@@ -5,10 +5,19 @@ so it's a fair and lightweight comparison point against NBN on the
 *discrete* regime. It does not natively support the kind of non-Gaussian
 continuous CPDs NBN handles, hence ``supports = {"discrete"}``.
 
-Inference path: pomegranate uses NaN as the "unobserved" sentinel in the
-input tensor; ``predict_proba`` returns the marginal over each unobserved
-node given the observed ones. This is exact belief-propagation on the
-tree-structured equivalent (or loopy on cyclic moralised graphs).
+Inference path: pomegranate's ``predict_proba`` takes a
+``torch.masked.masked_tensor`` whose unmasked entries are the observed
+states. We construct that tensor from the query's evidence dict; the
+returned per-node probability vectors are extracted via ``.get_data()``.
+
+Known limitation
+----------------
+pomegranate v1.1.x has a bug in ``predict_proba`` when evidence is present
+(internally it indexes a float-typed masked-tensor value as if it were a
+long, raising ``IndexError: tensors used as indices must be long, ...``).
+Marginal queries (no evidence) are unaffected. The
+``examples/crash_test_inference.py`` script therefore excludes pomegranate
+from its conditional-query lineup.
 """
 from __future__ import annotations
 
@@ -104,7 +113,13 @@ class PomegranateAdapter(BaselineAdapter):
         mask = torch.zeros((1, n), dtype=torch.bool)
         for k, v in q.evidence.items():
             i = self._node_to_idx[k]
-            row[0, i] = float(int(v.item() if isinstance(v, torch.Tensor) else v))
+            # Reduce any tensor (incl. shape [1] or [B] when called per-row)
+            # to a scalar Python int.
+            if isinstance(v, torch.Tensor):
+                scalar = int(v.reshape(-1)[0].item())
+            else:
+                scalar = int(v)
+            row[0, i] = float(scalar)
             mask[0, i] = True
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
