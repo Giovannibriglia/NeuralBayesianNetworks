@@ -65,7 +65,7 @@ class BenchmarkDomain(ABC):
 
     Subclasses must implement ``list_problems`` and ``load_problem``.
     The standard query battery (5 kinds) should be emitted by ``load_problem``
-    via ``nbn.benchmarks.queries.make_query_battery``.
+    via ``benchmarking.queries.make_query_battery``.
     """
 
     name: str = "abstract"

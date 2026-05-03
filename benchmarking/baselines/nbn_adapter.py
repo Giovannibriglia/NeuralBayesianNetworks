@@ -4,8 +4,8 @@ from __future__ import annotations
 import torch
 
 from nbn import NeuralBayesianNetwork
-from nbn.benchmarks.baselines.base import BaselineAdapter
-from nbn.benchmarks.domains.base import BenchmarkProblem, Query
+from benchmarking.baselines.base import BaselineAdapter
+from benchmarking.domains.base import BenchmarkProblem, Query
 from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
 from nbn.inference.tensor_ve import TensorVariableElimination
 from nbn.mechanisms import (

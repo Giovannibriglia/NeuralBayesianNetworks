@@ -5,12 +5,12 @@ from __future__ import annotations
 import networkx as nx
 import torch
 
-from nbn.benchmarks.domains.base import (
+from benchmarking.domains.base import (
     BenchmarkDomain,
     BenchmarkProblem,
     GroundTruth,
 )
-from nbn.benchmarks.queries import make_query_battery
+from benchmarking.queries import make_query_battery
 
 
 class SyntheticHybridDomain(BenchmarkDomain):

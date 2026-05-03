@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import torch
 
-from nbn.benchmarks.domains import get_domain
-from nbn.benchmarks.domains.base import BenchmarkDomain, BenchmarkProblem, Query
+from benchmarking.domains import get_domain
+from benchmarking.domains.base import BenchmarkDomain, BenchmarkProblem, Query
 
 
 def test_synthetic_hybrid_domain_lists_problems():

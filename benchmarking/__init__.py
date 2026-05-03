@@ -1,29 +1,29 @@
 """Plugin-based benchmarking suite.
 
 v0.2 surface:
-    - Domains  : ``nbn.benchmarks.domains.get_domain('bnlearn'|'synthetic_hybrid')``
-    - Baselines: ``nbn.benchmarks.baselines.get_adapter('nbn'|'pgmpy'|...)``
-    - Runner   : ``nbn.benchmarks.runner.run(config)``
-    - Metrics  : ``nbn.benchmarks.metrics.{kl,js,tv,wasserstein,…}``
+    - Domains  : ``benchmarking.domains.get_domain('bnlearn'|'synthetic_hybrid')``
+    - Baselines: ``benchmarking.baselines.get_adapter('nbn'|'pgmpy'|...)``
+    - Runner   : ``benchmarking.runner.run(config)``
+    - Metrics  : ``benchmarking.metrics.{kl,js,tv,wasserstein,…}``
 
 Back-compat shims for the v0.1 API are kept below so old examples still work.
 """
-from nbn.benchmarks.bnlearn_loader import BNLEARN_NETWORKS, load_bnlearn
-from nbn.benchmarks.domains import (
+from benchmarking.bnlearn_loader import BNLEARN_NETWORKS, load_bnlearn
+from benchmarking.domains import (
     BenchmarkDomain,
     BenchmarkProblem,
     GroundTruth,
     Query,
     get_domain,
 )
-from nbn.benchmarks.metrics import (
+from benchmarking.metrics import (
     js_divergence,
     kl_divergence,
     marginal_mae,
     tv_distance,
     wasserstein_1d,
 )
-from nbn.benchmarks.synthetic import generate_synthetic_hybrid
+from benchmarking.synthetic import generate_synthetic_hybrid
 
 __all__ = [
     "load_bnlearn",

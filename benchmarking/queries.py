@@ -9,7 +9,7 @@ from typing import Sequence
 
 import torch
 
-from nbn.benchmarks.domains.base import Query
+from benchmarking.domains.base import Query
 
 
 def make_query_battery(

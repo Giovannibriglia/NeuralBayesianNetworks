@@ -1,14 +1,14 @@
 """Baseline adapters. Each adapter is lazy — optional deps don't break import."""
-from nbn.benchmarks.baselines.base import BaselineAdapter
-from nbn.benchmarks.baselines.nbn_adapter import NBNAdapter
+from benchmarking.baselines.base import BaselineAdapter
+from benchmarking.baselines.nbn_adapter import NBNAdapter
 
 __all__ = ["BaselineAdapter", "NBNAdapter", "get_adapter"]
 
 _REGISTRY = {
-    "nbn": ("nbn.benchmarks.baselines.nbn_adapter", "NBNAdapter"),
-    "pgmpy": ("nbn.benchmarks.baselines.pgmpy_adapter", "PgmpyAdapter"),
-    "gpytorch": ("nbn.benchmarks.baselines.gpytorch_adapter", "GPyTorchAdapter"),
-    "pyro": ("nbn.benchmarks.baselines.pyro_adapter", "PyroAdapter"),
+    "nbn": ("benchmarking.baselines.nbn_adapter", "NBNAdapter"),
+    "pgmpy": ("benchmarking.baselines.pgmpy_adapter", "PgmpyAdapter"),
+    "gpytorch": ("benchmarking.baselines.gpytorch_adapter", "GPyTorchAdapter"),
+    "pyro": ("benchmarking.baselines.pyro_adapter", "PyroAdapter"),
 }
 
 

@@ -30,7 +30,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/nbn
-          key: nbn-cache-${{ hashFiles('nbn/benchmarks/domains/bnlearn.py') }}
+          key: nbn-cache-${{ hashFiles('benchmarking/domains/bnlearn.py') }}
           restore-keys: |
             nbn-cache-
 
@@ -40,7 +40,7 @@ jobs:
           pip install --prefer-binary -e ".[dev,bench,neural]"
 
       - name: Lint
-        run: ruff check nbn/ tests/ examples/
+        run: ruff check nbn/ benchmarking/ tests/ examples/
 
       - name: Type-check core
         run: mypy nbn/core nbn/mechanisms

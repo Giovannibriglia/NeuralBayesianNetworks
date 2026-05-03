@@ -72,7 +72,7 @@ print("  -> E is clamped via DeterministicMechanism.")
 # --- 3. Optional KDE figure --------------------------------------------------
 try:
     import matplotlib.pyplot as plt
-    from nbn.benchmarks.style import NBN_PALETTE, apply_style, savefig_multi
+    from benchmarking.style import NBN_PALETTE, apply_style, savefig_multi
 
     apply_style()
     fig, ax = plt.subplots(figsize=(5, 3))

@@ -11,12 +11,12 @@ from pathlib import Path
 
 import torch
 
-from nbn.benchmarks.domains.base import (
+from benchmarking.domains.base import (
     BenchmarkDomain,
     BenchmarkProblem,
     GroundTruth,
 )
-from nbn.benchmarks.queries import make_query_battery
+from benchmarking.queries import make_query_battery
 
 
 # (name → (n_nodes, n_edges))

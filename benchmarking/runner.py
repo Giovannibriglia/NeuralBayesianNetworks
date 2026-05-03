@@ -16,9 +16,9 @@ from typing import Any
 
 import torch
 
-from nbn.benchmarks import metrics as M
-from nbn.benchmarks.baselines import get_adapter
-from nbn.benchmarks.domains import get_domain
+from benchmarking import metrics as M
+from benchmarking.baselines import get_adapter
+from benchmarking.domains import get_domain
 
 logger = logging.getLogger("nbn.bench")
 

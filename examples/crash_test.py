@@ -16,12 +16,12 @@ from pathlib import Path
 import torch
 
 from nbn import NeuralBayesianNetwork, seed_all
-from nbn.benchmarks.baselines import get_adapter
-from nbn.benchmarks.domains import get_domain
-from nbn.benchmarks.metrics import (
+from benchmarking.baselines import get_adapter
+from benchmarking.domains import get_domain
+from benchmarking.metrics import (
     energy_distance, kl_divergence, map_accuracy, tv_distance, wasserstein_1d,
 )
-from nbn.benchmarks.style import NBN_PALETTE, apply_style, savefig_multi
+from benchmarking.style import NBN_PALETTE, apply_style, savefig_multi
 
 
 def _devices():

@@ -65,7 +65,7 @@ samples = model.sample(n=10_000)
 - **Batched-query API**: `query_batch` returns `[Q, K]` in one GPU launch
 - **Fully `nn.Module`**: `.to(device)`, `.parameters()`, `torch.compile`, AMP all work
 - **Causal extensions**: `do(X=x)` interventions, counterfactuals
-- **Benchmarks**: all 23+ bnlearn networks + large hybrid synthetic graphs
+- **Benchmarks**: top-level [`benchmarking/`](benchmarking/) package — plugin-based runner, 4 baselines (NBN, pgmpy, GPyTorch, Pyro), 15+ metrics, YAML configs (`nbn-bench run benchmarking/configs/discrete_small.yaml`).
 
 ## Status
 

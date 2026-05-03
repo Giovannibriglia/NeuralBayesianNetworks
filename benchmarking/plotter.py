@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from nbn.benchmarks.style import NBN_PALETTE, apply_style, savefig_multi
+from benchmarking.style import NBN_PALETTE, apply_style, savefig_multi
 
 
 def _ensure(df) -> Any:

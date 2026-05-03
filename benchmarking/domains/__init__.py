@@ -1,5 +1,5 @@
 """Domain registry — used by the runner to dispatch ``domain:`` in YAML."""
-from nbn.benchmarks.domains.base import (
+from benchmarking.domains.base import (
     BenchmarkDomain,
     BenchmarkProblem,
     GroundTruth,
@@ -15,8 +15,8 @@ __all__ = [
 ]
 
 _DOMAIN_REGISTRY = {
-    "bnlearn": ("nbn.benchmarks.domains.bnlearn", "BnlearnDomain"),
-    "synthetic_hybrid": ("nbn.benchmarks.domains.synthetic_hybrid", "SyntheticHybridDomain"),
+    "bnlearn": ("benchmarking.domains.bnlearn", "BnlearnDomain"),
+    "synthetic_hybrid": ("benchmarking.domains.synthetic_hybrid", "SyntheticHybridDomain"),
 }
 
 

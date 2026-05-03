@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import torch
 
-from nbn.benchmarks.baselines.base import BaselineAdapter
-from nbn.benchmarks.domains.base import BenchmarkProblem, Query
+from benchmarking.baselines.base import BaselineAdapter
+from benchmarking.domains.base import BenchmarkProblem, Query
 
 
 class PgmpyAdapter(BaselineAdapter):

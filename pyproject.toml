@@ -60,14 +60,14 @@ dev = [
 ]
 
 [project.scripts]
-nbn-bench = "nbn.benchmarks.runner:main"
+nbn-bench = "benchmarking.runner:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["nbn*"]
+include = ["nbn*", "benchmarking*"]
 
 [tool.setuptools.package-data]
-"nbn.benchmarks" = ["*.json"]
+"benchmarking" = ["configs/*.yaml"]
 
 [tool.setuptools_scm]
 write_to = "nbn/_version.py"

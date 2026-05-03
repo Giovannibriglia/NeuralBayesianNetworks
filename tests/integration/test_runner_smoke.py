@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import torch
 
-from nbn.benchmarks.runner import run
+from benchmarking.runner import run
 
 
 def test_runner_synthetic_hybrid_smoke(tmp_path):

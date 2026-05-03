@@ -1,15 +1,15 @@
 # Extending NBN's benchmarking suite
 
 The benchmark runner is plugin-based.  To add a new test domain, subclass
-`nbn.benchmarks.domains.base.BenchmarkDomain`, register it in
-`nbn/benchmarks/domains/__init__.py`, and you're done — every existing
+`benchmarking.domains.base.BenchmarkDomain`, register it in
+`benchmarking/domains/__init__.py`, and you're done — every existing
 baseline + metric works on your new problem family.
 
 ## Domain plugin contract
 
 ```python
-from nbn.benchmarks.domains import BenchmarkDomain, BenchmarkProblem
-from nbn.benchmarks.queries import make_query_battery
+from benchmarking.domains import BenchmarkDomain, BenchmarkProblem
+from benchmarking.queries import make_query_battery
 
 class MyDomain(BenchmarkDomain):
     name = "my_domain"
@@ -29,7 +29,7 @@ class MyDomain(BenchmarkDomain):
         )
 ```
 
-Then add it to `_DOMAIN_REGISTRY` in `nbn/benchmarks/domains/__init__.py`.
+Then add it to `_DOMAIN_REGISTRY` in `benchmarking/domains/__init__.py`.
 
 ## Standard query battery
 
@@ -46,14 +46,14 @@ plotter can split metrics per kind.
 
 ## Adding a baseline
 
-Subclass `nbn.benchmarks.baselines.base.BaselineAdapter` and register it in
-`nbn/benchmarks/baselines/__init__.py`.  Adapters declare which query kinds
+Subclass `benchmarking.baselines.base.BaselineAdapter` and register it in
+`benchmarking/baselines/__init__.py`.  Adapters declare which query kinds
 they support; unsupported queries are skipped (e.g. GPyTorch can't do discrete
 evidence — it raises `NotImplementedError` and the runner records the skip).
 
 ## Built-in metrics
 
-See `nbn/benchmarks/metrics.py` — KL / JS / TV on discrete marginals,
+See `benchmarking/metrics.py` — KL / JS / TV on discrete marginals,
 Wasserstein-1 / energy distance / MMD-RBF on continuous, MAP accuracy /
 Brier / CRPS on predictions, plus latency, throughput, GPU peak memory.
 

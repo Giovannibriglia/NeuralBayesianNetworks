@@ -6,7 +6,7 @@ from typing import Literal
 
 import torch
 
-from nbn.benchmarks.domains.base import BenchmarkProblem, Query
+from benchmarking.domains.base import BenchmarkProblem, Query
 
 
 class BaselineAdapter(ABC):
