@@ -141,6 +141,13 @@ def main() -> int:
     # Comparison set per regime. Adapters that aren't installed or that don't
     # support a given query type are silently skipped by _bench_problem.
     #
+    # All NBN public engines + mechanism families are exposed:
+    #   * nbn_ve                 — TensorVariableElimination (exact, discrete)
+    #   * nbn_lw                 — LikelihoodWeightingEngine (IS, hybrid)
+    #   * nbn_hybrid             — HybridRouter (auto-pick by treewidth)
+    #   * nbn_neural_categorical — discrete CPDs as MLP + embedding
+    #   * nbn_linear_gaussian    — continuous CPDs as closed-form ridge LG
+    #
     # Why GPyTorch is absent from the discrete lineup:
     #   GPyTorch implements Gaussian Processes — its likelihoods (Gaussian /
     #   Bernoulli / Multitask) are continuous regression targets. There is no
@@ -150,8 +157,14 @@ def main() -> int:
     #   `GPyTorchAdapter` therefore declares `supports = {"continuous"}`; the
     #   runner skips queries with discrete evidence with `not_supported` rather
     #   than producing meaningless numbers.
-    discrete_baselines = ["nbn", "pgmpy", "pomegranate", "pyro"]
-    hybrid_baselines   = ["nbn", "pyro", "gpytorch"]
+    discrete_baselines = [
+        "nbn_ve", "nbn_lw", "nbn_hybrid", "nbn_neural_categorical",
+        "pgmpy", "pomegranate", "pyro",
+    ]
+    hybrid_baselines = [
+        "nbn_lw", "nbn_hybrid", "nbn_linear_gaussian",
+        "pyro", "gpytorch",
+    ]
 
     print("==== NBN crash test ====")
     for device in _devices():

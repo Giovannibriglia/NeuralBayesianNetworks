@@ -48,6 +48,19 @@ def test_nbn_adapter_smoke_hybrid():
     _smoke_query(get_adapter("nbn", device="cpu"), _hybrid_problem())
 
 
+@pytest.mark.parametrize(
+    "variant",
+    ["nbn_ve", "nbn_lw", "nbn_hybrid", "nbn_neural_categorical", "nbn_linear_gaussian"],
+)
+def test_all_nbn_variants_run(variant):
+    """Every registered NBN preset must fit + answer one marginal query."""
+    if variant == "nbn_ve":
+        # VE is discrete-only — use bnlearn small
+        _smoke_query(get_adapter(variant, device="cpu"), _bnlearn_problem("asia"))
+    else:
+        _smoke_query(get_adapter(variant, device="cpu"), _hybrid_problem())
+
+
 @pytest.mark.skipif(not _has("pgmpy"), reason="needs pgmpy")
 def test_pgmpy_adapter_smoke_discrete():
     _smoke_query(get_adapter("pgmpy"), _bnlearn_problem("asia"))

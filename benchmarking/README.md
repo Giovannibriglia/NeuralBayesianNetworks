@@ -40,9 +40,35 @@ Figures land in `examples/figures/` (crash test) or `results/` (suites).
 
 ### Baselines
 
+#### NBN variants (every public engine × mechanism family)
+
+| Variant | Engine | Mechanisms | Notes |
+|---|---|---|---|
+| **`nbn`** / **`nbn_hybrid`** | `HybridRouter` | `CategoricalTable` + `MDN` | Default — auto-picks VE on small treewidth, LW elsewhere |
+| **`nbn_ve`** | `TensorVariableElimination` | `CategoricalTable` + `MDN` | Exact log-domain einsum VE; discrete-network workhorse |
+| **`nbn_lw`** | `LikelihoodWeightingEngine` | `CategoricalTable` + `MDN` | Batched ancestral importance sampling; hybrid-friendly |
+| **`nbn_neural_categorical`** | `HybridRouter` | `NeuralCategorical` + `MDN` | MLP + embedding categorical CPDs (large parent spaces) |
+| **`nbn_linear_gaussian`** | `HybridRouter` | `CategoricalTable` + `LinearGaussian` | Closed-form ridge regression for continuous CPDs |
+
+All NBN variants share a single configurable adapter
+([`baselines/nbn_adapter.py`](baselines/nbn_adapter.py)) — the table above
+just enumerates the registered presets. To create your own combination:
+
+```python
+from benchmarking.baselines.nbn_adapter import NBNAdapter
+NBNAdapter(
+    device="cuda",
+    engine="lw",                      # or "ve" / "hybrid"
+    discrete_mech="neural_categorical",
+    continuous_mech="linear_gaussian",
+    n_samples=4096,                   # for engine='lw'
+)
+```
+
+#### External baselines
+
 | Baseline | File | Supports | Inference method |
 |---|---|---|---|
-| **`nbn`** | [`baselines/nbn_adapter.py`](baselines/nbn_adapter.py) | discrete, continuous, hybrid, do, batched | `TensorVariableElimination` (discrete) + `LikelihoodWeighting` (else) |
 | **`pgmpy`** | [`baselines/pgmpy_adapter.py`](baselines/pgmpy_adapter.py) | discrete | Exact `VariableElimination` |
 | **`pomegranate`** | [`baselines/pomegranate_adapter.py`](baselines/pomegranate_adapter.py) | discrete | torch-backed v1.x BN inference (`predict_proba` with NaN sentinel for unobserved nodes) |
 | **`pyro`** | [`baselines/pyro_adapter.py`](baselines/pyro_adapter.py) | discrete, continuous, hybrid | `pyro.infer.Importance` over a generative Pyro model with `pyro.poutine.condition` |

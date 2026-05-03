@@ -5,10 +5,17 @@ from benchmarking.baselines.nbn_adapter import NBNAdapter
 __all__ = ["BaselineAdapter", "NBNAdapter", "get_adapter"]
 
 _REGISTRY = {
-    "nbn": ("benchmarking.baselines.nbn_adapter", "NBNAdapter"),
-    "pgmpy": ("benchmarking.baselines.pgmpy_adapter", "PgmpyAdapter"),
-    "gpytorch": ("benchmarking.baselines.gpytorch_adapter", "GPyTorchAdapter"),
-    "pyro": ("benchmarking.baselines.pyro_adapter", "PyroAdapter"),
+    # --- NBN variants — every public engine + mechanism family is exposed ---
+    "nbn":                    ("benchmarking.baselines.nbn_adapter", "NBNAdapter"),
+    "nbn_ve":                 ("benchmarking.baselines.nbn_adapter", "NBNTensorVEAdapter"),
+    "nbn_lw":                 ("benchmarking.baselines.nbn_adapter", "NBNLikelihoodWeightingAdapter"),
+    "nbn_hybrid":             ("benchmarking.baselines.nbn_adapter", "NBNHybridRouterAdapter"),
+    "nbn_neural_categorical": ("benchmarking.baselines.nbn_adapter", "NBNNeuralCategoricalAdapter"),
+    "nbn_linear_gaussian":    ("benchmarking.baselines.nbn_adapter", "NBNLinearGaussianAdapter"),
+    # --- external baselines ---
+    "pgmpy":       ("benchmarking.baselines.pgmpy_adapter",       "PgmpyAdapter"),
+    "gpytorch":    ("benchmarking.baselines.gpytorch_adapter",    "GPyTorchAdapter"),
+    "pyro":        ("benchmarking.baselines.pyro_adapter",        "PyroAdapter"),
     "pomegranate": ("benchmarking.baselines.pomegranate_adapter", "PomegranateAdapter"),
 }
 
