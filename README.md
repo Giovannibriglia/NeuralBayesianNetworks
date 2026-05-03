@@ -72,6 +72,25 @@ samples = model.sample(n=10_000)
 All commands assume you are at the repository root (the directory that
 contains `pyproject.toml`).
 
+> **First-time / after-pull**: `pip install -e ".[bench,neural,gp,mcmc]"`
+> to register the `benchmarking` package and pull the optional baseline
+> deps (pgmpy, pomegranate, gpytorch, pyro). The example scripts also
+> include a `sys.path` bootstrap so they still run without an editable
+> install if you prefer.
+
+There are two crash tests, focused on different things:
+
+* `examples/crash_test.py` — **parameter learning + serial inference**.
+  Each baseline fits a model from training data, then answers a small set
+  of queries one at a time. Reports accuracy (TV / MAP-acc) vs ground
+  truth and per-query latency. Lineup: 4 NBN variants + pgmpy + pomegranate
+  + pyro on alarm; 3 NBN variants + pyro + gpytorch on synthetic_hybrid_50.
+* `examples/crash_test_inference.py` — **batched inference throughput**.
+  Fits each baseline once, then sweeps batch size `B ∈ {1, 16, 256, 1024,
+  4096}`. NBN uses its native `model.query_batch(...)` (single GPU launch);
+  pgmpy / pyro have no batched API and loop in Python. Plots throughput
+  (q/s) vs B on log-log to make NBN's batched-query advantage visible.
+
 ```bash
 # Headline crash test: alarm + synthetic-50, all baselines, ~30s on CPU.
 # Saves figures under examples/figures/.
@@ -79,6 +98,11 @@ python examples/crash_test.py
 
 # Smoke run for CI / quick sanity check (~5s, no figures).
 python examples/crash_test.py --smoke
+
+# Inference-throughput crash test: sweeps B in {1, 16, 256, 1024, 4096}.
+# Saves the throughput-vs-B figure under examples/figures/.
+python examples/crash_test_inference.py
+python examples/crash_test_inference.py --smoke   # quick CI variant
 
 # Run a configured benchmark suite (writes parquet under results/).
 nbn-bench run benchmarking/configs/discrete_small.yaml

@@ -13,16 +13,22 @@ import sys
 import time
 from pathlib import Path
 
+# Self-bootstrap: make `nbn` and `benchmarking` importable when this script is
+# launched directly (e.g. `python examples/crash_test.py`) without first
+# running `pip install -e .`. Inserts the repo root onto sys.path if needed.
+_repo_root = Path(__file__).resolve().parent.parent
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
 import torch
 from tqdm import tqdm
 
-from nbn import NeuralBayesianNetwork, seed_all
-from benchmarking.baselines import get_adapter
-from benchmarking.domains import get_domain
-from benchmarking.metrics import (
+from benchmarking.baselines import get_adapter  # noqa: E402
+from benchmarking.domains import get_domain  # noqa: E402
+from benchmarking.metrics import (  # noqa: E402
     energy_distance, kl_divergence, map_accuracy, tv_distance, wasserstein_1d,
 )
-from benchmarking.style import NBN_PALETTE, apply_style, savefig_multi
+from benchmarking.style import NBN_PALETTE, apply_style, savefig_multi  # noqa: E402
+from nbn import NeuralBayesianNetwork, seed_all  # noqa: E402
 
 
 def _devices():
@@ -88,44 +94,86 @@ def _bench_problem(domain_name, problem_name, baselines, device, n_queries):
     return out
 
 
-def _plot_speed(rows, fig_dir):
-    apply_style()
-    import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(5, 3))
-    labels = [f"{r['baseline']}\n({r['device']}, {r['problem']})" for r in rows]
-    times_ms = [r["ms_per_query"] for r in rows]
-    colors = [NBN_PALETTE.get(r["baseline"], "#888") for r in rows]
-    ax.bar(labels, times_ms, color=colors)
-    ax.set_yscale("log")
-    ax.set_ylabel("Latency per query (ms, log)")
-    ax.set_title("NBN crash test: single-query latency")
-    ax.tick_params(axis="x", labelrotation=30)
-    return savefig_multi(fig, str(fig_dir / "crash_test_speed"))
+def _color_for(r):
+    return NBN_PALETTE.get(r["baseline"].split("_")[0], "#888")
 
 
-def _plot_accuracy(rows, fig_dir):
+def _label(r):
+    return f"{r['baseline']}\n({r['device']})"
+
+
+def _plot_summary(rows, fig_dir):
+    """Single 2x2 figure: rows = discrete / continuous, cols = accuracy / speed."""
     apply_style()
     import matplotlib.pyplot as plt
-    fig, axes = plt.subplots(1, 2, figsize=(7, 3))
-    discrete = [r for r in rows if r["problem"] == "alarm" and r["tv"] == r["tv"]]  # noqa: PLR0124
-    if discrete:
-        axes[0].bar([f"{r['baseline']}\n({r['device']})" for r in discrete],
-                     [r["tv"] for r in discrete],
-                     color=[NBN_PALETTE.get(r["baseline"], "#888") for r in discrete])
-        axes[0].set_title("alarm: TV to ground truth")
-        axes[0].set_ylabel("TV")
-        axes[0].tick_params(axis="x", labelrotation=20)
-    else:
-        axes[0].text(0.5, 0.5, "no discrete results", ha="center", va="center")
+
+    discrete = [r for r in rows if r["problem"] == "alarm"]
     hybrid = [r for r in rows if r["problem"].startswith("hybrid")]
+
+    fig, axes = plt.subplots(2, 2, figsize=(8.5, 6.5),
+                             gridspec_kw=dict(hspace=0.55, wspace=0.30))
+
+    # --- Row 0: Discrete (alarm) ---
+    ax = axes[0, 0]
+    discrete_acc = [r for r in discrete if r["tv"] == r["tv"]]  # noqa: PLR0124
+    if discrete_acc:
+        ax.bar([_label(r) for r in discrete_acc],
+               [r["tv"] for r in discrete_acc],
+               color=[_color_for(r) for r in discrete_acc])
+        ax.set_ylabel("TV (lower is better)")
+        ax.set_title("Discrete (alarm) — accuracy")
+        ax.tick_params(axis="x", labelrotation=30)
+        ax.axhline(0.05, color="grey", ls=":", lw=0.8, alpha=0.6)
+    else:
+        ax.text(0.5, 0.5, "no discrete results", ha="center", va="center")
+        ax.set_title("Discrete (alarm) — accuracy")
+
+    ax = axes[0, 1]
+    if discrete:
+        ax.bar([_label(r) for r in discrete],
+               [r["ms_per_query"] for r in discrete],
+               color=[_color_for(r) for r in discrete])
+        ax.set_ylabel("ms / query  (log)")
+        ax.set_yscale("log")
+        ax.set_title("Discrete (alarm) — speed")
+        ax.tick_params(axis="x", labelrotation=30)
+    else:
+        ax.text(0.5, 0.5, "no discrete results", ha="center", va="center")
+        ax.set_title("Discrete (alarm) — speed")
+
+    # --- Row 1: Continuous / hybrid ---
+    ax = axes[1, 0]
+    hybrid_acc = [r for r in hybrid if r["tv"] == r["tv"]]  # noqa: PLR0124
+    if hybrid_acc:
+        ax.bar([_label(r) for r in hybrid_acc],
+               [r["tv"] for r in hybrid_acc],
+               color=[_color_for(r) for r in hybrid_acc])
+        ax.set_ylabel("TV (lower is better)")
+        ax.set_title("Continuous / hybrid — accuracy")
+        ax.tick_params(axis="x", labelrotation=30)
+    else:
+        # Hybrid problems use sample-based ground truth (no marginal TV);
+        # show held-out NLL placeholder instead.
+        ax.text(0.5, 0.5, "no marginal ground truth\n(sample-based domain)",
+                ha="center", va="center", fontsize=9, alpha=0.7)
+        ax.set_title("Continuous / hybrid — accuracy")
+        ax.set_xticks([]); ax.set_yticks([])
+
+    ax = axes[1, 1]
     if hybrid:
-        axes[1].bar([f"{r['baseline']}\n({r['device']})" for r in hybrid],
-                     [r["ms_per_query"] for r in hybrid],
-                     color=[NBN_PALETTE.get(r["baseline"], "#888") for r in hybrid])
-        axes[1].set_title("hybrid: per-query latency (ms)")
-        axes[1].tick_params(axis="x", labelrotation=20)
-    fig.tight_layout()
-    return savefig_multi(fig, str(fig_dir / "crash_test_accuracy"))
+        ax.bar([_label(r) for r in hybrid],
+               [r["ms_per_query"] for r in hybrid],
+               color=[_color_for(r) for r in hybrid])
+        ax.set_ylabel("ms / query  (log)")
+        ax.set_yscale("log")
+        ax.set_title("Continuous / hybrid — speed")
+        ax.tick_params(axis="x", labelrotation=30)
+    else:
+        ax.text(0.5, 0.5, "no hybrid results", ha="center", va="center")
+        ax.set_title("Continuous / hybrid — speed")
+
+    fig.suptitle("NBN crash test: parameter learning + serial inference", fontsize=12)
+    return savefig_multi(fig, str(fig_dir / "crash_test_summary"))
 
 
 def main() -> int:
@@ -197,11 +245,29 @@ def main() -> int:
 
     if not args.no_figures and rows:
         try:
-            _plot_speed(rows, fig_dir)
-            _plot_accuracy(rows, fig_dir)
+            _plot_summary(rows, fig_dir)
             print(f"\nFigures saved to {fig_dir}/")
         except Exception as e:
             print(f"  [figure-skip] {e}")
+
+    # Always emit a paper-ready LaTeX table next to the figures.
+    if rows:
+        from benchmarking.latex import write_latex_table
+        cols = [
+            ("baseline", "Baseline"), ("device", "Device"),
+            ("problem", "Problem"), ("n_queries", "Q"),
+            ("time_s", "Time (s)"), ("ms_per_query", "ms/q"),
+            ("tv", "TV"), ("map_accuracy", "MAP-acc"),
+        ]
+        out_tex = fig_dir / "crash_test_summary.tex"
+        write_latex_table(
+            out_tex, rows, cols,
+            caption="Crash test: parameter learning + serial inference.",
+            label="tab:nbn-crash-test",
+            formats={"time_s": ".3f", "ms_per_query": ".2f",
+                     "tv": ".4f", "map_accuracy": ".3f"},
+        )
+        print(f"LaTeX table saved to {out_tex}")
 
     # Acceptance gate: only fail if alarm-on-NBN failed accuracy
     nbn_alarm = next((r for r in rows

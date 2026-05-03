@@ -48,8 +48,12 @@ jobs:
       - name: Test
         run: pytest -n auto --cov=nbn --cov-report=xml -m "not gpu and not slow"
 
-      - name: Smoke crash test
+      - name: Smoke crash test (parameter learning + serial inference)
         run: python examples/crash_test.py --smoke
+        continue-on-error: true
+
+      - name: Smoke crash test (batched inference throughput)
+        run: python examples/crash_test_inference.py --smoke --no-figures
         continue-on-error: true
 
       - uses: codecov/codecov-action@v4

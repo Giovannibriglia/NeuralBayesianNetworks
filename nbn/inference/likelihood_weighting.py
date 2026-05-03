@@ -51,6 +51,13 @@ class LikelihoodWeightingEngine(InferenceEngine):
             tuple(sorted(do.keys())),
             self._cache,
         )
+        # Normalise scalar / 0-D evidence values to 1-D so v.shape[0] works.
+        evidence = {
+            k: (v if (isinstance(v, torch.Tensor) and v.dim() >= 1)
+                else (torch.as_tensor(v).reshape(1) if not isinstance(v, torch.Tensor)
+                      else v.reshape(1)))
+            for k, v in evidence.items()
+        }
         b = max((v.shape[0] for v in evidence.values()), default=1)
         s = n_samples
 

@@ -102,18 +102,46 @@ class NBNAdapter(BaselineAdapter):
         else:
             self._engine = HybridRouter()
 
+    def _prep_evidence(self, ev) -> dict:
+        """Normalise evidence values to ``[B, D]`` tensors on ``self.device``."""
+        out = {}
+        for k, v in ev.items():
+            t = v if isinstance(v, torch.Tensor) else torch.tensor(v)
+            if t.dim() == 0:
+                t = t.unsqueeze(0)
+            out[k] = t.to(self.device)
+        return out
+
     def query(self, q: Query) -> torch.Tensor:
         assert self.model is not None and self._engine is not None
-        ev = {
-            k: (v if isinstance(v, torch.Tensor)
-                else torch.tensor(v).to(self.device))
-            for k, v in q.evidence.items()
-        }
+        ev = self._prep_evidence(q.evidence)
         result = self._engine.query(self.model, list(q.targets), ev)
         if isinstance(result, tuple):
             # (weights, samples) — reduce to weighted mean
             w, s = result
             return (w.unsqueeze(-1) * s).sum(dim=-2).squeeze(0).detach().cpu()
+        return result.detach().cpu()
+
+    def query_batch(self, q: Query) -> torch.Tensor:
+        """Batched query — exercises the engine's native batched path.
+
+        Evidence may be ``[B]`` (1-D scalar batch) or ``[B, D]``. We reshape
+        scalar-per-batch into ``[B, 1]`` because the inference engines
+        operate on per-node ``[B, D_node]`` tensors.
+        """
+        assert self.model is not None and self._engine is not None
+        ev = {}
+        for k, v in q.evidence.items():
+            t = v if isinstance(v, torch.Tensor) else torch.tensor(v)
+            if t.dim() == 1:
+                t = t.unsqueeze(-1)  # [B] -> [B, 1]
+            elif t.dim() == 0:
+                t = t.view(1, 1)
+            ev[k] = t.to(self.device)
+        result = self._engine.query_batch(self.model, list(q.targets), ev)
+        if isinstance(result, tuple):
+            w, s = result
+            return (w.unsqueeze(-1) * s).sum(dim=-2).detach().cpu()
         return result.detach().cpu()
 
     def teardown(self) -> None:
