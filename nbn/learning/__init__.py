@@ -1,3 +1,3 @@
-from nbn.learning.fit import fit, TrainHistory
+from nbn.learning.fit import TrainHistory, fit
 
 __all__ = ["fit", "TrainHistory"]

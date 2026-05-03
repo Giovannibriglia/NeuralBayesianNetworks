@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -32,7 +31,7 @@ class Mechanism(nn.Module, ABC):
 
     @abstractmethod
     def forward(
-        self, parents: Optional[torch.Tensor]
+        self, parents: torch.Tensor | None
     ) -> Distribution:
         """Return the conditional distribution P(X | parents).
 
@@ -49,7 +48,7 @@ class Mechanism(nn.Module, ABC):
         """
 
     def log_prob(
-        self, x: torch.Tensor, parents: Optional[torch.Tensor]
+        self, x: torch.Tensor, parents: torch.Tensor | None
     ) -> torch.Tensor:
         """Log conditional probability log P(x | parents).
 
@@ -65,7 +64,7 @@ class Mechanism(nn.Module, ABC):
         return self.forward(parents).log_prob(x)
 
     def sample(
-        self, parents: Optional[torch.Tensor], n: int = 1
+        self, parents: torch.Tensor | None, n: int = 1
     ) -> torch.Tensor:
         """Draw ``n`` samples per row.
 
@@ -90,7 +89,7 @@ class Mechanism(nn.Module, ABC):
         return s
 
     def rsample(
-        self, parents: Optional[torch.Tensor], n: int = 1
+        self, parents: torch.Tensor | None, n: int = 1
     ) -> torch.Tensor:
         """Reparameterized sample (differentiable).  Raises if not supported."""
         dist = self.forward(parents)
@@ -107,6 +106,6 @@ class Mechanism(nn.Module, ABC):
 
     @abstractmethod
     def fit_local(
-        self, x: torch.Tensor, parents: Optional[torch.Tensor], **kwargs
+        self, x: torch.Tensor, parents: torch.Tensor | None, **kwargs
     ) -> dict:
         """Closed-form or small-loop local MLE.  Returns a dict of metrics."""

@@ -34,9 +34,9 @@ def run_bnlearn_suite(
     exact answers as accuracy ground truth.
     """
     from nbn.benchmarks.bnlearn_loader import load_bnlearn
-    from nbn.inference.tensor_ve import TensorVariableElimination
-    from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
     from nbn.benchmarks.metrics import kl_divergence
+    from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
+    from nbn.inference.tensor_ve import TensorVariableElimination
 
     rows: List[Dict[str, Any]] = []
     for name in network_names:

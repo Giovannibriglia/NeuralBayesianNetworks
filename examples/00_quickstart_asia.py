@@ -19,7 +19,7 @@ edges = [
 ]
 nodes = ["asia", "smoke", "tub", "lung", "bronc", "either", "xray", "dysp"]
 
-model = NeuralBayesianNetwork(edges, variables={n: ("discrete", 2) for n in nodes})
+model = NeuralBayesianNetwork(edges, variables=dict.fromkeys(nodes, ("discrete", 2)))
 
 # Build CPTs (binary nodes; values from the asia paper)
 cpts = {

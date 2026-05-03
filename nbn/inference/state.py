@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
-
-import torch
+from typing import Dict, List, Tuple
 
 
 @dataclass(frozen=True)

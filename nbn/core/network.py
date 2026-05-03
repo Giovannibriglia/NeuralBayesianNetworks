@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Mapping, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
 
 from nbn.core.dag import DAG
 from nbn.core.variables import Variable
-from nbn.core.query import NBNQuery
 from nbn.mechanisms.base import Mechanism
 from nbn.mechanisms.categorical_table import CategoricalTableMechanism
 from nbn.mechanisms.linear_gaussian import LinearGaussianMechanism
 from nbn.mechanisms.mdn import MDNMechanism
+from nbn.utils.device import resolve_device, to_device
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ class NeuralBayesianNetwork(nn.Module):
                 self.variables[name] = spec
             else:
                 kind, dim = spec
-                from nbn.core.variables import DiscreteVariable, ContinuousVariable
+                from nbn.core.variables import ContinuousVariable, DiscreteVariable
                 if kind == "discrete":
                     self.variables[name] = DiscreteVariable(name, cardinality=dim)
                 else:
@@ -90,19 +90,18 @@ class NeuralBayesianNetwork(nn.Module):
 
         self._engine_spec = default_engine
         self._engine = None
-        if device == "auto":
-            self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        else:
-            self._device = torch.device(device)
+        self._device = resolve_device(device)
+        self._mixed_precision = False
 
     # ------------------------------------------------------------------
     # Mechanism registration
     # ------------------------------------------------------------------
 
     def set_mechanism(self, node: str, mech: Mechanism) -> None:
-        """Register a mechanism for a node."""
+        """Register a mechanism for a node and move it to the model's device."""
         if node not in self.variables:
             raise ValueError(f"Unknown node '{node}'.")
+        mech.to(self._device)
         self.mechanisms[node] = mech
 
     def auto_mechanisms(
@@ -111,21 +110,26 @@ class NeuralBayesianNetwork(nn.Module):
         default_continuous: str = "mdn",
         mdn_components: int = 5,
     ) -> None:
-        """Assign default mechanisms based on variable types."""
+        """Assign default mechanisms based on variable types (each on model device)."""
         for node, var in self.variables.items():
             if node in self.mechanisms:
                 continue
             if var.is_discrete:
                 if default_discrete == "categorical_table":
-                    self.mechanisms[node] = CategoricalTableMechanism()
+                    mech: Mechanism = CategoricalTableMechanism()
                 else:
                     from nbn.mechanisms.neural_categorical import NeuralCategoricalMechanism
-                    self.mechanisms[node] = NeuralCategoricalMechanism(n_classes=var.cardinality or 2)
+                    mech = NeuralCategoricalMechanism(n_classes=var.cardinality or 2)
             else:
                 if default_continuous == "mdn":
-                    self.mechanisms[node] = MDNMechanism(num_components=mdn_components)
+                    mech = MDNMechanism(num_components=mdn_components)
                 else:
-                    self.mechanisms[node] = LinearGaussianMechanism()
+                    mech = LinearGaussianMechanism()
+            self.set_mechanism(node, mech)
+
+    def set_mixed_precision(self, enabled: bool) -> None:
+        """Toggle ``torch.amp.autocast`` for forward passes (default: off)."""
+        self._mixed_precision = bool(enabled)
 
     # ------------------------------------------------------------------
     # Training
@@ -139,35 +143,35 @@ class NeuralBayesianNetwork(nn.Module):
         epochs: int = 100,
         batch_size: int = 4096,
         lr: float = 1e-3,
-        device: Optional[str] = None,
         **kwargs: Any,
     ):
-        """Fit all node mechanisms to data.
+        """Fit all node mechanisms to data on the model's device.
 
         Parameters
         ----------
         data:
-            Dict of node_name → tensor ``[N, D]`` or ``[N]``.
+            Dict of node_name → tensor ``[N, D]`` or ``[N]``. Auto-moved.
         method:
             ``"local"`` (node-wise, default) or ``"joint"`` (shared optimiser).
         epochs, batch_size, lr:
-            Training hyperparameters passed to mechanisms.
-        device:
-            Where to run; moves model and data here.
+            Training hyperparameters.
 
         Returns
         -------
         TrainHistory
         """
+        if "device" in kwargs:
+            raise TypeError(
+                "device is set at NeuralBayesianNetwork construction time; "
+                "use model.to(new_device) to move."
+            )
         from nbn.learning.fit import fit as _fit
-        if device is not None:
-            self.to(device)
-            self._device = torch.device(device)
+        data = to_device(data, self._device)
         return _fit(
             self, data,
             method=method, epochs=epochs,
             batch_size=batch_size, lr=lr,
-            device=device or str(self._device),
+            device=str(self._device),
             **kwargs,
         )
 
@@ -200,8 +204,8 @@ class NeuralBayesianNetwork(nn.Module):
     def query(
         self,
         targets: Sequence[str],
-        evidence: Optional[Mapping[str, Any]] = None,
-        engine: Optional[Any] = None,
+        evidence: Mapping[str, Any] | None = None,
+        engine: Any | None = None,
         **kwargs: Any,
     ) -> torch.Tensor:
         """Posterior inference for ``targets`` given ``evidence``.
@@ -221,6 +225,11 @@ class NeuralBayesianNetwork(nn.Module):
             For a single discrete target: ``[K]`` probability vector.
             For continuous or multi-target: ``(weights, samples)`` tuple.
         """
+        if "device" in kwargs:
+            raise TypeError(
+                "device is set at NeuralBayesianNetwork construction time; "
+                "use model.to(new_device) to move."
+            )
         eng = engine if engine is not None else self._get_engine()
         ev: Dict[str, torch.Tensor] = {}
         for k, v in (evidence or {}).items():
@@ -234,7 +243,7 @@ class NeuralBayesianNetwork(nn.Module):
         self,
         targets: Sequence[str],
         evidence: Mapping[str, torch.Tensor],
-        engine: Optional[Any] = None,
+        engine: Any | None = None,
         **kwargs: Any,
     ) -> torch.Tensor:
         """Batched posterior inference.
@@ -250,6 +259,11 @@ class NeuralBayesianNetwork(nn.Module):
         -------
         torch.Tensor of shape ``[B, K]`` for discrete targets.
         """
+        if "device" in kwargs:
+            raise TypeError(
+                "device is set at NeuralBayesianNetwork construction time; "
+                "use model.to(new_device) to move."
+            )
         eng = engine if engine is not None else self._get_engine()
         ev = {k: v.to(self._device) for k, v in evidence.items()}
         return eng.query_batch(self, list(targets), ev, **kwargs)
@@ -257,7 +271,7 @@ class NeuralBayesianNetwork(nn.Module):
     def map_query(
         self,
         targets: Sequence[str],
-        evidence: Optional[Mapping[str, Any]] = None,
+        evidence: Mapping[str, Any] | None = None,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
         """MAP query: return argmax of the posterior for each target."""
@@ -273,25 +287,32 @@ class NeuralBayesianNetwork(nn.Module):
     def sample(
         self,
         n: int = 1,
-        evidence: Optional[Dict[str, torch.Tensor]] = None,
-        do: Optional[Mapping[str, torch.Tensor]] = None,
-        device: Optional[str] = None,
+        evidence: Dict[str, torch.Tensor] | None = None,
+        do: Mapping[str, torch.Tensor] | None = None,
         return_log_prob: bool = False,
+        **kwargs: Any,
     ) -> Dict[str, torch.Tensor]:
-        """Draw ``n`` joint samples from the model via ancestral sampling.
+        """Draw ``n`` joint samples on the model's device.
 
         Parameters
         ----------
         n: number of samples.
-        evidence: clamped observed values.
-        do: do-intervention values (Pearl's do-operator).
-        device: target device.
+        evidence: clamped observed values (auto-moved to model device).
+        do: do-intervention values (auto-dispatched to deterministic /
+            dirac-gaussian per variable type).
         return_log_prob: if True return ``(samples, log_prob)``.
         """
+        if "device" in kwargs:
+            raise TypeError(
+                "device is set at NeuralBayesianNetwork construction time; "
+                "use model.to(new_device) to move."
+            )
         from nbn.sampling.ancestral import ancestral_sample
+        evidence = to_device(evidence, self._device) if evidence else None
+        do = to_device(do, self._device) if do else None
         return ancestral_sample(
             self, n=n, evidence=evidence, do=do,
-            device=device or str(self._device),
+            device=str(self._device),
             return_log_prob=return_log_prob,
         )
 
@@ -299,14 +320,35 @@ class NeuralBayesianNetwork(nn.Module):
     # Causal extensions
     # ------------------------------------------------------------------
 
-    def intervene(self, do: Mapping[str, Any]) -> "NeuralBayesianNetwork":
-        """Return a new NBN with do-interventions applied (mutilated graph)."""
+    def intervene(self, do: Mapping[str, Any]) -> NeuralBayesianNetwork:
+        """Return a deep-copied NBN with do-interventions applied.
+
+        Dispatches by variable type:
+        * discrete  → ``DeterministicMechanism`` (delta-Categorical at value)
+        * continuous → ``DiracGaussianMechanism`` (tight Gaussian at value)
+
+        The mutilated graph (incoming edges to do-targets removed) is reflected
+        in the working DAG used by inference engines via ``self._do_targets``.
+        """
         import copy
+
         from nbn.mechanisms.deterministic import DeterministicMechanism
+        from nbn.mechanisms.dirac_gaussian import DiracGaussianMechanism
+
         new_model = copy.deepcopy(self)
+        new_model._do_targets = set(do.keys())
         for node, val in do.items():
+            if node not in new_model.variables:
+                raise ValueError(f"Unknown intervention target '{node}'.")
+            var = new_model.variables[node]
             val_t = val if isinstance(val, torch.Tensor) else torch.tensor(val, dtype=torch.float)
-            new_model.mechanisms[node] = DeterministicMechanism(val_t.to(self._device))
+            val_t = val_t.to(new_model._device)
+            if var.is_discrete:
+                mech: Mechanism = DeterministicMechanism(val_t)
+            else:
+                mech = DiracGaussianMechanism(val_t, output_dim=var.dim)
+            mech.to(new_model._device)
+            new_model.mechanisms[node] = mech
         return new_model
 
     # ------------------------------------------------------------------
@@ -317,15 +359,24 @@ class NeuralBayesianNetwork(nn.Module):
     def device(self) -> torch.device:
         return self._device
 
-    def to(self, *args, **kwargs) -> "NeuralBayesianNetwork":
+    def to(self, *args, **kwargs) -> NeuralBayesianNetwork:
+        """Move model + every registered mechanism + cached engine to a device."""
         super().to(*args, **kwargs)
         # Update cached device
-        try:
-            p = next(self.parameters())
-            self._device = p.device
-        except StopIteration:
-            if args and isinstance(args[0], (str, torch.device)):
-                self._device = torch.device(args[0])
+        new_device: torch.device | None = None
+        if args and isinstance(args[0], (str, torch.device)):
+            new_device = resolve_device(args[0])
+        elif "device" in kwargs:
+            new_device = resolve_device(kwargs["device"])
+        else:
+            try:
+                new_device = next(self.parameters()).device
+            except StopIteration:
+                pass
+        if new_device is not None:
+            self._device = new_device
+        # Propagate to a cached engine (clear so next call rebuilds on new device)
+        self._engine = None
         return self
 
     # ------------------------------------------------------------------
@@ -349,7 +400,7 @@ class NeuralBayesianNetwork(nn.Module):
         torch.save(payload, path)
 
     @classmethod
-    def load(cls, path: str, map_location: str = "cpu") -> "NeuralBayesianNetwork":
+    def load(cls, path: str, map_location: str = "cpu") -> NeuralBayesianNetwork:
         """Load a model saved with ``save()``."""
         payload = torch.load(path, map_location=map_location, weights_only=False)
         edges = payload["dag_edges"]
@@ -364,7 +415,7 @@ class NeuralBayesianNetwork(nn.Module):
         return model
 
     @classmethod
-    def from_bif(cls, path: str) -> "NeuralBayesianNetwork":
+    def from_bif(cls, path: str) -> NeuralBayesianNetwork:
         """Load a discrete BN from a .bif file (uses pgmpy if available)."""
         try:
             from pgmpy.readwrite import BIFReader

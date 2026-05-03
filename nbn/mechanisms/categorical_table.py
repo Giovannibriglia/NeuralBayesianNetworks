@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import warnings
-from typing import Dict, List, Optional
+from typing import List
 
 import torch
 import torch.nn as nn
 from torch.distributions import Categorical
 
 from nbn.mechanisms.base import Mechanism
-from nbn.utils.batching import ensure_2d, broadcast_samples, flatten_samples
-
+from nbn.utils.batching import ensure_2d, flatten_samples
 
 _CARDINALITY_WARN_THRESHOLD = 1_000_000
 
@@ -41,11 +40,11 @@ class CategoricalTableMechanism(Mechanism):
         super().__init__()
         self.alpha = float(alpha)
         # Populated by fit_local:
-        self._logits: Optional[nn.Parameter] = None  # shape [prod(pa_cards), K]
+        self._logits: nn.Parameter | None = None  # shape [prod(pa_cards), K]
         self._n_classes: int = 0
         self._parent_cards: List[int] = []
         self._parent_strides: List[int] = []
-        self._class_values: Optional[torch.Tensor] = None  # [K]
+        self._class_values: torch.Tensor | None = None  # [K]
         self.output_dim = 1
 
     # ------------------------------------------------------------------
@@ -55,8 +54,8 @@ class CategoricalTableMechanism(Mechanism):
     def fit_local(
         self,
         x: torch.Tensor,
-        parents: Optional[torch.Tensor],
-        parent_cards: Optional[List[int]] = None,
+        parents: torch.Tensor | None,
+        parent_cards: List[int] | None = None,
         **kwargs,
     ) -> dict:
         """Vectorized count-based MLE with Dirichlet(alpha) smoothing.
@@ -147,7 +146,7 @@ class CategoricalTableMechanism(Mechanism):
             idx = idx + parents[..., d].long() * stride
         return idx
 
-    def _logits_for_parents(self, parents: Optional[torch.Tensor], batch_shape) -> torch.Tensor:
+    def _logits_for_parents(self, parents: torch.Tensor | None, batch_shape) -> torch.Tensor:
         """Return logits of shape ``[*batch_shape, K]``."""
         assert self._logits is not None, "Call fit_local before using this mechanism."
         if parents is None or (parents.shape[-1] == 0):
@@ -162,7 +161,7 @@ class CategoricalTableMechanism(Mechanism):
     # Distribution interface
     # ------------------------------------------------------------------
 
-    def forward(self, parents: Optional[torch.Tensor]) -> Categorical:
+    def forward(self, parents: torch.Tensor | None) -> Categorical:
         """Return Categorical distribution conditioned on parents.
 
         Parameters
@@ -183,7 +182,7 @@ class CategoricalTableMechanism(Mechanism):
             logits = self._logits_for_parents(parents_2d, (b,))  # [B, K]
         return Categorical(logits=logits)
 
-    def sample(self, parents: Optional[torch.Tensor], n: int = 1) -> torch.Tensor:
+    def sample(self, parents: torch.Tensor | None, n: int = 1) -> torch.Tensor:
         """Sample integer class indices → float values using class_values map.
 
         Returns
@@ -211,7 +210,7 @@ class CategoricalTableMechanism(Mechanism):
         return vals[idx].reshape(b, n, 1)
 
     def log_prob(
-        self, x: torch.Tensor, parents: Optional[torch.Tensor]
+        self, x: torch.Tensor, parents: torch.Tensor | None
     ) -> torch.Tensor:
         """Log-probability of integer class labels x.
 

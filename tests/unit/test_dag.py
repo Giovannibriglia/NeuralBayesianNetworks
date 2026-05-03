@@ -1,5 +1,6 @@
-import pytest
 import networkx as nx
+import pytest
+
 from nbn.core.dag import DAG
 
 

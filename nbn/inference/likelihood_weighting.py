@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 
@@ -35,8 +35,8 @@ class LikelihoodWeightingEngine(InferenceEngine):
         self,
         model,
         targets: List[str],
-        evidence: Optional[Dict[str, torch.Tensor]],
-        do: Optional[Dict[str, torch.Tensor]],
+        evidence: Dict[str, torch.Tensor] | None,
+        do: Dict[str, torch.Tensor] | None,
         n_samples: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Core IS loop.  Returns ``(log_weights [B, S], samples [B, S, total_dim])``."""
@@ -58,7 +58,7 @@ class LikelihoodWeightingEngine(InferenceEngine):
         log_w = torch.zeros(b, s, device=device, dtype=dtype)
 
         # Pre-load fixed values [B, 1, D] for evidence and do nodes
-        fixed: List[Optional[torch.Tensor]] = [None] * len(state.topo_order)
+        fixed: List[torch.Tensor | None] = [None] * len(state.topo_order)
         for node, val in {**do, **evidence}.items():
             idx = state.node_to_idx[node]
             v = ensure_2d(val.to(device=device, dtype=dtype))  # [B, D]
@@ -103,9 +103,9 @@ class LikelihoodWeightingEngine(InferenceEngine):
         self,
         model,
         targets: List[str],
-        evidence: Optional[Dict[str, torch.Tensor]] = None,
-        do: Optional[Dict[str, torch.Tensor]] = None,
-        n_samples: Optional[int] = None,
+        evidence: Dict[str, torch.Tensor] | None = None,
+        do: Dict[str, torch.Tensor] | None = None,
+        n_samples: int | None = None,
         **kwargs,
     ) -> torch.Tensor:
         s = n_samples or self.n_samples

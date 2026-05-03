@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -81,7 +81,7 @@ class NormalizingFlowMechanism(Mechanism):
         self.hidden = tuple(hidden)
         self.bins = bins
         self._d_pa: int = 0
-        self._flow: Optional[nn.Module] = None
+        self._flow: nn.Module | None = None
 
     def _build_flow(self, d_pa: int, device: torch.device) -> None:
         import zuko
@@ -97,7 +97,7 @@ class NormalizingFlowMechanism(Mechanism):
     def fit_local(
         self,
         x: torch.Tensor,
-        parents: Optional[torch.Tensor],
+        parents: torch.Tensor | None,
         epochs: int = 300,
         lr: float = 5e-4,
         batch_size: int = 512,
@@ -139,7 +139,7 @@ class NormalizingFlowMechanism(Mechanism):
         self.eval()
         return {"d_pa": d_pa, "d_x": d_x}
 
-    def forward(self, parents: Optional[torch.Tensor]) -> _FlowDistribution:
+    def forward(self, parents: torch.Tensor | None) -> _FlowDistribution:
         assert self._flow is not None, "Call fit_local before forward()."
         if self._d_pa == 0 or parents is None:
             b = 1 if parents is None else ensure_2d(parents).shape[0]
@@ -148,7 +148,7 @@ class NormalizingFlowMechanism(Mechanism):
             ctx = ensure_2d(parents)
         return _FlowDistribution(self._flow(ctx))
 
-    def log_prob(self, x: torch.Tensor, parents: Optional[torch.Tensor]) -> torch.Tensor:
+    def log_prob(self, x: torch.Tensor, parents: torch.Tensor | None) -> torch.Tensor:
         assert self._flow is not None
         squeeze_s = False
         if x.dim() == 1:
@@ -169,7 +169,7 @@ class NormalizingFlowMechanism(Mechanism):
         lp = self._flow(ctx).log_prob(x_flat).reshape(b, s)
         return lp.squeeze(1) if squeeze_s else lp
 
-    def sample(self, parents: Optional[torch.Tensor], n: int = 1) -> torch.Tensor:
+    def sample(self, parents: torch.Tensor | None, n: int = 1) -> torch.Tensor:
         assert self._flow is not None
         b = 1 if parents is None else ensure_2d(parents).shape[0]
         if self._d_pa == 0 or parents is None:

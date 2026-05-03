@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Tuple
+from typing import Dict, Tuple
 
-import torch
 import networkx as nx
+import torch
 
 from nbn.core.network import NeuralBayesianNetwork
 
@@ -44,9 +44,9 @@ def generate_synthetic_hybrid(
     (model, data_dict)
         ``model`` is a fitted NBN; ``data_dict`` is 5_000 IID samples from it.
     """
-    from nbn.utils.seed import seed_all
     from nbn.mechanisms.categorical_table import CategoricalTableMechanism
     from nbn.mechanisms.linear_gaussian import LinearGaussianMechanism
+    from nbn.utils.seed import seed_all
 
     seed_all(seed)
     g = _random_dag(n_nodes, edge_prob=edge_prob, seed=seed)

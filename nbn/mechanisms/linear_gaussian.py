@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 import torch
 import torch.nn as nn
-from torch.distributions import Normal, Independent
+from torch.distributions import Independent, Normal
 
 from nbn.mechanisms.base import Mechanism
-from nbn.utils.batching import ensure_2d, broadcast_samples, flatten_samples
+from nbn.utils.batching import ensure_2d, flatten_samples
 
 
 class LinearGaussianMechanism(Mechanism):
@@ -38,9 +37,9 @@ class LinearGaussianMechanism(Mechanism):
         self.min_scale = float(min_scale)
         self.learnable = learnable
         # Populated by fit_local:
-        self._weight: Optional[nn.Parameter] = None   # [D_pa, D_x]
-        self._bias: Optional[nn.Parameter] = None     # [D_x]
-        self._log_scale: Optional[nn.Parameter] = None  # [D_x]
+        self._weight: nn.Parameter | None = None   # [D_pa, D_x]
+        self._bias: nn.Parameter | None = None     # [D_x]
+        self._log_scale: nn.Parameter | None = None  # [D_x]
         self.output_dim = 1
         self._input_dim = 0
 
@@ -51,7 +50,7 @@ class LinearGaussianMechanism(Mechanism):
     def fit_local(
         self,
         x: torch.Tensor,
-        parents: Optional[torch.Tensor],
+        parents: torch.Tensor | None,
         **kwargs,
     ) -> dict:
         """Closed-form ridge regression.
@@ -120,7 +119,7 @@ class LinearGaussianMechanism(Mechanism):
     # Distribution interface
     # ------------------------------------------------------------------
 
-    def forward(self, parents: Optional[torch.Tensor]) -> Independent:
+    def forward(self, parents: torch.Tensor | None) -> Independent:
         assert self._bias is not None, "Call fit_local before forward()."
         scale = self._scale()  # [D_x]
         if self._input_dim == 0 or parents is None:
@@ -133,7 +132,7 @@ class LinearGaussianMechanism(Mechanism):
             scale_e = scale.unsqueeze(0).expand(parents_2d.shape[0], -1)
         return Independent(Normal(loc, scale_e), 1)
 
-    def sample(self, parents: Optional[torch.Tensor], n: int = 1) -> torch.Tensor:
+    def sample(self, parents: torch.Tensor | None, n: int = 1) -> torch.Tensor:
         """Return ``[B, n, D_x]``."""
         assert self._bias is not None
         scale = self._scale()
@@ -150,7 +149,7 @@ class LinearGaussianMechanism(Mechanism):
         return loc + sc * torch.randn_like(loc)
 
     def log_prob(
-        self, x: torch.Tensor, parents: Optional[torch.Tensor]
+        self, x: torch.Tensor, parents: torch.Tensor | None
     ) -> torch.Tensor:
         assert self._bias is not None
         x = ensure_2d(x)  # [B, D_x] or keep [B, S, D_x]

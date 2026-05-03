@@ -16,9 +16,13 @@ import time
 import torch
 from torch import nn
 
-from nbn import NeuralBayesianNetwork, TensorVariableElimination, LikelihoodWeightingEngine, seed_all
+from nbn import (
+    LikelihoodWeightingEngine,
+    NeuralBayesianNetwork,
+    TensorVariableElimination,
+    seed_all,
+)
 from nbn.mechanisms import CategoricalTableMechanism
-
 
 seed_all(0)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -49,7 +53,7 @@ parent_order = {
     "xray": ["either"], "dysp": ["either", "bronc"],
 }
 
-model = NeuralBayesianNetwork(edges, variables={n: ("discrete", 2) for n in nodes})
+model = NeuralBayesianNetwork(edges, variables=dict.fromkeys(nodes, ("discrete", 2)))
 for node in model.dag.topological_order():
     parents = parent_order[node]
     log_cpt = torch.zeros(max(1, 2 ** len(parents)), 2)
@@ -98,9 +102,9 @@ print(f"  NBN LW batch: {lw_time:.2f} s ({lw_time / N_QUERIES * 1e3:.2f} ms/quer
 # ── 4. pgmpy comparison ─────────────────────────────────────────────────────
 pgmpy_time = None
 try:
-    from pgmpy.models import DiscreteBayesianNetwork
     from pgmpy.factors.discrete import TabularCPD
     from pgmpy.inference import VariableElimination
+    from pgmpy.models import DiscreteBayesianNetwork
 
     pmodel = DiscreteBayesianNetwork(edges)
     for node in nodes:

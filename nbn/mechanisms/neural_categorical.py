@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -37,7 +37,7 @@ class NeuralCategoricalMechanism(Mechanism):
         self,
         n_classes: int = 2,
         hidden: Tuple[int, ...] = (64, 64),
-        embedding_dim: Optional[int] = None,
+        embedding_dim: int | None = None,
         activation: str = "relu",
     ) -> None:
         super().__init__()
@@ -46,15 +46,15 @@ class NeuralCategoricalMechanism(Mechanism):
         self.embedding_dim = embedding_dim
         self.activation = activation
         self.output_dim = 1
-        self.net: Optional[nn.Module] = None
-        self.embeddings: Optional[nn.ModuleList] = None
+        self.net: nn.Module | None = None
+        self.embeddings: nn.ModuleList | None = None
         self._d_pa = 0
 
     def fit_local(
         self,
         x: torch.Tensor,
-        parents: Optional[torch.Tensor],
-        parent_cards: Optional[list] = None,
+        parents: torch.Tensor | None,
+        parent_cards: list | None = None,
         epochs: int = 100,
         lr: float = 1e-3,
         batch_size: int = 512,
@@ -103,14 +103,14 @@ class NeuralCategoricalMechanism(Mechanism):
             inp = parents.float()
         return self.net(inp)
 
-    def forward(self, parents: Optional[torch.Tensor]) -> Categorical:
+    def forward(self, parents: torch.Tensor | None) -> Categorical:
         if self._d_pa == 0 or parents is None:
             b = 1 if parents is None else ensure_2d(parents).shape[0]
             return Categorical(logits=self._root_logits.unsqueeze(0).expand(b, -1))
         parents_2d = ensure_2d(parents)
         return Categorical(logits=self._logits_from_parents(parents_2d))
 
-    def log_prob(self, x: torch.Tensor, parents: Optional[torch.Tensor]) -> torch.Tensor:
+    def log_prob(self, x: torch.Tensor, parents: torch.Tensor | None) -> torch.Tensor:
         squeeze_s = False
         if x.dim() == 1:
             x = x.unsqueeze(-1)

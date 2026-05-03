@@ -1,6 +1,6 @@
-from nbn.benchmarks.bnlearn_loader import load_bnlearn, BNLEARN_NETWORKS
+from nbn.benchmarks.bnlearn_loader import BNLEARN_NETWORKS, load_bnlearn
+from nbn.benchmarks.metrics import js_divergence, kl_divergence, marginal_mae
 from nbn.benchmarks.synthetic import generate_synthetic_hybrid
-from nbn.benchmarks.metrics import kl_divergence, js_divergence, marginal_mae
 
 __all__ = [
     "load_bnlearn",

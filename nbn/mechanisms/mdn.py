@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import math
-from typing import Iterable, Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
-from torch.distributions import MixtureSameFamily, Independent, Normal, Categorical
+from torch.distributions import Categorical, Independent, MixtureSameFamily, Normal
 
 from nbn.mechanisms.base import Mechanism
-from nbn.utils.batching import ensure_2d, broadcast_samples, flatten_samples
+from nbn.utils.batching import ensure_2d, flatten_samples
 
 
 def _build_mlp(
@@ -67,13 +66,13 @@ class MDNMechanism(Mechanism):
         self.activation = activation
         self.min_scale = float(min_scale)
         # Built in fit_local once we know input/output dims:
-        self.net: Optional[nn.Module] = None
+        self.net: nn.Module | None = None
         self._d_x: int = 0
         self._d_pa: int = 0
         # Root node parameters (no parents)
-        self._root_logits: Optional[nn.Parameter] = None
-        self._root_loc: Optional[nn.Parameter] = None
-        self._root_log_scale: Optional[nn.Parameter] = None
+        self._root_logits: nn.Parameter | None = None
+        self._root_loc: nn.Parameter | None = None
+        self._root_log_scale: nn.Parameter | None = None
 
     # ------------------------------------------------------------------
     # Fitting
@@ -82,7 +81,7 @@ class MDNMechanism(Mechanism):
     def fit_local(
         self,
         x: torch.Tensor,
-        parents: Optional[torch.Tensor],
+        parents: torch.Tensor | None,
         epochs: int = 200,
         lr: float = 1e-3,
         batch_size: int = 512,
@@ -128,7 +127,7 @@ class MDNMechanism(Mechanism):
     # ------------------------------------------------------------------
 
     def _params_from_parents(
-        self, parents: Optional[torch.Tensor], shape: Tuple[int, ...]
+        self, parents: torch.Tensor | None, shape: Tuple[int, ...]
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return (logits [*shape, K], loc [*shape, K, D_x], scale [*shape, K, D_x])."""
         k = self.num_components
@@ -151,7 +150,7 @@ class MDNMechanism(Mechanism):
         scale = torch.exp(log_scale).clamp_min(self.min_scale)
         return logits, loc, scale
 
-    def _log_prob_2d(self, x: torch.Tensor, parents: Optional[torch.Tensor]) -> torch.Tensor:
+    def _log_prob_2d(self, x: torch.Tensor, parents: torch.Tensor | None) -> torch.Tensor:
         """Stable mixture log-prob for 2-D x ``[B, D_x]``."""
         logits, loc, scale = self._params_from_parents(
             parents, (x.shape[0],)
@@ -168,7 +167,7 @@ class MDNMechanism(Mechanism):
     # Distribution interface
     # ------------------------------------------------------------------
 
-    def forward(self, parents: Optional[torch.Tensor]) -> MixtureSameFamily:
+    def forward(self, parents: torch.Tensor | None) -> MixtureSameFamily:
         if parents is not None:
             parents = ensure_2d(parents)
             b = parents.shape[0]
@@ -179,7 +178,7 @@ class MDNMechanism(Mechanism):
         comp = Independent(Normal(loc, scale), 1)
         return MixtureSameFamily(mix, comp)
 
-    def sample(self, parents: Optional[torch.Tensor], n: int = 1) -> torch.Tensor:
+    def sample(self, parents: torch.Tensor | None, n: int = 1) -> torch.Tensor:
         """Return ``[B, n, D_x]``."""
         if parents is None:
             b = 1
@@ -203,7 +202,7 @@ class MDNMechanism(Mechanism):
         return samp.reshape(b, n, self._d_x)
 
     def log_prob(
-        self, x: torch.Tensor, parents: Optional[torch.Tensor]
+        self, x: torch.Tensor, parents: torch.Tensor | None
     ) -> torch.Tensor:
         squeeze_s = False
         if x.dim() == 1:

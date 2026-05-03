@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 import torch
-import opt_einsum
 
 from nbn.core.factor import LogFactor
 from nbn.inference.base import InferenceEngine
-from nbn.utils.topo import elimination_order
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +66,7 @@ class TensorVariableElimination(InferenceEngine):
         self,
         model,
         targets: List[str],
-        evidence: Optional[Dict[str, torch.Tensor]] = None,
+        evidence: Dict[str, torch.Tensor] | None = None,
         **kwargs,
     ) -> torch.Tensor:
         """Exact marginal inference via variable elimination.

@@ -2,10 +2,30 @@ line-length = 100
 target-version = "py310"
 
 [lint]
-select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM"]
-ignore = ["E501", "B008", "N803", "N806"]
+select = ["E", "F", "W", "I", "B", "C4", "SIM", "UP"]
+ignore = [
+    "E501",   # line length (handled by formatter)
+    "E702",   # compound statements on one line (we use this idiom)
+    "E731",   # lambda assignment
+    "B008",   # function call in default arg (common torch idiom)
+    "B007",   # unused loop variable
+    "B905",   # zip() without strict (Python 3.10 compat)
+    "B028",   # No explicit `stacklevel` keyword
+    "SIM105", # contextlib.suppress preference
+    "SIM108", # ternary
+    "SIM117", # nested with statements
+    "UP007",  # Optional[X] vs X | None — keep Optional for clarity
+    "UP035",  # `typing.Tuple` etc. — keep for explicitness
+    "UP006",  # use built-in generics — keep typing.Dict for stub compat
+    "UP015",  # redundant open mode
+    "C401",   # generator vs comprehension
+    "C408",   # dict() call (intentional readability)
+    "F841",   # unused local variables (often intentional debug aids)
+    "I001",   # let formatter handle import sort
+]
 
 [lint.per-file-ignores]
-"tests/*" = ["S101", "ANN"]
-"examples/*" = ["T201"]
-"notebooks/*" = ["T201", "E402"]
+"tests/*"     = ["S101", "ANN", "E501", "F841", "B007", "F401"]
+"examples/*"  = ["T201", "E501", "F401"]
+"notebooks/*" = ["T201", "E402", "E501"]
+"**/__init__.py" = ["F401"]

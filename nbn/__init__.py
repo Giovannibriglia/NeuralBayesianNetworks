@@ -1,24 +1,24 @@
 """NeuralBayesianNetworks (NBN) — PyTorch-native Bayesian Networks with neural mechanisms."""
 
-from nbn.core.network import NeuralBayesianNetwork
 from nbn.core.dag import DAG
-from nbn.core.variables import Variable, DiscreteVariable, ContinuousVariable
+from nbn.core.network import NeuralBayesianNetwork
 from nbn.core.query import NBNQuery
-from nbn.mechanisms import (
-    Mechanism,
-    CategoricalTableMechanism,
-    LinearGaussianMechanism,
-    MDNMechanism,
-    NeuralCategoricalMechanism,
-    DeterministicMechanism,
-)
+from nbn.core.variables import ContinuousVariable, DiscreteVariable, Variable
 from nbn.inference import (
+    HybridRouter,
     InferenceEngine,
     LikelihoodWeightingEngine,
     TensorVariableElimination,
-    HybridRouter,
 )
-from nbn.learning import fit, TrainHistory
+from nbn.learning import TrainHistory, fit
+from nbn.mechanisms import (
+    CategoricalTableMechanism,
+    DeterministicMechanism,
+    LinearGaussianMechanism,
+    MDNMechanism,
+    Mechanism,
+    NeuralCategoricalMechanism,
+)
 from nbn.sampling import ancestral_sample
 from nbn.utils.seed import seed_all
 

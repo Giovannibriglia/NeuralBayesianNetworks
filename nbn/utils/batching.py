@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 
@@ -38,8 +38,8 @@ def flatten_samples(x: torch.Tensor) -> Tuple[torch.Tensor, int, int]:
 def pack_parents(
     data: Dict[str, torch.Tensor],
     parent_names: List[str],
-    n_samples: Optional[int] = None,
-) -> Optional[torch.Tensor]:
+    n_samples: int | None = None,
+) -> torch.Tensor | None:
     """Concatenate parent tensors into a single ``[B, D_total]`` or ``[B, S, D_total]`` tensor.
 
     Parameters
