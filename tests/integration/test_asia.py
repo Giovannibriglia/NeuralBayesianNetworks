@@ -5,16 +5,15 @@ pgmpy's VariableElimination to within numerical tolerance on the standard
 asia network.
 """
 import math
+
+import networkx as nx
 import pytest
 import torch
 from torch import nn
 
-import networkx as nx
-
-from nbn import NeuralBayesianNetwork, TensorVariableElimination, LikelihoodWeightingEngine
+from nbn import LikelihoodWeightingEngine, NeuralBayesianNetwork, TensorVariableElimination
 from nbn.mechanisms.categorical_table import CategoricalTableMechanism
 from nbn.utils.seed import seed_all
-
 
 # ── asia DAG (Lauritzen & Spiegelhalter, 1988) ────────────────────────────────
 # Nodes:  asia → tub
@@ -63,7 +62,7 @@ def _build_asia_model() -> NeuralBayesianNetwork:
     seed_all(0)
     model = NeuralBayesianNetwork(
         ASIA_EDGES,
-        variables={n: ("discrete", 2) for n in ASIA_NODES},
+        variables=dict.fromkeys(ASIA_NODES, ("discrete", 2)),
     )
 
     # Topological order matters: parents come first

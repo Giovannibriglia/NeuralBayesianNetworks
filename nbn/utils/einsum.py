@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import torch
 import opt_einsum
+import torch
 
 
 def log_einsum_exp(equation: str, *operands: torch.Tensor) -> torch.Tensor:

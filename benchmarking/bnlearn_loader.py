@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +48,7 @@ def _bnlearn_url(stem: str) -> str:
 
 def load_bnlearn(
     name: str,
-    cache_dir: Optional[str] = None,
+    cache_dir: str | None = None,
     download: bool = True,
 ):
     """Download (and cache) a bnlearn network and return an NBN model.

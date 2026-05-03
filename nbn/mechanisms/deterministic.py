@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 from torch.distributions import Distribution
 
@@ -44,7 +42,7 @@ class DeterministicMechanism(Mechanism):
         super().__init__()
         self.register_buffer("_fixed_value", value)
 
-    def forward(self, parents: Optional[torch.Tensor]) -> _DeltaDistribution:
+    def forward(self, parents: torch.Tensor | None) -> _DeltaDistribution:
         if parents is not None and self._fixed_value.dim() == 1:
             b = ensure_2d(parents).shape[0]
             val = self._fixed_value.unsqueeze(0).expand(b, -1)
@@ -52,15 +50,15 @@ class DeterministicMechanism(Mechanism):
             val = self._fixed_value
         return _DeltaDistribution(val)
 
-    def sample(self, parents: Optional[torch.Tensor], n: int = 1) -> torch.Tensor:
+    def sample(self, parents: torch.Tensor | None, n: int = 1) -> torch.Tensor:
         b = 1 if parents is None else ensure_2d(parents).shape[0]
         val = self._fixed_value
         if val.dim() == 1:
             return val.view(1, 1, -1).expand(b, n, -1)
         return val.unsqueeze(1).expand(-1, n, -1)
 
-    def log_prob(self, x: torch.Tensor, parents: Optional[torch.Tensor]) -> torch.Tensor:
+    def log_prob(self, x: torch.Tensor, parents: torch.Tensor | None) -> torch.Tensor:
         return torch.zeros(x.shape[:-1], device=x.device, dtype=x.dtype)
 
-    def fit_local(self, x: torch.Tensor, parents: Optional[torch.Tensor], **kwargs) -> dict:
+    def fit_local(self, x: torch.Tensor, parents: torch.Tensor | None, **kwargs) -> dict:
         return {}

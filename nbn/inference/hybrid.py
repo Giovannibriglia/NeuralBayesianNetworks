@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import torch
 
 from nbn.inference.base import InferenceEngine
-from nbn.inference.tensor_ve import TensorVariableElimination
 from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
+from nbn.inference.tensor_ve import TensorVariableElimination
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ class HybridRouter(InferenceEngine):
         self.treewidth_threshold = treewidth_threshold
         self._ve = TensorVariableElimination(treewidth_threshold)
         self._lw = LikelihoodWeightingEngine(n_samples)
-        self._last_engine: Optional[str] = None
+        self._last_engine: str | None = None
 
     def _select(self, model) -> InferenceEngine:
         all_discrete = all(
@@ -62,7 +62,7 @@ class HybridRouter(InferenceEngine):
         self,
         model,
         targets: List[str],
-        evidence: Optional[Dict[str, torch.Tensor]] = None,
+        evidence: Dict[str, torch.Tensor] | None = None,
         **kwargs,
     ) -> torch.Tensor:
         return self._select(model).query(model, targets, evidence, **kwargs)

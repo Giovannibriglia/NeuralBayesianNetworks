@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal, Tuple, Union
 
 
@@ -29,8 +29,8 @@ class Variable:
     def from_spec(
         cls,
         name: str,
-        spec: Union[Tuple[Literal["discrete", "continuous", "mixed"], int], "Variable"],
-    ) -> "Variable":
+        spec: Union[Tuple[Literal["discrete", "continuous", "mixed"], int], Variable],
+    ) -> Variable:
         if isinstance(spec, Variable):
             return spec
         kind, dim = spec

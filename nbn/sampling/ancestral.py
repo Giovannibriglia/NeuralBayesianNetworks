@@ -1,22 +1,21 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, Mapping, Optional
+from typing import TYPE_CHECKING, Dict, Mapping
 
 import torch
 
 from nbn.mechanisms.deterministic import DeterministicMechanism
-from nbn.utils.batching import pack_parents
 
 if TYPE_CHECKING:
     from nbn.core.network import NeuralBayesianNetwork
 
 
 def ancestral_sample(
-    model: "NeuralBayesianNetwork",
+    model: NeuralBayesianNetwork,
     n: int = 1,
-    evidence: Optional[Dict[str, torch.Tensor]] = None,
-    do: Optional[Mapping[str, torch.Tensor]] = None,
-    device: Optional[str] = None,
+    evidence: Dict[str, torch.Tensor] | None = None,
+    do: Mapping[str, torch.Tensor] | None = None,
+    device: str | None = None,
     return_log_prob: bool = False,
 ) -> Dict[str, torch.Tensor]:
     """Batched ancestral sampler.

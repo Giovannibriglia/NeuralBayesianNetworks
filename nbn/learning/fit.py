@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List
 
 import torch
 
@@ -29,14 +29,14 @@ class TrainHistory:
 
 
 def fit(
-    model: "NeuralBayesianNetwork",
+    model: NeuralBayesianNetwork,
     data: Dict[str, torch.Tensor],
     *,
     method: str = "local",
     epochs: int = 100,
     batch_size: int = 4096,
     lr: float = 1e-3,
-    device: Optional[str] = None,
+    device: str | None = None,
     log_every: int = 10,
     **kwargs: Any,
 ) -> TrainHistory:
@@ -82,9 +82,9 @@ def fit(
 
     if method == "local":
         for i, node in enumerate(model.dag.topological_order()):
-            mech = model.mechanisms.get(node)
-            if mech is None:
+            if node not in model.mechanisms:
                 raise RuntimeError(f"No mechanism registered for node '{node}'.")
+            mech = model.mechanisms[node]
             parents = model.dag.parents(node)
             pa_tensor = pack_parents(data_dev, parents)
             x = data_dev[node]

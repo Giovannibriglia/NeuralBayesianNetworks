@@ -28,6 +28,28 @@ Existing exact PGM methods (pgmpy, pyAgrum, JT/VE) are SOTA on small discrete ne
 2. **Benchmark paper** → NeurIPS Datasets-&-Benchmarks Track 2025.
 3. **Methodology paper** (hybrid mechanisms + treewidth-aware router + amortized fallback with formal guarantees) → UAI / AISTATS 2026.
 
+## Continuous do-operator as Dirac-tight-Gaussian (v0.2)
+
+For continuous variables, Pearl's do-operator is implemented as a tight
+isotropic Gaussian:
+
+```
+P(X | parents) = N(mu = v, sigma = sigma_dirac)
+```
+
+with `sigma_dirac = 1e-4` by default (`nbn.config.DIRAC_GAUSSIAN_SIGMA`). This
+formulation behaves like a Dirac delta in sampling, keeps `log_prob` finite
+(`log p(v|do(X=v)) = -log(σ √(2π))`), and supports reparameterised sampling so
+`rsample` returns a differentiable tensor. The intervention value is stored as
+an `nn.Parameter`, so **interventional gradients** flow back through `do(X = θ)`
+for downstream learning — precisely what the Causality-Driven RL programme
+needs from a differentiable world model.
+
+`NeuralBayesianNetwork.intervene(do)` dispatches by variable type: discrete
+targets get a `DeterministicMechanism` (delta-Categorical), continuous targets
+get a `DiracGaussianMechanism`. The mutilated graph is tracked in
+`new_model._do_targets` and is reflected by inference engines.
+
 ## Open Questions / Future Work
 
 - **Structure learning**: NBN currently assumes the DAG is given. GFlowNet-based structure learning (Deleu et al. 2022/2023) would allow uncertain-DAG extension.

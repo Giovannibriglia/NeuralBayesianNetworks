@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List
 
 import torch
 
 if TYPE_CHECKING:
     from nbn.core.network import NeuralBayesianNetwork
-    from nbn.core.query import NBNQuery
 
 
 class InferenceEngine(ABC):
@@ -23,9 +22,9 @@ class InferenceEngine(ABC):
     @abstractmethod
     def query(
         self,
-        model: "NeuralBayesianNetwork",
+        model: NeuralBayesianNetwork,
         targets: List[str],
-        evidence: Optional[Dict[str, torch.Tensor]] = None,
+        evidence: Dict[str, torch.Tensor] | None = None,
         **kwargs,
     ) -> torch.Tensor:
         """Return posterior probabilities or samples for ``targets`` given ``evidence``.
@@ -46,7 +45,7 @@ class InferenceEngine(ABC):
 
     def query_batch(
         self,
-        model: "NeuralBayesianNetwork",
+        model: NeuralBayesianNetwork,
         targets: List[str],
         evidence: Dict[str, torch.Tensor],
         **kwargs,

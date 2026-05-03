@@ -5,15 +5,15 @@ For each mechanism we verify:
 2. Gradients flow: loss.backward() gives non-None grads on all parameters.
 """
 import math
+
 import pytest
 import torch
 
 from nbn.mechanisms.categorical_table import CategoricalTableMechanism
+from nbn.mechanisms.deterministic import DeterministicMechanism
 from nbn.mechanisms.linear_gaussian import LinearGaussianMechanism
 from nbn.mechanisms.mdn import MDNMechanism
 from nbn.mechanisms.neural_categorical import NeuralCategoricalMechanism
-from nbn.mechanisms.deterministic import DeterministicMechanism
-
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

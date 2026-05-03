@@ -5,22 +5,55 @@ on:
     branches: ["**"]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # setuptools-scm needs full history
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Cache bnlearn datasets
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/nbn
+          key: nbn-cache-${{ hashFiles('benchmarking/domains/bnlearn.py') }}
+          restore-keys: |
+            nbn-cache-
+
       - name: Install
-        run: pip install -e ".[dev,bench,neural]"
+        run: |
+          python -m pip install --upgrade pip
+          pip install --prefer-binary -e ".[dev,bench,neural]"
+
       - name: Lint
-        run: ruff check nbn/ tests/
+        run: ruff check nbn/ benchmarking/ tests/ examples/
+
       - name: Type-check core
-        run: mypy nbn/core nbn/mechanisms --ignore-missing-imports
+        run: mypy nbn/core nbn/mechanisms
+
       - name: Test
         run: pytest -n auto --cov=nbn --cov-report=xml -m "not gpu and not slow"
+
+      - name: Smoke crash test
+        run: python examples/crash_test.py --smoke
+        continue-on-error: true
+
+      - uses: codecov/codecov-action@v4
+        if: matrix.python-version == '3.11'
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
