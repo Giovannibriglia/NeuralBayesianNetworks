@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 import torch
+from tqdm import tqdm
 
 from nbn import NeuralBayesianNetwork, seed_all
 from benchmarking.baselines import get_adapter
@@ -38,7 +39,9 @@ def _bench_problem(domain_name, problem_name, baselines, device, n_queries):
         problem_name, n_train=2000, n_test=500, seed=0, device=torch.device(device),
     )
     out = []
-    for b_name in baselines:
+    pbar = tqdm(baselines)
+    for b_name in pbar:
+        pbar.set_description(f"Running [{b_name}]...")
         kw = {"device": device} if b_name in {"nbn", "gpytorch"} else {}
         try:
             adapter = get_adapter(b_name, **kw)
