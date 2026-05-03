@@ -58,6 +58,7 @@ class NeuralBayesianNetwork(nn.Module):
         dag: Union[List[Tuple[str, str]], Any],
         variables: Mapping[str, Union[Tuple, Variable]],
         default_engine: Union[str, Any] = "auto",
+        device: str = "auto",
     ) -> None:
         super().__init__()
 
@@ -89,7 +90,10 @@ class NeuralBayesianNetwork(nn.Module):
 
         self._engine_spec = default_engine
         self._engine = None
-        self._device = torch.device("cpu")
+        if device == "auto":
+            self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self._device = torch.device(device)
 
     # ------------------------------------------------------------------
     # Mechanism registration
