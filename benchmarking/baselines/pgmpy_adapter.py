@@ -19,11 +19,11 @@ class PgmpyAdapter(BaselineAdapter):
 
     def fit(self, problem: BenchmarkProblem) -> None:
         try:
-            from pgmpy.estimators import MaximumLikelihoodEstimator
             from pgmpy.inference import VariableElimination
             from pgmpy.models import DiscreteBayesianNetwork
         except ImportError as e:
             raise ImportError("PgmpyAdapter needs pgmpy: pip install pgmpy") from e
+        import warnings
         import pandas as pd
         # Discrete only
         for k, (kind, _) in problem.variables.items():
@@ -34,7 +34,17 @@ class PgmpyAdapter(BaselineAdapter):
             for k, v in problem.train_data.items()
         })
         bn = DiscreteBayesianNetwork(problem.dag)
-        bn.fit(df, estimator=MaximumLikelihoodEstimator)
+        # API drift across pgmpy versions:
+        # 1. pgmpy >= 1.1 wants `pgmpy.parameter_estimator.DiscreteMLE()`.
+        # 2. older pgmpy accepts the `MaximumLikelihoodEstimator` class.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            try:
+                from pgmpy.parameter_estimator import DiscreteMLE
+                bn.fit(df, estimator=DiscreteMLE())
+            except (ImportError, TypeError):
+                from pgmpy.estimators import MaximumLikelihoodEstimator
+                bn.fit(df, estimator=MaximumLikelihoodEstimator)
         self.model = bn
         self.infer = VariableElimination(bn)
 

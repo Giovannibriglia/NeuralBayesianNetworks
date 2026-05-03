@@ -53,16 +53,18 @@ class SyntheticHybridDomain(BenchmarkDomain):
             for nm in names
         }
 
-        # Generate samples from a mixture-of-skew-normals SCM
-        def _sample_node(n_samples: int, parents_data: list[torch.Tensor],
+        # Generate samples from a mixture-of-skew-normals SCM.
+        # All sampling happens on CPU (the seeded torch.Generator is CPU-only);
+        # only the final per-node tensors are moved to ``device``.
+        def _sample_node(n_samples: int, parents_data_cpu: list[torch.Tensor],
                          is_disc: bool) -> torch.Tensor:
-            if not parents_data:
+            if not parents_data_cpu:
                 if is_disc:
                     probs = torch.softmax(torch.randn(3, generator=g), dim=0)
                     return torch.multinomial(probs, n_samples, replacement=True,
                                              generator=g).unsqueeze(-1).float()
                 return torch.randn(n_samples, 1, generator=g) * 0.7
-            pa = torch.cat([p.float().reshape(n_samples, -1) for p in parents_data], dim=-1)
+            pa = torch.cat([p.float().reshape(n_samples, -1) for p in parents_data_cpu], dim=-1)
             if is_disc:
                 W = torch.randn(pa.shape[1], 3, generator=g) * 0.5
                 logits = pa @ W
@@ -80,12 +82,18 @@ class SyntheticHybridDomain(BenchmarkDomain):
         gx = nx.DiGraph(); gx.add_nodes_from(names); gx.add_edges_from(edges)
         topo = list(nx.topological_sort(gx))
 
+        # Keep a CPU copy for the SCM (the generator lives on CPU); also build
+        # the user-facing dict on the requested device.
+        train_cpu: dict[str, torch.Tensor] = {}
+        test_cpu: dict[str, torch.Tensor] = {}
         train_data: dict[str, torch.Tensor] = {}
         test_data: dict[str, torch.Tensor] = {}
         for nm in topo:
             parents = list(gx.predecessors(nm))
-            tr = _sample_node(n_train, [train_data[p] for p in parents], nm in discrete)
-            te = _sample_node(n_test, [test_data[p] for p in parents], nm in discrete)
+            tr = _sample_node(n_train, [train_cpu[p] for p in parents], nm in discrete)
+            te = _sample_node(n_test, [test_cpu[p] for p in parents], nm in discrete)
+            train_cpu[nm] = tr
+            test_cpu[nm] = te
             train_data[nm] = tr.to(device)
             test_data[nm] = te.to(device)
 

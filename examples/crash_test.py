@@ -138,21 +138,28 @@ def main() -> int:
     fig_dir.mkdir(parents=True, exist_ok=True)
     rows = []
 
+    # Comparison set per regime. Adapters that aren't installed or that don't
+    # support a given query type are silently skipped by _bench_problem.
+    discrete_baselines = ["nbn", "pgmpy", "pyro"]
+    hybrid_baselines   = ["nbn", "pyro", "gpytorch"]
+
     print("==== NBN crash test ====")
     for device in _devices():
         if not args.smoke:
-            print(f"-- Discrete (alarm, 37 nodes), device={device}")
+            print(f"-- Discrete (alarm, 37 nodes), device={device}, "
+                  f"baselines={discrete_baselines}")
             try:
                 rows.extend(_bench_problem(
-                    "bnlearn", "alarm", ["nbn", "pgmpy"],
+                    "bnlearn", "alarm", discrete_baselines,
                     device=device, n_queries=n_queries,
                 ))
             except Exception as e:
                 print(f"  [skip alarm] {e}")
-        print(f"-- Hybrid (synthetic_50), device={device}")
+        problem = "hybrid_50" if not args.smoke else "hybrid_10"
+        print(f"-- Hybrid ({problem}), device={device}, baselines={hybrid_baselines}")
         rows.extend(_bench_problem(
-            "synthetic_hybrid", "hybrid_50" if not args.smoke else "hybrid_10",
-            ["nbn"], device=device, n_queries=n_queries,
+            "synthetic_hybrid", problem,
+            hybrid_baselines, device=device, n_queries=n_queries,
         ))
 
     print("\n==== Results ====")
