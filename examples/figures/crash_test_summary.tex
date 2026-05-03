@@ -1,0 +1,16 @@
+\begin{table}[h]
+  \centering
+  \caption{Crash test: parameter learning + serial inference.}
+  \label{tab:nbn-crash-test}
+  \begin{tabular}{lrrrrrrr}
+    \toprule
+    Baseline & Device & Problem & Q & Time (s) & ms/q & TV & MAP-acc \\
+    \midrule
+    nbn\_lw & cpu & hybrid\_10 & 10 & 0.088 & 8.78 & — & — \\
+    nbn\_hybrid & cpu & hybrid\_10 & 10 & 0.113 & 11.29 & — & — \\
+    nbn\_linear\_gaussian & cpu & hybrid\_10 & 10 & 0.059 & 5.86 & — & — \\
+    pyro & cpu & hybrid\_10 & 10 & 11.264 & 1126.40 & — & — \\
+    gpytorch & cpu & hybrid\_10 & 5 & 0.014 & 2.77 & — & — \\
+    \bottomrule
+  \end{tabular}
+\end{table}

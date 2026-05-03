@@ -158,18 +158,69 @@ your problem family.
 
 ---
 
+## Two benchmark modes — parameter learning vs inference
+
+Inspired by VBN's split, the runner records different signals depending on
+`mode:`
+
+| Mode | What it measures | When to use |
+|---|---|---|
+| `parameter_learning` (default) | Fit time per baseline + serial single-query inference + ground-truth accuracy | "How well can each library learn this BN from data and answer queries one-by-one?" |
+| `inference` | Fixed fitted model, sweeps `inference_batch_sizes`, records latency / throughput per B | "How fast is each library when I throw 1000 conditional queries at once?" — exercises NBN's `query_batch` |
+| `both` | Both passes — heavier but gives you a full picture | Reproducing the paper's results |
+
+Pre-baked configs:
+* [`configs/parameter_learning.yaml`](configs/parameter_learning.yaml)
+* [`configs/inference_throughput.yaml`](configs/inference_throughput.yaml)
+* [`configs/discrete_small.yaml`](configs/discrete_small.yaml) (default
+  parameter-learning subset)
+
+Run any of them from the repo root:
+
+```bash
+nbn-bench run benchmarking/configs/parameter_learning.yaml
+nbn-bench run benchmarking/configs/inference_throughput.yaml
+```
+
+## Paper-ready LaTeX tables
+
+Every parquet output is accompanied by a `.tex` file with the same stem
+that contains a complete `\begin{table}…\end{table}` block in
+[`booktabs`](https://ctan.org/pkg/booktabs) style — copy-paste it into
+your paper without further editing. Both crash tests
+(`examples/crash_test.py`, `examples/crash_test_inference.py`) emit
+their own `.tex` files under `examples/figures/`.
+
+You can also drive the helper directly:
+
+```python
+from benchmarking.latex import rows_to_latex, write_latex_table
+write_latex_table(
+    "table.tex", rows,
+    columns=[("baseline", "Baseline"), ("tv", "TV"), ("ms_per_query", "ms/q")],
+    caption="My experiment", label="tab:my_run",
+    formats={"tv": ".4f", "ms_per_query": ".2f"},
+)
+```
+
+NaN values render as `—`, `_` is escaped, and per-column number formatting
+is configurable via the `formats=` dict.
+
 ## YAML config schema
 
 ```yaml
-domain: bnlearn               # or synthetic_hybrid (or your own plugin)
-problems: [asia, cancer]      # subset of domain.list_problems()
+domain: bnlearn                # or synthetic_hybrid (or your own plugin)
+problems: [asia, cancer]       # subset of domain.list_problems()
 n_train: 5000
 n_test: 1000
 seed: 0
-devices: [cpu, cuda]          # cuda auto-skipped if unavailable
+devices: [cpu, cuda]           # cuda auto-skipped if unavailable
 baselines: [nbn, pgmpy, pomegranate, pyro]   # see registry above
 query_kinds: [marginal, conditional, map, do]
-output: results/discrete_small.parquet
+mode: parameter_learning       # | inference | both
+measure_fit_time: true         # implicit when mode == parameter_learning
+inference_batch_sizes: [1, 16, 256, 1024]   # required for mode != parameter_learning
+output: results/my_run.parquet
 ```
 
 ---

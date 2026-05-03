@@ -174,14 +174,31 @@ def main() -> int:
         for b_name in nbn_baselines + others:
             rows.extend(_bench_baseline(b_name, problem, target, sweep, device=device))
 
+    out_dir = _repo_root / "examples" / "figures"
+    out_dir.mkdir(parents=True, exist_ok=True)
     if rows and not args.no_figures:
-        out_dir = _repo_root / "examples" / "figures"
-        out_dir.mkdir(parents=True, exist_ok=True)
         try:
             _plot_throughput(rows, out_dir / "crash_test_inference_throughput")
             print(f"\nFigure saved to {out_dir}/crash_test_inference_throughput.{{pdf,png,svg}}")
         except Exception as e:
             print(f"  [figure-skip] {e}")
+    if rows:
+        from benchmarking.latex import write_latex_table
+        cols = [
+            ("baseline", "Baseline"), ("device", "Device"),
+            ("B", "B"), ("time_s", "Time (s)"),
+            ("ms_per_query", "ms/q"), ("throughput_qps", "q/s"),
+            ("method", "Method"),
+        ]
+        tex = out_dir / "crash_test_inference_throughput.tex"
+        write_latex_table(
+            tex, rows, cols,
+            caption="Inference throughput vs batch size.",
+            label="tab:nbn-crash-inference",
+            formats={"time_s": ".3f", "ms_per_query": ".2f",
+                     "throughput_qps": ".0f"},
+        )
+        print(f"LaTeX table saved to {tex}")
 
     return 0
 
