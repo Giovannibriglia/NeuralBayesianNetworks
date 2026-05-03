@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: pip install -e ".[dev,bench,neural]"
+      - name: Lint
+        run: ruff check nbn/ tests/
+      - name: Type-check core
+        run: mypy nbn/core nbn/mechanisms --ignore-missing-imports
+      - name: Test
+        run: pytest -n auto --cov=nbn --cov-report=xml -m "not gpu and not slow"
