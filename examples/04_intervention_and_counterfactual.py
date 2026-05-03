@@ -8,12 +8,18 @@ Two demonstrations:
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
-import torch
+# Self-bootstrap so this script runs without `pip install -e .` first.
+_repo_root = Path(__file__).resolve().parent.parent
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
 
-from nbn import NeuralBayesianNetwork, seed_all
-from nbn.mechanisms import CategoricalTableMechanism, LinearGaussianMechanism
+import torch  # noqa: E402
+
+from nbn import NeuralBayesianNetwork, seed_all  # noqa: E402
+from nbn.mechanisms import CategoricalTableMechanism, LinearGaussianMechanism  # noqa: E402
 
 seed_all(0)
 

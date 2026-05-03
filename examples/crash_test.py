@@ -13,15 +13,22 @@ import sys
 import time
 from pathlib import Path
 
-import torch
+# Self-bootstrap: make `nbn` and `benchmarking` importable when this script is
+# launched directly (e.g. `python examples/crash_test.py`) without first
+# running `pip install -e .`. Inserts the repo root onto sys.path if needed.
+_repo_root = Path(__file__).resolve().parent.parent
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
 
-from nbn import NeuralBayesianNetwork, seed_all
-from benchmarking.baselines import get_adapter
-from benchmarking.domains import get_domain
-from benchmarking.metrics import (
+import torch  # noqa: E402
+
+from benchmarking.baselines import get_adapter  # noqa: E402
+from benchmarking.domains import get_domain  # noqa: E402
+from benchmarking.metrics import (  # noqa: E402
     energy_distance, kl_divergence, map_accuracy, tv_distance, wasserstein_1d,
 )
-from benchmarking.style import NBN_PALETTE, apply_style, savefig_multi
+from benchmarking.style import NBN_PALETTE, apply_style, savefig_multi  # noqa: E402
+from nbn import NeuralBayesianNetwork, seed_all  # noqa: E402
 
 
 def _devices():

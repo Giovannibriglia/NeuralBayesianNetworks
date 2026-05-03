@@ -72,6 +72,12 @@ samples = model.sample(n=10_000)
 All commands assume you are at the repository root (the directory that
 contains `pyproject.toml`).
 
+> **First-time / after-pull**: `pip install -e ".[bench,neural,gp,mcmc]"`
+> to register the `benchmarking` package and pull the optional baseline
+> deps (pgmpy, pomegranate, gpytorch, pyro). The example scripts also
+> include a `sys.path` bootstrap so they still run without an editable
+> install if you prefer.
+
 ```bash
 # Headline crash test: alarm + synthetic-50, all baselines, ~30s on CPU.
 # Saves figures under examples/figures/.
