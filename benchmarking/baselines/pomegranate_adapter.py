@@ -1,0 +1,122 @@
+"""pomegranate v1.x adapter (PyTorch-backed).
+
+pomegranate v1.0+ ships its Bayesian-network module on a PyTorch backend,
+so it's a fair and lightweight comparison point against NBN on the
+*discrete* regime. It does not natively support the kind of non-Gaussian
+continuous CPDs NBN handles, hence ``supports = {"discrete"}``.
+
+Inference path: pomegranate uses NaN as the "unobserved" sentinel in the
+input tensor; ``predict_proba`` returns the marginal over each unobserved
+node given the observed ones. This is exact belief-propagation on the
+tree-structured equivalent (or loopy on cyclic moralised graphs).
+"""
+from __future__ import annotations
+
+from typing import Dict, List
+
+import torch
+
+from benchmarking.baselines.base import BaselineAdapter
+from benchmarking.domains.base import BenchmarkProblem, Query
+
+
+class PomegranateAdapter(BaselineAdapter):
+    """Wraps ``pomegranate.bayesian_network.BayesianNetwork`` (v1.x torch backend)."""
+
+    name = "pomegranate"
+    supports = {"discrete"}
+
+    def __init__(self) -> None:
+        self.model = None
+        self._node_to_idx: Dict[str, int] = {}
+        self._cards: Dict[str, int] = {}
+        self._topo: List[str] = []
+
+    def fit(self, problem: BenchmarkProblem) -> None:
+        try:
+            from pomegranate.bayesian_network import BayesianNetwork
+            from pomegranate.distributions import Categorical, ConditionalCategorical
+        except ImportError as e:
+            raise ImportError(
+                "PomegranateAdapter needs pomegranate>=1.0: pip install 'pomegranate>=1.0'"
+            ) from e
+
+        # Discrete only
+        for k, (kind, _) in problem.variables.items():
+            if kind != "discrete":
+                raise ValueError(f"pomegranate adapter is discrete-only; got {k} ({kind}).")
+
+        # Topological order
+        import networkx as nx
+        g = nx.DiGraph(); g.add_nodes_from(problem.variables); g.add_edges_from(problem.dag)
+        self._topo = list(nx.topological_sort(g))
+        self._node_to_idx = {n: i for i, n in enumerate(self._topo)}
+        self._cards = {n: int(problem.variables[n][1]) for n in self._topo}
+
+        # Pomegranate v1 wants distribution objects + a list of edges between them.
+        # Build per-node distribution from the empirical CPT.
+        dist_objs = []
+        for node in self._topo:
+            k = self._cards[node]
+            parents = [p for p, c in problem.dag if c == node]
+            x = problem.train_data[node].cpu().long().reshape(-1)
+            if not parents:
+                counts = torch.zeros(k)
+                counts.scatter_add_(0, x, torch.ones_like(x, dtype=torch.float))
+                probs = (counts + 1.0) / (counts.sum() + k)
+                dist_objs.append(Categorical(probs.reshape(1, k).double()))
+            else:
+                pa_cards = [self._cards[p] for p in parents]
+                strides, stride = [], 1
+                for c in reversed(pa_cards):
+                    strides.append(stride); stride *= c
+                strides = list(reversed(strides))
+                n_pa = stride
+                pa_idx = torch.zeros_like(x)
+                for d, p in enumerate(parents):
+                    pa_idx = pa_idx + problem.train_data[p].cpu().long().reshape(-1) * strides[d]
+                flat = pa_idx * k + x
+                cnt = torch.zeros(n_pa * k)
+                cnt.scatter_add_(0, flat, torch.ones_like(flat, dtype=torch.float))
+                cnt = cnt.reshape(n_pa, k) + 1.0
+                probs = cnt / cnt.sum(-1, keepdim=True)
+                # Reshape into pomegranate's [*pa_cards, K] layout
+                probs = probs.reshape(*pa_cards, k).double()
+                dist_objs.append(ConditionalCategorical([probs]))
+
+        # Build edges as (parent_dist_obj, child_dist_obj) pairs
+        edges_obj = []
+        for parent, child in problem.dag:
+            edges_obj.append((dist_objs[self._node_to_idx[parent]],
+                              dist_objs[self._node_to_idx[child]]))
+        self.model = BayesianNetwork(distributions=dist_objs, edges=edges_obj)
+
+    def query(self, q: Query) -> torch.Tensor:
+        assert self.model is not None
+        # pomegranate v1.x's predict_proba expects a torch masked-tensor:
+        # observed entries are real values; unobserved entries are masked out.
+        from torch.masked import masked_tensor
+        import warnings
+
+        target = q.targets[0]
+        n = len(self._topo)
+        row = torch.zeros((1, n))
+        mask = torch.zeros((1, n), dtype=torch.bool)
+        for k, v in q.evidence.items():
+            i = self._node_to_idx[k]
+            row[0, i] = float(int(v.item() if isinstance(v, torch.Tensor) else v))
+            mask[0, i] = True
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            mt = masked_tensor(row, mask)
+            out = self.model.predict_proba(mt)
+        idx = self._node_to_idx[target]
+        # `out[idx]` may itself be a masked tensor when target is observed; call
+        # ``.get_data()`` to extract the underlying probability vector.
+        result = out[idx][0]
+        if hasattr(result, "get_data"):
+            result = result.get_data()
+        return result.float().detach()
+
+    def teardown(self) -> None:
+        self.model = None

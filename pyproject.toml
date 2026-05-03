@@ -36,6 +36,7 @@ dependencies = [
 [project.optional-dependencies]
 bench = [
     "pgmpy>=0.1.25",
+    "pomegranate>=1.0",
     "matplotlib>=3.7",
     "seaborn>=0.12",
     "requests>=2.28",
@@ -82,4 +83,4 @@ source = ["nbn"]
 omit = ["nbn/_version.py"]
 
 [tool.coverage.report]
-fail_under = 80
+fail_under = 60

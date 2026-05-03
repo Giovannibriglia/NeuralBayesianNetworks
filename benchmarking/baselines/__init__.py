@@ -9,6 +9,7 @@ _REGISTRY = {
     "pgmpy": ("benchmarking.baselines.pgmpy_adapter", "PgmpyAdapter"),
     "gpytorch": ("benchmarking.baselines.gpytorch_adapter", "GPyTorchAdapter"),
     "pyro": ("benchmarking.baselines.pyro_adapter", "PyroAdapter"),
+    "pomegranate": ("benchmarking.baselines.pomegranate_adapter", "PomegranateAdapter"),
 }
 
 

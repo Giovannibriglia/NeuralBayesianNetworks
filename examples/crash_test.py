@@ -140,7 +140,17 @@ def main() -> int:
 
     # Comparison set per regime. Adapters that aren't installed or that don't
     # support a given query type are silently skipped by _bench_problem.
-    discrete_baselines = ["nbn", "pgmpy", "pyro"]
+    #
+    # Why GPyTorch is absent from the discrete lineup:
+    #   GPyTorch implements Gaussian Processes — its likelihoods (Gaussian /
+    #   Bernoulli / Multitask) are continuous regression targets. There is no
+    #   first-class way to model a multi-class categorical CPT inside a GP
+    #   without a continuous relaxation (e.g. the Polya-Gamma trick), and that
+    #   is itself a research project rather than a fair benchmark adapter. The
+    #   `GPyTorchAdapter` therefore declares `supports = {"continuous"}`; the
+    #   runner skips queries with discrete evidence with `not_supported` rather
+    #   than producing meaningless numbers.
+    discrete_baselines = ["nbn", "pgmpy", "pomegranate", "pyro"]
     hybrid_baselines   = ["nbn", "pyro", "gpytorch"]
 
     print("==== NBN crash test ====")

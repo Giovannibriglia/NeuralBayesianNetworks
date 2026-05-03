@@ -65,7 +65,30 @@ samples = model.sample(n=10_000)
 - **Batched-query API**: `query_batch` returns `[Q, K]` in one GPU launch
 - **Fully `nn.Module`**: `.to(device)`, `.parameters()`, `torch.compile`, AMP all work
 - **Causal extensions**: `do(X=x)` interventions, counterfactuals
-- **Benchmarks**: top-level [`benchmarking/`](benchmarking/) package — plugin-based runner, 4 baselines (NBN, pgmpy, GPyTorch, Pyro), 15+ metrics, YAML configs (`nbn-bench run benchmarking/configs/discrete_small.yaml`).
+- **Benchmarks**: top-level [`benchmarking/`](benchmarking/) package — plugin-based runner, 5 baselines (NBN, pgmpy, pomegranate, GPyTorch, Pyro), 15+ metrics, YAML configs.
+
+## Running the crash test and benchmarks
+
+All commands assume you are at the repository root (the directory that
+contains `pyproject.toml`).
+
+```bash
+# Headline crash test: alarm + synthetic-50, all baselines, ~30s on CPU.
+# Saves figures under examples/figures/.
+python examples/crash_test.py
+
+# Smoke run for CI / quick sanity check (~5s, no figures).
+python examples/crash_test.py --smoke
+
+# Run a configured benchmark suite (writes parquet under results/).
+nbn-bench run benchmarking/configs/discrete_small.yaml
+nbn-bench run benchmarking/configs/continuous_small.yaml
+nbn-bench run benchmarking/configs/scaling.yaml
+```
+
+See [`benchmarking/README.md`](benchmarking/README.md) for the full
+reproduction guide, the standard 5-kind query battery, the metrics list,
+and instructions for adding your own domain or baseline adapter.
 
 ## Status
 
