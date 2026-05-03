@@ -1,11 +1,18 @@
 """bnlearn discrete-network domain.
 
-Lazy-downloads ``.bif`` files from the bnlearn repository and caches them
-locally.  Ground-truth marginals are computed via pgmpy's exact VE on the
-true CPTs.  Concurrent downloads are guarded with a ``filelock``.
+Loads canonical bnlearn networks. We try in order:
+
+1. ``pgmpy.utils.get_example_model(name)`` — pgmpy ships these as fitted
+   models, no network needed. This is the **default** path and works offline.
+2. Fall back to downloading ``.bif`` from a list of mirror URLs (the bnlearn
+   site has reorganised paths repeatedly; we try several known stems).
+
+Ground-truth marginals are computed via pgmpy's exact VE on the true CPTs.
+Concurrent downloads are guarded with ``filelock``.
 """
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -17,6 +24,8 @@ from benchmarking.domains.base import (
     GroundTruth,
 )
 from benchmarking.queries import make_query_battery
+
+logger = logging.getLogger(__name__)
 
 
 # (name → (n_nodes, n_edges))
@@ -37,6 +46,13 @@ BNLEARN_NETWORKS = {
     "mildew":    (35, 46),
 }
 
+# Known mirror URL templates, tried in order if pgmpy.get_example_model fails.
+_MIRROR_TEMPLATES = [
+    "https://www.bnlearn.com/bnrepository/{name}/{name}.bif.gz",
+    "https://www.bnlearn.com/bnrepository/{name}/{name}.bif",
+    "https://erdogant.github.io/datasets/{name}.bif",
+]
+
 
 def _cache_dir() -> Path:
     p = Path(os.path.expanduser("~/.cache/nbn/bnlearn"))
@@ -48,8 +64,8 @@ def _bif_path(name: str) -> Path:
     return _cache_dir() / f"{name}.bif"
 
 
-def _download_bif(name: str) -> Path:
-    """Download <name>.bif into the cache; concurrent-safe."""
+def _download_bif(name: str) -> Path | None:
+    """Download <name>.bif into the cache; tries multiple mirrors."""
     path = _bif_path(name)
     if path.exists() and path.stat().st_size > 0:
         return path
@@ -59,20 +75,65 @@ def _download_bif(name: str) -> Path:
         FileLock = None  # type: ignore[assignment]
     lock_path = str(path) + ".lock"
 
-    def _do_download():
+    def _do_download() -> bool:
+        import gzip
         import requests
-        url = f"https://www.bnlearn.com/bnrepository/{name}/{name}.bif"
-        r = requests.get(url, timeout=120)
-        r.raise_for_status()
-        path.write_bytes(r.content)
+        for tmpl in _MIRROR_TEMPLATES:
+            url = tmpl.format(name=name)
+            try:
+                r = requests.get(url, timeout=60)
+                if r.status_code != 200:
+                    continue
+                content = r.content
+                if url.endswith(".gz"):
+                    content = gzip.decompress(content)
+                path.write_bytes(content)
+                logger.info("Downloaded %s from %s", name, url)
+                return True
+            except Exception as e:
+                logger.debug("Mirror %s failed: %s", url, e)
+        return False
 
+    ok = False
     if FileLock is not None:
         with FileLock(lock_path):
-            if not (path.exists() and path.stat().st_size > 0):
-                _do_download()
+            if path.exists() and path.stat().st_size > 0:
+                ok = True
+            else:
+                ok = _do_download()
     else:
-        _do_download()
-    return path
+        ok = _do_download()
+    return path if ok else None
+
+
+def _load_pgmpy_model(name: str):
+    """Try every available path to get a fitted pgmpy model for ``name``."""
+    # Path 1a: pgmpy >= 1.3 — `pgmpy.example_models.load_model`
+    try:
+        from pgmpy.example_models import load_model
+        return load_model(name)
+    except Exception as e:
+        logger.debug("pgmpy.example_models.load_model('%s') failed: %s", name, e)
+
+    # Path 1b: older pgmpy — `pgmpy.utils.get_example_model`
+    try:
+        import warnings
+        from pgmpy.utils import get_example_model
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            return get_example_model(name)
+    except Exception as e:
+        logger.debug("pgmpy.utils.get_example_model('%s') failed: %s", name, e)
+
+    # Path 2: cached / downloadable .bif
+    bif = _download_bif(name)
+    if bif is None:
+        raise RuntimeError(
+            f"Could not load bnlearn network '{name}': "
+            "pgmpy built-ins failed and no .bif mirror was reachable."
+        )
+    from pgmpy.readwrite import BIFReader
+    return BIFReader(str(bif)).get_model()
 
 
 class BnlearnDomain(BenchmarkDomain):
@@ -92,13 +153,11 @@ class BnlearnDomain(BenchmarkDomain):
     ) -> BenchmarkProblem:
         try:
             from pgmpy.inference import VariableElimination
-            from pgmpy.readwrite import BIFReader
             from pgmpy.sampling import BayesianModelSampling
         except ImportError as e:
             raise ImportError("BnlearnDomain needs pgmpy: pip install pgmpy") from e
 
-        bif = _download_bif(problem)
-        bn = BIFReader(str(bif)).get_model()
+        bn = _load_pgmpy_model(problem)
         sampler = BayesianModelSampling(bn)
 
         edges = list(bn.edges())
@@ -109,17 +168,22 @@ class BnlearnDomain(BenchmarkDomain):
         cards = {n: len(bn.get_cpds(n).state_names[n]) for n in nodes}
         variables = {n: ("discrete", cards[n]) for n in nodes}
 
-        # Train/test data
+        # Train/test data — pgmpy returns string labels; map to ints via state_names.
         df_train = sampler.forward_sample(size=n_train, show_progress=False, seed=seed)
         df_test = sampler.forward_sample(size=n_test, show_progress=False, seed=seed + 1)
-        train_data = {
-            n: torch.tensor(df_train[n].astype(int).values, dtype=torch.long, device=device)
-            for n in nodes
-        }
-        test_data = {
-            n: torch.tensor(df_test[n].astype(int).values, dtype=torch.long, device=device)
-            for n in nodes
-        }
+
+        def _to_long(df, n):
+            states = bn.get_cpds(n).state_names[n]
+            label_to_idx = {s: i for i, s in enumerate(states)}
+            col = df[n]
+            try:
+                arr = col.astype(int).to_numpy()
+            except (ValueError, TypeError):
+                arr = col.map(label_to_idx).astype(int).to_numpy()
+            return torch.tensor(arr, dtype=torch.long, device=device)
+
+        train_data = {n: _to_long(df_train, n) for n in nodes}
+        test_data = {n: _to_long(df_test, n) for n in nodes}
 
         # Queries
         queries = make_query_battery(
