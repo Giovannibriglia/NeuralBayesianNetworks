@@ -82,9 +82,9 @@ def fit(
 
     if method == "local":
         for i, node in enumerate(model.dag.topological_order()):
-            mech = model.mechanisms.get(node)
-            if mech is None:
+            if node not in model.mechanisms:
                 raise RuntimeError(f"No mechanism registered for node '{node}'.")
+            mech = model.mechanisms[node]
             parents = model.dag.parents(node)
             pa_tensor = pack_parents(data_dev, parents)
             x = data_dev[node]

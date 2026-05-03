@@ -13,6 +13,7 @@ ignore = [
     "B028",   # No explicit `stacklevel` keyword
     "SIM105", # contextlib.suppress preference
     "SIM108", # ternary
+    "SIM102", # nested if statements
     "SIM117", # nested with statements
     "UP007",  # Optional[X] vs X | None — keep Optional for clarity
     "UP035",  # `typing.Tuple` etc. — keep for explicitness

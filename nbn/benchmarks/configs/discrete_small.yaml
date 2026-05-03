@@ -1,0 +1,9 @@
+domain: bnlearn
+problems: [asia, cancer, earthquake]
+n_train: 5000
+n_test: 1000
+seed: 0
+devices: [cpu]
+baselines: [nbn, pgmpy]
+query_kinds: [marginal, conditional]
+output: results/discrete_small.parquet
