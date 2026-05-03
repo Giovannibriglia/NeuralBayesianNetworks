@@ -19,8 +19,8 @@ from pathlib import Path
 _repo_root = Path(__file__).resolve().parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
-
-import torch  # noqa: E402
+import torch
+from tqdm import tqdm
 
 from benchmarking.baselines import get_adapter  # noqa: E402
 from benchmarking.domains import get_domain  # noqa: E402
@@ -45,7 +45,9 @@ def _bench_problem(domain_name, problem_name, baselines, device, n_queries):
         problem_name, n_train=2000, n_test=500, seed=0, device=torch.device(device),
     )
     out = []
-    for b_name in baselines:
+    pbar = tqdm(baselines)
+    for b_name in pbar:
+        pbar.set_description(f"Running [{b_name}]...")
         kw = {"device": device} if b_name in {"nbn", "gpytorch"} else {}
         try:
             adapter = get_adapter(b_name, **kw)
