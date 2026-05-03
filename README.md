@@ -11,7 +11,11 @@ pip install neuralbayesiannetworks
 # with all extras:
 pip install "neuralbayesiannetworks[bench,neural,gp,mcmc,dev]"
 ```
-
+or
+```bash
+git clone https://github.com/Giovannibriglia/NeuralBayesianNetworks.git
+pip install -e ".[bench,neural,gp,mcmc,dev]"
+```
 ## Quickstart
 
 ```python
