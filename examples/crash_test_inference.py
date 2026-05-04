@@ -3,11 +3,11 @@
 Thin wrapper around :func:`benchmarking.crash_test_runner.run_inference`.
 Same logic is reachable via ``nbn-bench inference --config <yaml>``.
 
-Named ``..._synthetic`` to avoid colliding with the v0.2 bnlearn-based
-``examples/crash_test_inference.py``, which serves a different purpose
-(small-network throughput parity demo against pgmpy on canonical
-bnlearn networks) and is referenced from the v0.3 README + CI.  See
-``examples/crash_test.py`` for the v0.3 page-1 figure script.
+The v0.2 bnlearn-corpus inference-throughput script lives at
+``examples/crash_test_inference_bnlearn.py`` (renamed in v0.4b PR #12
+to free the canonical ``crash_test_inference.py`` name for this
+synthetic variant).  See ``examples/crash_test.py`` for the v0.3
+page-1 figure script.
 """
 from __future__ import annotations
 
@@ -26,8 +26,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "v0.4 inference crash test on synthetic BNs (accuracy + B=1024 "
-            "throughput).  See examples/crash_test_inference.py for the v0.2 "
-            "bnlearn-based variant."
+            "throughput).  See examples/crash_test_inference_bnlearn.py for "
+            "the v0.2 bnlearn-corpus variant."
         ),
     )
     parser.add_argument(

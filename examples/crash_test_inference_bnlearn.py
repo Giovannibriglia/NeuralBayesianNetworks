@@ -20,7 +20,7 @@ Output:
       log-log throughput curve
 
 Usage:
-    python examples/crash_test_inference.py [--smoke] [--no-figures]
+    python examples/crash_test_inference_bnlearn.py [--smoke] [--no-figures]
 """
 from __future__ import annotations
 
