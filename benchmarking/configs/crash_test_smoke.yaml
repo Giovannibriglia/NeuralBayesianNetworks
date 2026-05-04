@@ -28,18 +28,24 @@ generator:
   max_in_degree: 4
   cardinality: 4
   fraction_continuous: 0.5
-  n_train: 2000
-  n_test: 500
-  n_reference: 5000
+  # Smoke uses tiny train data so per-cell fit completes in seconds even
+  # for the MDN-based ``continuous_nongauss`` family.  Full-sweep config
+  # uses the brief's nominal 10 000 / 2 000 / 50 000 numbers.
+  n_train: 200
+  n_test: 50
+  n_reference: 200
 
 # Inference-crash-test only: fixed batch size for NBN.  Baselines without a
 # native batched-query API loop inside their adapter and are timed for the
 # equivalent total workload.
 inference:
   batch_size: 1024
-  n_warmup: 5
-  n_repeat: 3
-  per_cell_timeout_s: 60
+  n_warmup: 2
+  n_repeat: 2
+  per_cell_timeout_s: 30
+  # Smoke fit hyperparams (passed through to model.fit) — keep iterations
+  # small so MDN/Pyro cells fit in the per-cell soft cap.
+  smoke_epochs: 20
 
 # Output root.  Figures land under figures/ on this prefix.
 output_dir: examples/figures/v04_smoke
