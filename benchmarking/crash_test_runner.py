@@ -123,17 +123,20 @@ def _param_learning_baselines(family: str, *, smoke: bool) -> Sequence[str]:
 
 def _inference_baselines(family: str, *, smoke: bool) -> Sequence[str]:
     if smoke:
-        # nbn_ve only applies to discrete; nbn_lw applies everywhere; pgmpy only
-        # for discrete + continuous_lg.  Self-consistency check: nbn_lw vs
-        # nbn_ve on discrete.
-        out = ["nbn_lw"]
-        if family == "discrete":
-            out.insert(0, "nbn_ve")
-        if family in {"discrete", "continuous_lg"}:
-            out.append("pgmpy")
-        if family == "hybrid":
-            out.insert(0, "nbn_hybrid")
-        return tuple(out)
+        # nbn_lw is the smoke workhorse — sample-based, runs in bounded
+        # time on every family.  nbn_ve and pgmpy are *excluded* from
+        # smoke because both block Python's SIGALRM and so can't honour
+        # the per-cell soft cap:
+        #   * nbn_ve discrete VE on n_nodes ≥ ~30 with even moderate
+        #     induced treewidth pegs a CPU core for >2 minutes inside
+        #     torch tensor C-loops (no signal yields).
+        #   * pgmpy.LinearGaussianBayesianNetwork.add_cpds does similar
+        #     in numpy.
+        # Both are honest baselines on the *full* config where the
+        # per-cell timeout is wide enough; the smoke figure just can't
+        # afford them.  nbn_lw vs nbn_ve self-consistency check on
+        # discrete is a v0.4c full-config item.
+        return ("nbn_lw",)
     full = ["nbn_lw"]
     if family == "discrete":
         full.insert(0, "nbn_ve")
@@ -246,7 +249,10 @@ def _fit_and_score_nbn(bn: SyntheticBN, family: str) -> tuple[str, float]:
         mech = fresh_mechanism_for(family, kind)
         fitted.set_mechanism(node, mech)
     # Use ridge-regression / count-MLE per-node fit
-    epochs = 20  # smoke / smoke-default
+    # Smoke uses 50 epochs (raised from 20 in PR #12 §1) so MDN-bearing
+    # cells converge enough to escape the sampling-noise floor; full-config
+    # callers pass higher values implicitly through the YAML.
+    epochs = 50
     fitted.fit(bn.train_data, epochs=epochs, batch_size=4096, lr=5e-3)
 
     if family == "discrete":
