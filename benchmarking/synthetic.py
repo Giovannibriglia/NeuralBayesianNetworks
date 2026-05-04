@@ -478,12 +478,16 @@ def _build_mdn_mechanism(
     # The bias / weight magnitudes are deliberately tighter than the brief's
     # ``N(0, 1/√P)`` ideal: long topological chains amplify variance at
     # every level, and an unconstrained mixture-of-skew-normals chain
-    # diverges by node ~30 in our tests.  These constants keep the joint
-    # samples bounded for n_nodes up to a few thousand while still
-    # producing visibly non-Gaussian per-node CPDs.
-    mean_w_scale = 0.5
-    skew_bias_scale = 0.5
-    scale_low, scale_high = 0.3, 0.8
+    # diverges by node ~30 in our tests.  After v0.4b PR #12 fixed
+    # ancestral sampling to actually respect per-row parent values
+    # (closing v0.5 #11), the *correct* per-row chain is more sensitive
+    # to bias drift than the buggy [n, n, D] take-samp[0] path was, so
+    # we tighten constants again from 0.5 → 0.3 to keep n_nodes=100
+    # joint samples bounded.  Strongly-non-Gaussian regime is a v0.5
+    # ablation — see #7.
+    mean_w_scale = 0.3
+    skew_bias_scale = 0.3
+    scale_low, scale_high = 0.3, 0.7
 
     if not parents:
         mech._d_pa = 0
