@@ -1,0 +1,51 @@
+\begin{table}[h]
+  \centering
+  \caption{Inference throughput vs batch size.}
+  \label{tab:nbn-crash-inference}
+  \begin{tabular}{lrrrrrr}
+    \toprule
+    Baseline & Device & B & Time (s) & ms/q & q/s & Method \\
+    \midrule
+    nbn\_ve & cpu & 1 & 0.005 & 5.29 & 189 & batched \\
+    nbn\_ve & cpu & 16 & 0.007 & 0.41 & 2450 & batched \\
+    nbn\_ve & cpu & 256 & 0.012 & 0.05 & 21866 & batched \\
+    nbn\_ve & cpu & 1024 & 0.025 & 0.02 & 40535 & batched \\
+    nbn\_ve & cpu & 4096 & 0.085 & 0.02 & 48174 & batched \\
+    nbn\_lw & cpu & 1 & 0.029 & 29.41 & 34 & batched \\
+    nbn\_lw & cpu & 16 & 0.171 & 10.67 & 94 & batched \\
+    nbn\_lw & cpu & 256 & 3.267 & 12.76 & 78 & batched \\
+    nbn\_lw & cpu & 1024 & 10.170 & 9.93 & 101 & batched \\
+    nbn\_lw & cpu & 4096 & 25.561 & 6.24 & 160 & batched \\
+    nbn\_hybrid & cpu & 1 & 0.418 & 417.89 & 2 & batched \\
+    nbn\_hybrid & cpu & 16 & 0.189 & 11.84 & 84 & batched \\
+    nbn\_hybrid & cpu & 256 & 2.994 & 11.69 & 86 & batched \\
+    nbn\_hybrid & cpu & 1024 & 7.684 & 7.50 & 133 & batched \\
+    nbn\_hybrid & cpu & 4096 & 32.084 & 7.83 & 128 & batched \\
+    pgmpy & cpu & 1 & 0.001 & 1.18 & 850 & loop \\
+    pgmpy & cpu & 16 & 0.013 & 0.82 & 1217 & loop \\
+    pgmpy & cpu & 256 & 0.204 & 0.80 & 1255 & loop \\
+    pgmpy & cpu & 1024 & 0.798 & 0.78 & 1283 & loop \\
+    pgmpy & cpu & 4096 & 2.966 & 0.72 & 1381 & loop \\
+    nbn\_ve & cuda & 1 & 0.088 & 87.90 & 11 & batched \\
+    nbn\_ve & cuda & 16 & 0.006 & 0.39 & 2538 & batched \\
+    nbn\_ve & cuda & 256 & 0.006 & 0.02 & 42521 & batched \\
+    nbn\_ve & cuda & 1024 & 0.023 & 0.02 & 44695 & batched \\
+    nbn\_ve & cuda & 4096 & 0.057 & 0.01 & 72092 & batched \\
+    nbn\_lw & cuda & 1 & 0.211 & 211.31 & 5 & batched \\
+    nbn\_lw & cuda & 16 & 0.031 & 1.91 & 523 & batched \\
+    nbn\_lw & cuda & 256 & 0.040 & 0.16 & 6368 & batched \\
+    nbn\_lw & cuda & 1024 & 0.121 & 0.12 & 8481 & batched \\
+    nbn\_lw & cuda & 4096 & 0.594 & 0.15 & 6891 & batched \\
+    nbn\_hybrid & cuda & 1 & 0.033 & 33.22 & 30 & batched \\
+    nbn\_hybrid & cuda & 16 & 0.048 & 2.99 & 334 & batched \\
+    nbn\_hybrid & cuda & 256 & 0.058 & 0.23 & 4411 & batched \\
+    nbn\_hybrid & cuda & 1024 & 0.245 & 0.24 & 4173 & batched \\
+    nbn\_hybrid & cuda & 4096 & 1.340 & 0.33 & 3056 & batched \\
+    pgmpy & cuda & 1 & 0.001 & 0.95 & 1056 & loop \\
+    pgmpy & cuda & 16 & 0.011 & 0.69 & 1441 & loop \\
+    pgmpy & cuda & 256 & 0.170 & 0.66 & 1504 & loop \\
+    pgmpy & cuda & 1024 & 0.674 & 0.66 & 1519 & loop \\
+    pgmpy & cuda & 4096 & 3.032 & 0.74 & 1351 & loop \\
+    \bottomrule
+  \end{tabular}
+\end{table}

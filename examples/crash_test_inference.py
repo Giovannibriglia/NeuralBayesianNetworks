@@ -164,10 +164,10 @@ def main() -> int:
     # pomegranate is excluded here: its predict_proba in v1.1.x has a bug
     # with evidence on masked tensors (works for marginals only) — see the
     # PomegranateAdapter docstring. pyro is slow and skipped in --smoke.
-    nbn_baselines = ["nbn_lw", "nbn_hybrid"]
+    nbn_baselines = ["nbn_ve", "nbn_lw", "nbn_hybrid"]
     others = ["pgmpy"]
-    if not args.smoke:
-        others.append("pyro")
+    """if not args.smoke:
+        others.append("pyro")"""
 
     for device in devices:
         print(f"-- device={device}")

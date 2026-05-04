@@ -6,14 +6,30 @@
     \toprule
     Baseline & Device & Problem & Q & Time (s) & ms/q & TV & MAP-acc & W₁ & Energy & JS-norm \\
     \midrule
-    nbn\_ve & cpu & alarm & 25 & 2.148 & 85.92 & 0.0062 & 1.000 & — & — & — \\
-    nbn\_lw & cpu & alarm & 25 & 9.548 & 381.94 & 0.0127 & 1.000 & — & — & — \\
-    nbn\_hybrid & cpu & alarm & 25 & 27.853 & 1114.10 & 0.0091 & 1.000 & — & — & — \\
-    nbn\_neural\_categorical & cpu & alarm & 25 & 34.036 & 1361.45 & — & — & — & — & — \\
-    pgmpy & cpu & alarm & 25 & 0.012 & 0.49 & 0.0062 & 1.000 & — & — & — \\
-    nbn\_lw & cpu & hybrid\_50 & 50 & 48.977 & 979.55 & — & — & 0.879 & 0.786 & 0.322 \\
-    nbn\_hybrid & cpu & hybrid\_50 & 50 & 2.189 & 43.79 & — & — & 0.903 & 0.825 & 0.333 \\
-    nbn\_linear\_gaussian & cpu & hybrid\_50 & 50 & 3.508 & 70.17 & — & — & 0.950 & 0.988 & 0.416 \\
+    nbn\_ve & cpu & alarm & 25 & 0.325 & 12.99 & 0.0062 & 1.000 & — & — & — \\
+    nbn\_lw & cpu & alarm & 25 & 0.627 & 25.08 & 0.0127 & 1.000 & — & — & — \\
+    nbn\_hybrid & cpu & alarm & 25 & 1.074 & 42.97 & 0.0091 & 1.000 & — & — & — \\
+    nbn\_neural\_categorical & cpu & alarm & 25 & 1.157 & 46.28 & — & — & — & — & — \\
+    pgmpy & cpu & alarm & 25 & 0.009 & 0.37 & 0.0062 & 1.000 & — & — & — \\
+    pomegranate & cpu & alarm & 25 & 1.880 & 75.19 & 0.0202 & 1.000 & — & — & — \\
+    pyro & cpu & alarm & 25 & 49.952 & 1998.08 & 0.0395 & 1.000 & — & — & — \\
+    nbn\_lw & cpu & hybrid\_50 & 50 & 4.945 & 98.90 & — & — & 0.881 & 0.775 & 0.323 \\
+    nbn\_hybrid & cpu & hybrid\_50 & 50 & 4.560 & 91.21 & — & — & 0.903 & 0.819 & 0.331 \\
+    nbn\_linear\_gaussian & cpu & hybrid\_50 & 50 & 10.929 & 218.57 & — & — & 0.951 & 0.975 & 0.410 \\
+    pyro & cpu & hybrid\_50 & 50 & 123.250 & 2465.01 & — & — & — & — & — \\
+    gpytorch & cpu & hybrid\_50 & 25 & 0.095 & 3.81 & — & — & — & — & — \\
+    nbn\_ve & cuda & alarm & 25 & 0.108 & 4.33 & 0.0062 & 1.000 & — & — & — \\
+    nbn\_lw & cuda & alarm & 25 & 0.669 & 26.74 & 0.0127 & 1.000 & — & — & — \\
+    nbn\_hybrid & cuda & alarm & 25 & 0.974 & 38.96 & 0.0091 & 1.000 & — & — & — \\
+    nbn\_neural\_categorical & cuda & alarm & 25 & 1.932 & 77.27 & — & — & — & — & — \\
+    pgmpy & cuda & alarm & 25 & 0.010 & 0.39 & 0.0062 & 1.000 & — & — & — \\
+    pomegranate & cuda & alarm & 25 & 1.792 & 71.68 & 0.0202 & 1.000 & — & — & — \\
+    pyro & cuda & alarm & 25 & 38.192 & 1527.66 & 0.0395 & 1.000 & — & — & — \\
+    nbn\_lw & cuda & hybrid\_50 & 50 & 2.658 & 53.17 & — & — & 0.881 & 0.775 & 0.323 \\
+    nbn\_hybrid & cuda & hybrid\_50 & 50 & 2.075 & 41.51 & — & — & 0.903 & 0.819 & 0.331 \\
+    nbn\_linear\_gaussian & cuda & hybrid\_50 & 50 & 3.680 & 73.60 & — & — & 0.951 & 0.975 & 0.410 \\
+    pyro & cuda & hybrid\_50 & 50 & 152.284 & 3045.68 & — & — & — & — & — \\
+    gpytorch & cuda & hybrid\_50 & 25 & 0.231 & 9.25 & — & — & — & — & — \\
     \bottomrule
   \end{tabular}
 \end{table}
