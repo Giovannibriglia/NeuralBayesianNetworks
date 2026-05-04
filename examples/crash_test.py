@@ -58,7 +58,16 @@ def _bench_problem(domain_name, problem_name, baselines, device, n_queries):
             print(f"  [skip] {b_name}: {e}")
             continue
         # Time
-        marg_qs = [q for q in problem.queries if q.kind == "marginal"][: n_queries]
+        # Interleave discrete + continuous targets so an n_queries=15 budget
+        # doesn't accidentally hit only the first 15 (often all-discrete) nodes.
+        all_marg = [q for q in problem.queries if q.kind == "marginal"]
+        disc_q = [q for q in all_marg if problem.variables[q.targets[0]][0] == "discrete"]
+        cont_q = [q for q in all_marg if problem.variables[q.targets[0]][0] == "continuous"]
+        # Round-robin: take half from each, fall back if one bucket is empty.
+        per_kind = max(1, n_queries // 2)
+        marg_qs = (disc_q[:per_kind] + cont_q[:per_kind])[: n_queries]
+        if not marg_qs:
+            marg_qs = all_marg[: n_queries]
         t0 = time.perf_counter()
         preds = []
         for q in marg_qs:
@@ -104,7 +113,8 @@ def _bench_problem(domain_name, problem_name, baselines, device, n_queries):
                     # the others (gpytorch, pyro) only return point estimates
                     # — they're explicitly recorded as N/A in panel (d).
                     gt = ground_truth_samples_for_query(
-                        problem, target, q.evidence, n_pool=10_000,
+                        problem, target, q.evidence,
+                        n_pool=20_000, eps=0.40, n_eff_min=100,
                     )
                     if gt is None or gt.numel() < 200:
                         continue
@@ -118,7 +128,7 @@ def _bench_problem(domain_name, problem_name, baselines, device, n_queries):
                             for k, v in q.evidence.items()
                         }
                         method_samples = nbn_model.sample(
-                            n=2_000, evidence=ev_t,
+                            n=500, evidence=ev_t,
                         )[target].detach().cpu().float().reshape(-1)
                     except Exception:
                         continue
@@ -262,6 +272,14 @@ def _plot_summary(rows, fig_dir):
     if hybrid_w1:
         _hbar(ax, hybrid_w1, "w1", fmt=".3f")
         ax.set_xlabel("W₁(method samples ‖ filtered SCM samples)  (lower better)")
+        # F4 footnote: pyro/gpytorch are point-estimate-only baselines.
+        ax.text(
+            0.99, -0.32,
+            "Pyro/GPyTorch report posterior means, not samples — "
+            "distributional metrics not applicable. See appendix.",
+            transform=ax.transAxes, ha="right", va="top",
+            fontsize=6.5, alpha=0.7, style="italic",
+        )
     else:
         ax.text(0.5, 0.5,
                 "No method returned distributional samples\n"
@@ -269,8 +287,9 @@ def _plot_summary(rows, fig_dir):
                 ha="center", va="center", fontsize=8.5, alpha=0.75)
         ax.set_xticks([]); ax.set_yticks([])
 
-    fig.suptitle("NBN crash test — parameter learning + serial inference",
-                 fontsize=11, fontweight="bold")
+    fig.suptitle("NBN crash test — parameter learning + serial inference  ·  "
+                 "seed=0 · NBN v0.3 · CPU sandbox",
+                 fontsize=10, fontweight="bold")
     _repro_footer(axes[1, 1])
     return savefig_multi(fig, str(fig_dir / "crash_test_summary"))
 
@@ -279,10 +298,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--smoke", action="store_true", help="Tiny config for CI smoke test.")
     parser.add_argument("--no-figures", action="store_true")
+    parser.add_argument("--skip-slow", action="store_true",
+                        help="Drop pyro from the lineup (its NUTS sampler "
+                             "dominates wall-clock at hybrid-50).")
+    parser.add_argument("--n-queries", type=int, default=None,
+                        help="Number of marginal queries per baseline "
+                             "(default: 10 for --smoke, 50 otherwise).")
     args = parser.parse_args()
 
     seed_all(0)
-    n_queries = 10 if args.smoke else 50
+    n_queries = args.n_queries if args.n_queries is not None else (10 if args.smoke else 50)
 
     fig_dir = Path("examples/figures")
     fig_dir.mkdir(parents=True, exist_ok=True)
@@ -315,6 +340,9 @@ def main() -> int:
         "nbn_lw", "nbn_hybrid", "nbn_linear_gaussian",
         "pyro", "gpytorch",
     ]
+    if args.skip_slow:
+        discrete_baselines = [b for b in discrete_baselines if b != "pyro"]
+        hybrid_baselines = [b for b in hybrid_baselines if b != "pyro"]
 
     print("==== NBN crash test ====")
     for device in _devices():

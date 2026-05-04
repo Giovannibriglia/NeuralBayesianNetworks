@@ -143,6 +143,9 @@ and instructions for adding your own domain or baseline adapter.
 | Advanced mechanisms (Flow, NeuralCat) | ✅ |
 | Amortized Variational Engine | ✅ |
 | Benchmarks suite | ✅ |
+| GPU performance work (CUDA-graphs, fused log-CPT, vectorized `query_batch`) | tracked in [#7](https://github.com/Giovannibriglia/NeuralBayesianNetworks/issues/7) |
+| 5-seed multi-replicate error-bar pipeline | tracked in [#7](https://github.com/Giovannibriglia/NeuralBayesianNetworks/issues/7) |
+| Lauritzen-Jensen analytic CG ground truth + NUTS gold ground truth | tracked in [#7](https://github.com/Giovannibriglia/NeuralBayesianNetworks/issues/7) |
 
 ## Citation
 
