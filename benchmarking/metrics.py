@@ -166,6 +166,55 @@ def gpu_peak_mb(device: torch.device) -> MetricResult:
     return MetricResult("gpu_peak_mb", torch.cuda.max_memory_allocated() / (1024 * 1024))
 
 
+# ── new in v0.3: histogram-TV and k-NN KL for continuous samples ────────────
+
+
+def tv_continuous(x: torch.Tensor, y: torch.Tensor, *, bins: int = 256) -> MetricResult:
+    """Histogram-based total-variation distance between two 1-D sample sets."""
+    x = x.reshape(-1).float(); y = y.reshape(-1).float()
+    if x.numel() == 0 or y.numel() == 0:
+        return MetricResult("tv_continuous", float("nan"))
+    lo = float(min(x.min(), y.min()))
+    hi = float(max(x.max(), y.max()))
+    if hi <= lo:
+        return MetricResult("tv_continuous", 0.0)
+    px = torch.histc(x, bins=bins, min=lo, max=hi); px = px / px.sum().clamp_min(1e-12)
+    py = torch.histc(y, bins=bins, min=lo, max=hi); py = py / py.sum().clamp_min(1e-12)
+    return MetricResult("tv_continuous", float(0.5 * (px - py).abs().sum()))
+
+
+def kl_div_continuous_knn(
+    p_samples: torch.Tensor, q_samples: torch.Tensor, *, k: int = 5,
+) -> MetricResult:
+    """Kozachenko–Leonenko k-NN estimator of KL(p || q).
+
+    Wang–Kulkarni–Verdú (2009).  Works on n-D continuous samples.  Small
+    batches are fine; assumes no exact-tied distances.
+    """
+    import math
+    x = p_samples.float().reshape(p_samples.shape[0], -1)
+    y = q_samples.float().reshape(q_samples.shape[0], -1)
+    n, d = x.shape
+    m = y.shape[0]
+    if n < k + 1 or m < k:
+        return MetricResult("kl_div_continuous_knn", float("nan"))
+    d_xx = torch.cdist(x, x)
+    d_xy = torch.cdist(x, y)
+    rho_k = d_xx.topk(k + 1, largest=False).values[:, -1].clamp_min(1e-12)
+    nu_k = d_xy.topk(k, largest=False).values[:, -1].clamp_min(1e-12)
+    kl = float(d * (torch.log(nu_k) - torch.log(rho_k)).mean()
+               + math.log(m / max(n - 1, 1)))
+    return MetricResult("kl_div_continuous_knn", kl)
+
+
+def js_normalized(p: torch.Tensor, q: torch.Tensor) -> MetricResult:
+    """JS divergence normalised to [0, 1] by dividing by log(2)."""
+    import math
+    return MetricResult(
+        "js_normalized", float(js_divergence(p, q).mean() / math.log(2)),
+    )
+
+
 # ── back-compat aliases (kept for v0.1 examples) ────────────────────────────
 
 def marginal_mae(p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:

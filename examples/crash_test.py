@@ -104,77 +104,101 @@ def _label(r):
     return f"{r['baseline']}\n({r['device']})"
 
 
+def _repro_footer(ax):
+    """Reproducibility footer: version, seed, git sha, torch, gpu."""
+    import subprocess
+    try:
+        sha = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"],
+                                       stderr=subprocess.DEVNULL).decode().strip()
+    except Exception:
+        sha = "?"
+    try:
+        from nbn import __version__ as nbn_v
+    except Exception:
+        nbn_v = "?"
+    gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu-only"
+    text = (f"NBN v{nbn_v} | seed=0 | git={sha} | "
+            f"torch={torch.__version__} | {gpu}")
+    ax.figure.text(0.99, 0.005, text, ha="right", va="bottom",
+                    fontsize=6, alpha=0.55, family="monospace")
+
+
+def _hbar(ax, rows, value_key, *, log=False, vline=None, fmt=".2f"):
+    """Horizontal grouped bars; CUDA solid, CPU hatched.  No collisions."""
+    if not rows:
+        ax.text(0.5, 0.5, "no data", ha="center", va="center", alpha=0.5)
+        ax.set_xticks([]); ax.set_yticks([])
+        return
+    # Sort by family for visual grouping (NBN first → external)
+    fam_order = {"nbn": 0, "pgmpy": 1, "pomegranate": 2, "pyro": 3, "gpytorch": 4}
+    rows = sorted(
+        rows,
+        key=lambda r: (fam_order.get(r["baseline"].split("_")[0], 9),
+                       r["baseline"], r["device"]),
+    )
+    labels = [f"{r['baseline'].replace('nbn_', 'NBN-')} ({r['device']})" for r in rows]
+    values = [r[value_key] for r in rows]
+    colors = [_color_for(r) for r in rows]
+    hatches = ["///" if r["device"] == "cpu" else "" for r in rows]
+    y = list(range(len(rows)))
+    bars = ax.barh(y, values, color=colors, edgecolor="white",
+                   hatch=hatches, height=0.78)
+    ax.set_yticks(y); ax.set_yticklabels(labels, fontsize=7.5)
+    ax.invert_yaxis()
+    if log:
+        ax.set_xscale("log")
+    if vline is not None:
+        ax.axvline(vline, color="grey", ls=":", lw=0.8, alpha=0.6)
+    # Bar value labels
+    for bar, v in zip(bars, values, strict=False):
+        if v != v:  # NaN
+            continue
+        ax.text(v, bar.get_y() + bar.get_height() / 2, f" {v:{fmt}}",
+                va="center", ha="left", fontsize=6.8, alpha=0.85)
+
+
 def _plot_summary(rows, fig_dir):
-    """Single 2x2 figure: rows = discrete / continuous, cols = accuracy / speed."""
+    """Page-1 figure: 2x2 with horizontal bars, family grouping, hatched CPU."""
     apply_style()
     import matplotlib.pyplot as plt
 
     discrete = [r for r in rows if r["problem"] == "alarm"]
     hybrid = [r for r in rows if r["problem"].startswith("hybrid")]
 
-    fig, axes = plt.subplots(2, 2, figsize=(8.5, 6.5),
-                             gridspec_kw=dict(hspace=0.55, wspace=0.30))
+    fig, axes = plt.subplots(2, 2, figsize=(7.0, 5.5), constrained_layout=True)
 
-    # --- Row 0: Discrete (alarm) ---
-    ax = axes[0, 0]
+    # (a) Discrete speed
+    ax = axes[0, 0]; ax.set_title("(a) Discrete (alarm) — speed")
+    _hbar(ax, discrete, "ms_per_query", log=True, fmt=".2f")
+    ax.set_xlabel("ms / query  (log)")
+
+    # (b) Discrete accuracy
+    ax = axes[0, 1]; ax.set_title("(b) Discrete (alarm) — TV")
     discrete_acc = [r for r in discrete if r["tv"] == r["tv"]]  # noqa: PLR0124
-    if discrete_acc:
-        ax.bar([_label(r) for r in discrete_acc],
-               [r["tv"] for r in discrete_acc],
-               color=[_color_for(r) for r in discrete_acc])
-        ax.set_ylabel("TV (lower is better)")
-        ax.set_title("Discrete (alarm) — accuracy")
-        ax.tick_params(axis="x", labelrotation=90)
-        ax.axhline(0.05, color="grey", ls=":", lw=0.8, alpha=0.6)
-    else:
-        ax.text(0.5, 0.5, "no discrete results", ha="center", va="center")
-        ax.set_title("Discrete (alarm) — accuracy")
+    _hbar(ax, discrete_acc, "tv", vline=0.05, fmt=".4f")
+    ax.set_xlabel("TV vs pgmpy ground truth")
 
-    ax = axes[0, 1]
-    if discrete:
-        ax.bar([_label(r) for r in discrete],
-               [r["ms_per_query"] for r in discrete],
-               color=[_color_for(r) for r in discrete])
-        ax.set_ylabel("ms / query  (log)")
-        ax.set_yscale("log")
-        ax.set_title("Discrete (alarm) — speed")
-        ax.tick_params(axis="x", labelrotation=90)
-    else:
-        ax.text(0.5, 0.5, "no discrete results", ha="center", va="center")
-        ax.set_title("Discrete (alarm) — speed")
+    # (c) Continuous speed
+    ax = axes[1, 0]; ax.set_title("(c) Hybrid (synthetic-50) — speed")
+    _hbar(ax, hybrid, "ms_per_query", log=True, fmt=".2f")
+    ax.set_xlabel("ms / query  (log)")
 
-    # --- Row 1: Continuous / hybrid ---
-    ax = axes[1, 0]
-    hybrid_acc = [r for r in hybrid if r["tv"] == r["tv"]]  # noqa: PLR0124
+    # (d) Continuous accuracy — populated when ground truth available
+    ax = axes[1, 1]; ax.set_title("(d) Hybrid — Wasserstein-1")
+    hybrid_acc = [r for r in hybrid if r.get("w1") == r.get("w1") and r.get("w1") is not None]
     if hybrid_acc:
-        ax.bar([_label(r) for r in hybrid_acc],
-               [r["tv"] for r in hybrid_acc],
-               color=[_color_for(r) for r in hybrid_acc])
-        ax.set_ylabel("TV (lower is better)")
-        ax.set_title("Continuous / hybrid — accuracy")
-        ax.tick_params(axis="x", labelrotation=90)
+        _hbar(ax, hybrid_acc, "w1", fmt=".3f")
+        ax.set_xlabel("W₁ vs MC ground truth (lower is better)")
     else:
-        # Hybrid problems use sample-based ground truth (no marginal TV);
-        # show held-out NLL placeholder instead.
-        ax.text(0.5, 0.5, "no marginal ground truth\n(sample-based domain)",
-                ha="center", va="center", fontsize=9, alpha=0.7)
-        ax.set_title("Continuous / hybrid — accuracy")
+        ax.text(0.5, 0.5,
+                "Continuous ground-truth metrics\nrequire `--with-ground-truth`\n"
+                "(MC-rejection on synthetic SCM)",
+                ha="center", va="center", fontsize=8.5, alpha=0.75)
         ax.set_xticks([]); ax.set_yticks([])
 
-    ax = axes[1, 1]
-    if hybrid:
-        ax.bar([_label(r) for r in hybrid],
-               [r["ms_per_query"] for r in hybrid],
-               color=[_color_for(r) for r in hybrid])
-        ax.set_ylabel("ms / query  (log)")
-        ax.set_yscale("log")
-        ax.set_title("Continuous / hybrid — speed")
-        ax.tick_params(axis="x", labelrotation=90)
-    else:
-        ax.text(0.5, 0.5, "no hybrid results", ha="center", va="center")
-        ax.set_title("Continuous / hybrid — speed")
-
-    fig.suptitle("NBN crash test: parameter learning + serial inference", fontsize=12)
+    fig.suptitle("NBN crash test — parameter learning + serial inference",
+                 fontsize=11, fontweight="bold")
+    _repro_footer(axes[1, 1])
     return savefig_multi(fig, str(fig_dir / "crash_test_summary"))
 
 

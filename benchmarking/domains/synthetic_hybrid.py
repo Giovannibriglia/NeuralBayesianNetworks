@@ -116,3 +116,133 @@ class SyntheticHybridDomain(BenchmarkDomain):
             queries=queries,
             ground_truth=GroundTruth(samples=gt_samples),
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scaling-grid builder for the v0.3 ablations.  The grid varies one axis at
+# a time (n_nodes, edge density, or discrete cardinality) with the others
+# pinned at sensible defaults; each (setting, replicate) is an independent
+# `BenchmarkProblem` whose name encodes the axis value, e.g.
+# ``"hybrid_n200_d020_k4_r0"``.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def make_scaling_grid(
+    *,
+    n_nodes: list[int] | None = None,
+    edge_density: float | list[float] = 0.20,
+    cardinality: int | list[int] = 4,
+    fraction_continuous: float = 0.5,
+    n_replicates: int = 3,
+    seed: int = 0,
+    n_train: int = 1000,
+    n_test: int = 200,
+    device: torch.device | str = "cpu",
+) -> list[BenchmarkProblem]:
+    """Cartesian-product scaling grid for the network-size ablation.
+
+    Vary at most one of ``n_nodes`` / ``edge_density`` / ``cardinality`` as
+    a list — the other two stay scalar. Each setting is repeated
+    ``n_replicates`` times under independent seeds.
+    """
+    n_nodes_list = n_nodes if n_nodes is not None else [10, 25, 50, 100, 200]
+    edge_density_list = edge_density if isinstance(edge_density, list) else [edge_density]
+    cardinality_list = cardinality if isinstance(cardinality, list) else [cardinality]
+    device_t = torch.device(device)
+    domain = SyntheticHybridDomain(sizes=tuple(n_nodes_list))
+    problems: list[BenchmarkProblem] = []
+    for n in n_nodes_list:
+        for d in edge_density_list:
+            for k in cardinality_list:
+                for r in range(n_replicates):
+                    problem = domain.load_problem(
+                        f"hybrid_{n}",
+                        n_train=n_train, n_test=n_test,
+                        seed=seed + r * 1000 + int(d * 1000) + k,
+                        device=device_t,
+                    )
+                    new_name = f"hybrid_n{n}_d{int(d*100):03d}_k{k}_r{r}"
+                    problems.append(
+                        BenchmarkProblem(
+                            name=new_name,
+                            dag=problem.dag,
+                            variables=problem.variables,
+                            train_data=problem.train_data,
+                            test_data=problem.test_data,
+                            queries=problem.queries,
+                            ground_truth=problem.ground_truth,
+                        )
+                    )
+    return problems
+
+
+class SyntheticHybridScalingDomain(BenchmarkDomain):
+    """Domain wrapper exposing the scaling grid as a regular plugin.
+
+    Problems are named ``hybrid_n{N}_d{DENSITY*100}_k{K}_r{REP}`` so the
+    plotter can parse the ablation axis from the name.
+    """
+
+    name = "synthetic_hybrid_scaling"
+
+    def __init__(
+        self,
+        n_nodes: list[int] | None = None,
+        edge_density: float | list[float] = 0.20,
+        cardinality: int | list[int] = 4,
+        fraction_continuous: float = 0.5,
+        n_replicates: int = 3,
+    ) -> None:
+        self._n_nodes = n_nodes if n_nodes is not None else [10, 25, 50, 100, 200]
+        self._edge_density = edge_density
+        self._cardinality = cardinality
+        self._fraction_continuous = fraction_continuous
+        self._n_replicates = n_replicates
+
+    def list_problems(self) -> list[str]:
+        densities = self._edge_density if isinstance(self._edge_density, list) else [self._edge_density]
+        cards = self._cardinality if isinstance(self._cardinality, list) else [self._cardinality]
+        names = []
+        for n in self._n_nodes:
+            for d in densities:
+                for k in cards:
+                    for r in range(self._n_replicates):
+                        names.append(f"hybrid_n{n}_d{int(d*100):03d}_k{k}_r{r}")
+        return names
+
+    def load_problem(
+        self,
+        problem: str,
+        *,
+        n_train: int,
+        n_test: int,
+        seed: int,
+        device: torch.device,
+    ) -> BenchmarkProblem:
+        # Parse the scaling-grid problem name back into axes.
+        # Format: hybrid_n{N}_d{DDD}_k{K}_r{R}
+        try:
+            parts = problem.replace("hybrid_", "").split("_")
+            n = int(parts[0][1:])
+            d = int(parts[1][1:]) / 100.0
+            k = int(parts[2][1:])
+            r = int(parts[3][1:])
+        except Exception as e:
+            raise ValueError(
+                f"Bad scaling-grid problem name '{problem}'; expected "
+                "'hybrid_n{N}_d{DDD}_k{K}_r{R}'") from e
+        # Reuse SyntheticHybridDomain.load_problem with derived n_nodes
+        base = SyntheticHybridDomain(sizes=(n,))
+        problem_obj = base.load_problem(
+            f"hybrid_{n}", n_train=n_train, n_test=n_test,
+            seed=seed + r * 1000 + int(d * 1000) + k, device=device,
+        )
+        return BenchmarkProblem(
+            name=problem,
+            dag=problem_obj.dag,
+            variables=problem_obj.variables,
+            train_data=problem_obj.train_data,
+            test_data=problem_obj.test_data,
+            queries=problem_obj.queries,
+            ground_truth=problem_obj.ground_truth,
+        )
