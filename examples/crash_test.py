@@ -69,22 +69,28 @@ def _bench_problem(domain_name, problem_name, baselines, device, n_queries):
         elapsed = time.perf_counter() - t0
         # Accuracy vs ground truth.
         # Discrete (bnlearn): TV between predicted marginal and pgmpy exact.
-        # Hybrid (synthetic): MAE + W1 between method's predicted mean
-        # (or mean of returned samples) and the test-data MC reference.
+        # Hybrid (synthetic): W₁ between rejection-filtered SCM samples and
+        # baseline samples drawn via NBNAdapter.model.sample(...).  See
+        # benchmarking/domains/_ground_truth.py for the SCM resampling.
+        from benchmarking.domains._ground_truth import (
+            ground_truth_samples_for_query,
+        )
         tv_score, map_score = float("nan"), float("nan")
-        w1_score, mae_score = float("nan"), float("nan")
+        w1_score, energy_score, js_score = float("nan"), float("nan"), float("nan")
         if problem.ground_truth and problem.ground_truth.marginals:
             tvs, hits, total = [], 0, 0
-            mae_acc, w1_acc, n_cont = 0.0, 0.0, 0
+            w1_acc, energy_acc, js_acc, n_cont = 0.0, 0.0, 0.0, 0
             for q, p in preds:
                 target = q.targets[0]
-                ref = problem.ground_truth.marginals.get(target)
-                if ref is None or p is None:
-                    continue
                 kind = problem.variables[target][0]
-                ref_c = ref.cpu().float().reshape(-1)
-                pred_c = p.detach().cpu().float().reshape(-1)
+                if p is None:
+                    continue
                 if kind == "discrete":
+                    ref = problem.ground_truth.marginals.get(target)
+                    if ref is None:
+                        continue
+                    ref_c = ref.cpu().float().reshape(-1)
+                    pred_c = p.detach().cpu().float().reshape(-1)
                     if pred_c.shape != ref_c.shape:
                         continue
                     tvs.append(0.5 * (pred_c - ref_c).abs().sum().item())
@@ -92,33 +98,67 @@ def _bench_problem(domain_name, problem_name, baselines, device, n_queries):
                         hits += 1
                     total += 1
                 else:
-                    # Continuous: ref is the test-data sample column;
-                    # method "predicts" either a [K]-bucket vector (skip — not
-                    # meaningful for continuous targets) or a scalar mean.
-                    if pred_c.numel() == 0:
+                    # Distributional metrics on continuous targets.
+                    # We need *samples* from the baseline. NBN adapters carry
+                    # a ``model`` attribute exposing ``sample(n=..., evidence=...)``;
+                    # the others (gpytorch, pyro) only return point estimates
+                    # — they're explicitly recorded as N/A in panel (d).
+                    gt = ground_truth_samples_for_query(
+                        problem, target, q.evidence, n_pool=10_000,
+                    )
+                    if gt is None or gt.numel() < 200:
                         continue
-                    pred_mean = float(pred_c.mean())
-                    ref_mean = float(ref_c.mean())
-                    mae_acc += abs(pred_mean - ref_mean)
-                    # 1-D W1 between two empirical sample sets via sorted-CDF
-                    if pred_c.numel() >= 2 and ref_c.numel() >= 2:
-                        n = min(pred_c.numel(), ref_c.numel(), 1024)
-                        qs = torch.linspace(0, 1, n)
-                        w1_acc += float((torch.quantile(pred_c, qs) -
-                                         torch.quantile(ref_c, qs)).abs().mean())
+                    nbn_model = getattr(adapter, "model", None)
+                    if nbn_model is None or not hasattr(nbn_model, "sample"):
+                        continue
+                    try:
+                        ev_t = {
+                            k: (v if isinstance(v, torch.Tensor)
+                                else torch.tensor(v))
+                            for k, v in q.evidence.items()
+                        }
+                        method_samples = nbn_model.sample(
+                            n=2_000, evidence=ev_t,
+                        )[target].detach().cpu().float().reshape(-1)
+                    except Exception:
+                        continue
+                    gt_c = gt.detach().cpu().float().reshape(-1)
+                    if method_samples.numel() < 50 or gt_c.numel() < 50:
+                        continue
+                    n = min(method_samples.numel(), gt_c.numel(), 1024)
+                    qs = torch.linspace(0, 1, n)
+                    w1_acc += float((torch.quantile(method_samples, qs) -
+                                     torch.quantile(gt_c, qs)).abs().mean())
+                    # Energy distance (1-D) cheap form
+                    a = method_samples[:n]; b = gt_c[:n]
+                    e_xy = (a.unsqueeze(1) - b.unsqueeze(0)).abs().mean()
+                    e_xx = (a.unsqueeze(1) - a.unsqueeze(0)).abs().mean()
+                    e_yy = (b.unsqueeze(1) - b.unsqueeze(0)).abs().mean()
+                    energy_acc += float(2 * e_xy - e_xx - e_yy)
+                    # JS-norm via 64-bin histograms over the union range
+                    lo, hi = float(min(a.min(), b.min())), float(max(a.max(), b.max()))
+                    if hi > lo:
+                        ha = torch.histc(a, bins=64, min=lo, max=hi); ha = ha / ha.sum().clamp_min(1e-12)
+                        hb = torch.histc(b, bins=64, min=lo, max=hi); hb = hb / hb.sum().clamp_min(1e-12)
+                        m = 0.5 * (ha + hb)
+                        js = 0.5 * ((ha * (ha.clamp_min(1e-12).log() - m.clamp_min(1e-12).log())).sum()
+                                  + (hb * (hb.clamp_min(1e-12).log() - m.clamp_min(1e-12).log())).sum())
+                        import math
+                        js_acc += float(js / math.log(2))
                     n_cont += 1
             if tvs:
                 tv_score = sum(tvs) / len(tvs)
                 map_score = hits / max(total, 1)
             if n_cont > 0:
-                mae_score = mae_acc / n_cont
                 w1_score = w1_acc / n_cont
+                energy_score = energy_acc / n_cont
+                js_score = js_acc / n_cont
         out.append({
             "baseline": b_name, "device": device, "problem": problem_name,
             "n_queries": len(preds), "time_s": elapsed,
             "ms_per_query": elapsed / max(len(preds), 1) * 1000,
             "tv": tv_score, "map_accuracy": map_score,
-            "w1": w1_score, "mae": mae_score,
+            "w1": w1_score, "energy": energy_score, "js_norm": js_score,
         })
         adapter.teardown()
     return out
@@ -211,18 +251,21 @@ def _plot_summary(rows, fig_dir):
     _hbar(ax, hybrid, "ms_per_query", log=True, fmt=".2f")
     ax.set_xlabel("ms / query  (log)")
 
-    # (d) Continuous accuracy — populated by per-baseline MAE of the
-    # predicted mean against the test-data MC reference (synthetic SCM).
-    # W₁ across full sample distributions is queued for v0.3.x once the
-    # adapters expose `predict_samples` rather than just a mean.
-    ax = axes[1, 1]; ax.set_title("(d) Hybrid — MAE (mean vs MC ref)")
-    hybrid_acc = [r for r in hybrid
-                   if r.get("mae") == r.get("mae") and r.get("mae") is not None]
-    if hybrid_acc:
-        _hbar(ax, hybrid_acc, "mae", fmt=".3f")
-        ax.set_xlabel("|predicted mean − MC reference|  (lower is better)")
+    # (d) Continuous accuracy — W₁ between method's `model.sample(n=...,
+    # evidence=...)` samples and rejection-filtered ground-truth SCM
+    # samples. Baselines that return only point estimates (gpytorch
+    # posterior mean, pyro Importance mean) are explicitly omitted; the
+    # panel labels them "N/A" via a hatched zero-bar.
+    ax = axes[1, 1]; ax.set_title("(d) Hybrid — W₁ vs filtered SCM samples")
+    hybrid_w1 = [r for r in hybrid
+                  if r.get("w1") == r.get("w1") and r.get("w1") is not None]
+    if hybrid_w1:
+        _hbar(ax, hybrid_w1, "w1", fmt=".3f")
+        ax.set_xlabel("W₁(method samples ‖ filtered SCM samples)  (lower better)")
     else:
-        ax.text(0.5, 0.5, "no continuous ground truth available",
+        ax.text(0.5, 0.5,
+                "No method returned distributional samples\n"
+                "(rejection pool too small or sample API not exposed)",
                 ha="center", va="center", fontsize=8.5, alpha=0.75)
         ax.set_xticks([]); ax.set_yticks([])
 
@@ -296,7 +339,9 @@ def main() -> int:
     for r in rows:
         extra = ""
         if r.get("w1") == r.get("w1") and r.get("w1") is not None:  # finite
-            extra = f" | W1={r['w1']:.3f} | MAE={r['mae']:.3f}"
+            extra = (f" | W1={r['w1']:.3f}"
+                     f" | E={r.get('energy', float('nan')):.3f}"
+                     f" | JS={r.get('js_norm', float('nan')):.3f}")
         print(f"  {r['baseline']:8s} {r['device']:5s} {r['problem']:12s}: "
               f"{r['n_queries']:>4d}q in {r['time_s']:6.3f}s "
               f"({r['ms_per_query']:6.2f} ms/q) | "
@@ -317,18 +362,19 @@ def main() -> int:
             ("problem", "Problem"), ("n_queries", "Q"),
             ("time_s", "Time (s)"), ("ms_per_query", "ms/q"),
             ("tv", "TV"), ("map_accuracy", "MAP-acc"),
-            ("w1", "W₁"), ("mae", "MAE"),
+            ("w1", "W₁"), ("energy", "Energy"), ("js_norm", "JS-norm"),
         ]
         out_tex = fig_dir / "crash_test_summary.tex"
         write_latex_table(
             out_tex, rows, cols,
             caption="Crash test: parameter learning + serial inference. "
-                    "Discrete: TV vs pgmpy exact. Continuous: W₁/MAE of "
-                    "predicted mean vs MC-test-data reference.",
+                    "Discrete: TV vs pgmpy exact. Continuous: W₁ / "
+                    "energy distance / JS-normalised between baseline "
+                    "samples and rejection-filtered SCM ground truth.",
             label="tab:nbn-crash-test",
             formats={"time_s": ".3f", "ms_per_query": ".2f",
                      "tv": ".4f", "map_accuracy": ".3f",
-                     "w1": ".3f", "mae": ".3f"},
+                     "w1": ".3f", "energy": ".3f", "js_norm": ".3f"},
         )
         print(f"LaTeX table saved to {out_tex}")
 

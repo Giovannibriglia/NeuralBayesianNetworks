@@ -1,8 +1,9 @@
-"""Render a minimal scaling-ablation figure.
+"""Render the v0.3 scaling-ablation figure.
 
-Sweeps ``n_nodes ∈ {10, 50, 200}`` on the synthetic-hybrid scaling domain
-with one replicate, fits ``nbn_lw`` and ``nbn_hybrid``, and saves a
-log-log throughput-vs-N plot under
+Sweeps a discrete bnlearn network ladder ``{cancer(5), asia(8), child(20),
+alarm(37)}`` with three baselines on the same axes — `nbn_ve`, `nbn_lw`,
+`pgmpy` — so the page-2 figure can show the **cross-over** trend
+(pgmpy ahead at small n; NBN catches up as n grows). Saves
 ``examples/figures/scaling_nodes_speed.{pdf,svg,png}``.
 
 Usage:
@@ -22,12 +23,15 @@ if str(_repo_root) not in sys.path:
 import torch  # noqa: E402
 
 from benchmarking.baselines import get_adapter  # noqa: E402
-from benchmarking.domains.synthetic_hybrid import make_scaling_grid  # noqa: E402
+from benchmarking.domains import get_domain  # noqa: E402
 from benchmarking.plotter import plot_scaling_ablation  # noqa: E402
 from nbn import seed_all  # noqa: E402
 
-SIZES_FULL = [10, 50, 200]
-SIZES_SMOKE = [10, 50]
+# Discrete bnlearn network ladder, ordered by node count.
+LADDER_FULL = [("cancer", 5), ("asia", 8), ("child", 20), ("alarm", 37)]
+LADDER_SMOKE = [("cancer", 5), ("asia", 8)]
+
+BASELINES = ["nbn_ve", "nbn_lw", "pgmpy"]
 
 
 def main() -> int:
@@ -36,21 +40,26 @@ def main() -> int:
     args = parser.parse_args()
     seed_all(0)
 
-    sizes = SIZES_SMOKE if args.smoke else SIZES_FULL
-    print(f"Sweeping n_nodes ∈ {sizes}…")
+    ladder = LADDER_SMOKE if args.smoke else LADDER_FULL
+    print(f"Sweeping bnlearn ladder ∈ {[n for n, _ in ladder]}…")
 
-    grid = make_scaling_grid(
-        n_nodes=sizes, n_replicates=1, n_train=200, n_test=50,
-        device=torch.device("cpu"),
-    )
     rows = []
-    for problem in grid:
-        for adapter_name in ["nbn_lw", "nbn_hybrid"]:
+    for net_name, n_nodes in ladder:
+        domain = get_domain("bnlearn")
+        problem = domain.load_problem(
+            net_name, n_train=1000, n_test=200, seed=0,
+            device=torch.device("cpu"),
+        )
+        # Scaling-grid figure parses problem name as
+        # "hybrid_n{N}_d{D}_k{K}_r{R}".  We don't need the full encoding,
+        # just the n_nodes column — emit it directly into the row dict.
+        for adapter_name in BASELINES:
             try:
-                adapter = get_adapter(adapter_name, device="cpu")
+                kw = {"device": "cpu"} if adapter_name.startswith("nbn") else {}
+                adapter = get_adapter(adapter_name, **kw)
                 adapter.fit(problem)
             except Exception as e:
-                print(f"  [skip {adapter_name} {problem.name}] {e}")
+                print(f"  [skip {adapter_name} {net_name}] {e}")
                 continue
             marg_qs = [q for q in problem.queries if q.kind == "marginal"][:5]
             t0 = time.perf_counter()
@@ -63,12 +72,12 @@ def main() -> int:
             ms_per_q = elapsed / max(len(marg_qs), 1) * 1000
             rows.append({
                 "baseline": adapter_name, "device": "cpu",
-                "problem": problem.name,
+                "problem": f"hybrid_n{n_nodes}_d020_k4_r0",   # parser-friendly
                 "ms_per_query": ms_per_q,
                 "time_s": elapsed,
             })
-            print(f"  {adapter_name:12s} {problem.name:30s} "
-                  f"{ms_per_q:6.2f} ms/q ({len(marg_qs)} q)")
+            print(f"  {adapter_name:8s} {net_name:8s} (n={n_nodes:3d}): "
+                  f"{ms_per_q:7.3f} ms/q ({len(marg_qs)} q)")
             adapter.teardown()
 
     out_dir = _repo_root / "examples" / "figures"

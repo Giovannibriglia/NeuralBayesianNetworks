@@ -1,16 +1,16 @@
 \begin{table}[h]
   \centering
-  \caption{Crash test: parameter learning + serial inference. Discrete: TV vs pgmpy exact. Continuous: W₁/MAE of predicted mean vs MC-test-data reference.}
+  \caption{Crash test: parameter learning + serial inference. Discrete: TV vs pgmpy exact. Continuous: W₁ / energy distance / JS-normalised between baseline samples and rejection-filtered SCM ground truth.}
   \label{tab:nbn-crash-test}
-  \begin{tabular}{lrrrrrrrrr}
+  \begin{tabular}{lrrrrrrrrrr}
     \toprule
-    Baseline & Device & Problem & Q & Time (s) & ms/q & TV & MAP-acc & W₁ & MAE \\
+    Baseline & Device & Problem & Q & Time (s) & ms/q & TV & MAP-acc & W₁ & Energy & JS-norm \\
     \midrule
-    nbn\_lw & cpu & hybrid\_10 & 10 & 0.088 & 8.83 & — & — & 0.000 & 0.210 \\
-    nbn\_hybrid & cpu & hybrid\_10 & 10 & 0.112 & 11.18 & — & — & 0.000 & 0.186 \\
-    nbn\_linear\_gaussian & cpu & hybrid\_10 & 10 & 0.057 & 5.73 & — & — & 0.000 & 0.195 \\
-    pyro & cpu & hybrid\_10 & 10 & 10.966 & 1096.59 & — & — & 0.000 & 0.196 \\
-    gpytorch & cpu & hybrid\_10 & 5 & 0.015 & 3.06 & — & — & 0.000 & 0.089 \\
+    nbn\_lw & cpu & hybrid\_10 & 10 & 0.054 & 5.43 & — & — & 0.159 & 0.061 & 0.094 \\
+    nbn\_hybrid & cpu & hybrid\_10 & 10 & 0.085 & 8.51 & — & — & 0.281 & 0.188 & 0.140 \\
+    nbn\_linear\_gaussian & cpu & hybrid\_10 & 10 & 0.040 & 3.99 & — & — & 0.361 & 0.317 & 0.212 \\
+    pyro & cpu & hybrid\_10 & 10 & 6.207 & 620.72 & — & — & — & — & — \\
+    gpytorch & cpu & hybrid\_10 & 5 & 0.009 & 1.86 & — & — & — & — & — \\
     \bottomrule
   \end{tabular}
 \end{table}
