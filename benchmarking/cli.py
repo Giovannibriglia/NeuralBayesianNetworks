@@ -91,9 +91,15 @@ def main(argv: list[str] | None = None) -> int:
         _run(args.config)
         return 0
     if args.cmd == "param-learning":
-        raise NotImplementedError(_PR2_PARAM_LEARNING_MSG)
+        from benchmarking.crash_test_runner import run_parameter_learning
+        return run_parameter_learning(
+            config_path=args.config, verbose=args.verbose,
+        )
     if args.cmd == "inference":
-        raise NotImplementedError(_PR2_INFERENCE_MSG)
+        from benchmarking.crash_test_runner import run_inference
+        return run_inference(
+            config_path=args.config, verbose=args.verbose,
+        )
     parser.error(f"Unhandled subcommand {args.cmd!r}")  # pragma: no cover
     return 2  # pragma: no cover
 

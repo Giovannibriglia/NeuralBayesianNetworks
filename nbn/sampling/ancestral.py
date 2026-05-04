@@ -81,11 +81,27 @@ def ancestral_sample(
         elif node in do:
             out[node] = mechanisms[node].sample(pa_tensor, n=1).squeeze(1).expand(n, -1)
         else:
-            samp = mechanisms[node].sample(pa_tensor, n=n)  # [n, n, D] or [1, n, D]
-            if samp.shape[0] == 1:
-                samp = samp.squeeze(0)  # [n, D]
+            # Two regimes:
+            #   * Root node (pa_tensor is None) — mechanism has B=1 internally,
+            #     so we ask for n iid samples; output shape ``[1, n, D]``,
+            #     squeeze the singleton batch axis to get ``[n, D]``.
+            #   * Non-root (pa_tensor has shape ``[n, P]``) — each row already
+            #     carries its row's parent values, so we want exactly one
+            #     sample per row; output shape ``[n, 1, D]``, squeeze the
+            #     singleton sample axis to get ``[n, D]``.
+            # The pre-fix path always asked for ``n`` samples even with a
+            # batched parent tensor, materialising a wasteful ``[n, n, D]``
+            # intermediate (root cause of v0.5 issue #11) and then taking
+            # ``samp[0]`` — every observation came out conditioned on
+            # parent row 0, so synthetic-BN training data carried no
+            # actual parent dependence (LG fitter saw weight ≈ 0 against
+            # truth ≈ ±2 at n_train=2000).  This fix closes both issues.
+            if pa_tensor is None:
+                samp = mechanisms[node].sample(None, n=n)  # [1, n, D]
+                samp = samp.squeeze(0)                     # [n, D]
             else:
-                samp = samp[0]  # first batch row
+                samp = mechanisms[node].sample(pa_tensor, n=1)  # [n_rows, 1, D]
+                samp = samp.squeeze(1)
             out[node] = samp.reshape(n, -1)
             if return_log_prob:
                 lp = mechanisms[node].log_prob(out[node], pa_tensor)

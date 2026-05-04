@@ -43,5 +43,28 @@ class BaselineAdapter(ABC):
             rows.append(self.query(Query(targets=q.targets, evidence=row_ev, kind=q.kind)))
         return torch.stack(rows, dim=0)
 
+    def query_batch_samples(
+        self, q: Query, n_samples: int = 2000,
+    ) -> torch.Tensor:
+        """Return batched posterior **samples** of shape ``[B, n_samples, |targets|]``.
+
+        Distinct from :meth:`query_batch`, which returns posterior means /
+        marginals.  v0.4 distributional metrics (Wasserstein-1, energy
+        distance, JS-norm) need actual samples, not point estimates.
+
+        Adapters that cannot draw posterior samples for the given query
+        signature (e.g. GPyTorch on discrete evidence, pgmpy on
+        non-Gaussian continuous) return a ``[0, n_samples, |targets|]``
+        tensor of ``nan`` so the runner can record the row as
+        ``not_supported`` without crashing the figure pipeline.
+
+        The default implementation raises ``NotImplementedError``;
+        adapters opt in by overriding.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement query_batch_samples; "
+            f"override to participate in distributional metrics.",
+        )
+
     def teardown(self) -> None:  # noqa: B027 — intentional empty default
         pass

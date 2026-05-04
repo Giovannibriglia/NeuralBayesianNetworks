@@ -94,8 +94,11 @@ vectorised `query_batch`. NBN-VE is strictly above pgmpy at every
 measured n on the bnlearn ladder (cancer, asia, child, alarm). See
 [`scaling_nodes_batched_throughput.pdf`](examples/figures/scaling_nodes_batched_throughput.pdf).
 
-For the **batched-inference** crash test (NBN's `query_batch` vs
-serial-loop competitors), see `examples/crash_test_inference.py`.
+For the **batched-inference** crash test on canonical bnlearn networks
+(NBN's `query_batch` vs serial-loop competitors), see
+`examples/crash_test_inference_bnlearn.py`.  The headline v0.4
+batched-inference crash test on synthetic BNs lives at
+`examples/crash_test_inference.py`.
 
 ## Running the crash test and benchmarks
 
@@ -115,11 +118,16 @@ There are two crash tests, focused on different things:
   of queries one at a time. Reports accuracy (TV / MAP-acc) vs ground
   truth and per-query latency. Lineup: 4 NBN variants + pgmpy + pomegranate
   + pyro on alarm; 3 NBN variants + pyro + gpytorch on synthetic_hybrid_50.
-* `examples/crash_test_inference.py` — **batched inference throughput**.
-  Fits each baseline once, then sweeps batch size `B ∈ {1, 16, 256, 1024,
-  4096}`. NBN uses its native `model.query_batch(...)` (single GPU launch);
-  pgmpy / pyro have no batched API and loop in Python. Plots throughput
-  (q/s) vs B on log-log to make NBN's batched-query advantage visible.
+* `examples/crash_test_inference.py` — **v0.4 synthetic batched
+  inference**.  Drives the synthetic-BN runner from
+  `benchmarking.crash_test_runner` against the four families
+  (`discrete`, `continuous_lg`, `continuous_nongauss`, `hybrid`) at
+  fixed `B=1024`; reports throughput and accuracy.
+* `examples/crash_test_inference_bnlearn.py` — **v0.2 bnlearn batched
+  inference**.  Fits each baseline once on a bnlearn network, then
+  sweeps batch size `B ∈ {1, 16, 256, 1024, 4096}` and plots
+  throughput-vs-B on log-log.  Kept as the small-network parity demo;
+  referenced by CI smoke.
 
 ```bash
 # Headline crash test: alarm + synthetic-50, all baselines, ~30s on CPU.
@@ -129,10 +137,12 @@ python examples/crash_test.py
 # Smoke run for CI / quick sanity check (~5s, no figures).
 python examples/crash_test.py --smoke
 
-# Inference-throughput crash test: sweeps B in {1, 16, 256, 1024, 4096}.
-# Saves the throughput-vs-B figure under examples/figures/.
-python examples/crash_test_inference.py
-python examples/crash_test_inference.py --smoke   # quick CI variant
+# v0.2 bnlearn inference-throughput crash test (B sweep, kept as parity demo).
+python examples/crash_test_inference_bnlearn.py
+python examples/crash_test_inference_bnlearn.py --smoke   # quick CI variant
+
+# v0.4 synthetic inference crash test (fixed B=1024, four-family sweep).
+python examples/crash_test_inference.py --config benchmarking/configs/crash_test_smoke.yaml
 
 # Run a configured benchmark suite (writes parquet under results/).
 nbn-bench run benchmarking/configs/discrete_small.yaml

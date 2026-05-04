@@ -187,9 +187,13 @@ nbn-bench run benchmarking/configs/inference_throughput.yaml
 Every parquet output is accompanied by a `.tex` file with the same stem
 that contains a complete `\begin{table}…\end{table}` block in
 [`booktabs`](https://ctan.org/pkg/booktabs) style — copy-paste it into
-your paper without further editing. Both crash tests
-(`examples/crash_test.py`, `examples/crash_test_inference.py`) emit
-their own `.tex` files under `examples/figures/`.
+your paper without further editing. Both bnlearn-corpus crash tests
+(`examples/crash_test.py`, `examples/crash_test_inference_bnlearn.py`)
+emit their own `.tex` files under `examples/figures/`.  The v0.4
+synthetic-BN crash tests
+(`examples/crash_test_parameter_learning.py`,
+`examples/crash_test_inference.py`) write parquet metric tables
+to the configured `output_dir`.
 
 You can also drive the helper directly:
 
