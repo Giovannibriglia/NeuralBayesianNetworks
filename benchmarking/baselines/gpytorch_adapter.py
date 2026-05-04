@@ -90,6 +90,69 @@ class GPyTorchAdapter(BaselineAdapter):
             mean = pred.mean
         return mean.cpu()
 
+    # ------------------------------------------------------------------
+    # Batched samples (v0.4)
+    # ------------------------------------------------------------------
+
+    def query_batch_samples(
+        self, q: Query, n_samples: int = 2000,
+    ) -> torch.Tensor:
+        """Return ``[B, n_samples, |targets|]`` GP-posterior samples.
+
+        The SVGP per node yields a ``MultivariateNormal(mean, covariance)``
+        at any query point.  Drawing ``n_samples`` from that and shaping
+        gives ``[B, n_samples, 1]`` for single-D continuous targets.
+
+        GPyTorch handles only continuous evidence.  If any discrete
+        evidence is in the batch, this returns a ``[0, n_samples, |T|]``
+        NaN sentinel so the runner can skip the row gracefully.
+        """
+        assert self.problem is not None
+        if any(self.problem.variables[k][0] == "discrete" for k in q.evidence):
+            return torch.full(
+                (0, n_samples, len(q.targets)), float("nan"),
+            )
+        target = q.targets[0]
+        spec = self.gps.get(target)
+        b = self._batch_size(q)
+        if spec is None:
+            return torch.full(
+                (b, n_samples, len(q.targets)), float("nan"),
+            )
+        if "mean" in spec:
+            # Root continuous node: marginal Gaussian
+            mean = spec["mean"].cpu().reshape(-1)
+            std = spec["std"].cpu().reshape(-1)
+            noise = torch.randn(b, n_samples, len(q.targets))
+            return mean.reshape(1, 1, -1) + std.reshape(1, 1, -1) * noise
+
+        parents = spec["parents"]
+        pa_rows = []
+        for i in range(b):
+            cols = []
+            for p in parents:
+                ev = q.evidence.get(p, 0.0)
+                if isinstance(ev, torch.Tensor):
+                    val = ev[i] if ev.dim() >= 1 else ev
+                    val = val.float().reshape(1)
+                else:
+                    val = torch.tensor([float(ev)])
+                cols.append(val)
+            pa_rows.append(torch.cat(cols, dim=-1))
+        pa = torch.stack(pa_rows, dim=0).to(self.device).float()  # [B, P]
+
+        with torch.no_grad():
+            pred = spec["lik"](spec["gp"](pa))
+            samples = pred.sample(torch.Size([n_samples]))  # [n_samples, B]
+            samples = samples.movedim(0, 1).unsqueeze(-1)    # [B, n_samples, 1]
+        return samples.cpu()
+
+    def _batch_size(self, q: Query) -> int:
+        for v in q.evidence.values():
+            if isinstance(v, torch.Tensor) and v.dim() >= 1:
+                return int(v.shape[0])
+        return 1
+
     def teardown(self) -> None:
         self.gps = {}
         self.problem = None

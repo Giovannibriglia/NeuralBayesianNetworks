@@ -133,10 +133,48 @@ class PyroAdapter(BaselineAdapter):
         return model
 
     def query(self, q: Query) -> torch.Tensor:
+        target = q.targets[0]
+        marg = self._posterior_samples(q, n_samples=self.n_samples)
+        if target in self._cards:
+            k = self._cards[target]
+            counts = torch.zeros(k)
+            for v in marg.long().reshape(-1).tolist():
+                if 0 <= v < k:
+                    counts[v] += 1
+            return counts / counts.sum().clamp_min(1e-12)
+        return marg.mean(0).reshape(1).float()
+
+    # ------------------------------------------------------------------
+    # Batched samples (v0.4)
+    # ------------------------------------------------------------------
+
+    def query_batch_samples(
+        self, q: Query, n_samples: int = 2000,
+    ) -> torch.Tensor:
+        """Per-row Importance posterior sampling.  Returns ``[B, n_samples, 1]``.
+
+        Pyro has no native batched-evidence dispatch, so we loop over
+        rows.  This is intentionally slow on large B; the inference
+        crash test caps Pyro to a small B-subsample with the timeout
+        guard from ``_crash_test_utils``.
+        """
+        b = self._batch_size(q)
+        target = q.targets[0]
+        out = torch.empty((b, n_samples, 1), dtype=torch.float)
+        for i in range(b):
+            row_q = self._row_query(q, i)
+            samples = self._posterior_samples(row_q, n_samples=n_samples)
+            out[i] = samples.float().reshape(n_samples, 1)
+        return out
+
+    def _posterior_samples(
+        self, q: Query, *, n_samples: int,
+    ) -> torch.Tensor:
+        """Draw ``n_samples`` posterior samples of ``q.targets[0]``."""
         try:
             import pyro.poutine as poutine
             from pyro.infer import EmpiricalMarginal, Importance
-        except ImportError as e:
+        except ImportError as e:  # pragma: no cover
             raise NotImplementedError("pyro-ppl not installed") from e
 
         target = q.targets[0]
@@ -147,23 +185,27 @@ class PyroAdapter(BaselineAdapter):
                 torch.tensor(int(val)) if k in self._cards
                 else torch.tensor(float(val))
             )
-
         model = self._pyro_model()
         conditioned = poutine.condition(model, data=evidence)
-        posterior = Importance(conditioned, num_samples=self.n_samples).run()
+        posterior = Importance(conditioned, num_samples=n_samples).run()
         marg = EmpiricalMarginal(posterior, sites=target)
+        out = torch.stack([marg() for _ in range(n_samples)]).float().reshape(n_samples)
+        return out
 
-        if target in self._cards:
-            k = self._cards[target]
-            counts = torch.zeros(k)
-            for _ in range(self.n_samples):
-                v = int(marg().item())
-                if 0 <= v < k:
-                    counts[v] += 1
-            return counts / counts.sum().clamp_min(1e-12)
-        # Continuous: return weighted mean
-        vals = torch.stack([marg() for _ in range(self.n_samples)]).float()
-        return vals.mean(0).reshape(1)
+    def _row_query(self, q: Query, i: int) -> Query:
+        ev = {}
+        for k, v in q.evidence.items():
+            if isinstance(v, torch.Tensor) and v.dim() >= 1:
+                ev[k] = v[i]
+            else:
+                ev[k] = v
+        return Query(targets=q.targets, evidence=ev, kind=q.kind)
+
+    def _batch_size(self, q: Query) -> int:
+        for v in q.evidence.values():
+            if isinstance(v, torch.Tensor) and v.dim() >= 1:
+                return int(v.shape[0])
+        return 1
 
     def teardown(self) -> None:
         self._cpts = {}
