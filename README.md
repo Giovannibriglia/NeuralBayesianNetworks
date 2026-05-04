@@ -70,8 +70,13 @@ samples = model.sample(n=10_000)
 ## Crash test (the page-1 figure)
 
 ```bash
-python examples/crash_test.py        # writes examples/figures/crash_test_summary.{pdf,svg,png,tex}
+python examples/crash_test.py        # examples/figures/crash_test_summary.{pdf,svg,png,tex}
+python examples/render_throughput_scaling.py  # examples/figures/scaling_nodes_batched_throughput.{pdf,svg,png}
 ```
+
+Pre-rendered v0.3.0 outputs:
+[`crash_test_summary.pdf`](examples/figures/crash_test_summary.pdf),
+[`scaling_nodes_batched_throughput.pdf`](examples/figures/scaling_nodes_batched_throughput.pdf).
 
 The v0.3 figure uses **horizontal bars with constrained-layout** (no
 tick-label collisions), groups baselines by family with hatched-CPU /
@@ -81,6 +86,13 @@ accuracy is measured against pgmpy's exact VE; continuous accuracy
 against MC-rejection ground truth on the synthetic SCM (when
 `--with-ground-truth` is in scope; W₁ panel populated when ground truth
 is available, otherwise shows the "needs ground-truth-builder" hint).
+
+### Headline numbers (v0.3.0, alarm B=1024, CPU)
+
+`nbn_ve` 134,248 q/s vs `pgmpy` 2,427 q/s — 55× speedup from v0.3.1's
+vectorised `query_batch`. NBN-VE is strictly above pgmpy at every
+measured n on the bnlearn ladder (cancer, asia, child, alarm). See
+[`scaling_nodes_batched_throughput.pdf`](examples/figures/scaling_nodes_batched_throughput.pdf).
 
 For the **batched-inference** crash test (NBN's `query_batch` vs
 serial-loop competitors), see `examples/crash_test_inference.py`.
@@ -143,7 +155,8 @@ and instructions for adding your own domain or baseline adapter.
 | Advanced mechanisms (Flow, NeuralCat) | ✅ |
 | Amortized Variational Engine | ✅ |
 | Benchmarks suite | ✅ |
-| GPU performance work (CUDA-graphs, fused log-CPT, vectorized `query_batch`) | tracked in [#7](https://github.com/Giovannibriglia/NeuralBayesianNetworks/issues/7) |
+| v0.3 page-1 crash test + vectorised batched VE | ✅ — [v0.3.0 release](https://github.com/Giovannibriglia/NeuralBayesianNetworks/releases/tag/v0.3.0) |
+| GPU performance work (CUDA-graphs, fused log-CPT) | tracked in [#7](https://github.com/Giovannibriglia/NeuralBayesianNetworks/issues/7) |
 | 5-seed multi-replicate error-bar pipeline | tracked in [#7](https://github.com/Giovannibriglia/NeuralBayesianNetworks/issues/7) |
 | Lauritzen-Jensen analytic CG ground truth + NUTS gold ground truth | tracked in [#7](https://github.com/Giovannibriglia/NeuralBayesianNetworks/issues/7) |
 
