@@ -23,12 +23,18 @@ from benchmarking.metrics import (
     tv_distance,
     wasserstein_1d,
 )
-from benchmarking.synthetic import generate_synthetic_hybrid
+from benchmarking.synthetic import (
+    SyntheticBN,
+    generate_synthetic_hybrid,
+    make_synthetic_bn,
+)
 
 __all__ = [
     "load_bnlearn",
     "BNLEARN_NETWORKS",
     "generate_synthetic_hybrid",
+    "make_synthetic_bn",
+    "SyntheticBN",
     # Plugin contract
     "BenchmarkDomain", "BenchmarkProblem", "GroundTruth", "Query",
     "get_domain",

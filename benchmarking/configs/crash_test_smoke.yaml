@@ -1,0 +1,45 @@
+# v0.4 crash-test smoke config — fast pipeline-validation run.
+#
+# Used by:
+#   nbn-bench param-learning --config benchmarking/configs/crash_test_smoke.yaml
+#   nbn-bench inference       --config benchmarking/configs/crash_test_smoke.yaml
+#
+# Implementation lands in v0.4b (PR-2); v0.4a wires the entry point and
+# ships this config so callers can exercise --help today and re-use the
+# same config file once PR-2 lands.
+
+# Network sizes to sweep on the x-axis.
+sizes: [10, 50]
+
+# Synthetic-generator families to evaluate.  Set in the order the figure
+# panels render (top-left, top-middle, top-right, bottom-left).
+families:
+  - discrete
+  - continuous_lg
+  - continuous_nongauss
+  - hybrid
+
+# Replicate count per (family, size) cell.  Smoke uses a single seed.
+seeds: [0]
+
+# Generator parameters.
+generator:
+  edge_density: 0.20
+  max_in_degree: 4
+  cardinality: 4
+  fraction_continuous: 0.5
+  n_train: 2000
+  n_test: 500
+  n_reference: 5000
+
+# Inference-crash-test only: fixed batch size for NBN.  Baselines without a
+# native batched-query API loop inside their adapter and are timed for the
+# equivalent total workload.
+inference:
+  batch_size: 1024
+  n_warmup: 5
+  n_repeat: 3
+  per_cell_timeout_s: 60
+
+# Output root.  Figures land under figures/ on this prefix.
+output_dir: examples/figures/v04_smoke

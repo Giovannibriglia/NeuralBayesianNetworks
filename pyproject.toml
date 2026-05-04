@@ -61,7 +61,7 @@ dev = [
 ]
 
 [project.scripts]
-nbn-bench = "benchmarking.runner:main"
+nbn-bench = "benchmarking.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
