@@ -13,14 +13,16 @@ import sys
 import time
 from pathlib import Path
 
+# Third-party packages — imported before sys.path manipulation so ruff E402 does not fire.
+import torch
+from tqdm import tqdm
+
 # Self-bootstrap: make `nbn` and `benchmarking` importable when this script is
 # launched directly (e.g. `python examples/crash_test.py`) without first
 # running `pip install -e .`. Inserts the repo root onto sys.path if needed.
 _repo_root = Path(__file__).resolve().parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
-import torch
-from tqdm import tqdm
 
 from benchmarking.baselines import get_adapter  # noqa: E402
 from benchmarking.domains import get_domain  # noqa: E402
