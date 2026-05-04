@@ -17,6 +17,9 @@ __all__ = [
 _DOMAIN_REGISTRY = {
     "bnlearn": ("benchmarking.domains.bnlearn", "BnlearnDomain"),
     "synthetic_hybrid": ("benchmarking.domains.synthetic_hybrid", "SyntheticHybridDomain"),
+    "synthetic_hybrid_scaling": (
+        "benchmarking.domains.synthetic_hybrid", "SyntheticHybridScalingDomain",
+    ),
 }
 
 

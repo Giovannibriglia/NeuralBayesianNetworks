@@ -67,6 +67,24 @@ samples = model.sample(n=10_000)
 - **Causal extensions**: `do(X=x)` interventions, counterfactuals
 - **Benchmarks**: top-level [`benchmarking/`](benchmarking/) package — plugin-based runner, 5 baselines (NBN, pgmpy, pomegranate, GPyTorch, Pyro), 15+ metrics, YAML configs.
 
+## Crash test (the page-1 figure)
+
+```bash
+python examples/crash_test.py        # writes examples/figures/crash_test_summary.{pdf,svg,png,tex}
+```
+
+The v0.3 figure uses **horizontal bars with constrained-layout** (no
+tick-label collisions), groups baselines by family with hatched-CPU /
+solid-CUDA encoding, and stamps a reproducibility footer (NBN version,
+seed, git sha, torch version, GPU name) on every output. Discrete
+accuracy is measured against pgmpy's exact VE; continuous accuracy
+against MC-rejection ground truth on the synthetic SCM (when
+`--with-ground-truth` is in scope; W₁ panel populated when ground truth
+is available, otherwise shows the "needs ground-truth-builder" hint).
+
+For the **batched-inference** crash test (NBN's `query_batch` vs
+serial-loop competitors), see `examples/crash_test_inference.py`.
+
 ## Running the crash test and benchmarks
 
 All commands assume you are at the repository root (the directory that
@@ -125,6 +143,9 @@ and instructions for adding your own domain or baseline adapter.
 | Advanced mechanisms (Flow, NeuralCat) | ✅ |
 | Amortized Variational Engine | ✅ |
 | Benchmarks suite | ✅ |
+| GPU performance work (CUDA-graphs, fused log-CPT, vectorized `query_batch`) | tracked in [#7](https://github.com/Giovannibriglia/NeuralBayesianNetworks/issues/7) |
+| 5-seed multi-replicate error-bar pipeline | tracked in [#7](https://github.com/Giovannibriglia/NeuralBayesianNetworks/issues/7) |
+| Lauritzen-Jensen analytic CG ground truth + NUTS gold ground truth | tracked in [#7](https://github.com/Giovannibriglia/NeuralBayesianNetworks/issues/7) |
 
 ## Citation
 

@@ -36,7 +36,11 @@ class CategoricalTableMechanism(Mechanism):
 
     is_discrete: bool = True
 
-    def __init__(self, alpha: float = 1.0) -> None:
+    def __init__(self, alpha: float = 0.0) -> None:
+        # ``alpha`` is the per-class Dirichlet pseudo-count for Laplace
+        # smoothing.  Default 0.0 matches pgmpy's ``MaximumLikelihoodEstimator``
+        # exactly (no smoothing) so accuracy on small networks is on par.
+        # Pass ``alpha=1.0`` to recover the v0.2 behaviour (uniform prior).
         super().__init__()
         self.alpha = float(alpha)
         # Populated by fit_local:

@@ -70,6 +70,70 @@ def plot_throughput_bar(df, out_stem: str = "results/throughput") -> list[str]:
     return savefig_multi(fig, out_stem)
 
 
+def _color(b: str) -> str:
+    base = b.split("_")[0] if isinstance(b, str) else "ground"
+    return NBN_PALETTE.get(base, "#888888")
+
+
+def plot_scaling_ablation(
+    df,
+    *,
+    axis: str = "n_nodes",
+    metric: str = "ms_per_query",
+    problem_kind: str = "all",
+    out_stem: str = "results/scaling_ablation",
+) -> list[str]:
+    """Line plot of ``metric`` vs ``axis`` (n_nodes / density / cardinality).
+
+    Parses each scaling-grid problem name (``hybrid_n{N}_d{DDD}_k{K}_r{R}``)
+    to extract the axis value, then groups by (baseline, device) and draws
+    one line per group with mean ± std error band over replicates.
+    """
+    apply_style()
+    import re
+    import matplotlib.pyplot as plt
+    pd = _ensure(df)
+
+    if not hasattr(df, "columns"):
+        df = pd.DataFrame(df)
+    if "problem" not in df.columns:
+        return []
+    re_n = re.compile(r"hybrid_n(\d+)_d(\d+)_k(\d+)_r(\d+)")
+    parsed = []
+    for _, row in df.iterrows():
+        m = re_n.match(str(row.get("problem", "")))
+        if not m:
+            continue
+        n, d, k, r = int(m.group(1)), int(m.group(2)) / 100.0, int(m.group(3)), int(m.group(4))
+        parsed.append({**row.to_dict(), "n_nodes": n, "density": d, "cardinality": k, "rep": r})
+    if not parsed:
+        return []
+    pdf = pd.DataFrame(parsed)
+    if metric not in pdf.columns or axis not in pdf.columns:
+        return []
+
+    Path(out_stem).parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(5.5, 3.5), constrained_layout=True)
+    for (baseline, device), grp in pdf.groupby(["baseline", "device"]):
+        agg = grp.groupby(axis)[metric].agg(["mean", "std"]).reset_index()
+        ax.plot(agg[axis], agg["mean"], marker="o", lw=1.5, ms=5,
+                color=_color(baseline), label=f"{baseline} ({device})")
+        if agg["std"].notna().any():
+            ax.fill_between(agg[axis], agg["mean"] - agg["std"], agg["mean"] + agg["std"],
+                            color=_color(baseline), alpha=0.15)
+    if axis == "n_nodes":
+        ax.set_xscale("log")
+    if metric in {"ms_per_query", "time_s", "throughput_qps"}:
+        ax.set_yscale("log")
+    ax.set_xlabel({"n_nodes": "n_nodes (log)", "density": "edge density",
+                    "cardinality": "discrete cardinality"}.get(axis, axis))
+    ax.set_ylabel({"ms_per_query": "ms / query (log)", "time_s": "time (s, log)",
+                    "tv": "TV", "throughput_qps": "queries / s (log)"}.get(metric, metric))
+    ax.set_title(f"Scaling ablation: {metric} vs {axis}")
+    ax.legend(frameon=False, fontsize=8)
+    return savefig_multi(fig, out_stem)
+
+
 def plot_accuracy_bars(df, out_stem: str = "results/accuracy") -> list[str]:
     """Mean TV / KL per baseline as a bar chart."""
     apply_style()
