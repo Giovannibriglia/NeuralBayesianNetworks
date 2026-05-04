@@ -8,7 +8,6 @@ import torch
 from benchmarking.domains.base import (
     BenchmarkDomain,
     BenchmarkProblem,
-    GroundTruth,
 )
 from benchmarking.queries import make_query_battery
 
@@ -97,11 +96,6 @@ class SyntheticHybridDomain(BenchmarkDomain):
             train_data[nm] = tr.to(device)
             test_data[nm] = te.to(device)
 
-        # Empirical ground truth: just the marginal samples themselves.
-        gt_samples = torch.cat(
-            [test_data[nm].reshape(n_test, -1) for nm in topo], dim=-1
-        )
-
         queries = make_query_battery(
             nodes=names, discrete_nodes=list(discrete),
             continuous_nodes=[nm for nm in names if nm not in discrete],
@@ -110,11 +104,25 @@ class SyntheticHybridDomain(BenchmarkDomain):
             seed=seed,
         )
 
-        return BenchmarkProblem(
+        # Empirical ground truth: per-node test-data samples + summary stats.
+        # See benchmarking/domains/_ground_truth.py for the wiring.
+        from benchmarking.domains._ground_truth import mc_marginals_from_test_data
+
+        problem_obj = BenchmarkProblem(
             name=problem, dag=edges, variables=variables,
             train_data=train_data, test_data=test_data,
             queries=queries,
-            ground_truth=GroundTruth(samples=gt_samples),
+            ground_truth=None,
+        )
+        gt = mc_marginals_from_test_data(problem_obj)
+        # Also keep the legacy concatenated-samples field for any callers
+        # that read it directly.
+        object.__setattr__(gt, "samples", torch.cat(
+            [test_data[nm].reshape(n_test, -1) for nm in topo], dim=-1))
+        return BenchmarkProblem(
+            name=problem_obj.name, dag=problem_obj.dag, variables=problem_obj.variables,
+            train_data=problem_obj.train_data, test_data=problem_obj.test_data,
+            queries=problem_obj.queries, ground_truth=gt,
         )
 
 

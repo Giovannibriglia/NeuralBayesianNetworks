@@ -94,6 +94,8 @@ def plot_scaling_ablation(
     import matplotlib.pyplot as plt
     pd = _ensure(df)
 
+    if not hasattr(df, "columns"):
+        df = pd.DataFrame(df)
     if "problem" not in df.columns:
         return []
     re_n = re.compile(r"hybrid_n(\d+)_d(\d+)_k(\d+)_r(\d+)")

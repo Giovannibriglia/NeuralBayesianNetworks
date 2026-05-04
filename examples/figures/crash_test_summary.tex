@@ -1,16 +1,16 @@
 \begin{table}[h]
   \centering
-  \caption{Crash test: parameter learning + serial inference.}
+  \caption{Crash test: parameter learning + serial inference. Discrete: TV vs pgmpy exact. Continuous: W₁/MAE of predicted mean vs MC-test-data reference.}
   \label{tab:nbn-crash-test}
-  \begin{tabular}{lrrrrrrr}
+  \begin{tabular}{lrrrrrrrrr}
     \toprule
-    Baseline & Device & Problem & Q & Time (s) & ms/q & TV & MAP-acc \\
+    Baseline & Device & Problem & Q & Time (s) & ms/q & TV & MAP-acc & W₁ & MAE \\
     \midrule
-    nbn\_lw & cpu & hybrid\_10 & 10 & 0.045 & 4.53 & — & — \\
-    nbn\_hybrid & cpu & hybrid\_10 & 10 & 0.061 & 6.14 & — & — \\
-    nbn\_linear\_gaussian & cpu & hybrid\_10 & 10 & 0.029 & 2.90 & — & — \\
-    pyro & cpu & hybrid\_10 & 10 & 4.926 & 492.58 & — & — \\
-    gpytorch & cpu & hybrid\_10 & 5 & 0.009 & 1.88 & — & — \\
+    nbn\_lw & cpu & hybrid\_10 & 10 & 0.088 & 8.83 & — & — & 0.000 & 0.210 \\
+    nbn\_hybrid & cpu & hybrid\_10 & 10 & 0.112 & 11.18 & — & — & 0.000 & 0.186 \\
+    nbn\_linear\_gaussian & cpu & hybrid\_10 & 10 & 0.057 & 5.73 & — & — & 0.000 & 0.195 \\
+    pyro & cpu & hybrid\_10 & 10 & 10.966 & 1096.59 & — & — & 0.000 & 0.196 \\
+    gpytorch & cpu & hybrid\_10 & 5 & 0.015 & 3.06 & — & — & 0.000 & 0.089 \\
     \bottomrule
   \end{tabular}
 \end{table}

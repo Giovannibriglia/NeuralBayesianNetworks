@@ -67,30 +67,58 @@ def _bench_problem(domain_name, problem_name, baselines, device, n_queries):
             except Exception:
                 pass
         elapsed = time.perf_counter() - t0
-        # Accuracy vs ground truth (for discrete only — bnlearn provides it)
+        # Accuracy vs ground truth.
+        # Discrete (bnlearn): TV between predicted marginal and pgmpy exact.
+        # Hybrid (synthetic): MAE + W1 between method's predicted mean
+        # (or mean of returned samples) and the test-data MC reference.
         tv_score, map_score = float("nan"), float("nan")
+        w1_score, mae_score = float("nan"), float("nan")
         if problem.ground_truth and problem.ground_truth.marginals:
             tvs, hits, total = [], 0, 0
+            mae_acc, w1_acc, n_cont = 0.0, 0.0, 0
             for q, p in preds:
-                ref = problem.ground_truth.marginals.get(q.targets[0])
+                target = q.targets[0]
+                ref = problem.ground_truth.marginals.get(target)
                 if ref is None or p is None:
                     continue
+                kind = problem.variables[target][0]
                 ref_c = ref.cpu().float().reshape(-1)
-                pred_c = p.cpu().float().reshape(-1)
-                if pred_c.shape != ref_c.shape:
-                    continue
-                tvs.append(0.5 * (pred_c - ref_c).abs().sum().item())
-                if pred_c.argmax() == ref_c.argmax():
-                    hits += 1
-                total += 1
+                pred_c = p.detach().cpu().float().reshape(-1)
+                if kind == "discrete":
+                    if pred_c.shape != ref_c.shape:
+                        continue
+                    tvs.append(0.5 * (pred_c - ref_c).abs().sum().item())
+                    if pred_c.argmax() == ref_c.argmax():
+                        hits += 1
+                    total += 1
+                else:
+                    # Continuous: ref is the test-data sample column;
+                    # method "predicts" either a [K]-bucket vector (skip — not
+                    # meaningful for continuous targets) or a scalar mean.
+                    if pred_c.numel() == 0:
+                        continue
+                    pred_mean = float(pred_c.mean())
+                    ref_mean = float(ref_c.mean())
+                    mae_acc += abs(pred_mean - ref_mean)
+                    # 1-D W1 between two empirical sample sets via sorted-CDF
+                    if pred_c.numel() >= 2 and ref_c.numel() >= 2:
+                        n = min(pred_c.numel(), ref_c.numel(), 1024)
+                        qs = torch.linspace(0, 1, n)
+                        w1_acc += float((torch.quantile(pred_c, qs) -
+                                         torch.quantile(ref_c, qs)).abs().mean())
+                    n_cont += 1
             if tvs:
                 tv_score = sum(tvs) / len(tvs)
                 map_score = hits / max(total, 1)
+            if n_cont > 0:
+                mae_score = mae_acc / n_cont
+                w1_score = w1_acc / n_cont
         out.append({
             "baseline": b_name, "device": device, "problem": problem_name,
             "n_queries": len(preds), "time_s": elapsed,
             "ms_per_query": elapsed / max(len(preds), 1) * 1000,
             "tv": tv_score, "map_accuracy": map_score,
+            "w1": w1_score, "mae": mae_score,
         })
         adapter.teardown()
     return out
@@ -183,16 +211,18 @@ def _plot_summary(rows, fig_dir):
     _hbar(ax, hybrid, "ms_per_query", log=True, fmt=".2f")
     ax.set_xlabel("ms / query  (log)")
 
-    # (d) Continuous accuracy — populated when ground truth available
-    ax = axes[1, 1]; ax.set_title("(d) Hybrid — Wasserstein-1")
-    hybrid_acc = [r for r in hybrid if r.get("w1") == r.get("w1") and r.get("w1") is not None]
+    # (d) Continuous accuracy — populated by per-baseline MAE of the
+    # predicted mean against the test-data MC reference (synthetic SCM).
+    # W₁ across full sample distributions is queued for v0.3.x once the
+    # adapters expose `predict_samples` rather than just a mean.
+    ax = axes[1, 1]; ax.set_title("(d) Hybrid — MAE (mean vs MC ref)")
+    hybrid_acc = [r for r in hybrid
+                   if r.get("mae") == r.get("mae") and r.get("mae") is not None]
     if hybrid_acc:
-        _hbar(ax, hybrid_acc, "w1", fmt=".3f")
-        ax.set_xlabel("W₁ vs MC ground truth (lower is better)")
+        _hbar(ax, hybrid_acc, "mae", fmt=".3f")
+        ax.set_xlabel("|predicted mean − MC reference|  (lower is better)")
     else:
-        ax.text(0.5, 0.5,
-                "Continuous ground-truth metrics\nrequire `--with-ground-truth`\n"
-                "(MC-rejection on synthetic SCM)",
+        ax.text(0.5, 0.5, "no continuous ground truth available",
                 ha="center", va="center", fontsize=8.5, alpha=0.75)
         ax.set_xticks([]); ax.set_yticks([])
 
@@ -264,10 +294,13 @@ def main() -> int:
 
     print("\n==== Results ====")
     for r in rows:
+        extra = ""
+        if r.get("w1") == r.get("w1") and r.get("w1") is not None:  # finite
+            extra = f" | W1={r['w1']:.3f} | MAE={r['mae']:.3f}"
         print(f"  {r['baseline']:8s} {r['device']:5s} {r['problem']:12s}: "
               f"{r['n_queries']:>4d}q in {r['time_s']:6.3f}s "
               f"({r['ms_per_query']:6.2f} ms/q) | "
-              f"TV={r['tv']:.4f} | MAP-acc={r['map_accuracy']:.3f}")
+              f"TV={r['tv']:.4f} | MAP-acc={r['map_accuracy']:.3f}{extra}")
 
     if not args.no_figures and rows:
         try:
@@ -284,14 +317,18 @@ def main() -> int:
             ("problem", "Problem"), ("n_queries", "Q"),
             ("time_s", "Time (s)"), ("ms_per_query", "ms/q"),
             ("tv", "TV"), ("map_accuracy", "MAP-acc"),
+            ("w1", "W₁"), ("mae", "MAE"),
         ]
         out_tex = fig_dir / "crash_test_summary.tex"
         write_latex_table(
             out_tex, rows, cols,
-            caption="Crash test: parameter learning + serial inference.",
+            caption="Crash test: parameter learning + serial inference. "
+                    "Discrete: TV vs pgmpy exact. Continuous: W₁/MAE of "
+                    "predicted mean vs MC-test-data reference.",
             label="tab:nbn-crash-test",
             formats={"time_s": ".3f", "ms_per_query": ".2f",
-                     "tv": ".4f", "map_accuracy": ".3f"},
+                     "tv": ".4f", "map_accuracy": ".3f",
+                     "w1": ".3f", "mae": ".3f"},
         )
         print(f"LaTeX table saved to {out_tex}")
 
