@@ -122,7 +122,7 @@ def _plot_summary(rows, fig_dir):
                color=[_color_for(r) for r in discrete_acc])
         ax.set_ylabel("TV (lower is better)")
         ax.set_title("Discrete (alarm) — accuracy")
-        ax.tick_params(axis="x", labelrotation=30)
+        ax.tick_params(axis="x", labelrotation=90)
         ax.axhline(0.05, color="grey", ls=":", lw=0.8, alpha=0.6)
     else:
         ax.text(0.5, 0.5, "no discrete results", ha="center", va="center")
@@ -136,7 +136,7 @@ def _plot_summary(rows, fig_dir):
         ax.set_ylabel("ms / query  (log)")
         ax.set_yscale("log")
         ax.set_title("Discrete (alarm) — speed")
-        ax.tick_params(axis="x", labelrotation=30)
+        ax.tick_params(axis="x", labelrotation=90)
     else:
         ax.text(0.5, 0.5, "no discrete results", ha="center", va="center")
         ax.set_title("Discrete (alarm) — speed")
@@ -150,7 +150,7 @@ def _plot_summary(rows, fig_dir):
                color=[_color_for(r) for r in hybrid_acc])
         ax.set_ylabel("TV (lower is better)")
         ax.set_title("Continuous / hybrid — accuracy")
-        ax.tick_params(axis="x", labelrotation=30)
+        ax.tick_params(axis="x", labelrotation=90)
     else:
         # Hybrid problems use sample-based ground truth (no marginal TV);
         # show held-out NLL placeholder instead.
@@ -167,7 +167,7 @@ def _plot_summary(rows, fig_dir):
         ax.set_ylabel("ms / query  (log)")
         ax.set_yscale("log")
         ax.set_title("Continuous / hybrid — speed")
-        ax.tick_params(axis="x", labelrotation=30)
+        ax.tick_params(axis="x", labelrotation=90)
     else:
         ax.text(0.5, 0.5, "no hybrid results", ha="center", va="center")
         ax.set_title("Continuous / hybrid — speed")
