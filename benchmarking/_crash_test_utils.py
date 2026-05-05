@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Sequence, Tuple
 
+import pandas as pd
 import torch
 import yaml
 
@@ -483,11 +484,16 @@ def plot_metric_vs_n_nodes(
             continue
 
         baselines = sorted(sub["baseline"].unique())
-        # Compute the panel's data-only ymax to position DNF markers above.
+        # Compute the panel's data-only ymax to position DNF markers AT
+        # (PR-B-round-2 §5).  We place DNF markers just inside the data
+        # range — never above it — so the panel's autoscaled ylim doesn't
+        # leave a large empty band of plot area above the data lines.
         ok_vals = sub[(sub["status"] == "ok") & sub["value"].notna()]["value"]
         if not ok_vals.empty and (ok_vals > 0).all():
             ymax = float(ok_vals.max())
-            dnf_y = ymax * 1.4 if log_y else ymax * 1.1
+            ymin = float(ok_vals.min())
+            # Sit just inside ymax (95%): prominent but doesn't extend axis.
+            dnf_y = ymax * 0.95 if log_y else ymin + 0.95 * (ymax - ymin)
         else:
             dnf_y = 1.0
 
@@ -534,27 +540,32 @@ def plot_metric_vs_n_nodes(
                 if len(xs) == 0:
                     continue
                 ys = [dnf_y] * len(xs)
-                ax.scatter(
-                    xs, ys, marker=_DNF_MARKERS.get(status_kind, "x"),
-                    color=colour, s=60, zorder=3,
-                    edgecolors="black" if status_kind == "not_supported" else "none",
-                    facecolors="none" if status_kind == "not_supported" else colour,
-                )
+                # PR-B-round-2 §5: distinguish filled vs hollow markers per
+                # status without passing edgecolor='none' on unfilled
+                # markers (which warns).
+                if status_kind == "not_supported":
+                    ax.scatter(xs, ys, marker=_DNF_MARKERS["not_supported"],
+                               s=50, zorder=3,
+                               facecolors="none", edgecolors=colour, linewidths=1.2)
+                else:
+                    ax.scatter(xs, ys, marker=_DNF_MARKERS.get(status_kind, "x"),
+                               s=50, zorder=3, color=colour)
 
         ax.set_title(family)
         ax.set_xlabel("n_nodes")
+        # PR-B-round-2 §2: single y-axis label per panel; concise so
+        # constrained_layout doesn't word-wrap onto two clipped lines.
         ax.set_ylabel(metric_label)
         if log_x:
             ax.set_xscale("log")
         if log_y:
             ax.set_yscale("log")
         ax.grid(True, which="both", linestyle=":", alpha=0.4)
-        ax.legend(fontsize=7, loc="best")
+        # PR-B-round-2: only call legend() when there are labelled artists,
+        # avoiding the "No artists with labels found" UserWarning.
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(fontsize=7, loc="best")
 
-    direction = "lower is better" if lower_is_better else "higher is better"
-    fig.suptitle(metric_label + f"  ({direction})", fontsize=11)
-
-
-# Required imports for the new helper (kept at module scope to avoid
-# repeated import inside the hot path).
-import pandas as pd  # noqa: E402  — placed here so plot_metric_vs_n_nodes can use it
+    # NB: caller (the runner) sets ``fig.suptitle`` itself after this
+    # returns; we don't set one here to avoid a double-suptitle clash.

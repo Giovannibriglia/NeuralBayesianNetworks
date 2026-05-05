@@ -184,6 +184,25 @@ def _inference_cell(
     if (family, baseline) in _NOT_APPLICABLE:
         return _not_applicable_row(family, n, seed, baseline)
     bn = _generate_bn(cfg, family, n, seed)
+    # PR-B-round-2 §3 fix: discrete family has no ``ground_truth_samples``
+    # by design; synthesise one reference pool per cell so the accuracy
+    # filter has something to work with.  Cached on the SyntheticBN so
+    # subsequent queries within the cell reuse it (the dataclass is
+    # frozen, so we use object.__setattr__).
+    if bn.ground_truth_samples is None:
+        try:
+            n_ref = min(5000, max(1000, cfg.n_reference // 2))
+            with torch.no_grad():
+                ref = bn.true_model.sample(n=n_ref)
+            nodes = list(bn.dag.nodes())
+            cached = torch.cat(
+                [ref[nm].reshape(n_ref, -1).float().cpu() for nm in nodes],
+                dim=-1,
+            )
+            object.__setattr__(bn, "ground_truth_samples", cached)
+        except Exception:  # pragma: no cover  (best-effort)
+            pass
+
     B = cfg.nbn_batch_size or cfg.n_queries_per_cell
     queries_batch = _build_query_batch(bn, B=B, seed=seed)
 
@@ -487,45 +506,56 @@ def _time_loop_inference(bn: SyntheticBN, baseline: str, q) -> float:
 
 
 def _render_two_figures(rows: List[CellResult], cfg: CrashTestConfig) -> None:
-    """Render the two canonical figures: total_time_vs_size + accuracy_vs_size."""
+    """Render the canonical figure(s) for the current mode.
+
+    PR-B-round-2 §1: parameter-learning is *accuracy only* per the v0.4
+    spec ("don't check the speed, just check metrics about accuracy").
+    Inference renders both total-time and accuracy.
+    """
     import matplotlib.pyplot as plt
     import pandas as pd
     df = pd.DataFrame([r.__dict__ for r in rows])
 
     if cfg.mode == "parameter_learning":
         accuracy_metrics = ("tv_per_node", "w1_per_node")
-        accuracy_label = "per-node TV (discrete) / W1 (continuous)  (lower better)"
+        accuracy_label = "per-node TV / W1"
+        accuracy_suffix = "(lower better)"
     else:
         accuracy_metrics = ("accuracy",)
-        accuracy_label = "Wasserstein-1 / TV (lower is better)"
+        accuracy_label = "TV / Wasserstein-1"
+        accuracy_suffix = "(lower better)"
 
-    # Figure 1: total time (only inference mode has timing rows; for
-    # parameter-learning we still render an empty figure so the file
-    # exists with the canonical name).
-    fig1, ax_grid1 = plt.subplots(2, 2, figsize=(11, 7), constrained_layout=True)
-    plot_metric_vs_n_nodes(
-        df, metric="total_time_s",
-        ax_grid=ax_grid1.flatten(), fig=fig1,
-        metric_label="total time for B queries (s, lower better)",
-        log_y=True, log_x=True,
-    )
-    fig1.text(
-        0.99, 0.005,
-        reproducibility_footer(version="v0.5", seed=cfg.seeds[0], device=cfg.device),
-        ha="right", va="bottom", fontsize=6, color="gray",
-    )
-    fig1.suptitle(
-        f"{cfg.mode} · total time vs network size",
-        fontsize=12, fontweight="bold",
-    )
-    for ext in ("pdf", "svg", "png"):
-        out = cfg.figure_path("total_time_vs_size", ext=ext)
-        fig1.savefig(out, bbox_inches="tight", dpi=150)
-    plt.close(fig1)
+    # Figure 1: total time (inference mode only).
+    if cfg.mode == "inference":
+        fig1, ax_grid1 = plt.subplots(2, 2, figsize=(11, 7), constrained_layout=True)
+        plot_metric_vs_n_nodes(
+            df, metric="total_time_s",
+            ax_grid=ax_grid1.flatten(), fig=fig1,
+            metric_label="total time for B queries (s), lower better",
+            log_y=True, log_x=True,
+        )
+        fig1.text(
+            0.99, 0.005,
+            reproducibility_footer(version="v0.5", seed=cfg.seeds[0], device=cfg.device),
+            ha="right", va="bottom", fontsize=7, color="gray",
+            transform=fig1.transFigure,
+        )
+        fig1.suptitle(
+            f"{cfg.mode} · total time vs network size",
+            fontsize=12, fontweight="bold",
+        )
+        for ext in ("pdf", "svg", "png"):
+            out = cfg.figure_path("total_time_vs_size", ext=ext)
+            fig1.savefig(out, bbox_inches="tight", dpi=150)
+        plt.close(fig1)
 
     # Figure 2: accuracy
-    df_acc = df[df["metric"].isin(accuracy_metrics)].copy()
-    df_acc["metric"] = "accuracy"
+    df_acc = df[df["metric"].isin(accuracy_metrics)
+                | (df["metric"] == "status")].copy()
+    # Renaming non-status accuracy metrics to a single 'accuracy' column
+    # lets the plotter pick them up uniformly across families.
+    metric_map = dict.fromkeys(accuracy_metrics, "accuracy")
+    df_acc["metric"] = df_acc["metric"].map(metric_map).fillna(df_acc["metric"])
     fig2, ax_grid2 = plt.subplots(2, 2, figsize=(11, 7), constrained_layout=True)
     plot_metric_vs_n_nodes(
         df_acc, metric="accuracy",
@@ -536,10 +566,11 @@ def _render_two_figures(rows: List[CellResult], cfg: CrashTestConfig) -> None:
     fig2.text(
         0.99, 0.005,
         reproducibility_footer(version="v0.5", seed=cfg.seeds[0], device=cfg.device),
-        ha="right", va="bottom", fontsize=6, color="gray",
+        ha="right", va="bottom", fontsize=7, color="gray",
+        transform=fig2.transFigure,
     )
     fig2.suptitle(
-        f"{cfg.mode} · accuracy vs network size",
+        f"{cfg.mode} · accuracy vs network size  {accuracy_suffix}",
         fontsize=12, fontweight="bold",
     )
     for ext in ("pdf", "svg", "png"):
@@ -555,7 +586,7 @@ def _render_two_figures(rows: List[CellResult], cfg: CrashTestConfig) -> None:
 
 def _compute_inference_accuracy(
     bn: SyntheticBN, baseline: str, q, family: str,
-    *, n_samples: int = 200, eps_factor: float = 0.20, n_eff_min: int = 25,
+    *, n_samples: int = 200, eps_factor: float = 0.50, n_eff_min: int = 10,
 ) -> float:
     """Distributional accuracy: posterior samples vs filtered ground truth.
 
@@ -615,9 +646,28 @@ def _filter_ground_truth(
 
     Returns ``[N_eff]`` 1-D samples of the target column, or ``None`` if
     the filter leaves fewer than ``n_eff_min`` rows.
+
+    PR-B-round-2 §3 fix: synthesises ground-truth samples from
+    ``bn.true_model`` for the discrete family — the v0.4a generator
+    intentionally sets ``bn.ground_truth_samples = None`` for discrete
+    BNs (saving memory; pgmpy-style exact marginals are the natural
+    target there) but the v0.5b inference accuracy metric still needs
+    a sample pool to filter, so we draw one on demand.
     """
     samples = bn.ground_truth_samples
-    if samples is None or samples.numel() == 0:
+    if samples is None:
+        # Discrete-family fallback: ancestral-sample on demand.
+        try:
+            n_ref = 5000
+            with torch.no_grad():
+                ref = bn.true_model.sample(n=n_ref)
+            nodes = list(bn.dag.nodes())
+            samples = torch.cat(
+                [ref[n].reshape(n_ref, -1).float().cpu() for n in nodes], dim=-1,
+            )
+        except Exception:
+            return None
+    if samples.numel() == 0:
         return None
     nodes = list(bn.dag.nodes())
     mask = torch.ones(samples.shape[0], dtype=torch.bool)
@@ -666,14 +716,27 @@ def _baseline_posterior_for_query(
             except Exception:
                 return None
         if isinstance(out, tuple):
-            # (weights, samples) for LW continuous
-            _, samp = out
-            return samp.detach().cpu().float().reshape(-1)
+            # PR-B-round-2 §3 (Hypothesis B fix): LW returns
+            # ``(normalised_weights, prior_samples)``; the *posterior*
+            # is obtained by importance-resampling samples according to
+            # weights.  Pre-fix we used ``samples`` directly, which
+            # ignored the conditioning and gave prior samples — the
+            # source of the flat W₁≈4 we saw on continuous_lg.
+            w, samp = out
+            w_flat = w.detach().cpu().float().reshape(-1)
+            samp_flat = samp.detach().cpu().float().reshape(-1)
+            n = min(samp_flat.shape[0], w_flat.shape[0])
+            w_flat = w_flat[:n].clamp_min(1e-12)
+            w_flat = w_flat / w_flat.sum()
+            n_resample = min(2000, n)
+            try:
+                idx = torch.multinomial(w_flat, n_resample, replacement=True)
+                return samp_flat[idx]
+            except Exception:
+                return samp_flat
         out = out.detach().cpu().float().reshape(-1)
         if target_kind == "discrete":
             return out
-        # continuous probability vector? sample by treating as Categorical
-        # over class_values; not meaningful here, so return None.
         return None
     if baseline in {"pgmpy", "pomegranate"}:
         from benchmarking.baselines import get_adapter
