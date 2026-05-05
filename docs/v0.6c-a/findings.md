@@ -181,11 +181,11 @@ The bug only fires on **3 cells out of 360** in the paper run (`continuous_nonga
 
 Both gitignored (`*.log` was already in `.gitignore`; this PR adds `*.run.json`). Best-effort on every step; never blocks the run on a logging failure.
 
-Verified on this sandbox via `nbn-bench inference --config benchmarking/configs/inference_smoke.yaml`:
+Verified on this sandbox via `nbn-bench inference --config benchmarking/configs/inference_smoke.yaml` (paths updated post-v0.6c-B; original v0.6c-A run wrote to `benchmarking/figures/`):
 
 ```
-benchmarking/figures/inference_smoke_20260505_174743.log       (gitignored ✓)
-benchmarking/figures/inference_smoke_20260505_174743.run.json  (gitignored ✓)
+benchmarking/results/raw/inference_smoke_20260505_174743.log       (gitignored ✓)
+benchmarking/results/raw/inference_smoke_20260505_174743.run.json  (gitignored ✓)
 ```
 
 The `.run.json` includes `git_sha`, `torch_version`, `cuda_available`, `cuda_device`, the full `config` snapshot (so `nbn_lw_n_samples` would have been visible in any prior run.json had this existed), and post-run `wall_time_s` + `status_summary`.

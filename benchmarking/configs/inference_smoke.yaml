@@ -18,5 +18,5 @@ baselines: [nbn_ve, nbn_lw, pgmpy, pomegranate, gpytorch]
 # round-3 verification per PR #14 reviewer ask.
 nbn_lw_n_samples: 4000
 per_cell_timeout_s: 30
-output_dir: benchmarking/figures
+output_dir: benchmarking/results
 output_prefix: inference_smoke
