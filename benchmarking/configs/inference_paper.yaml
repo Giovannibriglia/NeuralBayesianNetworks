@@ -7,6 +7,15 @@ n_queries_per_cell: 1024
 nbn_batch_size: 1024            # NBN runs B=1024 in one call; baselines loop 1024 times in Python
 n_train: 10000
 n_reference: 50000
+# v0.6c-A round 2: explicit per-query LW posterior budget.  4000 was
+# the smoke-side default since PR #14 round 3; paper YAML had silently
+# inherited the CrashTestConfig dataclass default of 512, producing
+# W₁ ≈ 1.0 on continuous_lg / continuous_nongauss at n_nodes=10
+# because the importance-sampling weight collapses on multi-evidence
+# continuous queries below ~2000 samples (round-1 sweep showed the W₁
+# phase transition between 1024 and 2000).  4000 is the minimum-correct
+# value; bump to 8000-20000 if paper-config wall time has headroom.
+nbn_lw_n_samples: 4000
 edge_density: 0.20
 max_in_degree: 4
 cardinality: 4
