@@ -41,22 +41,139 @@ from nbn.inference.tensor_ve import (
 
 
 # ---------------------------------------------------------------------- #
+# Min-fill elimination order (prototype for round-2's
+# nbn/inference/_elimination_order.py).  Pure-Python graph algorithm,
+# no torch.  Operates on the moralised + evidence-pruned undirected
+# graph.
+# ---------------------------------------------------------------------- #
+
+
+def _moralise_and_prune(
+    model, evidence_keys: Tuple[str, ...],
+) -> Dict[str, set]:
+    """Build the undirected moralised graph of ``model.dag``, then prune
+    evidence variables (connecting their neighbours pairwise so the
+    residual graph still contains every induced clique that would have
+    appeared during elimination)."""
+    adj: Dict[str, set] = {n: set() for n in model.dag.topological_order()}
+    for n in adj:
+        for p in model.dag.parents(n):
+            adj[p].add(n)
+            adj[n].add(p)
+        # Moralise: connect every pair of parents of n.
+        ps = model.dag.parents(n)
+        for i, p1 in enumerate(ps):
+            for p2 in ps[i + 1:]:
+                adj[p1].add(p2)
+                adj[p2].add(p1)
+    # Prune evidence: remove each evidence node, fully connecting its
+    # remaining neighbours so any clique that would have formed during
+    # ordinary elimination is preserved.
+    for ev in evidence_keys:
+        if ev not in adj:
+            continue
+        nbrs = list(adj[ev])
+        for i, a in enumerate(nbrs):
+            for b in nbrs[i + 1:]:
+                adj[a].add(b)
+                adj[b].add(a)
+        for nbr in nbrs:
+            adj[nbr].discard(ev)
+        del adj[ev]
+    return adj
+
+
+def min_fill_order(
+    model, target: str, evidence_keys: Tuple[str, ...],
+) -> List[str]:
+    """Min-fill elimination order (Kjaerulff 1990).
+
+    At each step pick the non-target variable whose elimination would
+    add the fewest fill-in edges to the residual graph; ties broken by
+    fewest neighbours then by name (deterministic).  The variable is
+    eliminated by adding any required fill-in edges to make its
+    neighbours a clique, then removing it from the graph.
+
+    Returns a permutation of ``set(model.dag.topological_order()) -
+    {target} - set(evidence_keys)``.
+    """
+    adj = _moralise_and_prune(model, evidence_keys)
+    candidates = set(adj.keys()) - {target}
+    order: List[str] = []
+    while candidates:
+        best_var = None
+        best_key: Tuple[int, int, str] | None = None
+        for v in candidates:
+            nbrs = adj[v] & candidates
+            nbrs_list = list(nbrs)
+            fill = 0
+            for i, a in enumerate(nbrs_list):
+                for b in nbrs_list[i + 1:]:
+                    if b not in adj[a]:
+                        fill += 1
+            key = (fill, len(nbrs_list), v)
+            if best_key is None or key < best_key:
+                best_key = key
+                best_var = v
+        assert best_var is not None
+        order.append(best_var)
+        nbrs = list(adj[best_var] & candidates)
+        for i, a in enumerate(nbrs):
+            for b in nbrs[i + 1:]:
+                adj[a].add(b)
+                adj[b].add(a)
+        for nbr in list(adj[best_var]):
+            adj[nbr].discard(best_var)
+        del adj[best_var]
+        candidates.discard(best_var)
+    return order
+
+
+def validate_elimination_order(
+    model, target: str, evidence_keys: Tuple[str, ...], order: List[str],
+) -> Dict[str, Any]:
+    """Sanity-check an elimination order.  Round-2 will replicate this
+    in tests/unit/test_min_fill_order.py."""
+    all_vars = set(model.dag.topological_order())
+    expected = all_vars - {target} - set(evidence_keys)
+    actual = set(order)
+
+    return {
+        "is_permutation_of_expected": actual == expected,
+        "missing_from_order": sorted(expected - actual),
+        "spurious_in_order": sorted(actual - expected),
+        "target_in_order": target in actual,
+        "any_evidence_in_order": any(e in actual for e in evidence_keys),
+        "len_order": len(order),
+        "len_expected": len(expected),
+        "no_duplicates": len(order) == len(actual),
+    }
+
+
+
+# ---------------------------------------------------------------------- #
 # Algebraic-shape walk (no torch ops yet — pure dimensional analysis)
 # ---------------------------------------------------------------------- #
 
 
 def _walk_elimination_shapes(
     model, target: str, evidence_keys: Tuple[str, ...], B: int,
+    *, plan: List[str] | None = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Walk the cached elimination plan algebraically and report the
+    """Walk a given elimination plan algebraically and report the
     shape of each intermediate factor product/marginalisation.
+
+    If ``plan`` is None, uses the engine's cached topological-order
+    plan via ``_plan``.  Pass an explicit plan (e.g. min-fill) to
+    compare alternative orderings on the same DAG.
 
     Does not run torch — it computes ``len(scope)`` and ``prod(cards)``
     so we can identify the worst-case allocation purely from the plan.
     """
     eng = TensorVariableElimination()
     factors = eng._extract_factors(model)
-    plan = eng._plan(model, target, evidence_keys)
+    if plan is None:
+        plan = eng._plan(model, target, evidence_keys)
 
     # Each entry: (vars_set, has_batch).  cardinality is uniformly K.
     state: List[Tuple[set, bool]] = []
@@ -319,10 +436,43 @@ def main() -> None:
     eng = TensorVariableElimination()
     plan = eng._plan(bn.true_model, target, tuple(sorted(evidence_names)))
 
-    # Algebraic shape walk
+    # Algebraic shape walk — naive (current) plan
     alg_steps, alg_summary = _walk_elimination_shapes(
         bn.true_model, target, tuple(sorted(evidence_names)), B,
     )
+
+    # ---- v0.6b round-1 follow-up: min-fill ordering verification ----
+    mf_order = min_fill_order(
+        bn.true_model, target, tuple(sorted(evidence_names)),
+    )
+    mf_validation = validate_elimination_order(
+        bn.true_model, target, tuple(sorted(evidence_names)), mf_order,
+    )
+    mf_steps, mf_summary = _walk_elimination_shapes(
+        bn.true_model, target, tuple(sorted(evidence_names)), B,
+        plan=mf_order,
+    )
+
+    naive_plan = plan  # noqa: F821 — `plan` is bound above when the engine's _plan is called
+    side_by_side = []
+    for i in range(max(len(naive_plan), len(mf_order))):
+        naive_step = next(
+            (s for s in alg_steps if s["step"] == i and not s.get("skipped")),
+            None,
+        )
+        mf_step = next(
+            (s for s in mf_steps if s["step"] == i and not s.get("skipped")),
+            None,
+        )
+        side_by_side.append({
+            "step": i,
+            "naive_var": naive_plan[i] if i < len(naive_plan) else None,
+            "naive_scope": naive_step["product_scope_size"] if naive_step else None,
+            "naive_mib": naive_step["product_mib"] if naive_step else None,
+            "minfill_var": mf_order[i] if i < len(mf_order) else None,
+            "minfill_scope": mf_step["product_scope_size"] if mf_step else None,
+            "minfill_mib": mf_step["product_mib"] if mf_step else None,
+        })
 
     # Real shape walk (caps a single product at 1 GiB to avoid OOM
     # on whatever sandbox we're on; if it aborts that's itself a
@@ -365,6 +515,18 @@ def main() -> None:
             "summary": alg_summary,
             "steps": alg_steps,
         },
+        "min_fill_comparison": {
+            "min_fill_order": mf_order,
+            "validation": mf_validation,
+            "summary_minfill": mf_summary,
+            "summary_naive": alg_summary,
+            "side_by_side": side_by_side,
+            "peak_reduction_factor": (
+                alg_summary["peak_product_mib"] / mf_summary["peak_product_mib"]
+                if mf_summary["peak_product_mib"] and mf_summary["peak_product_mib"] > 0
+                else None
+            ),
+        },
         "real_shape_walk": {
             "aborted_at_cap": aborted,
             "n_steps_completed": len(real_walk),
@@ -405,6 +567,43 @@ def main() -> None:
         print(f"  ABORTED at step {last['step']} ('{last['var']}'): "
               f"{last.get('mib', '?')} MiB > 2048 MiB cap")
         print(f"  shape={last.get('shape')}  scope={last.get('scope')}")
+
+    print()
+    print("--- Min-fill ordering verification ---")
+    print(f"  validation: {mf_validation}")
+    print(f"  min-fill peak step: #{mf_summary['peak_step_index']} "
+          f"eliminate '{mf_summary['peak_var_eliminated']}'  "
+          f"|scope|={mf_summary['peak_product_scope_size']}  "
+          f"{mf_summary['peak_product_mib']:.3f} MiB")
+    print(f"  naive    peak step: #{alg_summary['peak_step_index']} "
+          f"eliminate '{alg_summary['peak_var_eliminated']}'  "
+          f"|scope|={alg_summary['peak_product_scope_size']}  "
+          f"{alg_summary['peak_product_mib']:.1f} MiB")
+    if (mf_summary["peak_product_mib"]
+            and mf_summary["peak_product_mib"] > 0):
+        ratio = (alg_summary["peak_product_mib"]
+                 / mf_summary["peak_product_mib"])
+        print(f"  peak reduction: {ratio:.1f}× "
+              f"(naive / min-fill)")
+
+    print()
+    print("--- Side-by-side per-step (naive vs min-fill) ---")
+    print(f"  {'step':>4}  {'naive_var':>9} {'naive_scope':>11} {'naive_mib':>11}"
+          f"   |  {'mf_var':>6} {'mf_scope':>8} {'mf_mib':>10}")
+    for s in side_by_side:
+        nv = s["naive_var"] or "—"
+        mv = s["minfill_var"] or "—"
+        ns = s["naive_scope"]
+        ms = s["minfill_scope"]
+        nm = s["naive_mib"]
+        mm = s["minfill_mib"]
+        ns_s = "—" if ns is None else str(ns)
+        ms_s = "—" if ms is None else str(ms)
+        nm_s = "—" if nm is None else f"{nm:.3f}"
+        mm_s = "—" if mm is None else f"{mm:.3f}"
+        print(f"  {s['step']:>4}  {nv:>9} {ns_s:>11} {nm_s:>11}   |  "
+              f"{mv:>6} {ms_s:>8} {mm_s:>10}")
+
     print()
     print(f"--- Saved findings to {out_path} ---")
 

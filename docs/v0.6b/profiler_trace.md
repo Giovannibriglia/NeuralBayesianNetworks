@@ -82,7 +82,9 @@ Based on the trace, the dominant cause is:
 
 **Not C.** Every reduction in the trace is `aten::amax` + `aten::sub` + (implicit `exp` + `sum` + `log`) which is the standard `torch.logsumexp` decomposition — this is correct log-domain math, not a `.exp()` materialisation of an intermediate factor. dtype is `float32` throughout; no `float64` widening seen. The `aten::sub` at 1024 MiB is `(x - max)` inside `logsumexp`, not a Hypothesis-C exponentiation.
 
-**The actual cause: naive elimination ordering.** `_plan` (line 79-88) returns the topological order of non-target, non-evidence variables. With `max_in_degree=4` and `n_nodes=20`, eliminating an early-topo variable like `X6` requires producting all factors containing it (its own CPT plus its 4-or-fewer children's CPTs), each of which spans 5 variables — and the union of those factor scopes is 12-14 variables, not 5. The standard remedy is to choose the elimination order that **minimises the maximum induced clique size** — min-fill (Kjaerulff 1990) or weighted-min-fill (Kjaerulff 1992). On this DAG the min-fill ordering would keep each step's scope ≤ 6 variables, dropping the peak from `4¹² × B = 1 GiB` to `4⁶ × B = 256 KiB` — **four orders of magnitude smaller**.
+**The actual cause: naive elimination ordering.** `_plan` (line 79-88) returns the topological order of non-target, non-evidence variables. With `max_in_degree=4` and `n_nodes=20`, eliminating an early-topo variable like `X6` requires producting all factors containing it (its own CPT plus its 4-or-fewer children's CPTs), each of which spans 5 variables — and the union of those factor scopes is 12-14 variables, not 5. The standard remedy is to choose the elimination order that **minimises the maximum induced clique size** — min-fill (Kjaerulff 1990) or weighted-min-fill (Kjaerulff 1992).
+
+The actual reduction (measured below in the follow-up section) is **64× on this DAG**, not the "≥4 orders of magnitude" lower bound I asserted on first look — min-fill cuts the algebraic peak from 16 GiB to 256 MiB. 256 MiB sits comfortably within Giovanni's 7.6 GiB cuda budget; the existing v0.5b runtime guard remains valuable for genuinely-too-big paper-config cells (e.g., n=500), but the n=20 case will go from `oom` to `ok`.
 
 Issue #7 §1.6 already tracks `weighted-min-fill elimination ordering` as a v0.3.x carryover. This is exactly the v0.6b fix.
 
@@ -112,3 +114,68 @@ The memory-budget guard is a forward-defensive measure that lands as a separate 
 3. **Cuda end-to-end verification is deferred.** This sandbox is cpu-only with 16 GiB host RAM, which is enough to fit the current 1 GiB peak. Giovanni's 7.6 GiB cuda card hits OOM at 4 GiB because the worst-case algebraic peak (16 GiB algebraic / 4 GiB partially-realised due to broadcasting) crosses the threshold. Once min-fill is in, the predicted peak drops by ≥4 orders of magnitude — comfortably within budget. Round-2 acceptance must include a cuda re-run on Giovanni's card to confirm.
 
 4. **The smoke test's discrete n=20 cell will go from `oom` to `ok` once min-fill lands.** The v0.5b runtime guard (`status='oom'` classification) does not need to be removed — it's defensive scaffolding that keeps the runner robust against legitimate OOMs (e.g., n=500 cuda paper config where 7.6 GiB really isn't enough). After round 2, the n=20 case simply doesn't trigger the guard anymore.
+
+---
+
+## Round-1 follow-up: min-fill verification
+
+Two reviewer-requested checks before authorising round 2. Both implemented as extensions of the existing algebraic walk in `benchmarking/diagnostics/ve_profile_n20.py` (no new instrumentation; ~120 LOC for the min-fill prototype + ~60 LOC for the comparison and validator).
+
+### 1. Min-fill order is a valid elimination order on this DAG
+
+```
+{
+  "is_permutation_of_expected": True,
+  "missing_from_order":  [],
+  "spurious_in_order":   [],
+  "target_in_order":     False,
+  "any_evidence_in_order": False,
+  "len_order":    17,
+  "len_expected": 17,
+  "no_duplicates": True
+}
+```
+
+The textbook correctness argument applies (each variable, when picked, has its neighbours fully connected by construction → its elimination produces a clique that's already in the residual graph → the join-tree property holds). The validator above is the contract round-2's `tests/unit/test_min_fill_order.py` will pin.
+
+### 2. Predicted peak under min-fill on the same DAG
+
+| | naive (topological) | min-fill | reduction |
+|---|---:|---:|---:|
+| **Peak step**       | step 3 of 17    | step 8 of 17  | — |
+| **Peak elim var**   | `X6`            | `X1`          | — |
+| **Peak |scope|**    | 14 vars         | 11 vars       | −3 vars |
+| **Peak elements**   | `4¹⁴ × 16 = 4.3·10⁹`   | `4¹¹ × 16 = 6.7·10⁷`  | 64× |
+| **Peak algebraic MiB** | 16 384 MiB      | 256 MiB       | **64×** |
+
+### Side-by-side per-step
+
+| step | naive var | naive |scope| | naive MiB |   | min-fill var | mf |scope| | mf MiB |
+|-----:|:----------|------------:|----------:|:--|:-------------|----------:|-------:|
+|   0  | X1        |          12 |    1024.0 |   | X15          |         5 |  0.062 |
+|   1  | X4        |          10 |      64.0 |   | X16          |         3 |  0.000 |
+|   2  | X3        |          11 |     256.0 |   | X9           |         3 |  0.000 |
+|   3  | **X6**    |      **14** | **16384** |   | X11          |         5 |  0.004 |
+|   4  | X5        |          13 |    4096.0 |   | X5           |         5 |  0.004 |
+|   5  | X11       |          12 |    1024.0 |   | X14          |         5 |  0.004 |
+|   6  | X7        |          12 |    1024.0 |   | X19          |         5 |  0.004 |
+|   7  | X18       |          11 |     256.0 |   | X13          |         7 |  0.062 |
+|   8  | X13       |          11 |     256.0 |   | **X1**       |    **11** | **256** |
+|   9  | X12       |          11 |     256.0 |   | X12          |        11 |  256.0 |
+|  10  | X8        |          10 |      64.0 |   | X17          |        10 |   64.0 |
+|  11  | X15       |           9 |      16.0 |   | X18          |         9 |   16.0 |
+|  12  | X14       |           8 |       4.0 |   | X3           |         8 |    4.0 |
+|  13  | X17       |           7 |       1.0 |   | X4           |         7 |    1.0 |
+|  14  | X19       |           6 |     0.250 |   | X6           |         6 |  0.250 |
+|  15  | X9        |           5 |     0.062 |   | X7           |         5 |  0.062 |
+|  16  | X16       |           4 |     0.016 |   | X8           |         4 |  0.016 |
+
+The first 8 min-fill steps are nearly free (≤ 0.1 MiB each) — they peel off variables that participate in only one or two CPTs. The two orderings then converge in the tail (steps 8-16) because the residual graph eventually has to absorb the same join-tree clique structure regardless of order. The crucial difference is that min-fill never *crosses* the peak — its peak is 256 MiB, naive's peak is 16 GiB, both at the highest-scope step.
+
+### Implications for round 2
+
+- **Predicted post-patch peak on cuda**: 256 MiB at B=16, K=4, n=20 (up from the algebraic estimate; the *broadcast-realised* peak will likely be smaller, as it was on the naive ordering — 1 GiB algebraic / 1 GiB realised on cpu in the round-1 walk above; for min-fill, both numbers should land near 256 MiB or below). Comfortably under the 7.6 GiB cuda budget.
+
+- **Memory-budget guard estimator**: the `_walk_elimination_shapes` function is the prototype. Round 2 wraps it as a one-liner `estimate_peak_mib(plan, K, B, dtype)` and uses it as a precondition in `query_batch` — raise `OutOfMemoryError` if estimate > 90% of available device memory. This is honest pre-allocation failure mode (vs. a half-completed allocation that wedges the cuda allocator).
+
+- **Why not weighted-min-fill?** The min-fill peak of 256 MiB is already well within budget. Weighted-min-fill (Kjaerulff 1992) would marginally improve some steps (it weights fill-in cost by cardinality product), but on uniform-K DAGs like this one it reduces to plain min-fill. Land plain min-fill in round 2; revisit weighted variant only if a paper-config cell DNFs.
