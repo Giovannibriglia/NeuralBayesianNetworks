@@ -886,6 +886,15 @@ def _baseline_posterior_for_query(
         # PR #14's smoke parquet.  pomegranate is structurally excluded
         # from continuous families via ``_NOT_APPLICABLE`` so only
         # pgmpy reaches this branch in practice.
+        #
+        # Sample-budget parity: use the larger of ``n_samples`` (200
+        # default) and ``n_lw_samples`` (4000 in smoke) so pgmpy's
+        # closed-form posterior is sampled at the same density as
+        # nbn_lw's.  Without this, pgmpy's W₁ averaged over the query
+        # battery shows ≈4× higher MC noise than nbn_lw on identical
+        # SCMs — making the closed-form-exact baseline look worse
+        # than the MC approximation, which is misleading on the figure.
+        budget = max(n_samples, n_lw_samples)
         try:
             samples = adapter.query_batch_samples(
                 Query(
@@ -893,7 +902,7 @@ def _baseline_posterior_for_query(
                     evidence={k: v.reshape(1) for k, v in ev_row.items()},
                     kind="marginal",
                 ),
-                n_samples=n_samples,
+                n_samples=budget,
             )
         except Exception:
             return None
