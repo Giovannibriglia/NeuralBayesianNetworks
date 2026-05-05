@@ -20,6 +20,7 @@ from typing import Dict, List
 import torch
 
 from nbn.core.factor import LogFactor
+from nbn.inference._elimination_order import get_order
 from nbn.inference.base import InferenceEngine
 
 logger = logging.getLogger(__name__)
@@ -76,16 +77,44 @@ class TensorVariableElimination(InferenceEngine):
         self._factor_cache[id(model)] = factors
         return factors
 
-    def _plan(self, model, target: str, evidence_keys: tuple[str, ...]) -> list[str]:
-        key = (id(model), target, evidence_keys)
+    def _plan(
+        self,
+        model,
+        target: str,
+        evidence_keys: tuple[str, ...],
+        *,
+        order: str = "min_fill",
+    ) -> list[str]:
+        """Compute (or look up cached) elimination plan.
+
+        Parameters
+        ----------
+        order:
+            Strategy name dispatched through
+            :mod:`nbn.inference._elimination_order`.  Default
+            ``'min_fill'`` (Kjaerulff 1990 / Koller & Friedman §9.4.3) —
+            the v0.6b round-2 fix for the v0.5b §A.5 OOM.  Pass
+            ``'topological'`` for the legacy naive ordering kept for
+            comparability and as a fallback.
+
+        Notes
+        -----
+        Cache key includes ``order`` so different strategies cache
+        independently; the same ``(model, target, evidence_keys)``
+        query under two orders does *not* invalidate either entry.
+        """
+        key = (id(model), target, evidence_keys, order)
         cached = self._plan_cache.get(key)
         if cached is not None:
             return cached
-        all_vars = list(model.dag.topological_order())
-        ev_set = set(evidence_keys)
-        order = [v for v in all_vars if v != target and v not in ev_set]
-        self._plan_cache[key] = order
-        return order
+        elimination_order = get_order(
+            order,
+            model.dag.networkx_graph,
+            targets=[target],
+            evidence=list(evidence_keys),
+        )
+        self._plan_cache[key] = elimination_order
+        return elimination_order
 
     # ------------------------------------------------------------------ #
     # Single-row query (kept identical to the v0.2 path)
@@ -96,6 +125,8 @@ class TensorVariableElimination(InferenceEngine):
         model,
         targets: List[str],
         evidence: Dict[str, torch.Tensor] | None = None,
+        *,
+        order: str = "min_fill",
         **kwargs,
     ) -> torch.Tensor:
         if len(targets) != 1:
@@ -119,7 +150,9 @@ class TensorVariableElimination(InferenceEngine):
                     f = f.condition({ev_node: ev_val})
             conditioned.append(f)
 
-        to_eliminate = self._plan(model, target, tuple(sorted(ev_int.keys())))
+        to_eliminate = self._plan(
+            model, target, tuple(sorted(ev_int.keys())), order=order,
+        )
         for var in to_eliminate:
             relevant = [f for f in conditioned if var in f.variables]
             rest = [f for f in conditioned if var not in f.variables]
@@ -164,6 +197,8 @@ class TensorVariableElimination(InferenceEngine):
         model,
         targets: List[str],
         evidence: Dict[str, torch.Tensor],
+        *,
+        order: str = "min_fill",
         **kwargs,
     ) -> torch.Tensor:
         """Vectorised batched VE.
@@ -211,7 +246,9 @@ class TensorVariableElimination(InferenceEngine):
             )
             conditioned.append((lv, vars_, has_b))
 
-        to_eliminate = self._plan(model, target, tuple(sorted(ev_norm.keys())))
+        to_eliminate = self._plan(
+            model, target, tuple(sorted(ev_norm.keys())), order=order,
+        )
         for var in to_eliminate:
             relevant = [f for f in conditioned if var in f[1]]
             rest = [f for f in conditioned if var not in f[1]]
