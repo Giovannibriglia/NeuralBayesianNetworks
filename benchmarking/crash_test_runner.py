@@ -65,6 +65,24 @@ _NOT_APPLICABLE: set[tuple[str, str]] = {
 }
 
 
+# v0.5c bug 2: baselines that produce a valid throughput measurement but
+# cannot meaningfully report posterior-quality accuracy because they do
+# not condition on evidence at the BN level.  The speed measurement
+# runs normally; only the accuracy row is gated.
+#
+# GPyTorch SVGPs return ``posterior.sample(target_inputs)`` which is the
+# *prior* marginal at the target — independent of ``q.evidence``.  Pre-fix,
+# this scored as W₁ ≈ 1.0 flat-line on continuous_lg / continuous_nongauss
+# (same signature as the v0.5b round-1 LW-uniform-weights bug we
+# eliminated, but here it is the baseline's own structural limit, not a
+# runner bug).  Plotting that line would mislead a reader; reporting
+# ``not_supported`` for accuracy is honest.
+_ACCURACY_NOT_APPLICABLE: set[tuple[str, str]] = {
+    ("continuous_lg", "gpytorch"),
+    ("continuous_nongauss", "gpytorch"),
+}
+
+
 def _not_applicable_row(
     family: str, n_nodes: int, seed: int, baseline: str,
 ) -> List[CellResult]:
@@ -228,16 +246,32 @@ def _inference_cell(
     # (or filtering leaves too few effective samples), emit a
     # ``no_result`` status row rather than NaN-with-ok (which the
     # acceptance gate forbids).
-    accuracy = _compute_inference_accuracy(
-        bn, baseline, queries_batch, family,
-        n_lw_samples=cfg.nbn_lw_n_samples,
-    )
     rows: list[CellResult] = [
         CellResult(
             family=family, n_nodes=n, seed=seed, baseline=baseline,
             metric="total_time_s", value=float(total_time_s),
         ),
     ]
+    # v0.5c bug 2: gate accuracy for baselines that are speed-valid but
+    # cannot condition on evidence at the BN level (currently gpytorch
+    # on continuous families).  Speed measurement above already ran;
+    # accuracy is honest ``not_supported`` rather than a misleading
+    # W₁ ≈ 1.0 flat-line that looks like a real benchmark result.
+    if (family, baseline) in _ACCURACY_NOT_APPLICABLE:
+        rows.append(CellResult(
+            family=family, n_nodes=n, seed=seed, baseline=baseline,
+            metric="accuracy", value=float("nan"), status="not_supported",
+            extra={"error_msg": (
+                f"{baseline} cannot condition on evidence at the BN level; "
+                f"accuracy comparison is not meaningful"
+            )},
+        ))
+        return rows
+
+    accuracy = _compute_inference_accuracy(
+        bn, baseline, queries_batch, family,
+        n_lw_samples=cfg.nbn_lw_n_samples,
+    )
     if isinstance(accuracy, float) and accuracy == accuracy:  # not NaN
         rows.append(CellResult(
             family=family, n_nodes=n, seed=seed, baseline=baseline,
@@ -743,16 +777,27 @@ def _filter_ground_truth(
     # v0.6a: name → column lookups go through ``bn.column_index`` (the
     # canonical topological-sort schema established in
     # ``make_synthetic_bn``).  See _compute_inference_accuracy.
-    mask = torch.ones(samples.shape[0], dtype=torch.bool)
+    # v0.5c bug 1: ``mask`` and per-row arithmetic must live on the
+    # samples tensor's device.  When ``bn.ground_truth_samples`` is on
+    # cuda (hybrid family during a cuda smoke run) and ``q.evidence``
+    # values arrive on cpu (the runner's default for continuous
+    # evidence literals built in ``_build_query_batch``), the previous
+    # ``mask &= cuda_bool`` raised ``RuntimeError: Expected all tensors
+    # to be on the same device``.  Two cells in PR #14's cuda smoke
+    # were classified as ``status='error'`` because of this.
+    mask = torch.ones(
+        samples.shape[0], dtype=torch.bool, device=samples.device,
+    )
     for node, val in evidence_row.items():
         idx = bn.column_index(node)
         col = samples[:, idx]
-        v = float(val.item() if isinstance(val, torch.Tensor) else val)
         kind = bn.variable_specs[node][0]
+        raw = val.item() if isinstance(val, torch.Tensor) else val
         if kind == "discrete":
-            mask &= (col.long() == int(v))
+            mask &= (col.long() == int(raw))
         else:
-            sigma = float(col.std().clamp_min(1e-3).item())
+            v = torch.as_tensor(raw, device=col.device, dtype=col.dtype)
+            sigma = col.std().clamp_min(1e-3)
             mask &= (col - v).abs() < eps_factor * sigma
     if int(mask.sum().item()) < n_eff_min:
         return None
@@ -824,14 +869,46 @@ def _baseline_posterior_for_query(
         adapter.fit(problem)
         if hasattr(adapter, "kind") and adapter.kind == "unsupported":
             return None
+        if target_kind == "discrete":
+            try:
+                out = adapter.query(
+                    Query(targets=(target,), evidence=ev_row, kind="marginal"),
+                )
+            except Exception:
+                return None
+            return out.detach().cpu().float().reshape(-1)
+        # v0.5c bug 3: continuous-target path goes through
+        # ``query_batch_samples`` (pgmpy's closed-form Gaussian
+        # posterior → reparam samples), matching the gpytorch branch
+        # below.  Pre-fix, this branch hard-returned ``None`` for
+        # ``target_kind != "discrete"`` and every pgmpy continuous_lg
+        # accuracy cell skipped → ``no_result`` on all 3 cells in
+        # PR #14's smoke parquet.  pomegranate is structurally excluded
+        # from continuous families via ``_NOT_APPLICABLE`` so only
+        # pgmpy reaches this branch in practice.
+        #
+        # Sample-budget parity: use the larger of ``n_samples`` (200
+        # default) and ``n_lw_samples`` (4000 in smoke) so pgmpy's
+        # closed-form posterior is sampled at the same density as
+        # nbn_lw's.  Without this, pgmpy's W₁ averaged over the query
+        # battery shows ≈4× higher MC noise than nbn_lw on identical
+        # SCMs — making the closed-form-exact baseline look worse
+        # than the MC approximation, which is misleading on the figure.
+        budget = max(n_samples, n_lw_samples)
         try:
-            out = adapter.query(Query(targets=(target,), evidence=ev_row, kind="marginal"))
+            samples = adapter.query_batch_samples(
+                Query(
+                    targets=(target,),
+                    evidence={k: v.reshape(1) for k, v in ev_row.items()},
+                    kind="marginal",
+                ),
+                n_samples=budget,
+            )
         except Exception:
             return None
-        out = out.detach().cpu().float().reshape(-1)
-        if target_kind == "discrete":
-            return out
-        return None
+        if samples.shape[0] == 0 or torch.isnan(samples).any():
+            return None
+        return samples.detach().cpu().float().reshape(-1)
     if baseline == "gpytorch":
         from benchmarking.baselines import get_adapter
         from benchmarking.domains.base import BenchmarkProblem, Query
