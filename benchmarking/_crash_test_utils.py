@@ -85,6 +85,7 @@ class CrashTestConfig:
 
     # Inference specific
     nbn_batch_size: int = 0              # 0 means 'use n_queries_per_cell'
+    nbn_lw_n_samples: int = 512          # per-query posterior budget for LW
 
     device: str = "auto"
 
@@ -112,6 +113,7 @@ class CrashTestConfig:
             fit_epochs=int(d.get("fit_epochs", 50)),
             batch_size=int(d.get("batch_size", 1024)),
             nbn_batch_size=int(d.get("nbn_batch_size", 0)),
+            nbn_lw_n_samples=int(d.get("nbn_lw_n_samples", 512)),
         )
 
     @property

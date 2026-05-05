@@ -207,7 +207,9 @@ def _inference_cell(
     queries_batch = _build_query_batch(bn, B=B, seed=seed)
 
     if baseline.startswith("nbn"):
-        total_time_s = _time_nbn_inference(bn, baseline, queries_batch)
+        total_time_s = _time_nbn_inference(
+            bn, baseline, queries_batch, n_lw_samples=cfg.nbn_lw_n_samples,
+        )
     elif baseline in {"pgmpy", "pomegranate", "gpytorch", "pyro"}:
         total_time_s = _time_loop_inference(bn, baseline, queries_batch)
     else:
@@ -221,7 +223,10 @@ def _inference_cell(
     # (or filtering leaves too few effective samples), emit a
     # ``no_result`` status row rather than NaN-with-ok (which the
     # acceptance gate forbids).
-    accuracy = _compute_inference_accuracy(bn, baseline, queries_batch, family)
+    accuracy = _compute_inference_accuracy(
+        bn, baseline, queries_batch, family,
+        n_lw_samples=cfg.nbn_lw_n_samples,
+    )
     rows: list[CellResult] = [
         CellResult(
             family=family, n_nodes=n, seed=seed, baseline=baseline,
@@ -432,7 +437,9 @@ def _build_query_batch(bn: SyntheticBN, *, B: int, seed: int):
     return Query(targets=(target,), evidence=evidence, kind="marginal")
 
 
-def _time_nbn_inference(bn: SyntheticBN, baseline: str, q) -> float:
+def _time_nbn_inference(
+    bn: SyntheticBN, baseline: str, q, *, n_lw_samples: int = 512,
+) -> float:
     """One batched call per timed run; report median total time."""
     from nbn.inference.hybrid import HybridRouter
     from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
@@ -440,7 +447,7 @@ def _time_nbn_inference(bn: SyntheticBN, baseline: str, q) -> float:
     if baseline == "nbn_ve":
         eng = TensorVariableElimination()
     elif baseline == "nbn_lw":
-        eng = LikelihoodWeightingEngine(n_samples=512)
+        eng = LikelihoodWeightingEngine(n_samples=n_lw_samples)
     elif baseline == "nbn_hybrid":
         eng = HybridRouter()
     else:
@@ -587,6 +594,7 @@ def _render_two_figures(rows: List[CellResult], cfg: CrashTestConfig) -> None:
 def _compute_inference_accuracy(
     bn: SyntheticBN, baseline: str, q, family: str,
     *, n_samples: int = 200, eps_factor: float = 0.50, n_eff_min: int = 10,
+    n_lw_samples: int = 512,
 ) -> float:
     """Distributional accuracy: posterior samples vs filtered ground truth.
 
@@ -615,7 +623,8 @@ def _compute_inference_accuracy(
             continue
         try:
             pred = _baseline_posterior_for_query(
-                bn, baseline, target, ev_row, target_kind, n_samples=n_samples,
+                bn, baseline, target, ev_row, target_kind,
+                n_samples=n_samples, n_lw_samples=n_lw_samples,
             )
         except Exception:
             continue
@@ -689,6 +698,7 @@ def _filter_ground_truth(
 def _baseline_posterior_for_query(
     bn: SyntheticBN, baseline: str, target: str,
     ev_row: Dict[str, torch.Tensor], target_kind: str, *, n_samples: int,
+    n_lw_samples: int = 512,
 ) -> torch.Tensor | None:
     """Return posterior samples (continuous) or probability vector (discrete)
     for a single query, per baseline."""
@@ -699,7 +709,7 @@ def _baseline_posterior_for_query(
         from nbn.inference.tensor_ve import TensorVariableElimination
         eng_map = {
             "nbn_ve": TensorVariableElimination(),
-            "nbn_lw": LikelihoodWeightingEngine(n_samples=512),
+            "nbn_lw": LikelihoodWeightingEngine(n_samples=n_lw_samples),
             "nbn_hybrid": HybridRouter(),
         }
         eng = eng_map.get(baseline)
