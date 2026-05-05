@@ -1,9 +1,0 @@
-domain: synthetic_hybrid
-problems: [hybrid_50]
-n_train: 2000
-n_test: 500
-seed: 0
-devices: [cpu]
-baselines: [nbn]
-query_kinds: [marginal, conditional]
-output: results/continuous_small.parquet

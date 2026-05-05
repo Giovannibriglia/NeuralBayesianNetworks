@@ -1,0 +1,20 @@
+# Paper-grade config for parameter learning. Run locally; ~30 min on CPU,
+# faster on GPU.
+mode: parameter_learning
+families: [discrete, continuous_lg, continuous_nongauss, hybrid]
+n_nodes: [10, 50, 100, 500, 1000, 5000]
+n_seeds: 5
+n_queries_per_cell: 1024
+n_train: 10000
+n_test: 2000
+n_reference: 50000
+edge_density: 0.20
+max_in_degree: 4
+cardinality: 4
+fraction_continuous: 0.5
+fit_epochs: 200
+batch_size: 4096
+baselines: [nbn, pgmpy, pomegranate, gpytorch, pyro]
+per_cell_timeout_s: 600
+output_dir: benchmarking/figures
+output_prefix: parameter_learning_paper

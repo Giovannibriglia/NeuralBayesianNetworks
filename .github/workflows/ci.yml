@@ -26,21 +26,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Cache bnlearn datasets
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/nbn
-          key: nbn-cache-${{ hashFiles('benchmarking/domains/bnlearn.py') }}
-          restore-keys: |
-            nbn-cache-
-
       - name: Install
         run: |
           python -m pip install --upgrade pip
           pip install --prefer-binary -e ".[dev,bench,neural,gp,mcmc]"
 
       - name: Lint
-        run: ruff check nbn/ benchmarking/ tests/ examples/
+        run: ruff check nbn/ benchmarking/ tests/
 
       - name: Type-check core
         run: mypy nbn/core nbn/mechanisms
@@ -48,13 +40,21 @@ jobs:
       - name: Test
         run: pytest -n auto --cov=nbn --cov-report=xml -m "not gpu and not slow"
 
-      - name: Smoke crash test (parameter learning + serial inference)
-        run: python examples/crash_test.py --smoke
-        continue-on-error: true
+      - name: Parameter-learning smoke
+        run: nbn-bench param-learning --config benchmarking/configs/parameter_learning_smoke.yaml
+        timeout-minutes: 2
 
-      - name: Smoke crash test (bnlearn batched inference throughput)
-        run: python examples/crash_test_inference_bnlearn.py --smoke --no-figures
-        continue-on-error: true
+      - name: Inference smoke
+        run: nbn-bench inference --config benchmarking/configs/inference_smoke.yaml
+        timeout-minutes: 2
+
+      - name: Upload smoke figures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-figures-py${{ matrix.python-version }}
+          path: benchmarking/figures/*.png
+          if-no-files-found: ignore
 
       - uses: codecov/codecov-action@v4
         if: matrix.python-version == '3.11'

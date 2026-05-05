@@ -16,7 +16,7 @@ pomegranate v1.1.x has a bug in ``predict_proba`` when evidence is present
 (internally it indexes a float-typed masked-tensor value as if it were a
 long, raising ``IndexError: tensors used as indices must be long, ...``).
 Marginal queries (no evidence) are unaffected. The
-``examples/crash_test_inference_bnlearn.py`` script therefore excludes pomegranate
+v0.5 inference crash test therefore excludes pomegranate
 from its conditional-query lineup.
 """
 from __future__ import annotations

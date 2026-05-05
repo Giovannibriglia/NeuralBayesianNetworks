@@ -4,10 +4,10 @@ Prior to commit ``a980aab``, ``nbn/sampling/ancestral.py``'s non-root
 branch materialised ``mech.sample(pa_tensor, n=n)`` of shape
 ``[n, n, D]`` and then took ``samp[0]``, which is *n* samples all
 conditioned on ``pa_tensor[0]`` — silently dropping per-row parent
-variation.  The bug was invisible to bnlearn-based tests because they
-use external ``.bif`` data rather than ``model.sample(...)`` output;
-the synthetic-BN harness in v0.4 exposed it because every metric is
-defined relative to data drawn from a known generative process.
+variation.  The bug was invisible to v0.3-era tests because they used
+external data rather than ``model.sample(...)`` output; the synthetic-BN
+harness in v0.4 exposed it because every metric is defined relative to
+data drawn from a known generative process.
 
 These two tests would have flagged the bug pre-merge in v0.3 if they
 had existed; they are added now so the bug class stays regressable.

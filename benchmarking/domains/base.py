@@ -1,9 +1,9 @@
 """Plugin contract for benchmark domains.
 
-A *domain* is one family of test problems (bnlearn discrete, hybrid synthetic,
-UCI continuous, custom user-supplied DAG+data, …).  Implementing a new
-domain only requires subclassing ``BenchmarkDomain`` and producing
-``BenchmarkProblem`` instances on demand.
+A *domain* is one family of test problems.  v0.5 ships a single
+synthetic-BN generator (``benchmarking.synthetic.make_synthetic_bn``);
+these types are kept so adapters and user code can construct
+``BenchmarkProblem`` / ``Query`` instances directly.
 """
 from __future__ import annotations
 
@@ -18,9 +18,10 @@ import torch
 class GroundTruth:
     """Reference answers for a query battery.
 
-    Either *analytic* (when the true BN is known, e.g. a bnlearn .bif file
-    yields exact CPTs and pgmpy's VariableElimination provides the truth)
-    or *empirical* (Monte Carlo from the true generative process).
+    Either *analytic* (when the true BN is known and an exact engine
+    such as pgmpy's ``VariableElimination`` provides the truth) or
+    *empirical* (Monte Carlo from the true generative process —
+    ``SyntheticBN.ground_truth_samples``).
     """
 
     marginals: dict[str, torch.Tensor] = field(default_factory=dict)
