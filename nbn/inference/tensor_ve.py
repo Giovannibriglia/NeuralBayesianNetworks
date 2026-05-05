@@ -20,6 +20,7 @@ from typing import Dict, List
 import torch
 
 from nbn.core.factor import LogFactor
+from nbn.inference._elimination_order import get_order
 from nbn.inference.base import InferenceEngine
 
 logger = logging.getLogger(__name__)
@@ -76,16 +77,44 @@ class TensorVariableElimination(InferenceEngine):
         self._factor_cache[id(model)] = factors
         return factors
 
-    def _plan(self, model, target: str, evidence_keys: tuple[str, ...]) -> list[str]:
-        key = (id(model), target, evidence_keys)
+    def _plan(
+        self,
+        model,
+        target: str,
+        evidence_keys: tuple[str, ...],
+        *,
+        order: str = "min_fill",
+    ) -> list[str]:
+        """Compute (or look up cached) elimination plan.
+
+        Parameters
+        ----------
+        order:
+            Strategy name dispatched through
+            :mod:`nbn.inference._elimination_order`.  Default
+            ``'min_fill'`` (Kjaerulff 1990 / Koller & Friedman §9.4.3) —
+            the v0.6b round-2 fix for the v0.5b §A.5 OOM.  Pass
+            ``'topological'`` for the legacy naive ordering kept for
+            comparability and as a fallback.
+
+        Notes
+        -----
+        Cache key includes ``order`` so different strategies cache
+        independently; the same ``(model, target, evidence_keys)``
+        query under two orders does *not* invalidate either entry.
+        """
+        key = (id(model), target, evidence_keys, order)
         cached = self._plan_cache.get(key)
         if cached is not None:
             return cached
-        all_vars = list(model.dag.topological_order())
-        ev_set = set(evidence_keys)
-        order = [v for v in all_vars if v != target and v not in ev_set]
-        self._plan_cache[key] = order
-        return order
+        elimination_order = get_order(
+            order,
+            model.dag.networkx_graph,
+            targets=[target],
+            evidence=list(evidence_keys),
+        )
+        self._plan_cache[key] = elimination_order
+        return elimination_order
 
     # ------------------------------------------------------------------ #
     # Single-row query (kept identical to the v0.2 path)
@@ -96,6 +125,8 @@ class TensorVariableElimination(InferenceEngine):
         model,
         targets: List[str],
         evidence: Dict[str, torch.Tensor] | None = None,
+        *,
+        order: str = "min_fill",
         **kwargs,
     ) -> torch.Tensor:
         if len(targets) != 1:
@@ -119,7 +150,9 @@ class TensorVariableElimination(InferenceEngine):
                     f = f.condition({ev_node: ev_val})
             conditioned.append(f)
 
-        to_eliminate = self._plan(model, target, tuple(sorted(ev_int.keys())))
+        to_eliminate = self._plan(
+            model, target, tuple(sorted(ev_int.keys())), order=order,
+        )
         for var in to_eliminate:
             relevant = [f for f in conditioned if var in f.variables]
             rest = [f for f in conditioned if var not in f.variables]
@@ -164,6 +197,8 @@ class TensorVariableElimination(InferenceEngine):
         model,
         targets: List[str],
         evidence: Dict[str, torch.Tensor],
+        *,
+        order: str = "min_fill",
         **kwargs,
     ) -> torch.Tensor:
         """Vectorised batched VE.
@@ -211,7 +246,43 @@ class TensorVariableElimination(InferenceEngine):
             )
             conditioned.append((lv, vars_, has_b))
 
-        to_eliminate = self._plan(model, target, tuple(sorted(ev_norm.keys())))
+        to_eliminate = self._plan(
+            model, target, tuple(sorted(ev_norm.keys())), order=order,
+        )
+
+        # v0.6b round-2: pre-allocation memory-budget guard.  Estimate
+        # the peak intermediate-factor size by walking the plan
+        # algebraically (same algebra as the diagnostic in
+        # ``benchmarking/diagnostics/ve_profile_n20.py``).  Raise a
+        # clean ``OutOfMemoryError`` if the estimate exceeds 90% of the
+        # available cuda memory — better than letting the cuda
+        # allocator partially-OOM mid-elimination, which fragments the
+        # heap and surfaces an opaque error.  The runner's
+        # ``run_with_guard`` (v0.5b round-2) classifies this as
+        # ``status='oom'`` so paper-config cells fail cleanly with a
+        # DNF triangle rather than crashing the harness.
+        if device.type == "cuda":
+            estimated_peak = _estimate_peak_bytes(
+                to_eliminate, factors,
+                evidence_keys=tuple(sorted(ev_norm.keys())),
+                B=B,
+            )
+            try:
+                free_bytes, _total_bytes = torch.cuda.mem_get_info(device)
+            except RuntimeError:
+                free_bytes = None
+            if free_bytes is not None and estimated_peak > 0.9 * free_bytes:
+                raise torch.cuda.OutOfMemoryError(
+                    f"TensorVariableElimination: query out of memory "
+                    f"pre-allocation guard — plan would need "
+                    f"~{estimated_peak / 1024 ** 3:.2f} GiB peak "
+                    f"intermediate factor at order={order!r}, but only "
+                    f"{free_bytes / 1024 ** 3:.2f} GiB is free on "
+                    f"{device}.  Query rejected; try a coarser query "
+                    f"(fewer evidence variables) or a different "
+                    f"elimination order.",
+                )
+
         for var in to_eliminate:
             relevant = [f for f in conditioned if var in f[1]]
             rest = [f for f in conditioned if var not in f[1]]
@@ -254,6 +325,67 @@ class TensorVariableElimination(InferenceEngine):
             prod_lv = prod_lv.unsqueeze(0).expand(B, *prod_lv.shape)
         # prod_lv shape: [B, K]
         return torch.softmax(prod_lv, dim=-1).to(device)
+
+
+# ---------------------------------------------------------------------- #
+# Memory-budget estimator (v0.6b round-2)
+# ---------------------------------------------------------------------- #
+
+
+def _estimate_peak_bytes(
+    plan: list[str],
+    factors: Dict[str, LogFactor],
+    *,
+    evidence_keys: tuple[str, ...],
+    B: int,
+    dtype_bytes: int = 4,
+) -> int:
+    """Predict the peak intermediate-factor size in bytes.
+
+    Walks the elimination ``plan`` algebraically — the same algebra as
+    the inner loop of :meth:`TensorVariableElimination.query_batch` and
+    of the diagnostic in
+    ``benchmarking/diagnostics/ve_profile_n20.py::_walk_elimination_shapes``,
+    but tracks only ``(scope_set, has_b, cardinalities)`` triples and
+    never allocates a tensor.
+
+    Returns an upper bound on the peak: the actual realised peak may be
+    smaller because PyTorch's broadcasting can keep some operand axes
+    at size 1 instead of materialising the full union scope (the
+    round-1 diagnostic measured a 16:1 algebraic-to-realised ratio on
+    the naive plan; for min-fill the ratio is closer to 1:1 because
+    union scopes are smaller).
+    """
+    ev_set = set(evidence_keys)
+    state: list[tuple[set[str], bool, Dict[str, int]]] = []
+    for f in factors.values():
+        # _condition_factor_batched drops evidence vars from the scope
+        # and prepends a B-axis if any evidence touched the factor.
+        scope: set[str] = set(f.variables) - ev_set
+        has_b = any(v in ev_set for v in f.variables)
+        state.append((scope, has_b, dict(f.cardinalities)))
+
+    peak = 0
+    for var in plan:
+        relevant = [s for s in state if var in s[0]]
+        rest = [s for s in state if var not in s[0]]
+        if not relevant:
+            continue
+        union_scope: set[str] = set().union(*(s[0] for s in relevant))
+        prod_has_b = any(s[1] for s in relevant)
+        cards: Dict[str, int] = {}
+        for s in relevant:
+            cards.update(s[2])
+        elements = 1
+        for v in union_scope:
+            elements *= cards.get(v, 1)
+        if prod_has_b:
+            elements *= B
+        peak = max(peak, elements * dtype_bytes)
+        # Marginalise: drop var from the surviving factor.
+        union_scope.discard(var)
+        state = rest + [(union_scope, prod_has_b, cards)]
+    return peak
 
 
 # ---------------------------------------------------------------------- #

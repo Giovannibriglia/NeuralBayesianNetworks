@@ -1,0 +1,1219 @@
+{
+  "config": {
+    "n_nodes": 20,
+    "cardinality": 4,
+    "max_in_degree": 4,
+    "B": 16,
+    "device": "cpu",
+    "seed": 0,
+    "target": "X2",
+    "evidence_names": [
+      "X0",
+      "X10"
+    ],
+    "edge_density": 0.2
+  },
+  "plan": {
+    "type": "topological elimination order (naive)",
+    "len": 17,
+    "first_5": [
+      "X1",
+      "X4",
+      "X3",
+      "X6",
+      "X5"
+    ],
+    "last_5": [
+      "X14",
+      "X17",
+      "X19",
+      "X9",
+      "X16"
+    ],
+    "full": [
+      "X1",
+      "X4",
+      "X3",
+      "X6",
+      "X5",
+      "X11",
+      "X7",
+      "X18",
+      "X13",
+      "X12",
+      "X8",
+      "X15",
+      "X14",
+      "X17",
+      "X19",
+      "X9",
+      "X16"
+    ]
+  },
+  "algebraic_shape_walk": {
+    "summary": {
+      "total_steps": 17,
+      "peak_step_index": 3,
+      "peak_var_eliminated": "X6",
+      "peak_product_scope_size": 14,
+      "peak_product_mib": 16384.0,
+      "peak_product_has_b": true,
+      "K": 4
+    },
+    "steps": [
+      {
+        "step": 0,
+        "var": "X1",
+        "n_relevant_factors": 6,
+        "product_scope_size": 12,
+        "product_scope_vars": [
+          "X0",
+          "X1",
+          "X10",
+          "X12",
+          "X13",
+          "X15",
+          "X18",
+          "X19",
+          "X2",
+          "X5",
+          "X6",
+          "X7"
+        ],
+        "product_has_b": true,
+        "product_elements": 268435456,
+        "product_mib": 1024.0
+      },
+      {
+        "step": 1,
+        "var": "X4",
+        "n_relevant_factors": 4,
+        "product_scope_size": 10,
+        "product_scope_vars": [
+          "X0",
+          "X11",
+          "X12",
+          "X13",
+          "X14",
+          "X3",
+          "X4",
+          "X6",
+          "X7",
+          "X8"
+        ],
+        "product_has_b": true,
+        "product_elements": 16777216,
+        "product_mib": 64.0
+      },
+      {
+        "step": 2,
+        "var": "X3",
+        "n_relevant_factors": 5,
+        "product_scope_size": 11,
+        "product_scope_vars": [
+          "X0",
+          "X11",
+          "X12",
+          "X13",
+          "X14",
+          "X2",
+          "X3",
+          "X5",
+          "X6",
+          "X7",
+          "X8"
+        ],
+        "product_has_b": true,
+        "product_elements": 67108864,
+        "product_mib": 256.0
+      },
+      {
+        "step": 3,
+        "var": "X6",
+        "n_relevant_factors": 3,
+        "product_scope_size": 14,
+        "product_scope_vars": [
+          "X0",
+          "X10",
+          "X11",
+          "X12",
+          "X13",
+          "X14",
+          "X15",
+          "X18",
+          "X19",
+          "X2",
+          "X5",
+          "X6",
+          "X7",
+          "X8"
+        ],
+        "product_has_b": true,
+        "product_elements": 4294967296,
+        "product_mib": 16384.0
+      },
+      {
+        "step": 4,
+        "var": "X5",
+        "n_relevant_factors": 1,
+        "product_scope_size": 13,
+        "product_scope_vars": [
+          "X0",
+          "X10",
+          "X11",
+          "X12",
+          "X13",
+          "X14",
+          "X15",
+          "X18",
+          "X19",
+          "X2",
+          "X5",
+          "X7",
+          "X8"
+        ],
+        "product_has_b": true,
+        "product_elements": 1073741824,
+        "product_mib": 4096.0
+      },
+      {
+        "step": 5,
+        "var": "X11",
+        "n_relevant_factors": 1,
+        "product_scope_size": 12,
+        "product_scope_vars": [
+          "X0",
+          "X10",
+          "X11",
+          "X12",
+          "X13",
+          "X14",
+          "X15",
+          "X18",
+          "X19",
+          "X2",
+          "X7",
+          "X8"
+        ],
+        "product_has_b": true,
+        "product_elements": 268435456,
+        "product_mib": 1024.0
+      },
+      {
+        "step": 6,
+        "var": "X7",
+        "n_relevant_factors": 2,
+        "product_scope_size": 12,
+        "product_scope_vars": [
+          "X0",
+          "X10",
+          "X12",
+          "X13",
+          "X14",
+          "X15",
+          "X18",
+          "X19",
+          "X2",
+          "X7",
+          "X8",
+          "X9"
+        ],
+        "product_has_b": true,
+        "product_elements": 268435456,
+        "product_mib": 1024.0
+      },
+      {
+        "step": 7,
+        "var": "X18",
+        "n_relevant_factors": 1,
+        "product_scope_size": 11,
+        "product_scope_vars": [
+          "X0",
+          "X10",
+          "X12",
+          "X13",
+          "X14",
+          "X15",
+          "X18",
+          "X19",
+          "X2",
+          "X8",
+          "X9"
+        ],
+        "product_has_b": true,
+        "product_elements": 67108864,
+        "product_mib": 256.0
+      },
+      {
+        "step": 8,
+        "var": "X13",
+        "n_relevant_factors": 2,
+        "product_scope_size": 11,
+        "product_scope_vars": [
+          "X0",
+          "X10",
+          "X12",
+          "X13",
+          "X14",
+          "X15",
+          "X16",
+          "X19",
+          "X2",
+          "X8",
+          "X9"
+        ],
+        "product_has_b": true,
+        "product_elements": 67108864,
+        "product_mib": 256.0
+      },
+      {
+        "step": 9,
+        "var": "X12",
+        "n_relevant_factors": 2,
+        "product_scope_size": 11,
+        "product_scope_vars": [
+          "X0",
+          "X10",
+          "X12",
+          "X14",
+          "X15",
+          "X16",
+          "X17",
+          "X19",
+          "X2",
+          "X8",
+          "X9"
+        ],
+        "product_has_b": true,
+        "product_elements": 67108864,
+        "product_mib": 256.0
+      },
+      {
+        "step": 10,
+        "var": "X8",
+        "n_relevant_factors": 1,
+        "product_scope_size": 10,
+        "product_scope_vars": [
+          "X0",
+          "X10",
+          "X14",
+          "X15",
+          "X16",
+          "X17",
+          "X19",
+          "X2",
+          "X8",
+          "X9"
+        ],
+        "product_has_b": true,
+        "product_elements": 16777216,
+        "product_mib": 64.0
+      },
+      {
+        "step": 11,
+        "var": "X15",
+        "n_relevant_factors": 1,
+        "product_scope_size": 9,
+        "product_scope_vars": [
+          "X0",
+          "X10",
+          "X14",
+          "X15",
+          "X16",
+          "X17",
+          "X19",
+          "X2",
+          "X9"
+        ],
+        "product_has_b": true,
+        "product_elements": 4194304,
+        "product_mib": 16.0
+      },
+      {
+        "step": 12,
+        "var": "X14",
+        "n_relevant_factors": 1,
+        "product_scope_size": 8,
+        "product_scope_vars": [
+          "X0",
+          "X10",
+          "X14",
+          "X16",
+          "X17",
+          "X19",
+          "X2",
+          "X9"
+        ],
+        "product_has_b": true,
+        "product_elements": 1048576,
+        "product_mib": 4.0
+      },
+      {
+        "step": 13,
+        "var": "X17",
+        "n_relevant_factors": 1,
+        "product_scope_size": 7,
+        "product_scope_vars": [
+          "X0",
+          "X10",
+          "X16",
+          "X17",
+          "X19",
+          "X2",
+          "X9"
+        ],
+        "product_has_b": true,
+        "product_elements": 262144,
+        "product_mib": 1.0
+      },
+      {
+        "step": 14,
+        "var": "X19",
+        "n_relevant_factors": 1,
+        "product_scope_size": 6,
+        "product_scope_vars": [
+          "X0",
+          "X10",
+          "X16",
+          "X19",
+          "X2",
+          "X9"
+        ],
+        "product_has_b": true,
+        "product_elements": 65536,
+        "product_mib": 0.25
+      },
+      {
+        "step": 15,
+        "var": "X9",
+        "n_relevant_factors": 1,
+        "product_scope_size": 5,
+        "product_scope_vars": [
+          "X0",
+          "X10",
+          "X16",
+          "X2",
+          "X9"
+        ],
+        "product_has_b": true,
+        "product_elements": 16384,
+        "product_mib": 0.0625
+      },
+      {
+        "step": 16,
+        "var": "X16",
+        "n_relevant_factors": 1,
+        "product_scope_size": 4,
+        "product_scope_vars": [
+          "X0",
+          "X10",
+          "X16",
+          "X2"
+        ],
+        "product_has_b": true,
+        "product_elements": 4096,
+        "product_mib": 0.015625
+      }
+    ]
+  },
+  "min_fill_comparison": {
+    "min_fill_order": [
+      "X15",
+      "X16",
+      "X9",
+      "X11",
+      "X5",
+      "X14",
+      "X19",
+      "X13",
+      "X1",
+      "X12",
+      "X17",
+      "X18",
+      "X3",
+      "X4",
+      "X6",
+      "X7",
+      "X8"
+    ],
+    "validation": {
+      "is_permutation_of_expected": true,
+      "missing_from_order": [],
+      "spurious_in_order": [],
+      "target_in_order": false,
+      "any_evidence_in_order": false,
+      "len_order": 17,
+      "len_expected": 17,
+      "no_duplicates": true
+    },
+    "summary_minfill": {
+      "total_steps": 17,
+      "peak_step_index": 8,
+      "peak_var_eliminated": "X1",
+      "peak_product_scope_size": 11,
+      "peak_product_mib": 256.0,
+      "peak_product_has_b": true,
+      "K": 4
+    },
+    "summary_naive": {
+      "total_steps": 17,
+      "peak_step_index": 3,
+      "peak_var_eliminated": "X6",
+      "peak_product_scope_size": 14,
+      "peak_product_mib": 16384.0,
+      "peak_product_has_b": true,
+      "K": 4
+    },
+    "side_by_side": [
+      {
+        "step": 0,
+        "naive_var": "X1",
+        "naive_scope": 12,
+        "naive_mib": 1024.0,
+        "minfill_var": "X15",
+        "minfill_scope": 5,
+        "minfill_mib": 0.0625
+      },
+      {
+        "step": 1,
+        "naive_var": "X4",
+        "naive_scope": 10,
+        "naive_mib": 64.0,
+        "minfill_var": "X16",
+        "minfill_scope": 3,
+        "minfill_mib": 0.000244140625
+      },
+      {
+        "step": 2,
+        "naive_var": "X3",
+        "naive_scope": 11,
+        "naive_mib": 256.0,
+        "minfill_var": "X9",
+        "minfill_scope": 3,
+        "minfill_mib": 0.000244140625
+      },
+      {
+        "step": 3,
+        "naive_var": "X6",
+        "naive_scope": 14,
+        "naive_mib": 16384.0,
+        "minfill_var": "X11",
+        "minfill_scope": 5,
+        "minfill_mib": 0.00390625
+      },
+      {
+        "step": 4,
+        "naive_var": "X5",
+        "naive_scope": 13,
+        "naive_mib": 4096.0,
+        "minfill_var": "X5",
+        "minfill_scope": 5,
+        "minfill_mib": 0.00390625
+      },
+      {
+        "step": 5,
+        "naive_var": "X11",
+        "naive_scope": 12,
+        "naive_mib": 1024.0,
+        "minfill_var": "X14",
+        "minfill_scope": 5,
+        "minfill_mib": 0.00390625
+      },
+      {
+        "step": 6,
+        "naive_var": "X7",
+        "naive_scope": 12,
+        "naive_mib": 1024.0,
+        "minfill_var": "X19",
+        "minfill_scope": 5,
+        "minfill_mib": 0.00390625
+      },
+      {
+        "step": 7,
+        "naive_var": "X18",
+        "naive_scope": 11,
+        "naive_mib": 256.0,
+        "minfill_var": "X13",
+        "minfill_scope": 7,
+        "minfill_mib": 0.0625
+      },
+      {
+        "step": 8,
+        "naive_var": "X13",
+        "naive_scope": 11,
+        "naive_mib": 256.0,
+        "minfill_var": "X1",
+        "minfill_scope": 11,
+        "minfill_mib": 256.0
+      },
+      {
+        "step": 9,
+        "naive_var": "X12",
+        "naive_scope": 11,
+        "naive_mib": 256.0,
+        "minfill_var": "X12",
+        "minfill_scope": 11,
+        "minfill_mib": 256.0
+      },
+      {
+        "step": 10,
+        "naive_var": "X8",
+        "naive_scope": 10,
+        "naive_mib": 64.0,
+        "minfill_var": "X17",
+        "minfill_scope": 10,
+        "minfill_mib": 64.0
+      },
+      {
+        "step": 11,
+        "naive_var": "X15",
+        "naive_scope": 9,
+        "naive_mib": 16.0,
+        "minfill_var": "X18",
+        "minfill_scope": 9,
+        "minfill_mib": 16.0
+      },
+      {
+        "step": 12,
+        "naive_var": "X14",
+        "naive_scope": 8,
+        "naive_mib": 4.0,
+        "minfill_var": "X3",
+        "minfill_scope": 8,
+        "minfill_mib": 4.0
+      },
+      {
+        "step": 13,
+        "naive_var": "X17",
+        "naive_scope": 7,
+        "naive_mib": 1.0,
+        "minfill_var": "X4",
+        "minfill_scope": 7,
+        "minfill_mib": 1.0
+      },
+      {
+        "step": 14,
+        "naive_var": "X19",
+        "naive_scope": 6,
+        "naive_mib": 0.25,
+        "minfill_var": "X6",
+        "minfill_scope": 6,
+        "minfill_mib": 0.25
+      },
+      {
+        "step": 15,
+        "naive_var": "X9",
+        "naive_scope": 5,
+        "naive_mib": 0.0625,
+        "minfill_var": "X7",
+        "minfill_scope": 5,
+        "minfill_mib": 0.0625
+      },
+      {
+        "step": 16,
+        "naive_var": "X16",
+        "naive_scope": 4,
+        "naive_mib": 0.015625,
+        "minfill_var": "X8",
+        "minfill_scope": 4,
+        "minfill_mib": 0.015625
+      }
+    ],
+    "peak_reduction_factor": 64.0
+  },
+  "real_shape_walk": {
+    "aborted_at_cap": false,
+    "n_steps_completed": 17,
+    "steps": [
+      {
+        "step": 0,
+        "var": "X1",
+        "stage": "after_product_before_marginalise",
+        "shape": [
+          16,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4
+        ],
+        "scope": [
+          "X1",
+          "X2",
+          "X6",
+          "X18",
+          "X5",
+          "X13",
+          "X7",
+          "X15",
+          "X12",
+          "X19"
+        ],
+        "has_b": true,
+        "mib": 64.0,
+        "dtype": "torch.float32",
+        "n_relevant": 6
+      },
+      {
+        "step": 1,
+        "var": "X4",
+        "stage": "after_product_before_marginalise",
+        "shape": [
+          16,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4
+        ],
+        "scope": [
+          "X4",
+          "X11",
+          "X12",
+          "X6",
+          "X7",
+          "X8",
+          "X3",
+          "X13",
+          "X14"
+        ],
+        "has_b": true,
+        "mib": 16.0,
+        "dtype": "torch.float32",
+        "n_relevant": 4
+      },
+      {
+        "step": 2,
+        "var": "X3",
+        "stage": "after_product_before_marginalise",
+        "shape": [
+          16,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4
+        ],
+        "scope": [
+          "X3",
+          "X6",
+          "X2",
+          "X5",
+          "X11",
+          "X12",
+          "X7",
+          "X8",
+          "X13",
+          "X14"
+        ],
+        "has_b": true,
+        "mib": 64.0,
+        "dtype": "torch.float32",
+        "n_relevant": 5
+      },
+      {
+        "step": 3,
+        "var": "X6",
+        "stage": "after_product_before_marginalise",
+        "shape": [
+          16,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4
+        ],
+        "scope": [
+          "X6",
+          "X7",
+          "X2",
+          "X18",
+          "X5",
+          "X13",
+          "X15",
+          "X12",
+          "X19",
+          "X11",
+          "X8",
+          "X14"
+        ],
+        "has_b": true,
+        "mib": 1024.0,
+        "dtype": "torch.float32",
+        "n_relevant": 3
+      },
+      {
+        "step": 4,
+        "var": "X5",
+        "stage": "after_product_before_marginalise",
+        "shape": [
+          16,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4
+        ],
+        "scope": [
+          "X7",
+          "X2",
+          "X18",
+          "X5",
+          "X13",
+          "X15",
+          "X12",
+          "X19",
+          "X11",
+          "X8",
+          "X14"
+        ],
+        "has_b": true,
+        "mib": 256.0,
+        "dtype": "torch.float32",
+        "n_relevant": 1
+      },
+      {
+        "step": 5,
+        "var": "X11",
+        "stage": "after_product_before_marginalise",
+        "shape": [
+          16,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4
+        ],
+        "scope": [
+          "X7",
+          "X2",
+          "X18",
+          "X13",
+          "X15",
+          "X12",
+          "X19",
+          "X11",
+          "X8",
+          "X14"
+        ],
+        "has_b": true,
+        "mib": 64.0,
+        "dtype": "torch.float32",
+        "n_relevant": 1
+      },
+      {
+        "step": 6,
+        "var": "X7",
+        "stage": "after_product_before_marginalise",
+        "shape": [
+          16,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4
+        ],
+        "scope": [
+          "X7",
+          "X8",
+          "X9",
+          "X2",
+          "X18",
+          "X13",
+          "X15",
+          "X12",
+          "X19",
+          "X14"
+        ],
+        "has_b": true,
+        "mib": 64.0,
+        "dtype": "torch.float32",
+        "n_relevant": 2
+      },
+      {
+        "step": 7,
+        "var": "X18",
+        "stage": "after_product_before_marginalise",
+        "shape": [
+          16,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4
+        ],
+        "scope": [
+          "X8",
+          "X9",
+          "X2",
+          "X18",
+          "X13",
+          "X15",
+          "X12",
+          "X19",
+          "X14"
+        ],
+        "has_b": true,
+        "mib": 16.0,
+        "dtype": "torch.float32",
+        "n_relevant": 1
+      },
+      {
+        "step": 8,
+        "var": "X13",
+        "stage": "after_product_before_marginalise",
+        "shape": [
+          16,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4
+        ],
+        "scope": [
+          "X8",
+          "X13",
+          "X16",
+          "X9",
+          "X2",
+          "X15",
+          "X12",
+          "X19",
+          "X14"
+        ],
+        "has_b": true,
+        "mib": 16.0,
+        "dtype": "torch.float32",
+        "n_relevant": 2
+      },
+      {
+        "step": 9,
+        "var": "X12",
+        "stage": "after_product_before_marginalise",
+        "shape": [
+          16,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4
+        ],
+        "scope": [
+          "X12",
+          "X17",
+          "X8",
+          "X16",
+          "X9",
+          "X2",
+          "X15",
+          "X19",
+          "X14"
+        ],
+        "has_b": true,
+        "mib": 16.0,
+        "dtype": "torch.float32",
+        "n_relevant": 2
+      },
+      {
+        "step": 10,
+        "var": "X8",
+        "stage": "after_product_before_marginalise",
+        "shape": [
+          16,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4
+        ],
+        "scope": [
+          "X17",
+          "X8",
+          "X16",
+          "X9",
+          "X2",
+          "X15",
+          "X19",
+          "X14"
+        ],
+        "has_b": true,
+        "mib": 4.0,
+        "dtype": "torch.float32",
+        "n_relevant": 1
+      },
+      {
+        "step": 11,
+        "var": "X15",
+        "stage": "after_product_before_marginalise",
+        "shape": [
+          16,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4
+        ],
+        "scope": [
+          "X17",
+          "X16",
+          "X9",
+          "X2",
+          "X15",
+          "X19",
+          "X14"
+        ],
+        "has_b": true,
+        "mib": 1.0,
+        "dtype": "torch.float32",
+        "n_relevant": 1
+      },
+      {
+        "step": 12,
+        "var": "X14",
+        "stage": "after_product_before_marginalise",
+        "shape": [
+          16,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4
+        ],
+        "scope": [
+          "X17",
+          "X16",
+          "X9",
+          "X2",
+          "X19",
+          "X14"
+        ],
+        "has_b": true,
+        "mib": 0.25,
+        "dtype": "torch.float32",
+        "n_relevant": 1
+      },
+      {
+        "step": 13,
+        "var": "X17",
+        "stage": "after_product_before_marginalise",
+        "shape": [
+          16,
+          4,
+          4,
+          4,
+          4,
+          4
+        ],
+        "scope": [
+          "X17",
+          "X16",
+          "X9",
+          "X2",
+          "X19"
+        ],
+        "has_b": true,
+        "mib": 0.0625,
+        "dtype": "torch.float32",
+        "n_relevant": 1
+      },
+      {
+        "step": 14,
+        "var": "X19",
+        "stage": "after_product_before_marginalise",
+        "shape": [
+          16,
+          4,
+          4,
+          4,
+          4
+        ],
+        "scope": [
+          "X16",
+          "X9",
+          "X2",
+          "X19"
+        ],
+        "has_b": true,
+        "mib": 0.015625,
+        "dtype": "torch.float32",
+        "n_relevant": 1
+      },
+      {
+        "step": 15,
+        "var": "X9",
+        "stage": "after_product_before_marginalise",
+        "shape": [
+          16,
+          4,
+          4,
+          4
+        ],
+        "scope": [
+          "X16",
+          "X9",
+          "X2"
+        ],
+        "has_b": true,
+        "mib": 0.00390625,
+        "dtype": "torch.float32",
+        "n_relevant": 1
+      },
+      {
+        "step": 16,
+        "var": "X16",
+        "stage": "after_product_before_marginalise",
+        "shape": [
+          16,
+          4,
+          4
+        ],
+        "scope": [
+          "X16",
+          "X2"
+        ],
+        "has_b": true,
+        "mib": 0.0009765625,
+        "dtype": "torch.float32",
+        "n_relevant": 1
+      }
+    ]
+  },
+  "torch_profile": {
+    "error": null,
+    "tracemalloc_peak_mib": 62.34178447723389,
+    "peak_event": {
+      "op": "aten::sub",
+      "shape": "[[16, 4, 4, 4, 4, 4, 4, 4, 4, 4], [16, 1, 4, 4, 4, 4, 4, 4, 4, 4], []]",
+      "self_cpu_mib": 32.0,
+      "self_cuda_mib": 0.0,
+      "count": 2
+    },
+    "top_10_by_memory": [
+      {
+        "op": "aten::sub",
+        "shape": "[[16, 4, 4, 4, 4, 4, 4, 4, 4, 4], [16, 1, 4, 4, 4, 4, 4, 4, 4, 4], []]",
+        "self_cpu_mib": 32.0,
+        "self_cuda_mib": 0.0,
+        "count": 2
+      },
+      {
+        "op": "aten::add",
+        "shape": "[[16, 4, 4, 4, 4, 4, 4, 1, 1, 1], [1, 4, 4, 1, 1, 4, 1, 4, 4, 4], []]",
+        "self_cpu_mib": 16.0,
+        "self_cuda_mib": 0.0,
+        "count": 1
+      },
+      {
+        "op": "aten::add",
+        "shape": "[[16, 4, 4, 4, 4, 4, 1, 1, 1, 1], [16, 4, 1, 4, 4, 4, 4, 4, 4, 4], []]",
+        "self_cpu_mib": 16.0,
+        "self_cuda_mib": 0.0,
+        "count": 1
+      },
+      {
+        "op": "aten::amax",
+        "shape": "[[16, 4, 4, 4, 4, 4, 4, 4, 4, 4], [], []]",
+        "self_cpu_mib": 8.0,
+        "self_cuda_mib": 0.0,
+        "count": 2
+      },
+      {
+        "op": "aten::abs",
+        "shape": "[[16, 4, 4, 4, 4, 4, 4, 4, 4], [0]]",
+        "self_cpu_mib": 8.0,
+        "self_cuda_mib": 0.0,
+        "count": 2
+      },
+      {
+        "op": "aten::sum",
+        "shape": "[[16, 4, 4, 4, 4, 4, 4, 4, 4, 4], [], [], [], [0]]",
+        "self_cpu_mib": 8.0,
+        "self_cuda_mib": 0.0,
+        "count": 2
+      },
+      {
+        "op": "aten::sub",
+        "shape": "[[16, 4, 4, 4, 4, 4, 4, 4, 4], [16, 1, 4, 4, 4, 4, 4, 4, 4], []]",
+        "self_cpu_mib": 4.0,
+        "self_cuda_mib": 0.0,
+        "count": 1
+      },
+      {
+        "op": "aten::eq",
+        "shape": "[[16, 4, 4, 4, 4, 4, 4, 4, 4], []]",
+        "self_cpu_mib": 1.9999923706054688,
+        "self_cuda_mib": 0.0,
+        "count": 2
+      },
+      {
+        "op": "aten::amax",
+        "shape": "[[16, 4, 4, 4, 4, 4, 4, 4, 4], [], []]",
+        "self_cpu_mib": 1.0,
+        "self_cuda_mib": 0.0,
+        "count": 1
+      },
+      {
+        "op": "aten::abs",
+        "shape": "[[16, 4, 4, 4, 4, 4, 4, 4], [0]]",
+        "self_cpu_mib": 1.0,
+        "self_cuda_mib": 0.0,
+        "count": 1
+      }
+    ]
+  }
+}

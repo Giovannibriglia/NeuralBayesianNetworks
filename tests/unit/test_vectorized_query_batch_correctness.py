@@ -90,3 +90,51 @@ def test_vectorized_no_evidence_broadcasts() -> None:
     batched = engine.query_batch(model, [target], {})
     assert batched.shape == (1, prior.shape[-1])
     assert torch.allclose(batched[0], prior, atol=1e-6, rtol=1e-6)
+
+
+# ---------------------------------------------------------------------- #
+# v0.6b round-2: plan-independence under min-fill vs topological orders
+# ---------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("order", ["topological", "min_fill"])
+def test_query_batch_correctness_at_n20_under_both_orders(order: str) -> None:
+    """``query_batch``'s output must be numerically identical (within
+    float tolerance) regardless of elimination order.  Tests the v0.6b
+    min-fill ordering at ``n=20`` against the legacy topological
+    baseline; the result of both must match the looped single-row
+    reference.
+
+    ``B=4`` keeps the topological run feasible on cpu memory (the
+    naive plan's peak is ~1 GiB at ``B=16`` on this DAG; ``B=4``
+    drops it to 256 MiB, comfortably absorbed by the sandbox)."""
+    bn = make_synthetic_bn(
+        family="discrete", n_nodes=20, edge_density=0.20,
+        max_in_degree=4, cardinality=4,
+        n_train=200, n_test=50, n_reference=500, seed=0, device="cpu",
+    )
+    model = bn.true_model
+    engine = TensorVariableElimination()
+    target = "X2"
+    B = 4
+    evidence = {
+        "X0":  torch.zeros(B, dtype=torch.long),
+        "X10": torch.zeros(B, dtype=torch.long),
+    }
+
+    # Reference: loop the single-row query (no order kwarg passed —
+    # uses the default min_fill, which is plan-independent for output).
+    loop_rows = [
+        engine.query(model, [target], {k: v[b].reshape(1) for k, v in evidence.items()})
+        for b in range(B)
+    ]
+    loop_result = torch.stack(loop_rows, dim=0)
+
+    batched = engine.query_batch(model, [target], evidence, order=order)
+    assert batched.shape == loop_result.shape, (
+        f"shape mismatch: batched {batched.shape} vs loop {loop_result.shape}"
+    )
+    assert torch.allclose(batched, loop_result, atol=1e-6, rtol=1e-5), (
+        f"order={order!r}: max |Δ| = "
+        f"{(batched - loop_result).abs().max().item():.3e}"
+    )
