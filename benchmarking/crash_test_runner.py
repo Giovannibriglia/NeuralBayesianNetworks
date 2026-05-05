@@ -30,6 +30,7 @@ import statistics
 import time
 from typing import Dict, List
 
+import networkx as nx
 import torch
 
 from benchmarking._crash_test_utils import (
@@ -194,7 +195,14 @@ def _inference_cell(
             n_ref = min(5000, max(1000, cfg.n_reference // 2))
             with torch.no_grad():
                 ref = bn.true_model.sample(n=n_ref)
-            nodes = list(bn.dag.nodes())
+            # PR-B round-4: cat columns in *topological-sort* order to
+            # match ``benchmarking.synthetic.make_synthetic_bn``'s
+            # convention.  The previous ``list(bn.dag.nodes())``
+            # iterated in insertion order, which differs from
+            # ``nx.topological_sort`` for non-trivial DAGs and shuffled
+            # the columns relative to the runner's ``target_idx``
+            # lookup — the source of the W₁≈3 mystery from rounds 2–3.
+            nodes = list(nx.topological_sort(bn.dag))
             cached = torch.cat(
                 [ref[nm].reshape(n_ref, -1).float().cpu() for nm in nodes],
                 dim=-1,
@@ -594,33 +602,57 @@ def _render_two_figures(rows: List[CellResult], cfg: CrashTestConfig) -> None:
 def _compute_inference_accuracy(
     bn: SyntheticBN, baseline: str, q, family: str,
     *, n_samples: int = 200, eps_factor: float = 0.50, n_eff_min: int = 10,
-    n_lw_samples: int = 512,
+    n_lw_samples: int = 512, n_oracle_samples: int = 2000,
 ) -> float:
-    """Distributional accuracy: posterior samples vs filtered ground truth.
+    """Average distributional metric over the query battery.
 
-    For categorical targets reports TV between predicted and empirical
-    marginals; for continuous targets reports W₁ between sample sets.
-    Returns ``nan`` if filtering leaves too few effective samples or if
-    the baseline can't produce a usable posterior on this query.
+    Round-4 oracle change (PR #14)
+    ------------------------------
+    Continuous + hybrid targets now use **forward-with-clamp** ancestral
+    sampling from ``bn.true_model`` as the ground-truth oracle.  The
+    previous ε-ball rejection filter was correct for evidence at the
+    marginal mean but *biased* on multi-evidence queries with non-zero
+    evidence — the round-3 closed-form LG proof showed the analytic
+    posterior agreed with LW (W₁ < 0.02) while ε-ball rejection
+    disagreed by ≈1.4σ.  Forward-with-clamp generates exact samples
+    from ``p(target | evidence)`` for every SCM family this generator
+    produces.
 
-    This is a smoke-quality implementation: ε-ball filtering on
-    ``bn.ground_truth_samples`` per query, then a single distributional
-    metric.  Energy + JS-norm are deferred to v0.6 (paper config).
+    Discrete targets continue to use exact-match rejection on
+    ``bn.ground_truth_samples`` (synthesising the pool on demand for
+    the discrete family); that path is unaffected by the bias because
+    discrete-evidence rejection is exact-equality, not band-filtering.
     """
-    if bn.ground_truth_samples is None:
-        return float("nan")
     target = q.targets[0]
     target_kind = bn.variable_specs[target][0]
-    target_idx = list(bn.dag.nodes()).index(target)
+    # PR-B round-4: column order of bn.ground_truth_samples follows
+    # nx.topological_sort (per make_synthetic_bn), NOT bn.dag.nodes()
+    # insertion order.  The two differ on non-trivial DAGs and shuffling
+    # them caused the round-3 W₁≈3 discrepancy.
+    topo_nodes = list(nx.topological_sort(bn.dag))
+    target_idx = topo_nodes.index(target)
     B = next(iter(q.evidence.values())).shape[0]
+
+    # Ensure we have a discrete-family ground-truth pool for exact-match
+    # rejection; the round-2 fix synthesised this on demand.
+    if target_kind == "discrete" and bn.ground_truth_samples is None:
+        try:
+            n_ref = 5000
+            with torch.no_grad():
+                ref = bn.true_model.sample(n=n_ref)
+            # PR-B round-4: cat in topological-sort order to match
+            # synthetic.py's convention (see comment in _inference_cell).
+            cached = torch.cat(
+                [ref[nm].reshape(n_ref, -1).float().cpu() for nm in topo_nodes],
+                dim=-1,
+            )
+            object.__setattr__(bn, "ground_truth_samples", cached)
+        except Exception:  # pragma: no cover
+            return float("nan")
+
     accs: list[float] = []
     for i in range(min(B, 16)):  # cap accuracy work to keep smoke fast
         ev_row = {k: v[i] for k, v in q.evidence.items()}
-        gt_target = _filter_ground_truth(
-            bn, ev_row, target_idx, eps_factor=eps_factor, n_eff_min=n_eff_min,
-        )
-        if gt_target is None:
-            continue
         try:
             pred = _baseline_posterior_for_query(
                 bn, baseline, target, ev_row, target_kind,
@@ -630,7 +662,15 @@ def _compute_inference_accuracy(
             continue
         if pred is None:
             continue
+
         if target_kind == "discrete":
+            # Discrete: exact-match rejection on the cached pool.
+            gt_target = _filter_ground_truth(
+                bn, ev_row, target_idx,
+                eps_factor=eps_factor, n_eff_min=n_eff_min,
+            )
+            if gt_target is None:
+                continue
             k = bn.variable_specs[target][1]
             empirical = torch.zeros(k)
             empirical.scatter_add_(
@@ -641,44 +681,75 @@ def _compute_inference_accuracy(
             tv = 0.5 * (pred.cpu().reshape(-1)[:k] - empirical).abs().sum().item()
             accs.append(tv)
         else:
-            accs.append(_w1(pred, gt_target))
+            # Continuous / hybrid-continuous-target: forward-with-clamp.
+            try:
+                oracle = _forward_with_clamp_posterior_samples(
+                    bn, [target], ev_row, n_samples=n_oracle_samples,
+                )
+            except Exception:
+                continue
+            if oracle is None or oracle.shape[0] < 100:
+                continue
+            accs.append(_w1(pred, oracle.reshape(-1)))
     if not accs:
         return float("nan")
     return float(sum(accs) / len(accs))
+
+
+def _forward_with_clamp_posterior_samples(
+    bn: SyntheticBN,
+    targets: list[str],
+    evidence: Dict[str, torch.Tensor],
+    *, n_samples: int = 2000,
+) -> torch.Tensor | None:
+    """Generate posterior samples by ancestral sampling with evidence clamped.
+
+    For SCMs of the form ``X_j = f_j(X_{pa(j)}) + ε_j`` with ε_j
+    independent of ``{X_k : k ≠ j}``, ancestral sampling that *clamps*
+    evidence nodes to their observed values (rather than re-sampling
+    them) yields exact samples from ``p(T | E=e)``.  This is the same
+    machinery ``bn.true_model.sample(n, evidence=...)`` already
+    implements — we just reshape evidence to match the engine's
+    expected ``[B] / [B, D]`` contract and stack the resulting
+    target columns into ``[n_samples, |targets|]``.
+
+    Replaces the v0.5b ε-ball rejection oracle (PR #14 round-3 finding:
+    ε-ball is biased on multi-evidence non-zero-mean continuous queries).
+    """
+    ev = {
+        k: (v.reshape(1) if isinstance(v, torch.Tensor) and v.dim() == 0 else v)
+        for k, v in evidence.items()
+    }
+    with torch.no_grad():
+        try:
+            samples = bn.true_model.sample(n=n_samples, evidence=ev)
+        except Exception:
+            return None
+    cols = []
+    for t in targets:
+        col = samples[t]
+        if col.dim() >= 2 and col.shape[-1] == 1:
+            col = col.squeeze(-1)
+        cols.append(col.float().cpu().reshape(n_samples, -1))
+    return torch.cat(cols, dim=-1)
 
 
 def _filter_ground_truth(
     bn: SyntheticBN, evidence_row: Dict[str, torch.Tensor], target_idx: int,
     *, eps_factor: float, n_eff_min: int,
 ) -> torch.Tensor | None:
-    """ε-ball / exact-match filter on ``bn.ground_truth_samples``.
+    """Exact-match rejection on ``bn.ground_truth_samples`` (discrete only).
 
-    Returns ``[N_eff]`` 1-D samples of the target column, or ``None`` if
-    the filter leaves fewer than ``n_eff_min`` rows.
-
-    PR-B-round-2 §3 fix: synthesises ground-truth samples from
-    ``bn.true_model`` for the discrete family — the v0.4a generator
-    intentionally sets ``bn.ground_truth_samples = None`` for discrete
-    BNs (saving memory; pgmpy-style exact marginals are the natural
-    target there) but the v0.5b inference accuracy metric still needs
-    a sample pool to filter, so we draw one on demand.
+    Round-4: continuous + hybrid families no longer call this path —
+    ``_forward_with_clamp_posterior_samples`` is used instead.  Kept
+    here for the discrete exact-equality path (which is correct).
     """
     samples = bn.ground_truth_samples
-    if samples is None:
-        # Discrete-family fallback: ancestral-sample on demand.
-        try:
-            n_ref = 5000
-            with torch.no_grad():
-                ref = bn.true_model.sample(n=n_ref)
-            nodes = list(bn.dag.nodes())
-            samples = torch.cat(
-                [ref[n].reshape(n_ref, -1).float().cpu() for n in nodes], dim=-1,
-            )
-        except Exception:
-            return None
-    if samples.numel() == 0:
+    if samples is None or samples.numel() == 0:
         return None
-    nodes = list(bn.dag.nodes())
+    # PR-B round-4: column order matches nx.topological_sort, not
+    # bn.dag.nodes() — see _compute_inference_accuracy comment.
+    nodes = list(nx.topological_sort(bn.dag))
     mask = torch.ones(samples.shape[0], dtype=torch.bool)
     for node, val in evidence_row.items():
         idx = nodes.index(node)
