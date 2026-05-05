@@ -179,3 +179,60 @@ The first 8 min-fill steps are nearly free (≤ 0.1 MiB each) — they peel off 
 - **Memory-budget guard estimator**: the `_walk_elimination_shapes` function is the prototype. Round 2 wraps it as a one-liner `estimate_peak_mib(plan, K, B, dtype)` and uses it as a precondition in `query_batch` — raise `OutOfMemoryError` if estimate > 90% of available device memory. This is honest pre-allocation failure mode (vs. a half-completed allocation that wedges the cuda allocator).
 
 - **Why not weighted-min-fill?** The min-fill peak of 256 MiB is already well within budget. Weighted-min-fill (Kjaerulff 1992) would marginally improve some steps (it weights fill-in cost by cardinality product), but on uniform-K DAGs like this one it reduces to plain min-fill. Land plain min-fill in round 2; revisit weighted variant only if a paper-config cell DNFs.
+
+---
+
+## Round-2 verification: post-patch measurement
+
+After round-2 commits `93047a1` (algorithm), `548af0b` (`_plan` dispatch + correctness test), and `506ec20` (memory-budget guard), the round-1 diagnostic re-runs with the same DAG / target / evidence. **Engine default is now `order='min_fill'`**; the diagnostic explicitly requests `order='topological'` for the "naive" comparison column.
+
+### Predicted vs measured peak
+
+| | round-1 prediction | round-2 measured (cpu) | match |
+|---|---:|---:|:--:|
+| Naive (topological) algebraic peak | 16 384 MiB | 16 384 MiB | ✓ identical |
+| Naive realised peak (`aten::add`)   | ~1 024 MiB  | 1 024 MiB | ✓ identical |
+| Min-fill algebraic peak              | 256 MiB     | 256 MiB | ✓ identical |
+| **Min-fill realised peak (`aten::sub`)** | **~16-256 MiB (range)** | **32 MiB** | ✓ within bracket |
+| Algebraic peak reduction (naive/mf) | 64×         | 64×       | ✓ identical |
+| **Realised peak reduction**          | —           | **32×** (1024 / 32) | new measurement |
+
+The realised reduction (32×) is half the algebraic (64×) because PyTorch's broadcasting deduplicates more aggressively for the naive plan's wider operand shapes than for min-fill's tighter ones — an unsymmetric ratio that both `aten::add` (16 MiB × 1) and `aten::sub` (16 MiB × 2 inside `logsumexp`) confirm via the post-fix profiler trace.
+
+Post-fix peak op breakdown (from `docs/v0.6b/profiler_trace.json` `torch_profile.top_10_by_memory`):
+
+| op            | count | self-cpu MiB | input shape (truncated) |
+|---------------|------:|-------------:|------------------------|
+| `aten::sub`   |     2 |       32.0   | `[16, 4, 4, 4, 4, 4, 4, 4, 4, 4]` (10 axes; 11-var union scope from step 8 with B-axis) |
+| `aten::add`   |     1 |       16.0   | `[16, 4, 4, 4, 4, 4, 4, 1, 1, 1]` (broadcast operands; 16 MiB output) |
+| `aten::add`   |     1 |       16.0   | `[16, 4, 4, 4, 4, 4, 1, 1, 1, 1]` (broadcast operands; 16 MiB output) |
+
+tracemalloc total peak: **62 MiB** for the entire `query_batch` call (compare: 62 MiB on the round-1 baseline before the fix — most of that is `_extract_factors` and overhead, not intermediate factors; the intermediate factors peak is the new 32 MiB number).
+
+### Smoke run gate
+
+After round 2, `nbn-bench inference --config benchmarking/configs/inference_smoke.yaml` produces:
+
+```
+inference_smoke STATUS: {'ok': 42, 'not_supported': 39}
+nbn_ve discrete n=5  total_time_s=0.000184  accuracy=0.060   status=ok
+nbn_ve discrete n=10 total_time_s=0.000705  accuracy=0.072   status=ok
+nbn_ve discrete n=20 total_time_s=0.011016  accuracy=0.106   status=ok
+```
+
+The `nbn_ve discrete n=20` cell — which was `status='oom'` on PR #14's master and after the v0.5c residual fixes — is now `status='ok'` with `total_time_s = 11 ms, accuracy = 0.106`. The remaining `not_supported` rows are all baseline-vs-family combos that were already structurally excluded (gpytorch on continuous accuracy, pomegranate on hybrid, etc., per the existing `_NOT_APPLICABLE` and `_ACCURACY_NOT_APPLICABLE` tables).
+
+### Round-2 acceptance gates checked off
+
+- [x] `nbn/inference/_elimination_order.py` exists with `min_fill_order`, `get_order`, `ORDER_FUNCTIONS`.
+- [x] `nbn/inference/tensor_ve.py::_plan` dispatches on `order` kwarg; default `'min_fill'`; cache key includes strategy.
+- [x] Pre-allocation memory-budget guard in `query_batch`; `_estimate_peak_bytes` walks the plan algebraically; raises `torch.cuda.OutOfMemoryError` when estimate > 90% of free cuda memory.
+- [x] `tests/unit/test_min_fill_order.py`: 12 tests pass including the n=20 regression that pins the exact 17-element order.
+- [x] `tests/unit/test_vectorized_query_batch_correctness.py`: parametrised `order ∈ {topological, min_fill}` case verifies plan-independence at n=20 within `atol=1e-6, rtol=1e-5`.
+- [x] `nbn-bench inference --config benchmarking/configs/inference_smoke.yaml --device cpu` runs to completion with **zero `error` rows**.
+- [x] Round-1 diagnostic re-run shows real torch peak ~32 MiB for the n=20 case (down from 1024 MiB on master) — within the round-1 brief's predicted bracket.
+- [x] `inference_smoke` parquet `nbn_ve discrete n=20` cell shows `status='ok'` (was `oom` on master).
+- [x] All v0.5c + v0.6a tests still pass (full suite green).
+- [x] `ruff` and `mypy` clean.
+- [x] No `nbn/` file modified outside `nbn/inference/_elimination_order.py` (new) and `nbn/inference/tensor_ve.py`.
+- [ ] Cuda end-to-end verification — deferred to Giovanni's laptop (post-merge or post-other-workload), per the round-2 brief.

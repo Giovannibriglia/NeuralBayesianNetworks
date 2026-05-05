@@ -159,13 +159,16 @@ def validate_elimination_order(
 def _walk_elimination_shapes(
     model, target: str, evidence_keys: Tuple[str, ...], B: int,
     *, plan: List[str] | None = None,
+    order: str = "topological",
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Walk a given elimination plan algebraically and report the
     shape of each intermediate factor product/marginalisation.
 
-    If ``plan`` is None, uses the engine's cached topological-order
-    plan via ``_plan``.  Pass an explicit plan (e.g. min-fill) to
-    compare alternative orderings on the same DAG.
+    If ``plan`` is None, asks the engine for the plan under ``order``.
+    Defaults to ``'topological'`` (the pre-v0.6b naive ordering) so
+    the diagnostic's "naive" column stays comparable across engine
+    versions; pass ``order='min_fill'`` (or an explicit ``plan``) for
+    the alternative.
 
     Does not run torch — it computes ``len(scope)`` and ``prod(cards)``
     so we can identify the worst-case allocation purely from the plan.
@@ -173,7 +176,7 @@ def _walk_elimination_shapes(
     eng = TensorVariableElimination()
     factors = eng._extract_factors(model)
     if plan is None:
-        plan = eng._plan(model, target, evidence_keys)
+        plan = eng._plan(model, target, evidence_keys, order=order)
 
     # Each entry: (vars_set, has_batch).  cardinality is uniformly K.
     state: List[Tuple[set, bool]] = []
@@ -346,7 +349,9 @@ def _real_shapes_walk(
         )
         conditioned.append((lv, vars_, has_b))
 
-    plan = eng._plan(model, target, tuple(sorted(ev_norm.keys())))
+    plan = eng._plan(
+        model, target, tuple(sorted(ev_norm.keys())), order="topological",
+    )
     walk: List[Dict[str, Any]] = []
 
     for step_i, var in enumerate(plan):
@@ -434,9 +439,17 @@ def main() -> None:
     }
 
     eng = TensorVariableElimination()
-    plan = eng._plan(bn.true_model, target, tuple(sorted(evidence_names)))
+    # v0.6b round-2: explicitly request the legacy topological order so
+    # the diagnostic's "naive" column remains comparable across engine
+    # versions.  After round 2, ``_plan``'s default is ``'min_fill'``;
+    # without ``order='topological'`` here the comparison would be
+    # min-fill-vs-min-fill (no contrast).
+    plan = eng._plan(
+        bn.true_model, target, tuple(sorted(evidence_names)),
+        order="topological",
+    )
 
-    # Algebraic shape walk — naive (current) plan
+    # Algebraic shape walk — naive (topological) plan
     alg_steps, alg_summary = _walk_elimination_shapes(
         bn.true_model, target, tuple(sorted(evidence_names)), B,
     )
