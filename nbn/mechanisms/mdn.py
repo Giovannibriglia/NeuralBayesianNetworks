@@ -28,10 +28,10 @@ def _sanitise_parents(
 
     This is a band-aid.  The upstream NaN's origin — whichever
     mechanism in the chain produces it first at scale n=5000 — is
-    tracked separately as a v0.7 root-cause investigation.  The
-    sanitiser logs a warning the first time it triggers per
-    ``(mech_name, order-of-magnitude count)`` so silent corruption
-    is visible in run logs without flooding them.
+    tracked in v0.7 issue #24.  The sanitiser logs a warning the
+    first time it triggers per ``(mech_name, order-of-magnitude
+    count)`` so silent corruption is visible in run logs without
+    flooding them.
 
     Pure no-op on already-finite input.
     """
@@ -199,8 +199,8 @@ class MDNMechanism(Mechanism):
         # ultimately into ``Categorical(probs=softmax(logits))``,
         # tripping the Simplex constraint.  This guard is a band-aid;
         # the upstream NaN's root-cause origin in deep
-        # ``continuous_nongauss`` ancestral chains is tracked in v0.7
-        # issue (see PR #23 round-2 description for the link).
+        # ``continuous_nongauss`` ancestral chains is tracked in
+        # v0.7 issue #24.
         parents = _sanitise_parents(parents, mech_name="MDN._params_from_parents")
 
         assert self.net is not None
