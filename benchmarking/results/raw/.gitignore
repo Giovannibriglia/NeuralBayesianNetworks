@@ -1,0 +1,6 @@
+# Run logs and metadata — generated per nbn-bench invocation, gitignored.
+# Migrated from benchmarking/figures/.gitignore in v0.6c-B; the same
+# patterns also live in the root .gitignore so file lookups don't depend
+# on per-directory rules, but explicit local rules document intent.
+*.log
+*.run.json
