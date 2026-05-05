@@ -80,9 +80,13 @@ class GPyTorchAdapter(BaselineAdapter):
             raise NotImplementedError(f"target '{target}' not handled by GPyTorch adapter")
         if "mean" in spec:
             return spec["mean"].cpu()
-        # Build parent tensor
+        # Build parent tensor.  PR-B §A.8: use torch.as_tensor instead of
+        # torch.tensor(tensor) so we don't trip the "copy construct from
+        # a tensor" UserWarning when q.evidence values are already tensors.
         pa = torch.cat([
-            torch.tensor(q.evidence.get(p, 0.0)).reshape(1, -1).to(self.device).float()
+            torch.as_tensor(
+                q.evidence.get(p, 0.0), device=self.device, dtype=torch.float32,
+            ).reshape(1, -1)
             for p in spec["parents"]
         ], dim=-1)
         with torch.no_grad():

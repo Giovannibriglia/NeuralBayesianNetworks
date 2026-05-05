@@ -13,6 +13,10 @@ max_in_degree: 4
 cardinality: 4
 fraction_continuous: 0.5
 baselines: [nbn_ve, nbn_lw, pgmpy, pomegranate, gpytorch]
+# nbn_lw posterior-sample budget per query.  512 was the round-2 default
+# but produced W₁=3.5 at continuous_lg n=10 — bumped to 4000 for
+# round-3 verification per PR #14 reviewer ask.
+nbn_lw_n_samples: 4000
 per_cell_timeout_s: 30
 output_dir: benchmarking/figures
 output_prefix: inference_smoke
