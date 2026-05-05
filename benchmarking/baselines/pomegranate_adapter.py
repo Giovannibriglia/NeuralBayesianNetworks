@@ -109,17 +109,20 @@ class PomegranateAdapter(BaselineAdapter):
 
         target = q.targets[0]
         n = len(self._topo)
-        row = torch.zeros((1, n))
+        # PR-B §A.3: pomegranate v1.1's predict_proba uses evidence values
+        # as indices into per-node probability tensors; if `row` is float
+        # we hit ``IndexError: tensors used as indices must be long…``.
+        # The adapter is discrete-only, so all evidence values can safely
+        # be encoded as long.
+        row = torch.zeros((1, n), dtype=torch.long)
         mask = torch.zeros((1, n), dtype=torch.bool)
         for k, v in q.evidence.items():
             i = self._node_to_idx[k]
-            # Reduce any tensor (incl. shape [1] or [B] when called per-row)
-            # to a scalar Python int.
             if isinstance(v, torch.Tensor):
                 scalar = int(v.reshape(-1)[0].item())
             else:
                 scalar = int(v)
-            row[0, i] = float(scalar)
+            row[0, i] = scalar
             mask[0, i] = True
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
