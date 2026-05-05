@@ -18,6 +18,7 @@ htmlcov/
 .coverage
 coverage.xml
 *.log
+*.run.json
 *.parquet
 crash_test_results.png
 _legacy_vbn/

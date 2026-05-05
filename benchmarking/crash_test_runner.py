@@ -42,6 +42,7 @@ from benchmarking._crash_test_utils import (
     run_with_guard,
     write_parquet,
 )
+from benchmarking._run_logging import finalise_run_logging, setup_run_logging
 from benchmarking.synthetic import SyntheticBN, make_synthetic_bn
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,7 @@ def run_parameter_learning(
     cfg = CrashTestConfig.from_yaml(config_path)
     if device != "auto":
         cfg.device = device
+    run_meta = setup_run_logging(cfg)
     logger.info("parameter-learning crash test · prefix=%s · device=%s",
                 cfg.output_prefix, cfg.device)
 
@@ -126,6 +128,10 @@ def run_parameter_learning(
 
     write_parquet(rows, cfg.parquet_path())
     _render_two_figures(rows, cfg)
+    status_counts: dict[str, int] = {}
+    for r in rows:
+        status_counts[r.status] = status_counts.get(r.status, 0) + 1
+    finalise_run_logging(run_meta, status_summary=status_counts)
     return 0
 
 
@@ -135,6 +141,7 @@ def run_inference(
     cfg = CrashTestConfig.from_yaml(config_path)
     if device != "auto":
         cfg.device = device
+    run_meta = setup_run_logging(cfg)
     logger.info("inference crash test · prefix=%s · device=%s",
                 cfg.output_prefix, cfg.device)
 
@@ -152,6 +159,10 @@ def run_inference(
 
     write_parquet(rows, cfg.parquet_path())
     _render_two_figures(rows, cfg)
+    status_counts: dict[str, int] = {}
+    for r in rows:
+        status_counts[r.status] = status_counts.get(r.status, 0) + 1
+    finalise_run_logging(run_meta, status_summary=status_counts)
     return 0
 
 
