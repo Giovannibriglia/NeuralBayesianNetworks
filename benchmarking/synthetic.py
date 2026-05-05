@@ -80,6 +80,18 @@ class SyntheticBN:
         on continuous and hybrid problems.  ``None`` for fully discrete
         families where pgmpy-style exact marginals are the natural
         ground-truth target instead.
+    column_order:
+        Canonical column order for any tensor that follows this BN's
+        column convention — including ``ground_truth_samples`` and any
+        downstream cached pool the runner constructs.  Always equals
+        ``tuple(nx.topological_sort(dag))``.  Single source of truth:
+        do not recompute the topological sort elsewhere; use
+        ``column_index(name)`` to map a node name to its column.
+
+        Established in v0.6a after PR #14 round-4 surfaced a schema
+        bug — ``bn.ground_truth_samples`` is written in topological-sort
+        order, but the runner was indexing via insertion order, which
+        differs for non-trivial DAGs.
     """
 
     name: str
@@ -94,6 +106,27 @@ class SyntheticBN:
     avg_in_degree: float
     cardinality: int
     family: Family
+    column_order: Tuple[str, ...]
+
+    def column_index(self, name: str) -> int:
+        """Return the column index of ``name`` in tensors that follow
+        this BN's column order (e.g. ``ground_truth_samples``).
+
+        Single source of truth — never compute the index from
+        ``list(self.dag.nodes())`` elsewhere.
+
+        Raises
+        ------
+        KeyError
+            If ``name`` is not a node in this BN.
+        """
+        try:
+            return self.column_order.index(name)
+        except ValueError as exc:
+            raise KeyError(
+                f"node {name!r} not in BN {self.name!r} "
+                f"(known nodes: {self.column_order})",
+            ) from exc
 
 
 # ---------------------------------------------------------------------- #
@@ -223,8 +256,12 @@ def make_synthetic_bn(
     )
 
     # 4. Populate mechanisms with ground-truth parameters -------------- #
-    topo = list(nx.topological_sort(g))
-    for node in topo:
+    # column_order is the *single* place topological order is computed
+    # in this function — all subsequent column-indexed work derives
+    # from it (mechanism population order, sample-tensor cat order, the
+    # SyntheticBN field exposed to callers).  See SyntheticBN docstring.
+    column_order: Tuple[str, ...] = tuple(nx.topological_sort(g))
+    for node in column_order:
         parents = list(model.dag.parents(node))
         kind = kinds[node]
         if kind == "discrete":
@@ -254,7 +291,8 @@ def make_synthetic_bn(
         if family != "discrete":
             ref_dict = _take_samples(model, n=n_reference, device=device_t)
             ground_truth_samples = torch.cat(
-                [ref_dict[n].reshape(n_reference, -1).float() for n in topo], dim=-1,
+                [ref_dict[n].reshape(n_reference, -1).float() for n in column_order],
+                dim=-1,
             )
 
     name = (
@@ -275,6 +313,7 @@ def make_synthetic_bn(
         avg_in_degree=float(avg_in),
         cardinality=int(cardinality) if family in ("discrete", "hybrid") else -1,
         family=family,
+        column_order=column_order,
     )
 
 
