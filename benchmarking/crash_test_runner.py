@@ -46,6 +46,39 @@ from benchmarking.synthetic import SyntheticBN, make_synthetic_bn
 logger = logging.getLogger(__name__)
 
 
+# PR-B §A.4: Structurally-invalid (family, baseline) combinations.
+# Listed here so the runner skips the cell up-front with a single
+# ``not_supported`` row rather than dispatching a doomed call that
+# would surface as a ValueError or NotImplementedError downstream.
+_NOT_APPLICABLE: set[tuple[str, str]] = {
+    ("discrete", "gpytorch"),                      # GP is continuous
+    ("continuous_lg", "pomegranate"),              # pomegranate adapter is discrete-only
+    ("continuous_nongauss", "pomegranate"),
+    ("continuous_lg", "nbn_ve"),                   # exact VE is discrete-only
+    ("continuous_nongauss", "nbn_ve"),
+    ("continuous_nongauss", "pgmpy"),              # pgmpy LG cannot do non-Gaussian
+    ("hybrid", "gpytorch"),                        # hybrid has discrete components
+    ("hybrid", "pomegranate"),                     # hybrid has continuous components
+    ("hybrid", "pgmpy"),                           # conservative skip; LG mix unsupported
+    ("hybrid", "nbn_ve"),                          # hybrid has continuous components
+}
+
+
+def _not_applicable_row(
+    family: str, n_nodes: int, seed: int, baseline: str,
+) -> List[CellResult]:
+    """Single-row early-skip with a clear reason, written for both
+    parameter-learning (single metric) and inference (two metrics)."""
+    msg = f"{baseline} not applicable to {family}"
+    return [
+        CellResult(
+            family=family, n_nodes=n_nodes, seed=seed, baseline=baseline,
+            metric="status", value=float("nan"), status="not_supported",
+            extra={"error_msg": msg},
+        ),
+    ]
+
+
 # ---------------------------------------------------------------------- #
 # Public entry points
 # ---------------------------------------------------------------------- #
@@ -126,6 +159,8 @@ def _param_learning_cell(
     cfg: CrashTestConfig, family: str, n: int, seed: int, baseline: str,
 ) -> List[CellResult]:
     """Fit a fresh model with `baseline`, measure accuracy vs truth."""
+    if (family, baseline) in _NOT_APPLICABLE:
+        return _not_applicable_row(family, n, seed, baseline)
     bn = _generate_bn(cfg, family, n, seed)
     if baseline == "nbn":
         metric, value = _fit_and_score_nbn(cfg, bn, family)
@@ -146,6 +181,8 @@ def _inference_cell(
     cfg: CrashTestConfig, family: str, n: int, seed: int, baseline: str,
 ) -> List[CellResult]:
     """Time `B` queries against the *true* model under the workload contract."""
+    if (family, baseline) in _NOT_APPLICABLE:
+        return _not_applicable_row(family, n, seed, baseline)
     bn = _generate_bn(cfg, family, n, seed)
     B = cfg.nbn_batch_size or cfg.n_queries_per_cell
     queries_batch = _build_query_batch(bn, B=B, seed=seed)
@@ -159,18 +196,31 @@ def _inference_cell(
             f"inference baseline {baseline!r} not registered",
         )
 
-    return [
+    # PR-B §B.2 — accuracy plumbing.  Compute distributional accuracy
+    # against ground-truth samples filtered by evidence.  Best-effort:
+    # if a baseline doesn't expose a usable posterior on this family
+    # (or filtering leaves too few effective samples), emit a
+    # ``no_result`` status row rather than NaN-with-ok (which the
+    # acceptance gate forbids).
+    accuracy = _compute_inference_accuracy(bn, baseline, queries_batch, family)
+    rows: list[CellResult] = [
         CellResult(
             family=family, n_nodes=n, seed=seed, baseline=baseline,
             metric="total_time_s", value=float(total_time_s),
         ),
-        # accuracy plumbing is v0.5b; emit NaN so the figure renders the
-        # panel honestly (PR-B fills in real values).
-        CellResult(
-            family=family, n_nodes=n, seed=seed, baseline=baseline,
-            metric="accuracy", value=float("nan"),
-        ),
     ]
+    if isinstance(accuracy, float) and accuracy == accuracy:  # not NaN
+        rows.append(CellResult(
+            family=family, n_nodes=n, seed=seed, baseline=baseline,
+            metric="accuracy", value=float(accuracy),
+        ))
+    else:
+        rows.append(CellResult(
+            family=family, n_nodes=n, seed=seed, baseline=baseline,
+            metric="accuracy", value=float("nan"), status="no_result",
+            extra={"error_msg": "accuracy: filter or posterior unavailable"},
+        ))
+    return rows
 
 
 # ---------------------------------------------------------------------- #
@@ -187,7 +237,12 @@ def _fit_and_score_nbn(
     )
     for node in bn.dag.nodes():
         kind = bn.variable_specs[node][0]
-        fitted.set_mechanism(node, fresh_mechanism_for(family, kind))
+        parents = list(bn.dag.predecessors(node))
+        parent_kinds = [bn.variable_specs[p] for p in parents]
+        fitted.set_mechanism(node, fresh_mechanism_for(
+            family, kind,
+            parent_kinds=parent_kinds, cardinality=cfg.cardinality,
+        ))
     fitted.fit(
         bn.train_data, epochs=cfg.fit_epochs, batch_size=cfg.batch_size, lr=5e-3,
     )
@@ -215,8 +270,12 @@ def _fit_and_score_pgmpy(bn: SyntheticBN, family: str) -> tuple[str, float]:
 def _avg_tv_per_node(fitted, bn: SyntheticBN) -> float:
     out = []
     for node in bn.dag.nodes():
-        true_logits = bn.true_model.mechanisms[node]._logits.detach()
-        fit_logits = fitted.mechanisms[node]._logits.detach()
+        # device-align both tensors to CPU before subtraction (Bug 1):
+        # NBN's fitted model lives on cuda when device='auto'; the truth
+        # model may live on cpu (or vice-versa).  Normalise to cpu for
+        # the metric — these are tiny tensors so the move is free.
+        true_logits = bn.true_model.mechanisms[node]._logits.detach().cpu()
+        fit_logits = fitted.mechanisms[node]._logits.detach().cpu()
         if true_logits.shape != fit_logits.shape:
             continue
         true_p = torch.softmax(true_logits, dim=-1)
@@ -231,7 +290,8 @@ def _avg_tv_per_node_pgmpy(adapter, bn: SyntheticBN) -> float:
     out = []
     for cpd in adapter.model.get_cpds():
         node = cpd.variable
-        true_logits = bn.true_model.mechanisms[node]._logits.detach()
+        # Both tensors normalised to cpu (Bug 1).
+        true_logits = bn.true_model.mechanisms[node]._logits.detach().cpu()
         true_p = torch.softmax(true_logits, dim=-1)
         vals = np.asarray(cpd.values)
         k = true_p.shape[-1]
@@ -257,16 +317,24 @@ def _avg_w1_per_node(
         parents = list(bn.dag.predecessors(node))
         true_mech = bn.true_model.mechanisms[node]
         fit_mech = fitted.mechanisms[node]
+        # Place the parent tensor on the FITTED model's device so
+        # mech.sample(pa) doesn't trip on device mismatch (Bug 1).
+        # _w1 then operates on cpu copies of the resulting samples.
+        fit_device = next(
+            (p.device for p in fit_mech.parameters() if p is not None),
+            torch.device("cpu"),
+        )
         if parents:
             pa = torch.cat(
-                [test[p][:n_pa_eval].reshape(n_pa_eval, -1).float() for p in parents],
-                dim=-1,
-            )
+                [test[p][:n_pa_eval].reshape(n_pa_eval, -1).float()
+                 for p in parents], dim=-1,
+            ).to(fit_device)
         else:
             pa = None
         with torch.no_grad():
             try:
-                true_s = true_mech.sample(pa, n=n_samples).reshape(n_pa_eval, n_samples)
+                true_pa = pa.to(next(true_mech.parameters()).device) if pa is not None else None
+                true_s = true_mech.sample(true_pa, n=n_samples).reshape(n_pa_eval, n_samples)
                 fit_s = fit_mech.sample(pa, n=n_samples).reshape(n_pa_eval, n_samples)
             except Exception:
                 continue
@@ -294,14 +362,18 @@ def _avg_w1_per_node_pgmpy_lg(
         beta = list(cpd.beta)
         std = float(cpd.std)
         true_mech = bn.true_model.mechanisms[node]
+        true_device = next(true_mech.parameters()).device
         for i in range(n_pa_eval):
             if parents:
+                # parents come from bn.test_data (may be on cuda).
+                # Move to cpu for the pgmpy-side arithmetic, then put
+                # the tensor for true_mech.sample on its native device.
                 pa_vals = torch.tensor(
-                    [float(test[p][i].reshape(-1)[0].item()) for p in parents],
+                    [float(test[p][i].reshape(-1)[0].cpu().item()) for p in parents],
                 ).float()
                 mean = beta[0] + sum(beta[k + 1] * pa_vals[k].item() for k in range(len(parents)))
                 fit_s = mean + std * torch.randn(n_samples)
-                pa_t = pa_vals.reshape(1, -1)
+                pa_t = pa_vals.reshape(1, -1).to(true_device)
             else:
                 fit_s = beta[0] + std * torch.randn(n_samples)
                 pa_t = None
@@ -312,8 +384,9 @@ def _avg_w1_per_node_pgmpy_lg(
 
 
 def _w1(a: torch.Tensor, b: torch.Tensor) -> float:
-    a, _ = torch.sort(a.reshape(-1).float())
-    b, _ = torch.sort(b.reshape(-1).float())
+    # Bug 1: device-align before subtraction.
+    a, _ = torch.sort(a.reshape(-1).float().cpu())
+    b, _ = torch.sort(b.reshape(-1).float().cpu())
     n = min(a.shape[0], b.shape[0])
     return float((a[:n] - b[:n]).abs().mean().item())
 
@@ -473,6 +546,178 @@ def _render_two_figures(rows: List[CellResult], cfg: CrashTestConfig) -> None:
         out = cfg.figure_path("accuracy_vs_size", ext=ext)
         fig2.savefig(out, bbox_inches="tight", dpi=150)
     plt.close(fig2)
+
+
+# ---------------------------------------------------------------------- #
+# Inference accuracy (PR-B §B.2)
+# ---------------------------------------------------------------------- #
+
+
+def _compute_inference_accuracy(
+    bn: SyntheticBN, baseline: str, q, family: str,
+    *, n_samples: int = 200, eps_factor: float = 0.20, n_eff_min: int = 25,
+) -> float:
+    """Distributional accuracy: posterior samples vs filtered ground truth.
+
+    For categorical targets reports TV between predicted and empirical
+    marginals; for continuous targets reports W₁ between sample sets.
+    Returns ``nan`` if filtering leaves too few effective samples or if
+    the baseline can't produce a usable posterior on this query.
+
+    This is a smoke-quality implementation: ε-ball filtering on
+    ``bn.ground_truth_samples`` per query, then a single distributional
+    metric.  Energy + JS-norm are deferred to v0.6 (paper config).
+    """
+    if bn.ground_truth_samples is None:
+        return float("nan")
+    target = q.targets[0]
+    target_kind = bn.variable_specs[target][0]
+    target_idx = list(bn.dag.nodes()).index(target)
+    B = next(iter(q.evidence.values())).shape[0]
+    accs: list[float] = []
+    for i in range(min(B, 16)):  # cap accuracy work to keep smoke fast
+        ev_row = {k: v[i] for k, v in q.evidence.items()}
+        gt_target = _filter_ground_truth(
+            bn, ev_row, target_idx, eps_factor=eps_factor, n_eff_min=n_eff_min,
+        )
+        if gt_target is None:
+            continue
+        try:
+            pred = _baseline_posterior_for_query(
+                bn, baseline, target, ev_row, target_kind, n_samples=n_samples,
+            )
+        except Exception:
+            continue
+        if pred is None:
+            continue
+        if target_kind == "discrete":
+            k = bn.variable_specs[target][1]
+            empirical = torch.zeros(k)
+            empirical.scatter_add_(
+                0, gt_target.long().clamp(0, k - 1),
+                torch.ones_like(gt_target, dtype=torch.float),
+            )
+            empirical = empirical / empirical.sum().clamp_min(1e-12)
+            tv = 0.5 * (pred.cpu().reshape(-1)[:k] - empirical).abs().sum().item()
+            accs.append(tv)
+        else:
+            accs.append(_w1(pred, gt_target))
+    if not accs:
+        return float("nan")
+    return float(sum(accs) / len(accs))
+
+
+def _filter_ground_truth(
+    bn: SyntheticBN, evidence_row: Dict[str, torch.Tensor], target_idx: int,
+    *, eps_factor: float, n_eff_min: int,
+) -> torch.Tensor | None:
+    """ε-ball / exact-match filter on ``bn.ground_truth_samples``.
+
+    Returns ``[N_eff]`` 1-D samples of the target column, or ``None`` if
+    the filter leaves fewer than ``n_eff_min`` rows.
+    """
+    samples = bn.ground_truth_samples
+    if samples is None or samples.numel() == 0:
+        return None
+    nodes = list(bn.dag.nodes())
+    mask = torch.ones(samples.shape[0], dtype=torch.bool)
+    for node, val in evidence_row.items():
+        idx = nodes.index(node)
+        col = samples[:, idx]
+        v = float(val.item() if isinstance(val, torch.Tensor) else val)
+        kind = bn.variable_specs[node][0]
+        if kind == "discrete":
+            mask &= (col.long() == int(v))
+        else:
+            sigma = float(col.std().clamp_min(1e-3).item())
+            mask &= (col - v).abs() < eps_factor * sigma
+    if int(mask.sum().item()) < n_eff_min:
+        return None
+    return samples[mask, target_idx].cpu().float()
+
+
+def _baseline_posterior_for_query(
+    bn: SyntheticBN, baseline: str, target: str,
+    ev_row: Dict[str, torch.Tensor], target_kind: str, *, n_samples: int,
+) -> torch.Tensor | None:
+    """Return posterior samples (continuous) or probability vector (discrete)
+    for a single query, per baseline."""
+    discrete_nodes = {n for n, (k, _) in bn.variable_specs.items() if k == "discrete"}
+    if baseline.startswith("nbn"):
+        from nbn.inference.hybrid import HybridRouter
+        from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
+        from nbn.inference.tensor_ve import TensorVariableElimination
+        eng_map = {
+            "nbn_ve": TensorVariableElimination(),
+            "nbn_lw": LikelihoodWeightingEngine(n_samples=512),
+            "nbn_hybrid": HybridRouter(),
+        }
+        eng = eng_map.get(baseline)
+        if eng is None:
+            return None
+        ev = {
+            k: (v.long().reshape(1) if k in discrete_nodes
+                else v.float().reshape(1))
+            for k, v in ev_row.items()
+        }
+        with torch.no_grad():
+            try:
+                out = eng.query(bn.true_model, [target], ev)
+            except Exception:
+                return None
+        if isinstance(out, tuple):
+            # (weights, samples) for LW continuous
+            _, samp = out
+            return samp.detach().cpu().float().reshape(-1)
+        out = out.detach().cpu().float().reshape(-1)
+        if target_kind == "discrete":
+            return out
+        # continuous probability vector? sample by treating as Categorical
+        # over class_values; not meaningful here, so return None.
+        return None
+    if baseline in {"pgmpy", "pomegranate"}:
+        from benchmarking.baselines import get_adapter
+        from benchmarking.domains.base import BenchmarkProblem, Query
+        problem = BenchmarkProblem(
+            name=bn.name, dag=list(bn.dag.edges()),
+            variables=bn.variable_specs,
+            train_data=bn.train_data, test_data=bn.test_data, queries=[],
+        )
+        adapter = get_adapter(baseline)
+        adapter.fit(problem)
+        if hasattr(adapter, "kind") and adapter.kind == "unsupported":
+            return None
+        try:
+            out = adapter.query(Query(targets=(target,), evidence=ev_row, kind="marginal"))
+        except Exception:
+            return None
+        out = out.detach().cpu().float().reshape(-1)
+        if target_kind == "discrete":
+            return out
+        return None
+    if baseline == "gpytorch":
+        from benchmarking.baselines import get_adapter
+        from benchmarking.domains.base import BenchmarkProblem, Query
+        problem = BenchmarkProblem(
+            name=bn.name, dag=list(bn.dag.edges()),
+            variables=bn.variable_specs,
+            train_data=bn.train_data, test_data=bn.test_data, queries=[],
+        )
+        adapter = get_adapter(baseline, device="cpu")
+        adapter.fit(problem)
+        try:
+            samples = adapter.query_batch_samples(
+                Query(targets=(target,),
+                      evidence={k: v.reshape(1) for k, v in ev_row.items()},
+                      kind="marginal"),
+                n_samples=n_samples,
+            )
+        except Exception:
+            return None
+        if samples.shape[0] == 0 or torch.isnan(samples).any():
+            return None
+        return samples.detach().cpu().float().reshape(-1)
+    return None
 
 
 __all__ = ["run_parameter_learning", "run_inference"]

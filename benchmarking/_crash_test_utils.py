@@ -190,6 +190,29 @@ def cell_iterator(
                     yield (family, n, s, b)
 
 
+# PR-B §A.2: structural-limit markers — ValueErrors with these substrings
+# come from adapters refusing combinations they don't support and should
+# be classified as ``not_supported`` rather than ``error``.
+_STRUCTURAL_LIMIT_MARKERS = (
+    "only supports",
+    "is discrete-only",
+    "cannot condition on",
+    "not yet wired",
+    "non-Gaussian",
+    "not applicable to",
+    "refused",
+)
+
+
+def _is_structural_limit(exc: BaseException) -> bool:
+    if isinstance(exc, NotImplementedError):
+        return True
+    if isinstance(exc, ValueError):
+        msg = str(exc)
+        return any(marker in msg for marker in _STRUCTURAL_LIMIT_MARKERS)
+    return False
+
+
 def run_with_guard(
     fn: Callable[[], List[CellResult]],
     *,
@@ -199,11 +222,12 @@ def run_with_guard(
     baseline: str,
     timeout_s: int,
 ) -> List[CellResult]:
-    """Run ``fn`` with timeout / OOM / generic-exception guards.
+    """Run ``fn`` with timeout / OOM / not-supported / error guards.
 
-    Returns whatever rows ``fn`` produced if successful.  On timeout/OOM/
-    error, returns a single status row so the figure can render the cell
-    as a triangle marker rather than silently dropping it.
+    Returns whatever rows ``fn`` produced if successful.  On a known
+    failure mode (timeout / OOM / structural limit), returns a single
+    status row so the figure can render the cell as a DNF marker
+    rather than silently dropping it.
     """
     try:
         with _signal_alarm(timeout_s):
@@ -214,35 +238,82 @@ def run_with_guard(
             family, n_nodes, seed, baseline, timeout_s,
         )
         return [_status_row(family, n_nodes, seed, baseline, "timeout")]
-    except (RuntimeError, MemoryError) as exc:
-        msg = str(exc).lower()
-        if "out of memory" in msg or "alloc" in msg or "cuda oom" in msg:
-            logger.warning(
-                "[%s n=%d s=%d %s] OOM: %s",
-                family, n_nodes, seed, baseline, exc,
-            )
-            return [_status_row(family, n_nodes, seed, baseline, "oom")]
-        logger.exception(
-            "[%s n=%d s=%d %s] runtime error", family, n_nodes, seed, baseline,
-        )
-        return [_status_row(family, n_nodes, seed, baseline, "error")]
-    except NotImplementedError as exc:
-        logger.info(
-            "[%s n=%d s=%d %s] not supported: %s",
+    except torch.cuda.OutOfMemoryError as exc:
+        logger.warning(
+            "[%s n=%d s=%d %s] cuda OOM: %s",
             family, n_nodes, seed, baseline, exc,
         )
-        return [_status_row(family, n_nodes, seed, baseline, "not_supported")]
-    except Exception:  # pragma: no cover  (final safety net)
-        logger.exception(
-            "[%s n=%d s=%d %s] unexpected error", family, n_nodes, seed, baseline,
+        return [_status_row(family, n_nodes, seed, baseline, "oom",
+                            error_msg=str(exc))]
+    except MemoryError as exc:
+        logger.warning(
+            "[%s n=%d s=%d %s] OOM: %s",
+            family, n_nodes, seed, baseline, exc,
         )
-        return [_status_row(family, n_nodes, seed, baseline, "error")]
+        return [_status_row(family, n_nodes, seed, baseline, "oom",
+                            error_msg=str(exc))]
+    except ImportError as exc:
+        # Optional dependency missing (gpytorch / pyro / pomegranate not
+        # installed in this environment) → structural not_supported.
+        logger.info(
+            "[%s n=%d s=%d %s] not_supported (import): %s",
+            family, n_nodes, seed, baseline, exc,
+        )
+        return [_status_row(family, n_nodes, seed, baseline, "not_supported",
+                            error_msg=str(exc))]
+    except (NotImplementedError, ValueError) as exc:
+        if _is_structural_limit(exc):
+            logger.info(
+                "[%s n=%d s=%d %s] not_supported: %s",
+                family, n_nodes, seed, baseline, exc,
+            )
+            return [_status_row(family, n_nodes, seed, baseline, "not_supported",
+                                error_msg=str(exc))]
+        # ValueError without a structural-limit marker is a real error.
+        logger.exception(
+            "[%s n=%d s=%d %s] value error",
+            family, n_nodes, seed, baseline,
+        )
+        return [_status_row(family, n_nodes, seed, baseline, "error",
+                            error_msg=str(exc))]
+    except RuntimeError as exc:
+        msg = str(exc).lower()
+        # Catch torch's CPU allocator failures (which raise RuntimeError
+        # rather than MemoryError) as well as cuda OOMs.
+        if (
+            "out of memory" in msg or "cuda oom" in msg
+            or "alloc_cpu" in msg or "defaultcpuallocator" in msg
+            or "cannot allocate memory" in msg or "can't allocate memory" in msg
+        ):
+            logger.warning(
+                "[%s n=%d s=%d %s] OOM via RuntimeError: %s",
+                family, n_nodes, seed, baseline, exc,
+            )
+            return [_status_row(family, n_nodes, seed, baseline, "oom",
+                                error_msg=str(exc))]
+        logger.exception(
+            "[%s n=%d s=%d %s] runtime error",
+            family, n_nodes, seed, baseline,
+        )
+        return [_status_row(family, n_nodes, seed, baseline, "error",
+                            error_msg=str(exc))]
+    except Exception as exc:  # pragma: no cover  (final safety net)
+        logger.exception(
+            "[%s n=%d s=%d %s] unexpected error",
+            family, n_nodes, seed, baseline,
+        )
+        return [_status_row(family, n_nodes, seed, baseline, "error",
+                            error_msg=str(exc))]
 
 
-def _status_row(family, n_nodes, seed, baseline, status):
+def _status_row(
+    family: str, n_nodes: int, seed: int, baseline: str, status: str,
+    *, error_msg: str = "",
+) -> CellResult:
     return CellResult(
         family=family, n_nodes=n_nodes, seed=seed, baseline=baseline,
         metric="status", value=float("nan"), status=status,
+        extra={"error_msg": error_msg} if error_msg else {},
     )
 
 
@@ -315,6 +386,8 @@ def _git_short_sha() -> str:
 
 def fresh_mechanism_for(
     family: str, kind: str, *, num_components: int = 3,
+    parent_kinds: list[tuple[str, int]] | None = None,
+    cardinality: int = 4,
 ):
     """Construct a *fresh* (un-fitted) mechanism for the fitter side.
 
@@ -322,15 +395,25 @@ def fresh_mechanism_for(
     helper instead returns a brand-new mechanism that the fitter will
     populate via ``fit_local`` from training data.
 
-    Hybrid family keeps continuous→discrete edges through a binner that
-    is *fitted from train_data quantiles*, not the generator's truth
-    (option (b) per the v0.4b refinement).
+    Hybrid discrete-target nodes whose ``parent_kinds`` include any
+    continuous parents get a :class:`BinningCategoricalTable` whose
+    thresholds are learned from train_data quantiles (option (b) per
+    the v0.4b refinement).  Pure-discrete-parent discrete targets and
+    pure-continuous nodes get the standard mechanism.
     """
+    from nbn.mechanisms.binning_categorical import BinningCategoricalTable
     from nbn.mechanisms.categorical_table import CategoricalTableMechanism
     from nbn.mechanisms.linear_gaussian import LinearGaussianMechanism
     from nbn.mechanisms.mdn import MDNMechanism
 
     if kind == "discrete":
+        if (family == "hybrid" and parent_kinds
+                and any(pk == "continuous" for (pk, _) in parent_kinds)):
+            return BinningCategoricalTable(
+                parent_kinds=parent_kinds,
+                n_bins=cardinality,
+                n_categories=cardinality,
+            )
         return CategoricalTableMechanism(alpha=0.0)
     # Continuous
     if family == "continuous_lg" or (family == "hybrid" and kind == "continuous"):
@@ -345,6 +428,17 @@ def fresh_mechanism_for(
 # ---------------------------------------------------------------------- #
 
 
+# PR-B §B.1 — DNF marker shapes per status, distinct from data-point shapes.
+_DNF_MARKERS = {
+    "timeout": "v",         # downward triangle
+    "oom": "^",             # upward triangle
+    "no_result": "d",       # diamond
+    "not_supported": "s",   # square (hollow rendered)
+    "error": "x",           # cross
+}
+_DATA_MARKERS = ["o", "P", "*", "h", "X", "8"]
+
+
 def plot_metric_vs_n_nodes(
     df, *, metric: str, ax_grid, fig,
     metric_label: str, lower_is_better: bool = True,
@@ -352,40 +446,101 @@ def plot_metric_vs_n_nodes(
 ) -> None:
     """4-panel figure: one panel per family in ``PANEL_FAMILIES``.
 
-    Each panel: x = n_nodes (log scale), y = ``metric`` (log scale by
-    default).  One line per baseline with mean and ±1 std band over
-    seeds, distinguished by both colour and marker shape so the figure
-    survives greyscale printing.
+    PR-B §B.1 cell-level filtering rules:
+    * For each ``(baseline, n_nodes)`` cell, look up ``status`` from the
+      parquet.  ``ok`` + finite ``value`` → plot a data point.
+    * ``timeout`` / ``oom`` / ``no_result`` / ``not_supported`` /
+      ``error`` → DNF marker at ``ymax * 1.1``, with shape distinguishing
+      the kind.
+    * Connect successive ``ok`` points with a line; do **not** interpolate
+      across DNF cells.
+    * A baseline that is ``not_supported`` for every n in a family is
+      annotated in the legend with ``(not applicable)``.
+
+    Lines + data markers also distinguish baselines for greyscale survival.
     """
     import matplotlib.pyplot as plt
     palette = plt.get_cmap("tab10").colors
-    markers = ["o", "s", "D", "^", "v", "P", "X"]
 
     for ax, family in zip(ax_grid, PANEL_FAMILIES, strict=True):
-        sub = df[(df["family"] == family) & (df["metric"] == metric)
-                 & (df["status"] == "ok")]
+        sub = df[(df["family"] == family) & (df["metric"] == metric)].copy()
+        # Pull in status rows whose metric is 'status' (not the requested
+        # metric) so cells that DNF-out before the metric was computed
+        # still show as DNF triangles on the figure.
+        status_rows = df[(df["family"] == family) & (df["metric"] == "status")]
+        sub = pd.concat(
+            [sub, status_rows.assign(value=float("nan"))], ignore_index=True,
+        ) if not status_rows.empty else sub
+
         if sub.empty:
-            ax.set_title(f"{family} (no data)")
+            ax.set_title(family)
             ax.text(
-                0.5, 0.5, "smoke skipped — see full config",
+                0.5, 0.5, "no data",
                 transform=ax.transAxes, ha="center", va="center",
                 fontsize=8, color="gray",
             )
+            ax.set_xscale("log" if log_x else "linear")
             continue
+
         baselines = sorted(sub["baseline"].unique())
+        # Compute the panel's data-only ymax to position DNF markers above.
+        ok_vals = sub[(sub["status"] == "ok") & sub["value"].notna()]["value"]
+        if not ok_vals.empty and (ok_vals > 0).all():
+            ymax = float(ok_vals.max())
+            dnf_y = ymax * 1.4 if log_y else ymax * 1.1
+        else:
+            dnf_y = 1.0
+
         for i, b in enumerate(baselines):
+            colour = palette[i % len(palette)]
+            data_marker = _DATA_MARKERS[i % len(_DATA_MARKERS)]
             bsub = sub[sub["baseline"] == b]
-            agg = bsub.groupby("n_nodes")["value"].agg(["mean", "std"]).reset_index()
-            ax.plot(
-                agg["n_nodes"], agg["mean"],
-                marker=markers[i % len(markers)], color=palette[i % len(palette)],
-                label=b, linewidth=1.5,
+            ok_b = bsub[(bsub["status"] == "ok") & bsub["value"].notna()]
+            dnf_b = bsub[(bsub["status"] != "ok") | bsub["value"].isna()]
+
+            # All-not-supported annotation
+            all_not_sup = (
+                not ok_b.shape[0] and
+                (dnf_b["status"] == "not_supported").all() and
+                dnf_b.shape[0] > 0
             )
-            if (agg["std"].fillna(0.0) > 0).any():
-                ax.fill_between(
-                    agg["n_nodes"], agg["mean"] - agg["std"], agg["mean"] + agg["std"],
-                    color=palette[i % len(palette)], alpha=0.18,
+            label = f"{b} (not applicable)" if all_not_sup else b
+
+            # Line + data markers for ok cells
+            if not ok_b.empty:
+                agg = ok_b.groupby("n_nodes")["value"].agg(["mean", "std"]).reset_index()
+                ax.plot(
+                    agg["n_nodes"], agg["mean"],
+                    marker=data_marker, color=colour, label=label,
+                    linewidth=1.5, markersize=6,
                 )
+                if (agg["std"].fillna(0.0) > 0).any():
+                    ax.fill_between(
+                        agg["n_nodes"],
+                        (agg["mean"] - agg["std"]).clip(lower=1e-12) if log_y else agg["mean"] - agg["std"],
+                        agg["mean"] + agg["std"],
+                        color=colour, alpha=0.18,
+                    )
+            elif all_not_sup:
+                # Place a single legend-only entry off-figure so the
+                # baseline appears in the legend with its annotation.
+                ax.plot([], [], color=colour, marker=data_marker, label=label,
+                        linewidth=1.5, markersize=6)
+
+            # DNF markers — one per (n_nodes, status) cell
+            for status_kind in dnf_b["status"].unique():
+                cells = dnf_b[dnf_b["status"] == status_kind]
+                xs = cells["n_nodes"].unique()
+                if len(xs) == 0:
+                    continue
+                ys = [dnf_y] * len(xs)
+                ax.scatter(
+                    xs, ys, marker=_DNF_MARKERS.get(status_kind, "x"),
+                    color=colour, s=60, zorder=3,
+                    edgecolors="black" if status_kind == "not_supported" else "none",
+                    facecolors="none" if status_kind == "not_supported" else colour,
+                )
+
         ax.set_title(family)
         ax.set_xlabel("n_nodes")
         ax.set_ylabel(metric_label)
@@ -394,7 +549,12 @@ def plot_metric_vs_n_nodes(
         if log_y:
             ax.set_yscale("log")
         ax.grid(True, which="both", linestyle=":", alpha=0.4)
-        ax.legend(fontsize=7)
+        ax.legend(fontsize=7, loc="best")
 
     direction = "lower is better" if lower_is_better else "higher is better"
     fig.suptitle(metric_label + f"  ({direction})", fontsize=11)
+
+
+# Required imports for the new helper (kept at module scope to avoid
+# repeated import inside the hot path).
+import pandas as pd  # noqa: E402  — placed here so plot_metric_vs_n_nodes can use it
