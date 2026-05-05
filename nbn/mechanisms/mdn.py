@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Tuple
 
 import torch
@@ -8,6 +9,54 @@ from torch.distributions import Categorical, Independent, MixtureSameFamily, Nor
 
 from nbn.mechanisms.base import Mechanism
 from nbn.utils.batching import ensure_2d, flatten_samples
+
+logger = logging.getLogger(__name__)
+
+
+def _sanitise_parents(
+    parents: torch.Tensor, *, mech_name: str = "MDN",
+) -> torch.Tensor:
+    """Replace NaN/Inf entries in ``parents`` with ``0``.
+
+    Defensive guard against upstream numerical drift in deep
+    ancestral sampling chains.  v0.6c-A Finding 2 surfaced one
+    specific case: at ``continuous_nongauss n=5000 seed=0``, a
+    single row out of 2000 in the parent input becomes ``NaN``,
+    which propagates through the MDN's zero-weight logit projection
+    (because PyTorch's ``0 * NaN = NaN``) and trips
+    ``Categorical(probs=softmax(NaN))``'s simplex check.
+
+    This is a band-aid.  The upstream NaN's origin — whichever
+    mechanism in the chain produces it first at scale n=5000 — is
+    tracked separately as a v0.7 root-cause investigation.  The
+    sanitiser logs a warning the first time it triggers per
+    ``(mech_name, order-of-magnitude count)`` so silent corruption
+    is visible in run logs without flooding them.
+
+    Pure no-op on already-finite input.
+    """
+    if torch.isfinite(parents).all():
+        return parents
+    invalid = ~torch.isfinite(parents)
+    n_invalid = int(invalid.sum().item())
+    warned = getattr(_sanitise_parents, "_warned_keys", None)
+    if warned is None:
+        warned = set()
+        _sanitise_parents._warned_keys = warned  # type: ignore[attr-defined]
+    # Deduplicate by (mech_name, decade of count) so we surface the
+    # first occurrence per order of magnitude but don't spam.
+    decade = 0 if n_invalid <= 0 else len(str(n_invalid)) - 1
+    key = (mech_name, decade)
+    if key not in warned:
+        warned.add(key)
+        logger.warning(
+            "%s: sanitised %d non-finite parent values (NaN/Inf) at "
+            "method entry.  Defensive guard for v0.6c-A Finding 2; "
+            "upstream root cause tracked in a separate v0.7 issue.  "
+            "(Suppressing further warnings of similar magnitude.)",
+            mech_name, n_invalid,
+        )
+    return torch.where(invalid, torch.zeros_like(parents), parents)
 
 
 def _build_mlp(
@@ -140,6 +189,19 @@ class MDNMechanism(Mechanism):
             scale = torch.exp(self._root_log_scale).clamp_min(self.min_scale)
             scale = scale.unsqueeze(0).expand(b, -1, -1)
             return logits, loc, scale
+
+        # v0.6c-A round 2 — Finding 2 defensive guard.  Replace any
+        # NaN/Inf in ``parents`` with 0 before the linear projection.
+        # In PyTorch, ``0 * NaN = NaN``, so even a zero-weighted row
+        # of ``self.net``'s linear (e.g. the logit slot in
+        # synthetic-side MDNs whose mixture pi is parent-invariant by
+        # construction) propagates an upstream NaN into ``out`` and
+        # ultimately into ``Categorical(probs=softmax(logits))``,
+        # tripping the Simplex constraint.  This guard is a band-aid;
+        # the upstream NaN's root-cause origin in deep
+        # ``continuous_nongauss`` ancestral chains is tracked in v0.7
+        # issue (see PR #23 round-2 description for the link).
+        parents = _sanitise_parents(parents, mech_name="MDN._params_from_parents")
 
         assert self.net is not None
         out = self.net(parents)  # [*, k + k*D_x + k*D_x]
