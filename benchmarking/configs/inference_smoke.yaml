@@ -1,0 +1,18 @@
+# Smoke config for inference — runs in CI on every push.
+# Wall-clock budget: < 60 seconds on CPU.
+mode: inference
+families: [discrete, continuous_lg, continuous_nongauss, hybrid]
+n_nodes: [5, 10, 20]
+n_seeds: 1
+n_queries_per_cell: 16          # number of (target, evidence) queries timed per cell
+nbn_batch_size: 16              # B for NBN's query_batch on smoke; equals n_queries
+n_train: 2000
+n_reference: 5000
+edge_density: 0.20
+max_in_degree: 4
+cardinality: 4
+fraction_continuous: 0.5
+baselines: [nbn_ve, nbn_lw, pgmpy, pomegranate, gpytorch]
+per_cell_timeout_s: 30
+output_dir: benchmarking/figures
+output_prefix: inference_smoke

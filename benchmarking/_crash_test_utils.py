@@ -53,40 +53,83 @@ DEFAULT_PER_CELL_TIMEOUT_S = 30  # smoke soft cap (per pre-Phase-D refinement)
 
 @dataclass
 class CrashTestConfig:
-    """YAML-backed config matching ``benchmarking/configs/crash_test_*.yaml``."""
+    """v0.5 flat YAML schema.
 
-    sizes: List[int]
+    Fields match ``benchmarking/configs/{parameter_learning,inference}_{smoke,paper}.yaml``
+    exactly.  Generator parameters are top-level (not nested under
+    ``generator:``); workload parameters are top-level (not nested under
+    ``inference:``).
+    """
+
+    mode: str                            # 'parameter_learning' | 'inference'
     families: List[str]
-    seeds: List[int]
-    generator: Dict[str, Any]
-    inference: Dict[str, Any] = field(default_factory=dict)
-    output_dir: str = "examples/figures"
+    n_nodes: List[int]
+    n_seeds: int
+    n_queries_per_cell: int
+    n_train: int
+    n_test: int                          # parameter_learning only; inference may omit
+    n_reference: int
+    edge_density: float
+    max_in_degree: int
+    cardinality: int
+    fraction_continuous: float
+    baselines: List[str]
+    per_cell_timeout_s: int
+    output_dir: str
+    output_prefix: str
+
+    # Parameter-learning specific
+    fit_epochs: int = 50
+    batch_size: int = 1024
+
+    # Inference specific
+    nbn_batch_size: int = 0              # 0 means 'use n_queries_per_cell'
+
     device: str = "auto"
-    is_smoke: bool = False
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> CrashTestConfig:
         text = Path(path).read_text()
-        data = yaml.safe_load(text)
-        is_smoke = "smoke" in str(path)
-        cfg = cls(
-            sizes=list(data["sizes"]),
-            families=list(data["families"]),
-            seeds=list(data["seeds"]),
-            generator=dict(data.get("generator", {})),
-            inference=dict(data.get("inference", {})),
-            output_dir=str(data.get("output_dir", "examples/figures")),
-            is_smoke=is_smoke,
+        d = yaml.safe_load(text)
+        return cls(
+            mode=str(d["mode"]),
+            families=list(d["families"]),
+            n_nodes=list(d["n_nodes"]),
+            n_seeds=int(d["n_seeds"]),
+            n_queries_per_cell=int(d["n_queries_per_cell"]),
+            n_train=int(d["n_train"]),
+            n_test=int(d.get("n_test", 500)),
+            n_reference=int(d["n_reference"]),
+            edge_density=float(d["edge_density"]),
+            max_in_degree=int(d["max_in_degree"]),
+            cardinality=int(d["cardinality"]),
+            fraction_continuous=float(d["fraction_continuous"]),
+            baselines=list(d["baselines"]),
+            per_cell_timeout_s=int(d["per_cell_timeout_s"]),
+            output_dir=str(d["output_dir"]),
+            output_prefix=str(d["output_prefix"]),
+            fit_epochs=int(d.get("fit_epochs", 50)),
+            batch_size=int(d.get("batch_size", 1024)),
+            nbn_batch_size=int(d.get("nbn_batch_size", 0)),
         )
-        return cfg
+
+    @property
+    def is_smoke(self) -> bool:
+        return self.output_prefix.endswith("_smoke")
+
+    @property
+    def seeds(self) -> List[int]:
+        """Seeds list derived from ``n_seeds`` (for parquet 'seed' column)."""
+        return list(range(self.n_seeds))
 
     def figure_path(self, name: str, ext: str = "png") -> Path:
-        """Canonical figure output: smoke gets `_smoke`, full gets the bare name."""
-        suffix = "_smoke" if self.is_smoke else ""
-        return Path("examples") / "figures" / f"{name}{suffix}.{ext}"
+        """Canonical figure output: ``{output_dir}/{prefix}_{name}.{ext}``."""
+        out = Path(self.output_dir) / f"{self.output_prefix}_{name}.{ext}"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        return out
 
-    def parquet_path(self, name: str) -> Path:
-        out = Path(self.output_dir) / f"{name}.parquet"
+    def parquet_path(self) -> Path:
+        out = Path(self.output_dir) / f"{self.output_prefix}_metrics.parquet"
         out.parent.mkdir(parents=True, exist_ok=True)
         return out
 

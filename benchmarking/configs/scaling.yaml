@@ -1,9 +1,0 @@
-domain: synthetic_hybrid
-problems: [hybrid_10, hybrid_50, hybrid_200]
-n_train: 1000
-n_test: 200
-seed: 0
-devices: [cpu]
-baselines: [nbn]
-query_kinds: [marginal]
-output: results/scaling.parquet

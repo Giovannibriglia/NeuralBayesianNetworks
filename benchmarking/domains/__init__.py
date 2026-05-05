@@ -1,4 +1,10 @@
-"""Domain registry — used by the runner to dispatch ``domain:`` in YAML."""
+"""Plugin contract types for benchmark domains.
+
+The v0.5 crash-test runner consumes ``benchmarking.synthetic.SyntheticBN``
+directly and does not need a domain registry.  These types are kept so
+``BaselineAdapter`` subclasses (which take ``BenchmarkProblem``) and
+external code that builds ``Query`` objects continue to work.
+"""
 from benchmarking.domains.base import (
     BenchmarkDomain,
     BenchmarkProblem,
@@ -11,22 +17,4 @@ __all__ = [
     "BenchmarkProblem",
     "GroundTruth",
     "Query",
-    "get_domain",
 ]
-
-_DOMAIN_REGISTRY = {
-    "bnlearn": ("benchmarking.domains.bnlearn", "BnlearnDomain"),
-    "synthetic_hybrid": ("benchmarking.domains.synthetic_hybrid", "SyntheticHybridDomain"),
-    "synthetic_hybrid_scaling": (
-        "benchmarking.domains.synthetic_hybrid", "SyntheticHybridScalingDomain",
-    ),
-}
-
-
-def get_domain(name: str, **kw) -> BenchmarkDomain:
-    if name not in _DOMAIN_REGISTRY:
-        raise ValueError(f"Unknown domain '{name}'. Available: {list(_DOMAIN_REGISTRY)}")
-    import importlib
-    mod_path, cls = _DOMAIN_REGISTRY[name]
-    mod = importlib.import_module(mod_path)
-    return getattr(mod, cls)(**kw)

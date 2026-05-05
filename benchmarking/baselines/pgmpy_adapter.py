@@ -55,8 +55,8 @@ class PgmpyAdapter(BaselineAdapter):
             # Synthetic-BN names encode the family.  pgmpy's continuous
             # path is Linear-Gaussian-only, so silently fitting an LG to
             # a non-Gaussian SCM would produce a biased baseline.  We
-            # refuse ``continuous_nongauss`` explicitly; bnlearn-style
-            # problems and ``continuous_lg`` proceed.
+            # refuse ``continuous_nongauss`` explicitly; ``continuous_lg``
+            # proceeds.
             if name.startswith("continuous_nongauss"):
                 self.kind = "unsupported"
             else:
