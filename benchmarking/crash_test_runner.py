@@ -195,16 +195,13 @@ def _inference_cell(
             n_ref = min(5000, max(1000, cfg.n_reference // 2))
             with torch.no_grad():
                 ref = bn.true_model.sample(n=n_ref)
-            # PR-B round-4: cat columns in *topological-sort* order to
-            # match ``benchmarking.synthetic.make_synthetic_bn``'s
-            # convention.  The previous ``list(bn.dag.nodes())``
-            # iterated in insertion order, which differs from
-            # ``nx.topological_sort`` for non-trivial DAGs and shuffled
-            # the columns relative to the runner's ``target_idx``
-            # lookup — the source of the W₁≈3 mystery from rounds 2–3.
-            nodes = list(nx.topological_sort(bn.dag))
+            # v0.6a: cat columns in ``bn.column_order`` (the canonical
+            # topological-sort order established in
+            # ``make_synthetic_bn``).  PR #14 round-4 documented why
+            # this must not be ``list(bn.dag.nodes())`` (insertion
+            # order ≠ topological sort for non-trivial DAGs).
             cached = torch.cat(
-                [ref[nm].reshape(n_ref, -1).float().cpu() for nm in nodes],
+                [ref[nm].reshape(n_ref, -1).float().cpu() for nm in bn.column_order],
                 dim=-1,
             )
             object.__setattr__(bn, "ground_truth_samples", cached)
@@ -338,7 +335,6 @@ def _avg_tv_per_node_pgmpy(adapter, bn: SyntheticBN) -> float:
 def _avg_w1_per_node(
     fitted, bn: SyntheticBN, *, n_eval: int, n_samples: int,
 ) -> float:
-    import networkx as nx
     out = []
     test = bn.test_data
     n_test = next(iter(test.values())).shape[0]
@@ -378,7 +374,6 @@ def _avg_w1_per_node(
 def _avg_w1_per_node_pgmpy_lg(
     adapter, bn: SyntheticBN, *, n_eval: int, n_samples: int,
 ) -> float:
-    import networkx as nx
     if adapter.kind != "continuous_lg":
         raise NotImplementedError("pgmpy LG path not active")
     test = bn.test_data
@@ -625,12 +620,12 @@ def _compute_inference_accuracy(
     """
     target = q.targets[0]
     target_kind = bn.variable_specs[target][0]
-    # PR-B round-4: column order of bn.ground_truth_samples follows
-    # nx.topological_sort (per make_synthetic_bn), NOT bn.dag.nodes()
-    # insertion order.  The two differ on non-trivial DAGs and shuffling
-    # them caused the round-3 W₁≈3 discrepancy.
-    topo_nodes = list(nx.topological_sort(bn.dag))
-    target_idx = topo_nodes.index(target)
+    # v0.6a: ``bn.column_index`` is the canonical name → column-index
+    # map (single source of truth for the topological-sort schema
+    # established by ``make_synthetic_bn``).  PR #14 round-4 root cause
+    # was indexing via insertion order — never recompute the topo sort
+    # from ``bn.dag.nodes()`` for column lookups.
+    target_idx = bn.column_index(target)
     B = next(iter(q.evidence.values())).shape[0]
 
     # Ensure we have a discrete-family ground-truth pool for exact-match
@@ -640,10 +635,8 @@ def _compute_inference_accuracy(
             n_ref = 5000
             with torch.no_grad():
                 ref = bn.true_model.sample(n=n_ref)
-            # PR-B round-4: cat in topological-sort order to match
-            # synthetic.py's convention (see comment in _inference_cell).
             cached = torch.cat(
-                [ref[nm].reshape(n_ref, -1).float().cpu() for nm in topo_nodes],
+                [ref[nm].reshape(n_ref, -1).float().cpu() for nm in bn.column_order],
                 dim=-1,
             )
             object.__setattr__(bn, "ground_truth_samples", cached)
@@ -747,12 +740,12 @@ def _filter_ground_truth(
     samples = bn.ground_truth_samples
     if samples is None or samples.numel() == 0:
         return None
-    # PR-B round-4: column order matches nx.topological_sort, not
-    # bn.dag.nodes() — see _compute_inference_accuracy comment.
-    nodes = list(nx.topological_sort(bn.dag))
+    # v0.6a: name → column lookups go through ``bn.column_index`` (the
+    # canonical topological-sort schema established in
+    # ``make_synthetic_bn``).  See _compute_inference_accuracy.
     mask = torch.ones(samples.shape[0], dtype=torch.bool)
     for node, val in evidence_row.items():
-        idx = nodes.index(node)
+        idx = bn.column_index(node)
         col = samples[:, idx]
         v = float(val.item() if isinstance(val, torch.Tensor) else val)
         kind = bn.variable_specs[node][0]
