@@ -869,14 +869,37 @@ def _baseline_posterior_for_query(
         adapter.fit(problem)
         if hasattr(adapter, "kind") and adapter.kind == "unsupported":
             return None
+        if target_kind == "discrete":
+            try:
+                out = adapter.query(
+                    Query(targets=(target,), evidence=ev_row, kind="marginal"),
+                )
+            except Exception:
+                return None
+            return out.detach().cpu().float().reshape(-1)
+        # v0.5c bug 3: continuous-target path goes through
+        # ``query_batch_samples`` (pgmpy's closed-form Gaussian
+        # posterior → reparam samples), matching the gpytorch branch
+        # below.  Pre-fix, this branch hard-returned ``None`` for
+        # ``target_kind != "discrete"`` and every pgmpy continuous_lg
+        # accuracy cell skipped → ``no_result`` on all 3 cells in
+        # PR #14's smoke parquet.  pomegranate is structurally excluded
+        # from continuous families via ``_NOT_APPLICABLE`` so only
+        # pgmpy reaches this branch in practice.
         try:
-            out = adapter.query(Query(targets=(target,), evidence=ev_row, kind="marginal"))
+            samples = adapter.query_batch_samples(
+                Query(
+                    targets=(target,),
+                    evidence={k: v.reshape(1) for k, v in ev_row.items()},
+                    kind="marginal",
+                ),
+                n_samples=n_samples,
+            )
         except Exception:
             return None
-        out = out.detach().cpu().float().reshape(-1)
-        if target_kind == "discrete":
-            return out
-        return None
+        if samples.shape[0] == 0 or torch.isnan(samples).any():
+            return None
+        return samples.detach().cpu().float().reshape(-1)
     if baseline == "gpytorch":
         from benchmarking.baselines import get_adapter
         from benchmarking.domains.base import BenchmarkProblem, Query
