@@ -153,6 +153,56 @@ class NBNAdapter(BaselineAdapter):
             return (w.unsqueeze(-1) * s).sum(dim=-2).detach().cpu()
         return result.detach().cpu()
 
+    def query_batch_samples(
+        self, q: Query, n_samples: int = 2000,
+    ) -> torch.Tensor:
+        """v0.7-#35: batched posterior sampling via the engine's native
+        batched path.  Returns ``[B, n_samples, n_targets]``.
+
+        Single ``engine.query_batch(...)`` call over the full ``[B, ...]``
+        evidence tensor; the per-row sampling step is a GPU-vectorised
+        ``torch.distributions.Categorical`` (discrete) or
+        ``torch.multinomial`` resample (LW continuous), so the wall-clock
+        is dominated by the engine's batched pass — which is the
+        architectural advantage we want the paper figure to measure.
+
+        Note on LW continuous resampling: when ``n_samples >
+        engine.n_samples``, resampling is with-replacement from a finite
+        proposal pool of size ``engine.n_samples``.  For unbiased MC at
+        higher sample counts, increase ``nbn_lw_n_samples`` at engine-init
+        time (config knob).  In the runner's call site
+        (``_time_nbn_inference``), ``n_samples == engine.n_samples`` by
+        construction, so the resampling reduces to permutation-with-
+        replacement.
+        """
+        assert self.model is not None and self._engine is not None
+        ev = {}
+        for k, v in q.evidence.items():
+            t = v if isinstance(v, torch.Tensor) else torch.tensor(v)
+            if t.dim() == 1:
+                t = t.unsqueeze(-1)
+            elif t.dim() == 0:
+                t = t.view(1, 1)
+            ev[k] = t.to(self.device)
+        result = self._engine.query_batch(self.model, list(q.targets), ev)
+
+        if isinstance(result, tuple):
+            # LW continuous: (weights[B, S], samples[B, S, D]).
+            weights, samples = result
+            idx = torch.multinomial(
+                weights, num_samples=n_samples, replacement=True,
+            )                                                   # [B, n_samples]
+            gathered = samples.gather(
+                1, idx.unsqueeze(-1).expand(-1, -1, samples.size(-1)),
+            )                                                   # [B, n_samples, D]
+            return gathered.detach().cpu()
+
+        # Discrete: result is [B, K] probability vector.
+        probs = result if result.dim() == 2 else result.unsqueeze(0)
+        cat = torch.distributions.Categorical(probs=probs)
+        drawn = cat.sample((n_samples,))                        # [n_samples, B]
+        return drawn.T.unsqueeze(-1).float().detach().cpu()      # [B, n_samples, 1]
+
     def teardown(self) -> None:
         self.model = None
         self._engine = None

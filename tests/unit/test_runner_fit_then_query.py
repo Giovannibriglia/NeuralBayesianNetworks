@@ -383,6 +383,79 @@ def test_inference_runner_skips_non_applicable_cells(tmp_path) -> None:
     )
 
 
+def test_nbn_inference_path_records_total_time_s(tmp_path) -> None:
+    """Issue #35 regression test: NBN inference baselines must populate
+    ``total_time_s`` with a finite positive value, not NaN.
+
+    Pre-fix, ``_time_nbn_inference`` called
+    ``adapter.query_batch_samples(...)`` which ``NBNAdapter`` did not
+    implement (the base class raised ``NotImplementedError``); the
+    function silently swallowed the exception and returned ``float('nan')``.
+    Cells then landed in the parquet as ``status='ok'`` with NaN value,
+    which disappeared from the rendered figures.
+
+    After the v0.7-#35 fix, ``NBNAdapter.query_batch_samples`` exposes
+    the engine's batched path (single torch call over [B, ...] evidence,
+    sample post-processing per-row) and the runner no longer swallows
+    exceptions silently.  This test pins both.
+    """
+    import yaml
+    import pandas as pd
+    from benchmarking.crash_test_runner import run_inference
+
+    config = {
+        "config_schema_version": 2,
+        "mode": "inference",
+        "families": ["discrete"],
+        "n_nodes": [5],
+        "n_seeds": 1,
+        "n_queries_per_cell": 4,
+        "nbn_batch_size": 4,
+        "n_train": 200,
+        "n_reference": 500,
+        "edge_density": 0.20,
+        "max_in_degree": 4,
+        "cardinality": 4,
+        "fraction_continuous": 0.0,
+        "nbn_lw_n_samples": 200,
+        "baselines": [
+            {"library": "nbn", "mechanism": "cat",
+             "param_method": "mle", "inference_method": "ve"},
+        ],
+        "per_cell_timeout_s": 60,
+        "output_dir": str(tmp_path),
+        "output_prefix": "nbn_timing_test",
+    }
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(yaml.safe_dump(config))
+
+    rc = run_inference(str(cfg_path), device="cpu")
+    assert rc == 0
+
+    parquet = tmp_path / "raw" / "nbn_timing_test_metrics.parquet"
+    df = pd.read_parquet(parquet)
+
+    time_rows = df[
+        (df["baseline"] == "nbn-cat-ve")
+        & (df["metric"] == "total_time_s")
+        & (df["status"] == "ok")
+    ]
+    assert len(time_rows) >= 1, (
+        f"NBN inference must emit total_time_s rows; got "
+        f"{df[df['metric']=='total_time_s'].to_dict('records')}"
+    )
+
+    finite_values = time_rows["value"].dropna()
+    assert len(finite_values) >= 1, (
+        f"NBN inference total_time_s must have at least one finite value; "
+        f"got {time_rows['value'].tolist()}"
+    )
+    assert all(v > 0 for v in finite_values), (
+        f"NBN inference total_time_s values must be positive; "
+        f"got {finite_values.tolist()}"
+    )
+
+
 def test_nbn_neuralcat_ve_remains_deferred_in_c1b() -> None:
     """C-1a deferred ``nbn-neuralcat-ve`` to v0.7.  C-1b's adapter
     factory must not silently start supporting it (which would route
