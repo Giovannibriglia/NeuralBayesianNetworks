@@ -1,15 +1,15 @@
 # Smoke config for parameter learning — runs in CI on every push.
-# Wall-clock budget: < 60 seconds on CPU.
+# Wall-clock budget: < 90 seconds on CPU.
 config_schema_version: 2
 
 mode: parameter_learning
 families: [discrete, continuous_lg, continuous_nongauss, hybrid]
 n_nodes: [5, 10, 20]
 n_seeds: 1
-n_queries_per_cell: 16          # used for cross-validation of fitted CPDs
+n_queries_per_cell: 16
 n_train: 2000
 n_test: 500
-n_reference: 5000               # ground-truth samples for accuracy metric
+n_reference: 5000
 edge_density: 0.20
 max_in_degree: 4
 cardinality: 4
@@ -17,18 +17,19 @@ fraction_continuous: 0.5
 fit_epochs: 50
 batch_size: 1024
 
-# v0.6c-C-1a — structured baseline list.  Each spec maps 1-to-1 to a
-# legacy adapter via ``_legacy_adapter_for_spec``:
-#   nbn         cat      mle → legacy "nbn"
-#   pgmpy       discrete mle → legacy "pgmpy"
-#   pomegranate discrete mle → legacy "pomegranate"
-#   gpytorch    gp       mle → legacy "gpytorch"
+# v0.6c-C-1b — full per-method baseline set.  Non-applicable cells are
+# gated via ``is_applicable(label, family)`` before adapter dispatch.
 baselines:
-  - {library: nbn,         mechanism: cat,      param_method: mle}
-  - {library: pgmpy,       mechanism: discrete, param_method: mle}
-  - {library: pomegranate, mechanism: discrete, param_method: mle}
-  - {library: gpytorch,    mechanism: gp,       param_method: mle}
+  - {library: pgmpy, mechanism: discrete, param_method: mle}
+  - {library: pgmpy, mechanism: discrete, param_method: bayes}
+  - {library: pgmpy, mechanism: lg,       param_method: mle}
+  - {library: nbn,   mechanism: cat,      param_method: mle}
+  - {library: nbn,   mechanism: neuralcat, param_method: mle}
+  - {library: nbn,   mechanism: lg,       param_method: mle}
+  - {library: nbn,   mechanism: mdn,      param_method: mle}
+  - {library: nbn,   mechanism: flow,     param_method: mle}
+  - {library: nbn,   mechanism: hybrid,   param_method: mle}
 
-per_cell_timeout_s: 30
+per_cell_timeout_s: 60
 output_dir: benchmarking/results
 output_prefix: parameter_learning_smoke

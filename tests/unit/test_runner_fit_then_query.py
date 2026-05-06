@@ -300,6 +300,89 @@ def test_time_query_battery_records_calls_in_fit_then_query_order() -> None:
 # ---------------------------------------------------------------------- #
 
 
+def test_inference_runner_skips_non_applicable_cells(tmp_path) -> None:
+    """The runner MUST consult ``is_applicable(label, family)`` BEFORE
+    adapter dispatch and emit ``status='not_supported'`` for non-
+    applicable cells.
+
+    Regression for the v0.6c-C-1b post-merge bug: pre-fix the runner
+    consulted only the legacy ``_NOT_APPLICABLE`` table inside
+    ``_inference_cell``, which is keyed by polymorphic legacy adapter
+    strings ("pgmpy", "nbn_lw") that pre-date the C-1a per-mechanism
+    label scheme.  As a result, ``pgmpy-mle-ve`` ran on continuous_lg
+    (via pgmpy's lg path), ``nbn-cat-lw`` ran on continuous_nongauss
+    (via NBN's mdn default), and ``nbn-cat-lw`` on hybrid hit a cuda
+    device-side assert.  The fix routes the registry-based applicability
+    gate at the runner-loop level, BEFORE any adapter dispatch.
+
+    This test exercises the gate end-to-end via a tiny YAML config
+    that includes one non-applicable spec; ``adapter.fit`` must NEVER
+    be called for that cell.
+    """
+    import yaml
+    from benchmarking._crash_test_utils import CrashTestConfig
+    from benchmarking.crash_test_runner import run_inference
+
+    # Build a tiny inference config with one non-applicable spec.
+    config = {
+        "config_schema_version": 2,
+        "mode": "inference",
+        "families": ["continuous_lg"],   # ← deliberate
+        "n_nodes": [5],
+        "n_seeds": 1,
+        "n_queries_per_cell": 4,
+        "nbn_batch_size": 4,
+        "n_train": 200,
+        "n_reference": 500,
+        "edge_density": 0.20,
+        "max_in_degree": 4,
+        "cardinality": 4,
+        "fraction_continuous": 0.5,
+        "nbn_lw_n_samples": 200,
+        # Non-applicable: pgmpy-mle-ve is discrete-only per registry.
+        "baselines": [
+            {"library": "pgmpy", "mechanism": "discrete",
+             "param_method": "mle", "inference_method": "ve"},
+        ],
+        "per_cell_timeout_s": 60,
+        "output_dir": str(tmp_path),
+        "output_prefix": "applicability_test",
+    }
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(yaml.safe_dump(config))
+
+    # Sanity: build_adapter_v2 would succeed for this spec — gating
+    # must happen at the runner level, not inside the adapter.
+    spec = BaselineSpec(library="pgmpy", mechanism="discrete",
+                        param_method="mle", inference_method="ve")
+    _ = build_adapter_v2(spec, device="cpu")
+
+    # Run the inference crash test.
+    rc = run_inference(str(cfg_path), device="cpu")
+    assert rc == 0
+
+    # Read the parquet and confirm the cell is status='not_supported',
+    # not status='ok' (which would mean we ran inference on a
+    # non-applicable family).
+    import pandas as pd
+    parquet = tmp_path / "raw" / "applicability_test_metrics.parquet"
+    df = pd.read_parquet(parquet)
+    assert len(df) == 1, f"expected 1 row, got {len(df)}: {df}"
+    assert df.iloc[0]["status"] == "not_supported", (
+        f"continuous_lg + pgmpy-mle-ve must be not_supported; "
+        f"got {df.iloc[0]['status']!r}.  This indicates the "
+        f"registry-based applicability gate is missing from the "
+        f"runner loop."
+    )
+    assert df.iloc[0]["baseline"] == "pgmpy-mle-ve"
+    # ``write_parquet`` flattens ``CellResult.extra`` into top-level
+    # columns; the not_applicable row sets extra={"error_msg": "..."}.
+    error_msg = str(df.iloc[0].get("error_msg", "") or "")
+    assert "not applicable" in error_msg.lower(), (
+        f"expected 'not applicable' in error_msg, got {error_msg!r}"
+    )
+
+
 def test_nbn_neuralcat_ve_remains_deferred_in_c1b() -> None:
     """C-1a deferred ``nbn-neuralcat-ve`` to v0.7.  C-1b's adapter
     factory must not silently start supporting it (which would route

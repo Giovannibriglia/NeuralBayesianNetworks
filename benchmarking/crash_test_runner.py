@@ -42,7 +42,7 @@ from benchmarking._crash_test_utils import (
     run_with_guard,
     write_parquet,
 )
-from benchmarking._baseline_registry import _label_from_spec
+from benchmarking._baseline_registry import _label_from_spec, is_applicable
 from benchmarking._run_logging import finalise_run_logging, setup_run_logging
 from benchmarking.synthetic import SyntheticBN, make_synthetic_bn
 
@@ -173,6 +173,22 @@ def run_parameter_learning(
             for s in cfg.seeds:
                 for spec in cfg.baselines:
                     label = _label_from_spec(spec)
+                    # v0.6c-C-1b: registry-based applicability gate
+                    # (BEFORE adapter dispatch).  Method-keyed labels
+                    # like ``pgmpy-mle-ve`` are discrete-only per the
+                    # C-1a registry; the legacy ``_NOT_APPLICABLE``
+                    # table inside the cell functions is keyed by the
+                    # *polymorphic* legacy adapter string ("pgmpy",
+                    # "nbn_lw") which gates a different (less strict)
+                    # set of combinations.  Without this gate, e.g.,
+                    # ``pgmpy-mle-ve`` would dispatch on continuous_lg
+                    # via the legacy adapter's lg path and emit a
+                    # nonsense ``ok`` row in the parquet.
+                    if not is_applicable(label, family):
+                        rows.append(_not_applicable_row(
+                            family, n, s, label,
+                        )[0])
+                        continue
                     legacy = _legacy_adapter_for_spec(spec)
                     cell_rows = run_with_guard(
                         lambda f=family, nn=n, ss=s, lg=legacy:
@@ -212,6 +228,18 @@ def run_inference(
             for s in cfg.seeds:
                 for spec in cfg.baselines:
                     label = _label_from_spec(spec)
+                    # v0.6c-C-1b: registry-based applicability gate
+                    # BEFORE adapter dispatch.  See run_parameter_learning
+                    # for the rationale.  Without this, ``pgmpy-mle-ve``
+                    # would dispatch on continuous_lg via the legacy
+                    # adapter's lg path and emit a nonsense ``ok`` row;
+                    # ``nbn-cat-lw`` would dispatch on hybrid and trip
+                    # a cuda device-side assert during sampling.
+                    if not is_applicable(label, family):
+                        rows.append(_not_applicable_row(
+                            family, n, s, label,
+                        )[0])
+                        continue
                     legacy = _legacy_adapter_for_spec(spec)
                     cell_rows = run_with_guard(
                         lambda f=family, nn=n, ss=s, lg=legacy:

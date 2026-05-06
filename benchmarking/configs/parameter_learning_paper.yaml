@@ -4,7 +4,7 @@ config_schema_version: 2
 
 mode: parameter_learning
 families: [discrete, continuous_lg, continuous_nongauss, hybrid]
-n_nodes: [10, 50, 100, 500, 1000, 5000]
+n_nodes: [10, 50, 100, 500, 1000]
 n_seeds: 5
 n_queries_per_cell: 1024
 n_train: 10000
@@ -17,14 +17,17 @@ fraction_continuous: 0.5
 fit_epochs: 200
 batch_size: 4096
 
-# v0.6c-C-1a — structured baseline list (same baseline count as old
-# v0.6c-B paper config: [nbn, pgmpy, pomegranate, gpytorch, pyro]).
+# v0.6c-C-1b — full per-method baseline set.
 baselines:
-  - {library: nbn,         mechanism: cat,      param_method: mle}
-  - {library: pgmpy,       mechanism: discrete, param_method: mle}
-  - {library: pomegranate, mechanism: discrete, param_method: mle}
-  - {library: gpytorch,    mechanism: gp,       param_method: mle}
-  - {library: pyro,        mechanism: discrete, param_method: mle}
+  - {library: pgmpy, mechanism: discrete, param_method: mle}
+  - {library: pgmpy, mechanism: discrete, param_method: bayes}
+  - {library: pgmpy, mechanism: lg,       param_method: mle}
+  - {library: nbn,   mechanism: cat,      param_method: mle}
+  - {library: nbn,   mechanism: neuralcat, param_method: mle}
+  - {library: nbn,   mechanism: lg,       param_method: mle}
+  - {library: nbn,   mechanism: mdn,      param_method: mle}
+  - {library: nbn,   mechanism: flow,     param_method: mle}
+  - {library: nbn,   mechanism: hybrid,   param_method: mle}
 
 per_cell_timeout_s: 600
 output_dir: benchmarking/results

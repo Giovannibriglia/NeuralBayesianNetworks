@@ -3,33 +3,32 @@ config_schema_version: 2
 
 mode: inference
 families: [discrete, continuous_lg, continuous_nongauss, hybrid]
-n_nodes: [10, 50, 100, 500, 1000, 5000]
+n_nodes: [10, 50, 100, 500, 1000]   # 5000 dropped (cuda OOM at 7.6 GiB)
 n_seeds: 5
 n_queries_per_cell: 1024
-nbn_batch_size: 1024            # NBN runs B=1024 in one call; baselines loop 1024 times in Python
+nbn_batch_size: 1024
 n_train: 10000
+n_test: 1024                          # explicit per v0.6c-A audit (was silently 500)
 n_reference: 50000
-# v0.6c-A round 2: explicit per-query LW posterior budget.  4000 was
-# the smoke-side default since PR #14 round 3; paper YAML had silently
-# inherited the CrashTestConfig dataclass default of 512, producing
-# W₁ ≈ 1.0 on continuous_lg / continuous_nongauss at n_nodes=10.
 nbn_lw_n_samples: 4000
 edge_density: 0.20
 max_in_degree: 4
 cardinality: 4
 fraction_continuous: 0.5
 
-# v0.6c-C-1a — structured baseline list.  Paper preserves the
-# v0.6c-B baseline count (matching old [nbn_ve, nbn_lw, pgmpy,
-# pomegranate, gpytorch, pyro]).  Each spec maps 1-to-1 to a legacy
-# adapter via ``_legacy_adapter_for_spec``.
+# v0.6c-C-1b — full per-method baseline set, matching smoke.
+# nbn-neuralcat-ve deferred to v0.7 issue #26.
 baselines:
-  - {library: nbn,         mechanism: cat,      param_method: mle, inference_method: ve}
-  - {library: nbn,         mechanism: cat,      param_method: mle, inference_method: lw}
-  - {library: pgmpy,       mechanism: discrete, param_method: mle, inference_method: ve}
-  - {library: pomegranate, mechanism: discrete, param_method: mle, inference_method: ve}
-  - {library: gpytorch,    mechanism: gp,       param_method: mle, inference_method: predict}
-  - {library: pyro,        mechanism: discrete, param_method: mle, inference_method: ve}
+  - {library: pgmpy, mechanism: discrete, param_method: mle,   inference_method: ve}
+  - {library: pgmpy, mechanism: discrete, param_method: bayes, inference_method: ve}
+  - {library: pgmpy, mechanism: lg,       param_method: mle,   inference_method: predict}
+  - {library: nbn,   mechanism: cat,      param_method: mle,   inference_method: ve}
+  - {library: nbn,   mechanism: cat,      param_method: mle,   inference_method: lw}
+  - {library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: lw}
+  - {library: nbn,   mechanism: lg,       param_method: mle,   inference_method: lw}
+  - {library: nbn,   mechanism: mdn,      param_method: mle,   inference_method: lw}
+  - {library: nbn,   mechanism: flow,     param_method: mle,   inference_method: lw}
+  - {library: nbn,   mechanism: hybrid,   param_method: mle,   inference_method: router}
 
 per_cell_timeout_s: 600
 output_dir: benchmarking/results

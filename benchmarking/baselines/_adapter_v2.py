@@ -206,17 +206,10 @@ def build_adapter_v2(
         )
 
     if spec.library == "pgmpy":
+        # v0.6c-C-1b: PgmpyAdapter takes ``param_method`` to switch
+        # between MLE and BayesianEstimator on discrete networks.
         from benchmarking.baselines.pgmpy_adapter import PgmpyAdapter
-        v1 = PgmpyAdapter()
-        # The existing PgmpyAdapter auto-dispatches by problem family;
-        # Bayesian estimator on discrete is not yet supported (v0.7
-        # extension).  Reject specs we can't satisfy.
-        if spec.mechanism == "discrete" and spec.param_method == "bayes":
-            raise NotImplementedError(
-                "pgmpy-bayes-ve requires a PgmpyAdapter param_method "
-                "extension; tracked as v0.7 follow-up.  Skip in this "
-                "PR's smoke YAML or expect status='not_supported'.",
-            )
+        v1 = PgmpyAdapter(param_method=spec.param_method)
     elif spec.library == "nbn":
         from benchmarking.baselines.nbn_adapter import NBNAdapter
         engine_map = {"ve": "ve", "lw": "lw", "router": "hybrid"}
@@ -233,23 +226,19 @@ def build_adapter_v2(
             "cat": "categorical_table",
             "neuralcat": "neural_categorical",
         }
+        # v0.6c-C-1b: ``flow`` added (NormalizingFlow, requires zuko).
         continuous_mech_map = {
             "lg": "linear_gaussian",
             "mdn": "mdn",
+            "flow": "flow",
         }
-        # hybrid mechanism leaves both defaults (HybridRouter handles
-        # per-node dispatch).  flow is not in the v1 NBNAdapter's
-        # continuous_mech literal — defer to a v0.7 extension.
-        if spec.mechanism == "flow":
-            raise NotImplementedError(
-                "nbn-flow-lw requires NBNAdapter continuous_mech='flow' "
-                "extension; tracked as v0.7 follow-up.",
-            )
         kwargs: Dict[str, Any] = {"device": device, "engine": engine}
         if spec.mechanism in discrete_mech_map:
             kwargs["discrete_mech"] = discrete_mech_map[spec.mechanism]
         if spec.mechanism in continuous_mech_map:
             kwargs["continuous_mech"] = continuous_mech_map[spec.mechanism]
+        # hybrid mechanism leaves both defaults (HybridRouter handles
+        # per-node dispatch).
         v1 = NBNAdapter(**kwargs)
     elif spec.library == "gpytorch":
         from benchmarking.baselines import get_adapter
