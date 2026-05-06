@@ -123,6 +123,36 @@ def test_aggregate_metric_missing(tmp_path: Path) -> None:
     assert acc == "0.0700"
 
 
+def test_aggregate_ok_rows_with_nan_value_treated_as_missing(tmp_path: Path) -> None:
+    """Issue #35 specific: runner emits ``status='ok'`` rows where the
+    ``value`` itself is NaN (metric path didn't populate the timing).
+    The aggregator must treat these as metric-missing — never let a
+    literal ``"nan"`` reach the formatted output."""
+    p = _write_synthetic_parquet([
+        # NBN-style: status=ok but value=NaN.
+        {"family": "discrete", "n_nodes": 5, "seed": 0,
+         "baseline": "nbn-cat-ve", "metric": "total_time_s",
+         "value": float("nan"), "status": "ok"},
+        {"family": "discrete", "n_nodes": 5, "seed": 1,
+         "baseline": "nbn-cat-ve", "metric": "total_time_s",
+         "value": float("nan"), "status": "ok"},
+        # Another baseline emits a real value so the metric is present.
+        {"family": "discrete", "n_nodes": 5, "seed": 0,
+         "baseline": "pgmpy-mle-ve", "metric": "total_time_s",
+         "value": 0.001, "status": "ok"},
+    ], tmp_path)
+    out = aggregate(p)
+    cell = out["wide"].loc[("discrete", "total_time_s", 5), "nbn-cat-ve"]
+    assert cell == _NA_METRIC_MISSING, (
+        f"expected {_NA_METRIC_MISSING!r}, got {cell!r}"
+    )
+    # And no literal "nan" anywhere in the wide table.
+    flat = out["wide"].to_numpy().flatten().tolist()
+    assert not any(isinstance(v, str) and "nan" in v.lower() for v in flat), (
+        f"literal 'nan' leaked into wide table: {flat}"
+    )
+
+
 def test_aggregate_multi_seed_mean_std(tmp_path: Path) -> None:
     """Multiple ok seeds → ``mean ± std`` formatting with sample stddev."""
     p = _write_synthetic_parquet([

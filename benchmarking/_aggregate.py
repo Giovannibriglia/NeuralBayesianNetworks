@@ -75,6 +75,13 @@ def _classify_cell(
     if len(ok_rows) == 0:
         return _NA_CELL_ERRORED, np.nan, np.nan, 0
     values = ok_rows["value"].to_numpy(dtype=float)
+    # Issue #35: the runner sometimes emits status='ok' rows with NaN
+    # value (the metric was not populated for that baseline path).
+    # Treat as metric-missing rather than formatting "nan" into the
+    # output table.
+    values = values[np.isfinite(values)]
+    if len(values) == 0:
+        return _NA_METRIC_MISSING, np.nan, np.nan, 0
     mean = float(np.mean(values))
     if len(values) == 1:
         std = 0.0
