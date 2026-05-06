@@ -143,6 +143,33 @@ _BASELINE_APPLICABILITY: dict[str, FrozenSet[str]] = {
     "nbn-mdn-lw":              frozenset({"continuous_lg", "continuous_nongauss"}),
     "nbn-flow-lw":             frozenset({"continuous_lg", "continuous_nongauss"}),
     "nbn-hybrid-router":       frozenset({"hybrid"}),
+
+    # --- Other libraries (v0.6c-C-2) ---
+    # gpytorch: SVGP per continuous node (independent leaves on parents).
+    # Already vectorised in the v1 adapter (pred.sample(torch.Size([n])))
+    # so no per-method fan-out beyond gp / gp-predict.  GPs cannot
+    # condition on discrete evidence, so applicability is continuous-only.
+    "gpytorch-gp":               frozenset({"continuous_lg", "continuous_nongauss"}),
+    "gpytorch-gp-predict":       frozenset({"continuous_lg", "continuous_nongauss"}),
+
+    # pomegranate v1.x: empirical-CPT BayesianNetwork on torch backend.
+    # Discrete-only.  Single canonical method (Laplace-smoothed counts +
+    # predict_proba).  Known v1 bug: predict_proba raises IndexError on
+    # conditional queries (filed as v0.7 issue).  Applicability matrix
+    # marks discrete-only; cells with continuous targets/evidence skip.
+    "pomegranate-discrete":      frozenset({"discrete"}),
+    "pomegranate-discrete-ve":   frozenset({"discrete"}),
+
+    # pyro: Importance sampler over an ancestral generative model.
+    # Empirical CPT for discrete; per-node Gaussian leaves for continuous.
+    # The continuous path is structurally broken (parent-ignoring
+    # marginal Gaussian; filed as v0.7 issue), so applicability is
+    # restricted to discrete despite the v1 adapter declaring
+    # supports = {discrete, continuous, hybrid}.  Mechanism label
+    # "empirical" describes the empirical-distribution-fit style;
+    # inference_method "importance" is pyro.infer.Importance.
+    "pyro-empirical":            frozenset({"discrete"}),
+    "pyro-empirical-importance": frozenset({"discrete"}),
 }
 
 
