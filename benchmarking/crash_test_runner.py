@@ -647,20 +647,21 @@ def _time_nbn_inference(
     adapter = build_adapter_v2(spec, device=str(bn.true_model.device))
     fitted = adapter.fit(bn.train_data, bn.dag, bn.variable_specs)
 
-    # Warmup
+    # v0.7-#35: warmup and timed loop now propagate exceptions so that
+    # genuine engine failures land as ``status='error'`` via
+    # ``run_with_guard``.  Pre-fix this function silently swallowed any
+    # exception from ``query_batch_samples`` and returned ``float('nan')``
+    # — combined with NBNAdapter not implementing ``query_batch_samples``
+    # at all (so the base class always raised), the parquet's
+    # ``total_time_s`` rows for every NBN inference baseline came out as
+    # NaN-with-status='ok' and disappeared from the figures.
     for _ in range(3):
-        try:
-            adapter.query_batch_samples(fitted, q, n_samples=n_lw_samples)
-        except Exception:
-            break
+        adapter.query_batch_samples(fitted, q, n_samples=n_lw_samples)
 
     times = []
     for _ in range(5):
         t0 = time.perf_counter()
-        try:
-            adapter.query_batch_samples(fitted, q, n_samples=n_lw_samples)
-        except Exception:
-            return float("nan")
+        adapter.query_batch_samples(fitted, q, n_samples=n_lw_samples)
         times.append(time.perf_counter() - t0)
     return statistics.median(times)
 
