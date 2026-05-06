@@ -30,6 +30,16 @@ baselines:
   - {library: nbn,   mechanism: flow,     param_method: mle,   inference_method: lw}
   - {library: nbn,   mechanism: hybrid,   param_method: mle,   inference_method: router}
 
+  # v0.6c-C-2: paper-only — gpytorch / pomegranate / pyro inference.
+  # Smoke configs stay pgmpy + NBN per Giovanni's earlier decision;
+  # these libraries are paper-grade only.  Applicability matrix:
+  # gpytorch → continuous_lg + continuous_nongauss; pomegranate /
+  # pyro → discrete only.  Non-applicable cells skip via the
+  # registry-based gate from C-1b.
+  - {library: gpytorch,    mechanism: gp,       param_method: mle, inference_method: predict}
+  - {library: pomegranate, mechanism: discrete, param_method: mle, inference_method: ve}
+  - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance}
+
 per_cell_timeout_s: 600
 output_dir: benchmarking/results
 output_prefix: inference_paper

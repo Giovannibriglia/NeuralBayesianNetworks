@@ -6,8 +6,26 @@ then run inference via ``pyro.infer.Importance`` (the canonical Pyro path
 for unconditional models) and read the empirical posterior marginal of the
 query target.
 
-Continuous nodes are modelled as Gaussian leaves whose mean/std are fitted
-from data.
+.. warning::
+    The continuous path in this adapter is **structurally incorrect**.
+    ``_fit_gaussian_leaf`` stores per-node *marginal* ``(mean, std)`` from
+    the training data, and ``_pyro_model`` samples each continuous node
+    from ``Normal(mean, std)`` independently of its parents — see the
+    ``s[node] = pyro.sample(node, dist.Normal(mu, sigma))`` line in
+    ``_pyro_model``.  This ignores parent values entirely, which is wrong
+    for any continuous_lg or hybrid network with non-trivial structure.
+    Despite ``supports = {discrete, continuous, hybrid}`` declared on the
+    class below, the adapter is correct **only on discrete**.
+
+    The C-1a baseline registry's ``_BASELINE_APPLICABILITY`` matrix
+    accordingly restricts ``pyro-empirical`` and
+    ``pyro-empirical-importance`` to ``{discrete}`` — the runner-loop
+    applicability gate (introduced in v0.6c-C-1b) early-skips cells
+    where pyro would otherwise produce wrong answers.
+
+    Reworking the continuous path (e.g., ``Normal(parent_linear, sigma)``
+    for LG, or moving to SVI with proper conditional CPDs) is tracked
+    as a v0.7 issue.
 
 Notes
 -----
@@ -18,7 +36,8 @@ modular enough that an Importance-sampling baseline already exercises:
     - posterior inference via `pyro.infer.Importance`
     - empirical marginal extraction for a chosen target
 
-Upgrading to NUTS / amortised SVI for hybrid networks is tracked in v0.3.
+Upgrading to NUTS / amortised SVI for hybrid networks is tracked in v0.7
+(separate issue from the continuous-correctness one).
 """
 from __future__ import annotations
 

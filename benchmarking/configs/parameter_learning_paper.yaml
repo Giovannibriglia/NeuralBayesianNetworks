@@ -29,6 +29,11 @@ baselines:
   - {library: nbn,   mechanism: flow,     param_method: mle}
   - {library: nbn,   mechanism: hybrid,   param_method: mle}
 
+  # v0.6c-C-2: paper-only — gpytorch / pomegranate / pyro param-learning.
+  - {library: gpytorch,    mechanism: gp,       param_method: mle}
+  - {library: pomegranate, mechanism: discrete, param_method: mle}
+  - {library: pyro,        mechanism: empirical, param_method: mle}
+
 per_cell_timeout_s: 600
 output_dir: benchmarking/results
 output_prefix: parameter_learning_paper
