@@ -1,5 +1,7 @@
 # Smoke config for inference — runs in CI on every push.
 # Wall-clock budget: < 60 seconds on CPU.
+config_schema_version: 2
+
 mode: inference
 families: [discrete, continuous_lg, continuous_nongauss, hybrid]
 n_nodes: [5, 10, 20]
@@ -12,11 +14,31 @@ edge_density: 0.20
 max_in_degree: 4
 cardinality: 4
 fraction_continuous: 0.5
-baselines: [nbn_ve, nbn_lw, pgmpy, pomegranate, gpytorch]
-# nbn_lw posterior-sample budget per query.  512 was the round-2 default
-# but produced W₁=3.5 at continuous_lg n=10 — bumped to 4000 for
-# round-3 verification per PR #14 reviewer ask.
 nbn_lw_n_samples: 4000
+
+# v0.6c-C-1a — structured baseline list.  Each entry is a
+# (library, mechanism, param_method, inference_method) tuple.
+#
+# 1a preserves the v0.6c-B baseline COUNT (5 inference, 4
+# param-learning) so smoke STATUS counts stay invariant; only the
+# parquet ``baseline`` column relabels via the registry.
+# 1b will refactor the runner to do fit-then-query semantics and
+# expand to the full per-method dispatch.
+#
+# Each spec maps 1-to-1 to a legacy adapter via
+# ``_legacy_adapter_for_spec`` in crash_test_runner.py:
+#   nbn  cat ve  → legacy "nbn_ve"
+#   nbn  cat lw  → legacy "nbn_lw"
+#   pgmpy discrete mle ve → legacy "pgmpy"
+#   pomegranate discrete mle ve → legacy "pomegranate"
+#   gpytorch gp mle predict → legacy "gpytorch"
+baselines:
+  - {library: nbn,         mechanism: cat,      param_method: mle, inference_method: ve}
+  - {library: nbn,         mechanism: cat,      param_method: mle, inference_method: lw}
+  - {library: pgmpy,       mechanism: discrete, param_method: mle, inference_method: ve}
+  - {library: pomegranate, mechanism: discrete, param_method: mle, inference_method: ve}
+  - {library: gpytorch,    mechanism: gp,       param_method: mle, inference_method: predict}
+
 per_cell_timeout_s: 30
 output_dir: benchmarking/results
 output_prefix: inference_smoke
