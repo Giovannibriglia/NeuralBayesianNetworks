@@ -56,11 +56,14 @@ nbn-bench param-learning --config benchmarking/configs/parameter_learning_paper.
 nbn-bench inference      --config benchmarking/configs/inference_paper.yaml
 ```
 
-Each invocation produces two figures plus a parquet:
+Each invocation writes its output under `benchmarking/results/`:
 
-    benchmarking/figures/{prefix}_total_time_vs_size.{pdf,svg,png}
-    benchmarking/figures/{prefix}_accuracy_vs_size.{pdf,svg,png}
-    benchmarking/figures/{prefix}_metrics.parquet
+    benchmarking/results/figures/{prefix}_total_time_vs_size.{pdf,svg,png}
+    benchmarking/results/figures/{prefix}_accuracy_vs_size.{pdf,svg,png}
+    benchmarking/results/raw/{prefix}_metrics.parquet
+    benchmarking/results/raw/{prefix}_{timestamp}.log         (gitignored)
+    benchmarking/results/raw/{prefix}_{timestamp}.run.json    (gitignored)
+    benchmarking/results/tables/                              (placeholder for v0.6c-C)
 
 ### Smoke results
 
@@ -71,8 +74,8 @@ require the data fixes in PR-B.)
 ### Paper results
 
 Run the paper configs locally and commit the resulting figures to
-`benchmarking/figures/` for the README to display. CI does not run
-paper configs.
+`benchmarking/results/figures/` for the README to display. CI does
+not run paper configs.
 
 ## Configuration
 

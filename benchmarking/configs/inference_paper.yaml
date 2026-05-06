@@ -22,5 +22,5 @@ cardinality: 4
 fraction_continuous: 0.5
 baselines: [nbn_ve, nbn_lw, pgmpy, pomegranate, gpytorch, pyro]
 per_cell_timeout_s: 600
-output_dir: benchmarking/figures
+output_dir: benchmarking/results
 output_prefix: inference_paper

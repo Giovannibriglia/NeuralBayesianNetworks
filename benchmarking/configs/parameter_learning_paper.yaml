@@ -16,5 +16,5 @@ fit_epochs: 200
 batch_size: 4096
 baselines: [nbn, pgmpy, pomegranate, gpytorch, pyro]
 per_cell_timeout_s: 600
-output_dir: benchmarking/figures
+output_dir: benchmarking/results
 output_prefix: parameter_learning_paper

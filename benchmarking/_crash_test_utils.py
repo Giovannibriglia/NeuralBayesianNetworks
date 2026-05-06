@@ -107,22 +107,32 @@ class CrashTestConfig:
         "n_train", "n_reference", "edge_density", "max_in_degree",
         "cardinality", "fraction_continuous", "baselines",
         "per_cell_timeout_s", "output_dir", "output_prefix",
-        "nbn_lw_n_samples",  # v0.6c-A round 2 — was silently defaulted
+    })
+    # v0.6c-B follow-up: ``nbn_lw_n_samples`` is required only for
+    # ``mode: inference`` configs since param-learning never invokes
+    # ``LikelihoodWeightingEngine``.  Restricting to inference avoids
+    # forcing param-learning YAMLs to set an unused field.
+    _REQUIRED_INFERENCE_FIELDS = frozenset({
+        "nbn_lw_n_samples",
     })
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> CrashTestConfig:
         text = Path(path).read_text()
         d = yaml.safe_load(text)
-        missing = cls._REQUIRED_YAML_FIELDS - set(d.keys())
+        required = set(cls._REQUIRED_YAML_FIELDS)
+        if d.get("mode") == "inference":
+            required |= cls._REQUIRED_INFERENCE_FIELDS
+        missing = required - set(d.keys())
         if missing:
             raise ValueError(
                 f"Config {str(path)!r} missing required fields: "
                 f"{sorted(missing)}.  As of v0.6c-A round 2,"
-                f" nbn_lw_n_samples must be set explicitly to prevent the"
-                f" silent-defaulting class of bug that produced wrong"
-                f" continuous accuracy on paper config (W₁ ≈ 1.0 vs"
-                f" smoke's 0.04).  Smoke uses 4000; paper uses 4000+.",
+                f" nbn_lw_n_samples must be set explicitly on inference"
+                f" configs to prevent the silent-defaulting class of bug"
+                f" that produced wrong continuous accuracy on paper"
+                f" config (W₁ ≈ 1.0 vs smoke's 0.04).  Smoke uses 4000;"
+                f" paper uses 4000+.",
             )
         return cls(
             mode=str(d["mode"]),
@@ -144,7 +154,11 @@ class CrashTestConfig:
             fit_epochs=int(d.get("fit_epochs", 50)),
             batch_size=int(d.get("batch_size", 1024)),
             nbn_batch_size=int(d.get("nbn_batch_size", 0)),
-            nbn_lw_n_samples=int(d["nbn_lw_n_samples"]),
+            # nbn_lw_n_samples: required for inference; param-learning
+            # configs may legitimately omit (validated above).  When
+            # absent, fall back to the dataclass default of 512 — that
+            # value is unused by run_parameter_learning anyway.
+            nbn_lw_n_samples=int(d.get("nbn_lw_n_samples", 512)),
         )
 
     @property
@@ -157,13 +171,22 @@ class CrashTestConfig:
         return list(range(self.n_seeds))
 
     def figure_path(self, name: str, ext: str = "png") -> Path:
-        """Canonical figure output: ``{output_dir}/{prefix}_{name}.{ext}``."""
-        out = Path(self.output_dir) / f"{self.output_prefix}_{name}.{ext}"
+        """Canonical figure output: ``{output_dir}/figures/{prefix}_{name}.{ext}``.
+
+        v0.6c-B: figures live in ``output_dir/figures/``; raw parquets +
+        logs + run.json live in ``output_dir/raw/``; tables (placeholder
+        for v0.6c-C) live in ``output_dir/tables/``.  The single
+        ``output_dir`` field in YAML names the parent; this method and
+        :meth:`parquet_path` and :mod:`benchmarking._run_logging`
+        enforce the subdirectory split internally.
+        """
+        out = Path(self.output_dir) / "figures" / f"{self.output_prefix}_{name}.{ext}"
         out.parent.mkdir(parents=True, exist_ok=True)
         return out
 
     def parquet_path(self) -> Path:
-        out = Path(self.output_dir) / f"{self.output_prefix}_metrics.parquet"
+        """Canonical parquet output: ``{output_dir}/raw/{prefix}_metrics.parquet``."""
+        out = Path(self.output_dir) / "raw" / f"{self.output_prefix}_metrics.parquet"
         out.parent.mkdir(parents=True, exist_ok=True)
         return out
 

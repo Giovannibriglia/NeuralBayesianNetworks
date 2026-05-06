@@ -1,20 +1,21 @@
 """Structured logging for ``nbn-bench`` runs (v0.6c-A).
 
 For every parameter-learning / inference run, write two artefacts
-alongside the parquet so future diagnostics have full execution
-context:
+into ``{output_dir}/raw/`` alongside the metrics parquet so future
+diagnostics have full execution context:
 
-* ``{output_dir}/{output_prefix}_{timestamp}.log`` — INFO+ logs
+* ``{output_dir}/raw/{output_prefix}_{timestamp}.log`` — INFO+ logs
   duplicated from the existing console handler.
-* ``{output_dir}/{output_prefix}_{timestamp}.run.json`` — metadata
-  dict (git SHA, torch version, cuda device, full config, wall
-  time, status summary).
+* ``{output_dir}/raw/{output_prefix}_{timestamp}.run.json`` —
+  metadata dict (git SHA, torch version, cuda device, full config,
+  wall time, status summary).
 
-Both are gitignored (``*.log`` is already in the repo's root
-``.gitignore``; ``*.run.json`` is added in this round).  Best-
-effort: any failure inside this module logs a warning and lets the
-run proceed.  We never block a smoke / paper run on a logging
-issue.
+The ``raw/`` subdirectory was introduced in v0.6c-B.  Both files are
+gitignored (``*.log`` is already in the repo's root ``.gitignore``;
+``*.run.json`` was added in v0.6c-A; ``raw/.gitignore`` lists both
+explicitly).  Best-effort: any failure inside this module logs a
+warning and lets the run proceed.  We never block a smoke / paper
+run on a logging issue.
 """
 from __future__ import annotations
 
@@ -47,7 +48,11 @@ def setup_run_logging(cfg) -> Dict[str, Any]:
     }
 
     try:
-        out = Path(cfg.output_dir)
+        # v0.6c-B: logs + run.json land in ``output_dir/raw/`` alongside
+        # the metrics parquet so all per-run artefacts are in one place.
+        # ``output_dir/figures/`` is for plotter outputs; the layout is
+        # enforced in code, not via per-subdir YAML fields.
+        out = Path(cfg.output_dir) / "raw"
         out.mkdir(parents=True, exist_ok=True)
         log_path = out / f"{cfg.output_prefix}_{timestamp}.log"
         meta_path = out / f"{cfg.output_prefix}_{timestamp}.run.json"
