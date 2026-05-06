@@ -27,7 +27,13 @@ class PgmpyAdapter(BaselineAdapter):
     name = "pgmpy"
     supports = {"discrete", "continuous"}
 
-    def __init__(self) -> None:
+    def __init__(self, *, param_method: str = "mle") -> None:
+        # v0.6c-C-1b: ``param_method`` selects between MLE and Bayesian
+        # estimators on discrete networks (BDeu prior, equivalent_sample_size=5
+        # — the standard pgmpy default for the Bayesian path).  The
+        # continuous_lg path uses MLE only (closed-form least-squares;
+        # no Bayesian variant in pgmpy as of 0.1.25).
+        self.param_method = param_method
         self.model: Any = None            # discrete VE model
         self.infer: Any = None            # discrete inference engine
         self.lg_model: Any = None         # LinearGaussianBayesianNetwork
@@ -73,12 +79,21 @@ class PgmpyAdapter(BaselineAdapter):
         bn = DiscreteBayesianNetwork(problem.dag)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FutureWarning)
-            try:
-                from pgmpy.parameter_estimator import DiscreteMLE
-                bn.fit(df, estimator=DiscreteMLE())
-            except (ImportError, TypeError):
-                from pgmpy.estimators import MaximumLikelihoodEstimator
-                bn.fit(df, estimator=MaximumLikelihoodEstimator)
+            if self.param_method == "bayes":
+                # v0.6c-C-1b: BayesianEstimator with the standard pgmpy
+                # default prior (BDeu, equivalent_sample_size=5).
+                from pgmpy.estimators import BayesianEstimator
+                bn.fit(
+                    df, estimator=BayesianEstimator,
+                    prior_type="BDeu", equivalent_sample_size=5,
+                )
+            else:
+                try:
+                    from pgmpy.parameter_estimator import DiscreteMLE
+                    bn.fit(df, estimator=DiscreteMLE())
+                except (ImportError, TypeError):
+                    from pgmpy.estimators import MaximumLikelihoodEstimator
+                    bn.fit(df, estimator=MaximumLikelihoodEstimator)
         self.model = bn
         self.infer = VariableElimination(bn)
         self.kind = "discrete"

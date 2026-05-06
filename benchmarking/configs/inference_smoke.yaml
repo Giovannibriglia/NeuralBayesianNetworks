@@ -1,13 +1,13 @@
 # Smoke config for inference — runs in CI on every push.
-# Wall-clock budget: < 60 seconds on CPU.
+# Wall-clock budget: < 90 seconds on CPU.
 config_schema_version: 2
 
 mode: inference
 families: [discrete, continuous_lg, continuous_nongauss, hybrid]
 n_nodes: [5, 10, 20]
 n_seeds: 1
-n_queries_per_cell: 16          # number of (target, evidence) queries timed per cell
-nbn_batch_size: 16              # B for NBN's query_batch on smoke; equals n_queries
+n_queries_per_cell: 16
+nbn_batch_size: 16
 n_train: 2000
 n_reference: 5000
 edge_density: 0.20
@@ -16,29 +16,26 @@ cardinality: 4
 fraction_continuous: 0.5
 nbn_lw_n_samples: 4000
 
-# v0.6c-C-1a — structured baseline list.  Each entry is a
-# (library, mechanism, param_method, inference_method) tuple.
+# v0.6c-C-1b — full per-method baseline set per the registry.  The
+# runner gates non-applicable cells via ``is_applicable(label, family)``
+# BEFORE adapter dispatch (see crash_test_runner.py:run_inference);
+# each baseline below only runs on the family/families its label
+# applies to (e.g., pgmpy-mle-ve runs on discrete only, nbn-mdn-lw on
+# continuous_lg + continuous_nongauss).
 #
-# 1a preserves the v0.6c-B baseline COUNT (5 inference, 4
-# param-learning) so smoke STATUS counts stay invariant; only the
-# parquet ``baseline`` column relabels via the registry.
-# 1b will refactor the runner to do fit-then-query semantics and
-# expand to the full per-method dispatch.
-#
-# Each spec maps 1-to-1 to a legacy adapter via
-# ``_legacy_adapter_for_spec`` in crash_test_runner.py:
-#   nbn  cat ve  → legacy "nbn_ve"
-#   nbn  cat lw  → legacy "nbn_lw"
-#   pgmpy discrete mle ve → legacy "pgmpy"
-#   pomegranate discrete mle ve → legacy "pomegranate"
-#   gpytorch gp mle predict → legacy "gpytorch"
+# nbn-neuralcat-ve is omitted (deferred to v0.7 issue #26).
 baselines:
-  - {library: nbn,         mechanism: cat,      param_method: mle, inference_method: ve}
-  - {library: nbn,         mechanism: cat,      param_method: mle, inference_method: lw}
-  - {library: pgmpy,       mechanism: discrete, param_method: mle, inference_method: ve}
-  - {library: pomegranate, mechanism: discrete, param_method: mle, inference_method: ve}
-  - {library: gpytorch,    mechanism: gp,       param_method: mle, inference_method: predict}
+  - {library: pgmpy, mechanism: discrete, param_method: mle,   inference_method: ve}
+  - {library: pgmpy, mechanism: discrete, param_method: bayes, inference_method: ve}
+  - {library: pgmpy, mechanism: lg,       param_method: mle,   inference_method: predict}
+  - {library: nbn,   mechanism: cat,      param_method: mle,   inference_method: ve}
+  - {library: nbn,   mechanism: cat,      param_method: mle,   inference_method: lw}
+  - {library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: lw}
+  - {library: nbn,   mechanism: lg,       param_method: mle,   inference_method: lw}
+  - {library: nbn,   mechanism: mdn,      param_method: mle,   inference_method: lw}
+  - {library: nbn,   mechanism: flow,     param_method: mle,   inference_method: lw}
+  - {library: nbn,   mechanism: hybrid,   param_method: mle,   inference_method: router}
 
-per_cell_timeout_s: 30
+per_cell_timeout_s: 60
 output_dir: benchmarking/results
 output_prefix: inference_smoke

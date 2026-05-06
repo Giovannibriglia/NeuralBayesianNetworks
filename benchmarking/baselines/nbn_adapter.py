@@ -33,7 +33,10 @@ from nbn.mechanisms import (
 
 
 DiscreteMech = Literal["categorical_table", "neural_categorical"]
-ContinuousMech = Literal["mdn", "linear_gaussian"]
+# v0.6c-C-1b: ``flow`` added for ``nbn-flow-lw`` (NormalizingFlow
+# mechanism, requires ``zuko``).  Kept conditional so the adapter
+# doesn't hard-fail on environments where zuko isn't installed.
+ContinuousMech = Literal["mdn", "linear_gaussian", "flow"]
 
 
 class NBNAdapter(BaselineAdapter):
@@ -84,6 +87,12 @@ class NBNAdapter(BaselineAdapter):
             return CategoricalTableMechanism()
         if self.continuous_mech == "linear_gaussian":
             return LinearGaussianMechanism()
+        if self.continuous_mech == "flow":
+            # v0.6c-C-1b: NormalizingFlow mechanism (requires zuko).
+            # Imported lazily so this branch only fails when ``flow`` is
+            # actually requested.
+            from nbn.mechanisms import NormalizingFlowMechanism
+            return NormalizingFlowMechanism()
         return MDNMechanism(num_components=3, hidden=(32,))
 
     def fit(self, problem: BenchmarkProblem) -> None:

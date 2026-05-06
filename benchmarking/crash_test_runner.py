@@ -42,7 +42,7 @@ from benchmarking._crash_test_utils import (
     run_with_guard,
     write_parquet,
 )
-from benchmarking._baseline_registry import _label_from_spec
+from benchmarking._baseline_registry import _label_from_spec, is_applicable
 from benchmarking._run_logging import finalise_run_logging, setup_run_logging
 from benchmarking.synthetic import SyntheticBN, make_synthetic_bn
 
@@ -173,6 +173,22 @@ def run_parameter_learning(
             for s in cfg.seeds:
                 for spec in cfg.baselines:
                     label = _label_from_spec(spec)
+                    # v0.6c-C-1b: registry-based applicability gate
+                    # (BEFORE adapter dispatch).  Method-keyed labels
+                    # like ``pgmpy-mle-ve`` are discrete-only per the
+                    # C-1a registry; the legacy ``_NOT_APPLICABLE``
+                    # table inside the cell functions is keyed by the
+                    # *polymorphic* legacy adapter string ("pgmpy",
+                    # "nbn_lw") which gates a different (less strict)
+                    # set of combinations.  Without this gate, e.g.,
+                    # ``pgmpy-mle-ve`` would dispatch on continuous_lg
+                    # via the legacy adapter's lg path and emit a
+                    # nonsense ``ok`` row in the parquet.
+                    if not is_applicable(label, family):
+                        rows.append(_not_applicable_row(
+                            family, n, s, label,
+                        )[0])
+                        continue
                     legacy = _legacy_adapter_for_spec(spec)
                     cell_rows = run_with_guard(
                         lambda f=family, nn=n, ss=s, lg=legacy:
@@ -212,6 +228,18 @@ def run_inference(
             for s in cfg.seeds:
                 for spec in cfg.baselines:
                     label = _label_from_spec(spec)
+                    # v0.6c-C-1b: registry-based applicability gate
+                    # BEFORE adapter dispatch.  See run_parameter_learning
+                    # for the rationale.  Without this, ``pgmpy-mle-ve``
+                    # would dispatch on continuous_lg via the legacy
+                    # adapter's lg path and emit a nonsense ``ok`` row;
+                    # ``nbn-cat-lw`` would dispatch on hybrid and trip
+                    # a cuda device-side assert during sampling.
+                    if not is_applicable(label, family):
+                        rows.append(_not_applicable_row(
+                            family, n, s, label,
+                        )[0])
+                        continue
                     legacy = _legacy_adapter_for_spec(spec)
                     cell_rows = run_with_guard(
                         lambda f=family, nn=n, ss=s, lg=legacy:
@@ -257,10 +285,20 @@ def _generate_bn(cfg: CrashTestConfig, family: str, n: int, seed: int) -> Synthe
 def _param_learning_cell(
     cfg: CrashTestConfig, family: str, n: int, seed: int, baseline: str,
 ) -> List[CellResult]:
-    """Fit a fresh model with `baseline`, measure accuracy vs truth."""
+    """Fit a fresh model with `baseline`, measure accuracy vs truth.
+
+    v0.6c-C-1b: also reports ``total_time_s`` — wall-clock time to
+    fit + score the per-node accuracy battery.  This is the
+    parameter-learning crash test's headline speed metric (per
+    Giovanni's spec).  Speed includes the ``adapter.fit(...)`` call
+    AND the ``_avg_*_per_node`` direct-CPD comparison loop, since
+    those collectively constitute "learn the CPDs and evaluate them"
+    — what a paper figure timing column should report.
+    """
     if (family, baseline) in _NOT_APPLICABLE:
         return _not_applicable_row(family, n, seed, baseline)
     bn = _generate_bn(cfg, family, n, seed)
+    t0 = time.perf_counter()
     if baseline == "nbn":
         metric, value = _fit_and_score_nbn(cfg, bn, family)
     elif baseline == "pgmpy":
@@ -270,10 +308,17 @@ def _param_learning_cell(
         raise NotImplementedError(
             f"param-learning baseline {baseline!r} accuracy wiring is v0.5b",
         )
-    return [CellResult(
-        family=family, n_nodes=n, seed=seed, baseline=baseline,
-        metric=metric, value=value,
-    )]
+    total_time = time.perf_counter() - t0
+    return [
+        CellResult(
+            family=family, n_nodes=n, seed=seed, baseline=baseline,
+            metric=metric, value=value,
+        ),
+        CellResult(
+            family=family, n_nodes=n, seed=seed, baseline=baseline,
+            metric="total_time_s", value=float(total_time),
+        ),
+    ]
 
 
 def _inference_cell(
@@ -557,32 +602,67 @@ def _build_query_batch(bn: SyntheticBN, *, B: int, seed: int):
 def _time_nbn_inference(
     bn: SyntheticBN, baseline: str, q, *, n_lw_samples: int = 512,
 ) -> float:
-    """One batched call per timed run; report median total time."""
-    from nbn.inference.hybrid import HybridRouter
-    from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
-    from nbn.inference.tensor_ve import TensorVariableElimination
-    if baseline == "nbn_ve":
-        eng = TensorVariableElimination()
-    elif baseline == "nbn_lw":
-        eng = LikelihoodWeightingEngine(n_samples=n_lw_samples)
-    elif baseline == "nbn_hybrid":
-        eng = HybridRouter()
-    else:
+    """One batched call per timed run; report median total time.
+
+    v0.6c-C-1b: routes through ``BaselineAdapterV2Shim`` so the engine
+    queries a *fitted* NBN model (trained on ``bn.train_data``), not
+    ``bn.true_model``.  Pre-PR this function called
+    ``eng.query_batch(bn.true_model, ...)`` directly, which measured
+    "engine quality on the canonical SCM" rather than "library quality
+    after fitting on data" — wrong semantics for paper figures.
+    """
+    from benchmarking._baseline_registry import BaselineSpec
+    from benchmarking.baselines._adapter_v2 import build_adapter_v2
+
+    legacy_to_inference_method = {
+        "nbn_ve": "ve",
+        "nbn_lw": "lw",
+        "nbn_hybrid": "router",
+    }
+    inf_method = legacy_to_inference_method.get(baseline)
+    if inf_method is None:
         raise NotImplementedError(f"unknown nbn variant {baseline!r}")
 
-    discrete_nodes = {n for n, (k, _) in bn.variable_specs.items() if k == "discrete"}
-    ev: Dict[str, torch.Tensor] = {}
-    for k, v in q.evidence.items():
-        ev[k] = v.long() if k in discrete_nodes else v
+    # Pick a default mechanism per family — these match the v1 NBNAdapter's
+    # auto-routing.  v0.6c-C-1b's runner refactor is per-spec dispatch in
+    # principle, but the smoke YAML still uses the C-1a 5-baseline set
+    # mapped 1-to-1 to legacy names; per-mechanism expansion lands in
+    # the YAML of this PR for the labels we have adapter support for.
+    family_kinds = {k for (k, _) in bn.variable_specs.values()}
+    if family_kinds == {"discrete"}:
+        spec = BaselineSpec(library="nbn", mechanism="cat",
+                            param_method="mle", inference_method=inf_method)
+    elif family_kinds == {"continuous"}:
+        # continuous_lg vs continuous_nongauss: pick LG when the
+        # name encodes _lg (the synthetic generator's convention).
+        if "_lg" in bn.name:
+            spec = BaselineSpec(library="nbn", mechanism="lg",
+                                param_method="mle", inference_method=inf_method)
+        else:
+            spec = BaselineSpec(library="nbn", mechanism="mdn",
+                                param_method="mle", inference_method=inf_method)
+    else:
+        # hybrid → HybridRouter handles per-node dispatch.
+        spec = BaselineSpec(library="nbn", mechanism="hybrid",
+                            param_method="mle", inference_method=inf_method)
+
+    adapter = build_adapter_v2(spec, device=str(bn.true_model.device))
+    fitted = adapter.fit(bn.train_data, bn.dag, bn.variable_specs)
 
     # Warmup
     for _ in range(3):
-        eng.query_batch(bn.true_model, list(q.targets), ev)
+        try:
+            adapter.query_batch_samples(fitted, q, n_samples=n_lw_samples)
+        except Exception:
+            break
 
     times = []
     for _ in range(5):
         t0 = time.perf_counter()
-        eng.query_batch(bn.true_model, list(q.targets), ev)
+        try:
+            adapter.query_batch_samples(fitted, q, n_samples=n_lw_samples)
+        except Exception:
+            return float("nan")
         times.append(time.perf_counter() - t0)
     return statistics.median(times)
 
@@ -893,9 +973,45 @@ def _baseline_posterior_for_query(
     for a single query, per baseline."""
     discrete_nodes = {n for n, (k, _) in bn.variable_specs.items() if k == "discrete"}
     if baseline.startswith("nbn"):
+        # v0.6c-C-1b: route NBN posterior queries through a *fitted*
+        # NBN model (trained on bn.train_data via the v2 adapter shim),
+        # not bn.true_model.  Pre-PR this branch called
+        # ``eng.query(bn.true_model, [target], ev)`` directly — wrong
+        # semantics for honest paper figures.
+        from benchmarking._baseline_registry import BaselineSpec
+        from benchmarking.baselines._adapter_v2 import build_adapter_v2
         from nbn.inference.hybrid import HybridRouter
         from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
         from nbn.inference.tensor_ve import TensorVariableElimination
+        legacy_to_inference_method = {
+            "nbn_ve": "ve", "nbn_lw": "lw", "nbn_hybrid": "router",
+        }
+        inf_method = legacy_to_inference_method.get(baseline)
+        if inf_method is None:
+            return None
+        # Pick a default mechanism per family.
+        family_kinds = {k for (k, _) in bn.variable_specs.values()}
+        if family_kinds == {"discrete"}:
+            spec = BaselineSpec(library="nbn", mechanism="cat",
+                                param_method="mle", inference_method=inf_method)
+        elif family_kinds == {"continuous"}:
+            mech = "lg" if "_lg" in bn.name else "mdn"
+            spec = BaselineSpec(library="nbn", mechanism=mech,
+                                param_method="mle", inference_method=inf_method)
+        else:
+            spec = BaselineSpec(library="nbn", mechanism="hybrid",
+                                param_method="mle", inference_method=inf_method)
+        try:
+            adapter = build_adapter_v2(spec, device=str(bn.true_model.device))
+            fitted = adapter.fit(bn.train_data, bn.dag, bn.variable_specs)
+        except Exception:
+            return None
+        # Use the fitted adapter's query path.  The v1 NBNAdapter's
+        # ``query`` returns a probability vector for discrete or a
+        # mean for continuous; we still need engine-level samples for
+        # the accuracy oracle, so call the underlying engine on the
+        # *fitted* model (NEVER bn.true_model).
+        fitted_model = adapter._v1.model  # NBNAdapter exposes .model post-fit
         eng_map = {
             "nbn_ve": TensorVariableElimination(),
             "nbn_lw": LikelihoodWeightingEngine(n_samples=n_lw_samples),
@@ -911,7 +1027,7 @@ def _baseline_posterior_for_query(
         }
         with torch.no_grad():
             try:
-                out = eng.query(bn.true_model, [target], ev)
+                out = eng.query(fitted_model, [target], ev)
             except Exception:
                 return None
         if isinstance(out, tuple):
