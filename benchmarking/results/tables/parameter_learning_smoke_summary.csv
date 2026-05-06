@@ -1,0 +1,37 @@
+family,metric,n_nodes,nbn-cat,nbn-flow,nbn-hybrid,nbn-lg,nbn-mdn,nbn-neuralcat,pgmpy-bayes,pgmpy-lg,pgmpy-mle
+continuous_lg,total_time_s,5,n/a (not applicable),0.0126,n/a (not applicable),0.0133,0.0117,n/a (not applicable),n/a (not applicable),0.0257,n/a (not applicable)
+continuous_lg,total_time_s,10,n/a (not applicable),0.0243,n/a (not applicable),0.0262,0.0243,n/a (not applicable),n/a (not applicable),0.0643,n/a (not applicable)
+continuous_lg,total_time_s,20,n/a (not applicable),0.0618,n/a (not applicable),0.0538,0.0569,n/a (not applicable),n/a (not applicable),0.1216,n/a (not applicable)
+continuous_lg,tv_per_node,5,n/a (not applicable),n/a (metric missing),n/a (not applicable),n/a (metric missing),n/a (metric missing),n/a (not applicable),n/a (not applicable),n/a (metric missing),n/a (not applicable)
+continuous_lg,tv_per_node,10,n/a (not applicable),n/a (metric missing),n/a (not applicable),n/a (metric missing),n/a (metric missing),n/a (not applicable),n/a (not applicable),n/a (metric missing),n/a (not applicable)
+continuous_lg,tv_per_node,20,n/a (not applicable),n/a (metric missing),n/a (not applicable),n/a (metric missing),n/a (metric missing),n/a (not applicable),n/a (not applicable),n/a (metric missing),n/a (not applicable)
+continuous_lg,w1_per_node,5,n/a (not applicable),0.1230,n/a (not applicable),0.1253,0.1245,n/a (not applicable),n/a (not applicable),0.1032,n/a (not applicable)
+continuous_lg,w1_per_node,10,n/a (not applicable),0.0903,n/a (not applicable),0.0881,0.0855,n/a (not applicable),n/a (not applicable),0.0908,n/a (not applicable)
+continuous_lg,w1_per_node,20,n/a (not applicable),0.0758,n/a (not applicable),0.0776,0.0757,n/a (not applicable),n/a (not applicable),0.0759,n/a (not applicable)
+continuous_nongauss,total_time_s,5,n/a (not applicable),2.2099,n/a (not applicable),n/a (not applicable),3.2936,n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable)
+continuous_nongauss,total_time_s,10,n/a (not applicable),7.1943,n/a (not applicable),n/a (not applicable),7.3067,n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable)
+continuous_nongauss,total_time_s,20,n/a (not applicable),15.9867,n/a (not applicable),n/a (not applicable),16.1599,n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable)
+continuous_nongauss,tv_per_node,5,n/a (not applicable),n/a (metric missing),n/a (not applicable),n/a (not applicable),n/a (metric missing),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable)
+continuous_nongauss,tv_per_node,10,n/a (not applicable),n/a (metric missing),n/a (not applicable),n/a (not applicable),n/a (metric missing),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable)
+continuous_nongauss,tv_per_node,20,n/a (not applicable),n/a (metric missing),n/a (not applicable),n/a (not applicable),n/a (metric missing),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable)
+continuous_nongauss,w1_per_node,5,n/a (not applicable),0.1012,n/a (not applicable),n/a (not applicable),0.0969,n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable)
+continuous_nongauss,w1_per_node,10,n/a (not applicable),0.1442,n/a (not applicable),n/a (not applicable),0.1591,n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable)
+continuous_nongauss,w1_per_node,20,n/a (not applicable),0.1378,n/a (not applicable),n/a (not applicable),0.1401,n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable)
+discrete,total_time_s,5,0.0062,n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),0.0054,0.0158,n/a (not applicable),2.1838
+discrete,total_time_s,10,0.0097,n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),0.0097,0.0349,n/a (not applicable),0.0425
+discrete,total_time_s,20,0.0209,n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),0.0235,0.0872,n/a (not applicable),0.0858
+discrete,tv_per_node,5,0.0234,n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),0.0234,0.0242,n/a (not applicable),0.0242
+discrete,tv_per_node,10,0.0657,n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),0.0657,0.0657,n/a (not applicable),0.0657
+discrete,tv_per_node,20,0.1163,n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),0.1163,0.1705,n/a (not applicable),0.1705
+discrete,w1_per_node,5,n/a (metric missing),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (metric missing),n/a (metric missing),n/a (not applicable),n/a (metric missing)
+discrete,w1_per_node,10,n/a (metric missing),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (metric missing),n/a (metric missing),n/a (not applicable),n/a (metric missing)
+discrete,w1_per_node,20,n/a (metric missing),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (metric missing),n/a (metric missing),n/a (not applicable),n/a (metric missing)
+hybrid,total_time_s,5,n/a (not applicable),n/a (not applicable),0.0080,n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable)
+hybrid,total_time_s,10,n/a (not applicable),n/a (not applicable),0.0166,n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable)
+hybrid,total_time_s,20,n/a (not applicable),n/a (not applicable),0.0402,n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable)
+hybrid,tv_per_node,5,n/a (not applicable),n/a (not applicable),n/a (metric missing),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable)
+hybrid,tv_per_node,10,n/a (not applicable),n/a (not applicable),n/a (metric missing),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable)
+hybrid,tv_per_node,20,n/a (not applicable),n/a (not applicable),n/a (metric missing),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable)
+hybrid,w1_per_node,5,n/a (not applicable),n/a (not applicable),0.1331,n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable)
+hybrid,w1_per_node,10,n/a (not applicable),n/a (not applicable),0.1287,n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable)
+hybrid,w1_per_node,20,n/a (not applicable),n/a (not applicable),0.0749,n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable),n/a (not applicable)

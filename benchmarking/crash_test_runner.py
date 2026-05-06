@@ -37,8 +37,6 @@ from benchmarking._crash_test_utils import (
     CellResult,
     CrashTestConfig,
     fresh_mechanism_for,
-    plot_metric_vs_n_nodes,
-    reproducibility_footer,
     run_with_guard,
     write_parquet,
 )
@@ -710,77 +708,56 @@ def _time_loop_inference(bn: SyntheticBN, baseline: str, q) -> float:
 
 
 def _render_two_figures(rows: List[CellResult], cfg: CrashTestConfig) -> None:
-    """Render the canonical figure(s) for the current mode.
+    """v0.6c-C-3: render figures + write summary tables.
 
-    PR-B-round-2 §1: parameter-learning is *accuracy only* per the v0.4
-    spec ("don't check the speed, just check metrics about accuracy").
-    Inference renders both total-time and accuracy.
+    Reads the parquet that ``write_parquet`` just produced and pipes
+    it through the new aggregator + table writers + plotter v2:
+
+    * 2 figures (accuracy_vs_size + total_time_vs_size) via
+      :mod:`benchmarking._plot_v2.render_figures` — per-panel
+      applicability filter, b&w-safe markers, mean ± std bands.
+    * 4 tables (CSV / markdown / LaTeX / parquet) via
+      :func:`benchmarking._tables.write_all`.
+
+    The old plotter (``plot_metric_vs_n_nodes``) is no longer called
+    — it was tied to the pre-C-1a flat baseline list.  The new
+    plotter consumes the registry's per-baseline applicability matrix
+    so legends correctly filter per panel even with 13 method-keyed
+    baselines.
+
+    Best-effort: any failure in the aggregator / tables / plotter
+    pipeline logs a warning and lets the run complete (the parquet
+    is already on disk by the time we get here).
     """
-    import matplotlib.pyplot as plt
-    import pandas as pd
-    df = pd.DataFrame([r.__dict__ for r in rows])
+    from benchmarking._aggregate import aggregate
+    from benchmarking._plot_v2 import render_figures
+    from benchmarking._tables import write_all
 
-    if cfg.mode == "parameter_learning":
-        accuracy_metrics = ("tv_per_node", "w1_per_node")
-        accuracy_label = "per-node TV / W1"
-        accuracy_suffix = "(lower better)"
-    else:
-        accuracy_metrics = ("accuracy",)
-        accuracy_label = "TV / Wasserstein-1"
-        accuracy_suffix = "(lower better)"
+    parquet_path = cfg.parquet_path()
+    output_prefix = cfg.output_prefix
+    output_dir = cfg.output_dir
 
-    # Figure 1: total time (inference mode only).
-    if cfg.mode == "inference":
-        fig1, ax_grid1 = plt.subplots(2, 2, figsize=(11, 7), constrained_layout=True)
-        plot_metric_vs_n_nodes(
-            df, metric="total_time_s",
-            ax_grid=ax_grid1.flatten(), fig=fig1,
-            metric_label="total time for B queries (s), lower better",
-            log_y=True, log_x=True,
+    try:
+        aggregated = aggregate(parquet_path)
+        write_all(aggregated, output_dir=output_dir, output_prefix=output_prefix)
+    except Exception as exc:
+        logger.warning(
+            "v0.6c-C-3 aggregator/tables pipeline failed: %s "
+            "(parquet still written; figures still attempted)",
+            exc,
         )
-        fig1.text(
-            0.99, 0.005,
-            reproducibility_footer(version="v0.5", seed=cfg.seeds[0], device=cfg.device),
-            ha="right", va="bottom", fontsize=7, color="gray",
-            transform=fig1.transFigure,
-        )
-        fig1.suptitle(
-            f"{cfg.mode} · total time vs network size",
-            fontsize=12, fontweight="bold",
-        )
-        for ext in ("pdf", "svg", "png"):
-            out = cfg.figure_path("total_time_vs_size", ext=ext)
-            fig1.savefig(out, bbox_inches="tight", dpi=150)
-        plt.close(fig1)
 
-    # Figure 2: accuracy
-    df_acc = df[df["metric"].isin(accuracy_metrics)
-                | (df["metric"] == "status")].copy()
-    # Renaming non-status accuracy metrics to a single 'accuracy' column
-    # lets the plotter pick them up uniformly across families.
-    metric_map = dict.fromkeys(accuracy_metrics, "accuracy")
-    df_acc["metric"] = df_acc["metric"].map(metric_map).fillna(df_acc["metric"])
-    fig2, ax_grid2 = plt.subplots(2, 2, figsize=(11, 7), constrained_layout=True)
-    plot_metric_vs_n_nodes(
-        df_acc, metric="accuracy",
-        ax_grid=ax_grid2.flatten(), fig=fig2,
-        metric_label=accuracy_label,
-        log_y=False, log_x=True,
-    )
-    fig2.text(
-        0.99, 0.005,
-        reproducibility_footer(version="v0.5", seed=cfg.seeds[0], device=cfg.device),
-        ha="right", va="bottom", fontsize=7, color="gray",
-        transform=fig2.transFigure,
-    )
-    fig2.suptitle(
-        f"{cfg.mode} · accuracy vs network size  {accuracy_suffix}",
-        fontsize=12, fontweight="bold",
-    )
-    for ext in ("pdf", "svg", "png"):
-        out = cfg.figure_path("accuracy_vs_size", ext=ext)
-        fig2.savefig(out, bbox_inches="tight", dpi=150)
-    plt.close(fig2)
+    try:
+        render_figures(
+            parquet_path=parquet_path,
+            output_dir=output_dir,
+            output_prefix=output_prefix,
+        )
+    except Exception as exc:
+        logger.warning(
+            "v0.6c-C-3 plotter v2 failed: %s (parquet + tables still on disk)",
+            exc,
+        )
 
 
 # ---------------------------------------------------------------------- #
