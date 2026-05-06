@@ -85,14 +85,45 @@ class CrashTestConfig:
 
     # Inference specific
     nbn_batch_size: int = 0              # 0 means 'use n_queries_per_cell'
-    nbn_lw_n_samples: int = 512          # per-query posterior budget for LW
+    # v0.6c-A round 2: ``from_yaml`` enforces this field as required;
+    # the dataclass default below is retained only as a placeholder for
+    # type-system completeness (the YAML path raises ValueError before
+    # reaching it).  Direct ``CrashTestConfig(...)`` construction is
+    # not used in the codebase per audit; if a future caller adds one,
+    # the v0.6c-A required-field guard should be lifted into a
+    # __post_init__ check too.  Tracked in v0.7 if needed.
+    nbn_lw_n_samples: int = 512
 
     device: str = "auto"
+
+    # v0.6c-A round 2: fields that *must* be set explicitly in every
+    # YAML config.  Adding a field here removes the silent-fallback
+    # path that caused Finding 1 (paper YAML omitting nbn_lw_n_samples
+    # → smoke-tuned default 512 silently leaked into paper run →
+    # W₁ ≈ 1.0 on continuous accuracy).  Promote a defaulted field to
+    # this set when smoke-vs-paper-appropriate values differ.
+    _REQUIRED_YAML_FIELDS = frozenset({
+        "mode", "families", "n_nodes", "n_seeds", "n_queries_per_cell",
+        "n_train", "n_reference", "edge_density", "max_in_degree",
+        "cardinality", "fraction_continuous", "baselines",
+        "per_cell_timeout_s", "output_dir", "output_prefix",
+        "nbn_lw_n_samples",  # v0.6c-A round 2 — was silently defaulted
+    })
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> CrashTestConfig:
         text = Path(path).read_text()
         d = yaml.safe_load(text)
+        missing = cls._REQUIRED_YAML_FIELDS - set(d.keys())
+        if missing:
+            raise ValueError(
+                f"Config {str(path)!r} missing required fields: "
+                f"{sorted(missing)}.  As of v0.6c-A round 2,"
+                f" nbn_lw_n_samples must be set explicitly to prevent the"
+                f" silent-defaulting class of bug that produced wrong"
+                f" continuous accuracy on paper config (W₁ ≈ 1.0 vs"
+                f" smoke's 0.04).  Smoke uses 4000; paper uses 4000+.",
+            )
         return cls(
             mode=str(d["mode"]),
             families=list(d["families"]),
@@ -113,7 +144,7 @@ class CrashTestConfig:
             fit_epochs=int(d.get("fit_epochs", 50)),
             batch_size=int(d.get("batch_size", 1024)),
             nbn_batch_size=int(d.get("nbn_batch_size", 0)),
-            nbn_lw_n_samples=int(d.get("nbn_lw_n_samples", 512)),
+            nbn_lw_n_samples=int(d["nbn_lw_n_samples"]),
         )
 
     @property

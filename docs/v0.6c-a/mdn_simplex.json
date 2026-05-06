@@ -1,0 +1,83 @@
+{
+  "config": {
+    "family": "continuous_nongauss",
+    "n_nodes": 5000,
+    "seed": 0,
+    "B": 1024,
+    "n_train": 10000,
+    "n_lw_samples": 512
+  },
+  "error": {
+    "type": "ValueError",
+    "msg": "Expected parameter probs (Tensor of shape (2000, 3)) of distribution Categorical(probs: torch.Size([2000, 3])) to satisfy the constraint Simplex(), but found invalid values:\ntensor([[0.5464, 0.1393, 0.3143],\n        [0.5464, 0.1393, 0.3143],\n        [0.5464, 0.1393, 0.3143],\n        ...,\n        [0.5464, 0.1393, 0.3143],\n        [0.5464, 0.1393, 0.3143],\n        [0.5464, 0.1393, 0.3143]])",
+    "traceback": "Traceback (most recent call last):\n  File \"/home/user/NeuralBayesianNetworks/benchmarking/diagnostics/v0_6c_a_mdn_simplex.py\", line 173, in reproduce_mdn_simplex_error\n    bn = make_synthetic_bn(\n         ^^^^^^^^^^^^^^^^^^\n  File \"/home/user/NeuralBayesianNetworks/benchmarking/synthetic.py\", line 288, in make_synthetic_bn\n    train_dict = _take_samples(model, n=n_train, device=device_t)\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/user/NeuralBayesianNetworks/benchmarking/synthetic.py\", line 616, in _take_samples\n    chunks.append(model.sample(n=c))\n                  ^^^^^^^^^^^^^^^^^\n  File \"/home/user/NeuralBayesianNetworks/nbn/core/network.py\", line 313, in sample\n    return ancestral_sample(\n           ^^^^^^^^^^^^^^^^^\n  File \"/home/user/NeuralBayesianNetworks/nbn/sampling/ancestral.py\", line 103, in ancestral_sample\n    samp = mechanisms[node].sample(pa_tensor, n=1)  # [n_rows, 1, D]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/user/NeuralBayesianNetworks/nbn/mechanisms/mdn.py\", line 196, in sample\n    comp_idx = Categorical(probs=pi).sample()  # [B*n]\n               ^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/user/NeuralBayesianNetworks/benchmarking/diagnostics/v0_6c_a_mdn_simplex.py\", line 163, in patched_init\n    return original_init(\n           ^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.11/dist-packages/torch/distributions/categorical.py\", line 85, in __init__\n    super().__init__(batch_shape, validate_args=validate_args)\n  File \"/usr/local/lib/python3.11/dist-packages/torch/distributions/distribution.py\", line 77, in __init__\n    raise ValueError(\nValueError: Expected parameter probs (Tensor of shape (2000, 3)) of distribution Categorical(probs: torch.Size([2000, 3])) to satisfy the constraint Simplex(), but found invalid values:\ntensor([[0.5464, 0.1393, 0.3143],\n        [0.5464, 0.1393, 0.3143],\n        [0.5464, 0.1393, 0.3143],\n        ...,\n        [0.5464, 0.1393, 0.3143],\n        [0.5464, 0.1393, 0.3143],\n        [0.5464, 0.1393, 0.3143]])\n"
+  },
+  "error_phase": "make_synthetic_bn",
+  "n_categorical_constructions_with_probs": 9289,
+  "n_categorical_constructions_with_logits": 0,
+  "audit_probs_index": 9288,
+  "last_probs_audit": {
+    "shape": [
+      2000,
+      3
+    ],
+    "dtype": "torch.float32",
+    "has_nan": true,
+    "n_nan": 3,
+    "has_inf": false,
+    "n_inf": 0,
+    "has_neg": false,
+    "n_neg": 0,
+    "min_value": 0.13933636248111725,
+    "max_value": 0.546381413936615,
+    "row_sums_min_finite": 1.0,
+    "row_sums_max_finite": 1.0,
+    "row_sums_n_off_simplex": 0,
+    "first_nan_row_idx": 560,
+    "nan_rows_count": 1,
+    "sample_non_conforming_rows": [
+      {
+        "idx": 560,
+        "row": [
+          NaN,
+          NaN,
+          NaN
+        ],
+        "row_sum": NaN,
+        "row_has_nan": true,
+        "row_has_inf": false,
+        "row_has_neg": false
+      }
+    ],
+    "sample_conforming_rows": [
+      {
+        "idx": 0,
+        "row": [
+          0.546381413936615,
+          0.13933636248111725,
+          0.31428226828575134
+        ],
+        "row_sum": 1.0
+      },
+      {
+        "idx": 1,
+        "row": [
+          0.546381413936615,
+          0.13933636248111725,
+          0.31428226828575134
+        ],
+        "row_sum": 1.0
+      },
+      {
+        "idx": 2,
+        "row": [
+          0.546381413936615,
+          0.13933636248111725,
+          0.31428226828575134
+        ],
+        "row_sum": 1.0
+      }
+    ]
+  },
+  "retries": []
+}
