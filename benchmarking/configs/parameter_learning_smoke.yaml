@@ -1,5 +1,7 @@
 # Smoke config for parameter learning — runs in CI on every push.
 # Wall-clock budget: < 60 seconds on CPU.
+config_schema_version: 2
+
 mode: parameter_learning
 families: [discrete, continuous_lg, continuous_nongauss, hybrid]
 n_nodes: [5, 10, 20]
@@ -14,7 +16,19 @@ cardinality: 4
 fraction_continuous: 0.5
 fit_epochs: 50
 batch_size: 1024
-baselines: [nbn, pgmpy, pomegranate, gpytorch]
+
+# v0.6c-C-1a — structured baseline list.  Each spec maps 1-to-1 to a
+# legacy adapter via ``_legacy_adapter_for_spec``:
+#   nbn         cat      mle → legacy "nbn"
+#   pgmpy       discrete mle → legacy "pgmpy"
+#   pomegranate discrete mle → legacy "pomegranate"
+#   gpytorch    gp       mle → legacy "gpytorch"
+baselines:
+  - {library: nbn,         mechanism: cat,      param_method: mle}
+  - {library: pgmpy,       mechanism: discrete, param_method: mle}
+  - {library: pomegranate, mechanism: discrete, param_method: mle}
+  - {library: gpytorch,    mechanism: gp,       param_method: mle}
+
 per_cell_timeout_s: 30
 output_dir: benchmarking/results
 output_prefix: parameter_learning_smoke

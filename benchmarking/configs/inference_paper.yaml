@@ -1,4 +1,6 @@
 # Paper-grade config for inference. Run locally; ~30 min on CPU.
+config_schema_version: 2
+
 mode: inference
 families: [discrete, continuous_lg, continuous_nongauss, hybrid]
 n_nodes: [10, 50, 100, 500, 1000, 5000]
@@ -10,17 +12,25 @@ n_reference: 50000
 # v0.6c-A round 2: explicit per-query LW posterior budget.  4000 was
 # the smoke-side default since PR #14 round 3; paper YAML had silently
 # inherited the CrashTestConfig dataclass default of 512, producing
-# W₁ ≈ 1.0 on continuous_lg / continuous_nongauss at n_nodes=10
-# because the importance-sampling weight collapses on multi-evidence
-# continuous queries below ~2000 samples (round-1 sweep showed the W₁
-# phase transition between 1024 and 2000).  4000 is the minimum-correct
-# value; bump to 8000-20000 if paper-config wall time has headroom.
+# W₁ ≈ 1.0 on continuous_lg / continuous_nongauss at n_nodes=10.
 nbn_lw_n_samples: 4000
 edge_density: 0.20
 max_in_degree: 4
 cardinality: 4
 fraction_continuous: 0.5
-baselines: [nbn_ve, nbn_lw, pgmpy, pomegranate, gpytorch, pyro]
+
+# v0.6c-C-1a — structured baseline list.  Paper preserves the
+# v0.6c-B baseline count (matching old [nbn_ve, nbn_lw, pgmpy,
+# pomegranate, gpytorch, pyro]).  Each spec maps 1-to-1 to a legacy
+# adapter via ``_legacy_adapter_for_spec``.
+baselines:
+  - {library: nbn,         mechanism: cat,      param_method: mle, inference_method: ve}
+  - {library: nbn,         mechanism: cat,      param_method: mle, inference_method: lw}
+  - {library: pgmpy,       mechanism: discrete, param_method: mle, inference_method: ve}
+  - {library: pomegranate, mechanism: discrete, param_method: mle, inference_method: ve}
+  - {library: gpytorch,    mechanism: gp,       param_method: mle, inference_method: predict}
+  - {library: pyro,        mechanism: discrete, param_method: mle, inference_method: ve}
+
 per_cell_timeout_s: 600
 output_dir: benchmarking/results
 output_prefix: inference_paper

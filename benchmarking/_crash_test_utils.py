@@ -54,12 +54,16 @@ DEFAULT_PER_CELL_TIMEOUT_S = 30  # smoke soft cap (per pre-Phase-D refinement)
 
 @dataclass
 class CrashTestConfig:
-    """v0.5 flat YAML schema.
+    """v0.6c-C-1a (schema v2) flat YAML schema.
 
-    Fields match ``benchmarking/configs/{parameter_learning,inference}_{smoke,paper}.yaml``
-    exactly.  Generator parameters are top-level (not nested under
-    ``generator:``); workload parameters are top-level (not nested under
-    ``inference:``).
+    v0.6c-C-1a introduces ``config_schema_version: 2`` and changes
+    ``baselines`` from a flat list of strings into a list of structured
+    spec dicts ``{library, mechanism, param_method[, inference_method]}``.
+    The runner derives canonical labels via
+    :func:`benchmarking._baseline_registry._label_from_spec`.
+
+    Schema-v1 configs (flat ``baselines: [nbn_lw, nbn_ve, pgmpy, ...]``)
+    are rejected by ``from_yaml`` with a clear migration message.
     """
 
     mode: str                            # 'parameter_learning' | 'inference'
@@ -74,7 +78,7 @@ class CrashTestConfig:
     max_in_degree: int
     cardinality: int
     fraction_continuous: float
-    baselines: List[str]
+    baselines: List[Dict[str, Any]]      # schema v2: list of spec dicts
     per_cell_timeout_s: int
     output_dir: str
     output_prefix: str
@@ -85,41 +89,76 @@ class CrashTestConfig:
 
     # Inference specific
     nbn_batch_size: int = 0              # 0 means 'use n_queries_per_cell'
-    # v0.6c-A round 2: ``from_yaml`` enforces this field as required;
-    # the dataclass default below is retained only as a placeholder for
-    # type-system completeness (the YAML path raises ValueError before
-    # reaching it).  Direct ``CrashTestConfig(...)`` construction is
-    # not used in the codebase per audit; if a future caller adds one,
-    # the v0.6c-A required-field guard should be lifted into a
-    # __post_init__ check too.  Tracked in v0.7 if needed.
     nbn_lw_n_samples: int = 512
 
     device: str = "auto"
 
-    # v0.6c-A round 2: fields that *must* be set explicitly in every
-    # YAML config.  Adding a field here removes the silent-fallback
-    # path that caused Finding 1 (paper YAML omitting nbn_lw_n_samples
-    # → smoke-tuned default 512 silently leaked into paper run →
-    # W₁ ≈ 1.0 on continuous accuracy).  Promote a defaulted field to
-    # this set when smoke-vs-paper-appropriate values differ.
+    _SCHEMA_VERSION: int = 2
+
     _REQUIRED_YAML_FIELDS = frozenset({
+        "config_schema_version",         # v0.6c-C-1a: explicit version
         "mode", "families", "n_nodes", "n_seeds", "n_queries_per_cell",
         "n_train", "n_reference", "edge_density", "max_in_degree",
         "cardinality", "fraction_continuous", "baselines",
         "per_cell_timeout_s", "output_dir", "output_prefix",
     })
-    # v0.6c-B follow-up: ``nbn_lw_n_samples`` is required only for
-    # ``mode: inference`` configs since param-learning never invokes
-    # ``LikelihoodWeightingEngine``.  Restricting to inference avoids
-    # forcing param-learning YAMLs to set an unused field.
     _REQUIRED_INFERENCE_FIELDS = frozenset({
         "nbn_lw_n_samples",
     })
+
+    @staticmethod
+    def _validate_baseline_spec(b: Any, mode: str) -> Dict[str, Any]:
+        """Verify a single ``baselines:`` list entry has the right shape.
+
+        Raises ``ValueError`` on missing/unknown keys.  Returns a clean
+        ``dict`` (not the raw YAML node) for downstream consumers.
+        """
+        if not isinstance(b, dict):
+            raise ValueError(
+                f"baseline entry {b!r} is not a dict; v0.6c-C-1a schema "
+                f"requires {{library, mechanism, param_method"
+                f"[, inference_method]}}.  Schema v1 (flat baseline "
+                f"list of strings) was retired; see "
+                f"benchmarking/configs/inference_smoke.yaml.",
+            )
+        required = {"library", "mechanism", "param_method"}
+        if mode == "inference":
+            required |= {"inference_method"}
+        missing = required - set(b.keys())
+        if missing:
+            raise ValueError(
+                f"baseline entry {b!r} missing fields: {sorted(missing)}",
+            )
+        return {
+            "library": str(b["library"]),
+            "mechanism": str(b["mechanism"]),
+            "param_method": str(b["param_method"]),
+            "inference_method": (
+                str(b["inference_method"])
+                if b.get("inference_method") is not None else None
+            ),
+        }
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> CrashTestConfig:
         text = Path(path).read_text()
         d = yaml.safe_load(text)
+
+        # v0.6c-C-1a: enforce schema v2.  Schema v1 had a flat baseline
+        # list of strings; v2 has structured spec dicts.  No silent
+        # backward-compat path — v1 configs raise with a migration hint.
+        version = d.get("config_schema_version")
+        if version != cls._SCHEMA_VERSION:
+            raise ValueError(
+                f"Config {str(path)!r} has config_schema_version="
+                f"{version!r}; v0.6c-C-1a+ requires version "
+                f"{cls._SCHEMA_VERSION}.  See "
+                f"benchmarking/configs/inference_smoke.yaml for the "
+                f"new format: 'baselines' is now a list of spec dicts "
+                f"like {{library: nbn, mechanism: cat, param_method: "
+                f"mle, inference_method: ve}}.",
+            )
+
         required = set(cls._REQUIRED_YAML_FIELDS)
         if d.get("mode") == "inference":
             required |= cls._REQUIRED_INFERENCE_FIELDS
@@ -147,17 +186,16 @@ class CrashTestConfig:
             max_in_degree=int(d["max_in_degree"]),
             cardinality=int(d["cardinality"]),
             fraction_continuous=float(d["fraction_continuous"]),
-            baselines=list(d["baselines"]),
+            baselines=[
+                cls._validate_baseline_spec(b, str(d.get("mode", "")))
+                for b in d["baselines"]
+            ],
             per_cell_timeout_s=int(d["per_cell_timeout_s"]),
             output_dir=str(d["output_dir"]),
             output_prefix=str(d["output_prefix"]),
             fit_epochs=int(d.get("fit_epochs", 50)),
             batch_size=int(d.get("batch_size", 1024)),
             nbn_batch_size=int(d.get("nbn_batch_size", 0)),
-            # nbn_lw_n_samples: required for inference; param-learning
-            # configs may legitimately omit (validated above).  When
-            # absent, fall back to the dataclass default of 512 — that
-            # value is unused by run_parameter_learning anyway.
             nbn_lw_n_samples=int(d.get("nbn_lw_n_samples", 512)),
         )
 

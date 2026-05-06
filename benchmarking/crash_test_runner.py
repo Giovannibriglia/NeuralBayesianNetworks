@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import statistics
 import time
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import networkx as nx
 import torch
@@ -42,10 +42,63 @@ from benchmarking._crash_test_utils import (
     run_with_guard,
     write_parquet,
 )
+from benchmarking._baseline_registry import _label_from_spec
 from benchmarking._run_logging import finalise_run_logging, setup_run_logging
 from benchmarking.synthetic import SyntheticBN, make_synthetic_bn
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------- #
+# v0.6c-C-1a — schema-v2 spec → legacy adapter shim
+# ---------------------------------------------------------------------- #
+#
+# v0.6c-C-1a introduces structured baseline specs in YAML
+# (``{library, mechanism, param_method[, inference_method]}``) and a
+# new method-keyed label scheme via ``_label_from_spec``.
+#
+# The runner refactor that consumes these specs natively (fit-then-
+# query semantics, per-method dispatch) lands in v0.6c-C-1b.  In 1a
+# we keep the runner's existing string-keyed dispatch + the legacy
+# ``_NOT_APPLICABLE`` table; ``_legacy_adapter_for_spec`` translates
+# each spec to its legacy-adapter string.  After the cell runs, the
+# resulting rows are *relabeled* to use the new
+# ``_label_from_spec(spec)`` label in the parquet ``baseline`` column.
+#
+# This means smoke STATUS counts are invariant in 1a (the dispatch
+# mapping is 1-to-1 with v0.6c-B's flat list); only the labels in
+# the parquet change.
+def _legacy_adapter_for_spec(spec: Dict[str, Any]) -> str:
+    """Map a v0.6c-C-1a spec dict to the legacy adapter string used by
+    the existing string-keyed dispatch in :func:`_inference_cell` /
+    :func:`_param_learning_cell`.
+
+    Raises ``ValueError`` on unknown specs — every spec listed in the
+    shipping YAML configs has a defined mapping; new specs added in
+    v0.6c-C-1b will use spec-keyed dispatch and won't go through this
+    shim.
+    """
+    library = str(spec["library"])
+    inference_method = spec.get("inference_method")
+    if library == "nbn":
+        if inference_method == "ve":
+            return "nbn_ve"
+        if inference_method == "lw":
+            return "nbn_lw"
+        if inference_method == "router":
+            return "nbn_hybrid"
+        if inference_method is None:
+            return "nbn"        # parameter-learning
+        raise ValueError(
+            f"v0.6c-C-1a: unknown inference_method "
+            f"{inference_method!r} in nbn spec {spec!r}",
+        )
+    if library in {"pgmpy", "pomegranate", "gpytorch", "pyro"}:
+        return library
+    raise ValueError(
+        f"v0.6c-C-1a: no legacy adapter mapping for spec {spec!r}; "
+        f"new libraries land in v0.6c-C-1b's spec-keyed dispatch.",
+    )
 
 
 # PR-B §A.4: Structurally-invalid (family, baseline) combinations.
@@ -118,13 +171,21 @@ def run_parameter_learning(
     for family in cfg.families:
         for n in cfg.n_nodes:
             for s in cfg.seeds:
-                for b in cfg.baselines:
-                    rows.extend(run_with_guard(
-                        lambda f=family, n=n, s=s, b=b:
-                            _param_learning_cell(cfg, f, n, s, b),
-                        family=family, n_nodes=n, seed=s, baseline=b,
+                for spec in cfg.baselines:
+                    label = _label_from_spec(spec)
+                    legacy = _legacy_adapter_for_spec(spec)
+                    cell_rows = run_with_guard(
+                        lambda f=family, nn=n, ss=s, lg=legacy:
+                            _param_learning_cell(cfg, f, nn, ss, lg),
+                        family=family, n_nodes=n, seed=s, baseline=label,
                         timeout_s=cfg.per_cell_timeout_s,
-                    ))
+                    )
+                    # v0.6c-C-1a relabel: cells use the legacy adapter
+                    # string internally; replace it with the registry's
+                    # canonical label for the parquet ``baseline`` column.
+                    for r in cell_rows:
+                        r.baseline = label
+                    rows.extend(cell_rows)
 
     write_parquet(rows, cfg.parquet_path())
     _render_two_figures(rows, cfg)
@@ -149,13 +210,21 @@ def run_inference(
     for family in cfg.families:
         for n in cfg.n_nodes:
             for s in cfg.seeds:
-                for b in cfg.baselines:
-                    rows.extend(run_with_guard(
-                        lambda f=family, n=n, s=s, b=b:
-                            _inference_cell(cfg, f, n, s, b),
-                        family=family, n_nodes=n, seed=s, baseline=b,
+                for spec in cfg.baselines:
+                    label = _label_from_spec(spec)
+                    legacy = _legacy_adapter_for_spec(spec)
+                    cell_rows = run_with_guard(
+                        lambda f=family, nn=n, ss=s, lg=legacy:
+                            _inference_cell(cfg, f, nn, ss, lg),
+                        family=family, n_nodes=n, seed=s, baseline=label,
                         timeout_s=cfg.per_cell_timeout_s,
-                    ))
+                    )
+                    # v0.6c-C-1a relabel: cells use the legacy adapter
+                    # string internally; replace it with the registry's
+                    # canonical label for the parquet ``baseline`` column.
+                    for r in cell_rows:
+                        r.baseline = label
+                    rows.extend(cell_rows)
 
     write_parquet(rows, cfg.parquet_path())
     _render_two_figures(rows, cfg)
