@@ -568,11 +568,29 @@ def _avg_w1_per_node_pgmpy_lg(
 
 
 def _w1(a: torch.Tensor, b: torch.Tensor) -> float:
-    # Bug 1: device-align before subtraction.
-    a, _ = torch.sort(a.reshape(-1).float().cpu())
-    b, _ = torch.sort(b.reshape(-1).float().cpu())
-    n = min(a.shape[0], b.shape[0])
-    return float((a[:n] - b[:n]).abs().mean().item())
+    """Empirical 1-D Wasserstein-1 distance between two sample arrays.
+
+    v0.7-#37 fix: previous implementation did ``min(len(a), len(b))``
+    truncation post-sort, which compares mismatched quantiles when the
+    arrays differ in length (e.g. lower half of one vs all of the other).
+    This is not a Wasserstein estimator.  The continuous_lg accuracy
+    cell hit this because the runner's predicted-vs-oracle paths
+    produced unequal-length arrays (pgmpy budget=4000 vs oracle=2000),
+    inflating pgmpy's W₁ by ≈10× — see ``scripts/diagnostics/diagnose_issue_37.py``.
+
+    Use the standard quantile-interpolation estimator: take both sorted
+    arrays at the same evenly-spaced quantile grid (length ``max(len)``
+    so neither is downsampled), then average the absolute differences.
+    Matches ``scipy.stats.wasserstein_distance`` for equal-length input
+    and degrades gracefully when the arrays differ.
+    """
+    a = a.reshape(-1).float().cpu()
+    b = b.reshape(-1).float().cpu()
+    n = max(a.shape[0], b.shape[0])
+    qs = torch.linspace(0.0, 1.0, n)
+    a_q = torch.quantile(a, qs)
+    b_q = torch.quantile(b, qs)
+    return float((a_q - b_q).abs().mean().item())
 
 
 # ---------------------------------------------------------------------- #

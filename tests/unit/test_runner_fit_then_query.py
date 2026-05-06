@@ -456,6 +456,96 @@ def test_nbn_inference_path_records_total_time_s(tmp_path) -> None:
     )
 
 
+def test_pgmpy_lg_predict_w1_in_expected_range(tmp_path) -> None:
+    """Issue #37 regression test: pgmpy-lg-predict's W₁ on continuous_lg
+    should be in the same range as nbn-lg-lw post-fix.
+
+    Pre-fix, ``_w1`` did ``min(len(a), len(b))`` truncation post-sort —
+    a mismatched-quantile comparison rather than a Wasserstein estimator.
+    The continuous_lg accuracy cell hit this because pgmpy's predicted
+    samples (budget=max(n_samples, n_lw_samples)) differed in length
+    from the oracle (always 2000), so ``_w1`` compared the lower half
+    of sorted pgmpy against all of sorted oracle.
+
+    Post-fix, ``_w1`` uses quantile-interpolation at evenly-spaced
+    quantiles (length ``max(len)``).  Both pgmpy-lg-predict and
+    nbn-lg-lw should now produce small W₁ values close to each other,
+    because they're computing W₁ on essentially the same predicted
+    distribution (analytic LG vs LW on fitted LG) against the same
+    oracle.
+    """
+    import yaml
+    import pandas as pd
+    from benchmarking.crash_test_runner import run_inference
+
+    config = {
+        "config_schema_version": 2,
+        "mode": "inference",
+        "families": ["continuous_lg"],
+        "n_nodes": [10],
+        "n_seeds": 1,
+        "n_queries_per_cell": 16,
+        "nbn_batch_size": 16,
+        "n_train": 2000,
+        "n_reference": 2000,
+        "edge_density": 0.20,
+        "max_in_degree": 4,
+        "cardinality": 4,
+        "fraction_continuous": 1.0,
+        "nbn_lw_n_samples": 2000,
+        "baselines": [
+            {"library": "pgmpy", "mechanism": "lg",
+             "param_method": "mle", "inference_method": "predict"},
+            {"library": "nbn", "mechanism": "lg",
+             "param_method": "mle", "inference_method": "lw"},
+        ],
+        "per_cell_timeout_s": 120,
+        "output_dir": str(tmp_path),
+        "output_prefix": "issue37_test",
+    }
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(yaml.safe_dump(config))
+
+    rc = run_inference(str(cfg_path), device="cpu")
+    assert rc == 0
+
+    parquet = tmp_path / "raw" / "issue37_test_metrics.parquet"
+    df = pd.read_parquet(parquet)
+
+    pgmpy_rows = df[
+        (df["baseline"] == "pgmpy-lg-predict")
+        & (df["metric"] == "accuracy")
+        & (df["status"] == "ok")
+    ]
+    nbn_rows = df[
+        (df["baseline"] == "nbn-lg-lw")
+        & (df["metric"] == "accuracy")
+        & (df["status"] == "ok")
+    ]
+    assert len(pgmpy_rows) >= 1, (
+        f"pgmpy-lg-predict must emit an accuracy ok row; got {df.to_dict('records')}"
+    )
+    assert len(nbn_rows) >= 1, (
+        f"nbn-lg-lw must emit an accuracy ok row; got {df.to_dict('records')}"
+    )
+
+    pgmpy_w1 = float(pgmpy_rows["value"].iloc[0])
+    nbn_w1 = float(nbn_rows["value"].iloc[0])
+
+    # Post-fix expected: both small, both close.
+    assert pgmpy_w1 < 0.15, (
+        f"pgmpy-lg-predict W₁ should be small post-fix (got {pgmpy_w1:.4f})"
+    )
+    assert nbn_w1 < 0.15, (
+        f"nbn-lg-lw W₁ should be small post-fix (got {nbn_w1:.4f})"
+    )
+    assert abs(pgmpy_w1 - nbn_w1) < 0.10, (
+        f"pgmpy-lg-predict and nbn-lg-lw W₁ should be similar post-fix; "
+        f"gap {abs(pgmpy_w1 - nbn_w1):.4f} suggests metric still has bias "
+        f"(pgmpy={pgmpy_w1:.4f}, nbn={nbn_w1:.4f})"
+    )
+
+
 def test_nbn_neuralcat_ve_remains_deferred_in_c1b() -> None:
     """C-1a deferred ``nbn-neuralcat-ve`` to v0.7.  C-1b's adapter
     factory must not silently start supporting it (which would route
