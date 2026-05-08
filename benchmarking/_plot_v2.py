@@ -37,6 +37,30 @@ from benchmarking._baseline_registry import is_applicable
 
 
 # ---------------------------------------------------------------------- #
+# Metric metadata
+# ---------------------------------------------------------------------- #
+
+
+# Metrics that are non-negative by definition (W₁ ≥ 0, TV ≥ 0, time ≥ 0).
+# Std bands around the mean are clipped at 0 for these so the rendered
+# region stays geometrically valid (#42).
+NON_NEGATIVE_METRICS = frozenset({
+    "accuracy", "tv_per_node", "w1_per_node", "cpd_accuracy", "total_time_s",
+})
+
+
+# Parameter-learning uses different accuracy metrics per family
+# (different units; can't share a y-axis, but each panel has its own).
+# Inference uses "accuracy" uniformly across families and is unaffected.
+PARAM_LEARN_FAMILY_METRIC: Dict[str, str] = {
+    "discrete":            "tv_per_node",
+    "continuous_lg":       "w1_per_node",
+    "continuous_nongauss": "w1_per_node",
+    "hybrid":              "w1_per_node",
+}
+
+
+# ---------------------------------------------------------------------- #
 # Stable per-baseline color and marker schemes
 # ---------------------------------------------------------------------- #
 
@@ -184,13 +208,23 @@ def _render_single_metric(
     error_footnotes: List[str] = []
 
     for ax, family in zip(flat_axes, families):
+        # Per-family metric resolution.  Parameter-learning uses
+        # tv_per_node for discrete and w1_per_node for the others
+        # (different units; can't share a y-axis, but each panel has
+        # its own).  Inference and total-time are uniform across
+        # families, so the else branch is the pre-fix path (#44).
+        if metric in ("tv_per_node", "w1_per_node"):
+            family_metric = PARAM_LEARN_FAMILY_METRIC.get(family, metric)
+        else:
+            family_metric = metric
+
         ax.set_title(f"{family}", fontsize=11, fontweight="bold")
         ax.set_xlabel("n_nodes")
         ylabel = (
-            "Wasserstein-1 (W₁)" if metric in ("accuracy", "w1_per_node")
-            else "Total variation (TV)" if metric == "tv_per_node"
-            else "Wall-clock seconds" if metric == "total_time_s"
-            else metric
+            "Wasserstein-1 (W₁)" if family_metric in ("accuracy", "w1_per_node")
+            else "Total variation (TV)" if family_metric == "tv_per_node"
+            else "Wall-clock seconds" if family_metric == "total_time_s"
+            else family_metric
         )
         ax.set_ylabel(ylabel)
         ax.grid(True, alpha=0.3)
@@ -204,7 +238,7 @@ def _render_single_metric(
             sub = df[
                 (df["family"] == family)
                 & (df["baseline"] == baseline)
-                & (df["metric"] == metric)
+                & (df["metric"] == family_metric)
             ]
             if sub.empty:
                 continue
@@ -227,8 +261,13 @@ def _render_single_metric(
                 color=sty["color"], marker=sty["marker"],
                 linestyle=sty["linestyle"], markersize=7, linewidth=1.5,
             )
+            # Std band; clip lower bound at 0 for non-negative metrics
+            # so the rendered region stays geometrically valid (#42).
+            lower = ys - stds
+            if family_metric in NON_NEGATIVE_METRICS:
+                lower = np.maximum(lower, 0.0)
             ax.fill_between(
-                xs, ys - stds, ys + stds,
+                xs, lower, ys + stds,
                 color=sty["color"], alpha=0.18, linewidth=0,
             )
             any_drawn = True
