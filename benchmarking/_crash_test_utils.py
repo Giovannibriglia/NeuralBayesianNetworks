@@ -518,6 +518,76 @@ def fresh_mechanism_for(
     raise ValueError(f"no fresh mechanism for (family={family}, kind={kind})")
 
 
+def fresh_mechanism_for_spec(
+    spec, family: str, kind: str, *, num_components: int = 3,
+    parent_kinds: list[tuple[str, int]] | None = None,
+    cardinality: int = 4,
+):
+    """v0.8 spec-aware mechanism factory (audit v0.7-#43, runtime fix v0.8-#51).
+
+    Replaces the family-keyed :func:`fresh_mechanism_for` for NBN baselines
+    on the parameter-learning runner side.  The legacy function collapsed
+    every NBN discrete baseline to ``CategoricalTableMechanism`` (so
+    ``nbn-cat`` and ``nbn-neuralcat`` produced bit-identical fits despite
+    distinct method-keyed labels in the parquet).  This version routes on
+    ``spec.mechanism`` instead, so each method-keyed baseline gets the
+    mechanism class its label promises.
+
+    NBN-only — pgmpy / gpytorch / pomegranate / pyro have their own
+    fitting code paths in the runner.  ``spec.mechanism == "hybrid"``
+    falls back to the family-default :func:`fresh_mechanism_for` so the
+    HybridRouter case keeps its per-node mechanism dispatch.
+
+    The ``BinningCategoricalTable`` branch (hybrid-family discrete-target
+    nodes with at least one continuous parent) is mechanism-independent:
+    both ``nbn-cat`` and ``nbn-neuralcat`` resolve to the binner for
+    cont→disc edges, so we keep that branch ahead of the mechanism
+    dispatch.
+    """
+    from nbn.mechanisms.binning_categorical import BinningCategoricalTable
+    from nbn.mechanisms.categorical_table import CategoricalTableMechanism
+    from nbn.mechanisms.linear_gaussian import LinearGaussianMechanism
+    from nbn.mechanisms.mdn import MDNMechanism
+    from nbn.mechanisms.neural_categorical import NeuralCategoricalMechanism
+
+    if spec.mechanism == "hybrid":
+        return fresh_mechanism_for(
+            family, kind,
+            num_components=num_components,
+            parent_kinds=parent_kinds,
+            cardinality=cardinality,
+        )
+
+    if kind == "discrete":
+        if (family == "hybrid" and parent_kinds
+                and any(pk == "continuous" for (pk, _) in parent_kinds)):
+            return BinningCategoricalTable(
+                parent_kinds=parent_kinds,
+                n_bins=cardinality,
+                n_categories=cardinality,
+            )
+        if spec.mechanism == "neuralcat":
+            return NeuralCategoricalMechanism(n_classes=cardinality)
+        # Default for discrete: closed-form counting MLE.
+        return CategoricalTableMechanism(alpha=0.0)
+
+    # Continuous nodes — dispatch on spec.mechanism, fallback to
+    # family-default for unspecified mechanisms.
+    if spec.mechanism == "lg":
+        return LinearGaussianMechanism(ridge=1e-4, learnable=True)
+    if spec.mechanism == "mdn":
+        return MDNMechanism(num_components=num_components, hidden=(32,))
+    if spec.mechanism == "flow":
+        from nbn.mechanisms.normalizing_flow import NormalizingFlowMechanism
+        return NormalizingFlowMechanism()
+    return fresh_mechanism_for(
+        family, kind,
+        num_components=num_components,
+        parent_kinds=parent_kinds,
+        cardinality=cardinality,
+    )
+
+
 # ---------------------------------------------------------------------- #
 # Figure renderer
 # ---------------------------------------------------------------------- #

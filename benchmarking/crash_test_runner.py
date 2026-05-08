@@ -37,10 +37,15 @@ from benchmarking._crash_test_utils import (
     CellResult,
     CrashTestConfig,
     fresh_mechanism_for,
+    fresh_mechanism_for_spec,
     run_with_guard,
     write_parquet,
 )
-from benchmarking._baseline_registry import _label_from_spec, is_applicable
+from benchmarking._baseline_registry import (
+    BaselineSpec,
+    _label_from_spec,
+    is_applicable,
+)
 from benchmarking._run_logging import finalise_run_logging, setup_run_logging
 from benchmarking.synthetic import SyntheticBN, make_synthetic_bn
 
@@ -66,18 +71,23 @@ logger = logging.getLogger(__name__)
 # This means smoke STATUS counts are invariant in 1a (the dispatch
 # mapping is 1-to-1 with v0.6c-B's flat list); only the labels in
 # the parquet change.
-def _legacy_adapter_for_spec(spec: Dict[str, Any]) -> str:
-    """Map a v0.6c-C-1a spec dict to the legacy adapter string used by
-    the existing string-keyed dispatch in :func:`_inference_cell` /
+def _legacy_adapter_for_spec(spec) -> str:
+    """Map a v0.6c-C-1a spec to the legacy adapter string used by the
+    existing string-keyed dispatch in :func:`_inference_cell` /
     :func:`_param_learning_cell`.
 
-    Raises ``ValueError`` on unknown specs — every spec listed in the
+    Accepts either a dict (legacy YAML-loaded form) or a
+    :class:`BaselineSpec` (v0.8-#51 method-keyed form).  Raises
+    ``ValueError`` on unknown specs — every spec listed in the
     shipping YAML configs has a defined mapping; new specs added in
-    v0.6c-C-1b will use spec-keyed dispatch and won't go through this
-    shim.
+    v0.6c-C-1b use spec-keyed dispatch and don't go through this shim.
     """
-    library = str(spec["library"])
-    inference_method = spec.get("inference_method")
+    if isinstance(spec, BaselineSpec):
+        library = spec.library
+        inference_method = spec.inference_method
+    else:
+        library = str(spec["library"])
+        inference_method = spec.get("inference_method")
     if library == "nbn":
         if inference_method == "ve":
             return "nbn_ve"
@@ -187,18 +197,18 @@ def run_parameter_learning(
                             family, n, s, label,
                         )[0])
                         continue
-                    legacy = _legacy_adapter_for_spec(spec)
+                    # v0.8-#51: dispatch on the method-keyed spec, not
+                    # the legacy polymorphic string.  The cell now
+                    # reads spec.library / spec.mechanism / spec.param_method
+                    # directly and produces label-keyed rows; the post-cell
+                    # relabel is no longer needed (cell already labels
+                    # with the canonical _label_from_spec(spec)).
                     cell_rows = run_with_guard(
-                        lambda f=family, nn=n, ss=s, lg=legacy:
-                            _param_learning_cell(cfg, f, nn, ss, lg),
+                        lambda f=family, nn=n, ss=s, sp=spec:
+                            _param_learning_cell(cfg, f, nn, ss, sp),
                         family=family, n_nodes=n, seed=s, baseline=label,
                         timeout_s=cfg.per_cell_timeout_s,
                     )
-                    # v0.6c-C-1a relabel: cells use the legacy adapter
-                    # string internally; replace it with the registry's
-                    # canonical label for the parquet ``baseline`` column.
-                    for r in cell_rows:
-                        r.baseline = label
                     rows.extend(cell_rows)
 
     write_parquet(rows, cfg.parquet_path())
@@ -281,39 +291,57 @@ def _generate_bn(cfg: CrashTestConfig, family: str, n: int, seed: int) -> Synthe
 
 
 def _param_learning_cell(
-    cfg: CrashTestConfig, family: str, n: int, seed: int, baseline: str,
+    cfg: CrashTestConfig, family: str, n: int, seed: int,
+    spec: BaselineSpec,
 ) -> List[CellResult]:
-    """Fit a fresh model with `baseline`, measure accuracy vs truth.
+    """Fit a fresh model per ``spec``, measure accuracy vs truth.
 
-    v0.6c-C-1b: also reports ``total_time_s`` — wall-clock time to
-    fit + score the per-node accuracy battery.  This is the
-    parameter-learning crash test's headline speed metric (per
-    Giovanni's spec).  Speed includes the ``adapter.fit(...)`` call
-    AND the ``_avg_*_per_node`` direct-CPD comparison loop, since
-    those collectively constitute "learn the CPDs and evaluate them"
-    — what a paper figure timing column should report.
+    v0.8-#51: dispatches on the method-keyed ``spec`` (library +
+    mechanism + param_method) rather than the legacy polymorphic
+    string.  Pre-fix, every ``nbn-*`` baseline collapsed to a single
+    fit path that ignored ``spec.mechanism`` (so ``nbn-cat`` and
+    ``nbn-neuralcat`` produced bit-identical TV); see
+    ``docs/audits/v0.7-43-fit-path-audit.md`` for the audit trail.
+
+    v0.6c-C-1b: reports ``total_time_s`` alongside the accuracy
+    metric.  Speed includes the ``adapter.fit(...)`` call AND the
+    ``_avg_*_per_node`` direct-CPD comparison loop (collectively
+    "learn the CPDs and evaluate them" — what a paper figure
+    timing column should report).
     """
-    if (family, baseline) in _NOT_APPLICABLE:
-        return _not_applicable_row(family, n, seed, baseline)
+    # YAML-loaded specs are dicts; tests pass BaselineSpec dataclasses.
+    # Normalise once at the boundary so downstream attribute access is
+    # uniform.
+    if not isinstance(spec, BaselineSpec):
+        spec = BaselineSpec(
+            library=str(spec["library"]),
+            mechanism=str(spec["mechanism"]),
+            param_method=str(spec["param_method"]),
+            inference_method=spec.get("inference_method"),
+        )
+    label = _label_from_spec(spec)
+    legacy = _legacy_adapter_for_spec(spec)
+    if (family, legacy) in _NOT_APPLICABLE:
+        return _not_applicable_row(family, n, seed, label)
     bn = _generate_bn(cfg, family, n, seed)
     t0 = time.perf_counter()
-    if baseline == "nbn":
-        metric, value = _fit_and_score_nbn(cfg, bn, family)
-    elif baseline == "pgmpy":
+    if spec.library == "nbn":
+        metric, value = _fit_and_score_nbn(cfg, bn, family, spec)
+    elif spec.library == "pgmpy":
         metric, value = _fit_and_score_pgmpy(bn, family)
     else:
         # pomegranate / gpytorch / pyro accuracy plumbing lands in v0.5b.
         raise NotImplementedError(
-            f"param-learning baseline {baseline!r} accuracy wiring is v0.5b",
+            f"param-learning library {spec.library!r} accuracy wiring is v0.5b",
         )
     total_time = time.perf_counter() - t0
     return [
         CellResult(
-            family=family, n_nodes=n, seed=seed, baseline=baseline,
+            family=family, n_nodes=n, seed=seed, baseline=label,
             metric=metric, value=value,
         ),
         CellResult(
-            family=family, n_nodes=n, seed=seed, baseline=baseline,
+            family=family, n_nodes=n, seed=seed, baseline=label,
             metric="total_time_s", value=float(total_time),
         ),
     ]
@@ -416,6 +444,7 @@ def _inference_cell(
 
 def _fit_and_score_nbn(
     cfg: CrashTestConfig, bn: SyntheticBN, family: str,
+    spec: BaselineSpec,
 ) -> tuple[str, float]:
     from nbn.core.network import NeuralBayesianNetwork
     fitted = NeuralBayesianNetwork(
@@ -425,8 +454,12 @@ def _fit_and_score_nbn(
         kind = bn.variable_specs[node][0]
         parents = list(bn.dag.predecessors(node))
         parent_kinds = [bn.variable_specs[p] for p in parents]
-        fitted.set_mechanism(node, fresh_mechanism_for(
-            family, kind,
+        # v0.8-#51: spec-aware mechanism factory routes on
+        # spec.mechanism (cat / neuralcat / lg / mdn / flow / hybrid)
+        # so each method-keyed NBN baseline gets its promised
+        # mechanism class.
+        fitted.set_mechanism(node, fresh_mechanism_for_spec(
+            spec, family, kind,
             parent_kinds=parent_kinds, cardinality=cfg.cardinality,
         ))
     fitted.fit(
