@@ -66,7 +66,15 @@ class NeuralCategoricalMechanism(Mechanism):
 
         if parents is None or parents.shape[-1] == 0:
             self._d_pa = 0
-            self._root_logits = nn.Parameter(torch.zeros(k, device=device))
+            # v0.8-#52: pre-fix initialised ``_root_logits`` to zeros
+            # (uniform distribution over K classes) and returned
+            # immediately, ignoring training data — surfaced by the
+            # v0.7-#43 audit.  Closed-form MLE for a marginal categorical
+            # is the empirical log-frequency; ``+1e-8`` smoothing avoids
+            # ``log(0)`` when a class doesn't appear in train_data.
+            counts = torch.bincount(x, minlength=k).float() + 1e-8
+            log_freq = torch.log(counts / counts.sum())
+            self._root_logits = nn.Parameter(log_freq.to(device))
             return {"n_classes": k}
 
         parents = ensure_2d(parents).to(device=device)
