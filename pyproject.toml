@@ -70,6 +70,12 @@ include = ["nbn*", "benchmarking*"]
 
 [tool.setuptools_scm]
 write_to = "nbn/_version.py"
+# v0.6c-d tag is the paper-data anchor at commit 2e0dd32 but is not
+# PEP 440 compliant (bare ``c`` + ``-d`` suffix); packaging.version.Version
+# rejects it across all setuptools-scm releases.  Capture only the leading
+# numeric portion so v0.6c-d resolves to 0.6 and setuptools-scm bumps to
+# 0.7.dev{N}+g{SHA} for installs.  Tag itself stays intact in git/docs/paper.
+tag_regex = "^v(?P<version>\\d+\\.\\d+(?:\\.\\d+)?)"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
