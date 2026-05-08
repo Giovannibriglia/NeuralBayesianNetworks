@@ -151,7 +151,11 @@ Each crash test has a smoke config (CI, < 60s) and a paper config
 nbn-bench param-learning --config benchmarking/configs/parameter_learning_smoke.yaml
 nbn-bench inference      --config benchmarking/configs/inference_smoke.yaml
 
-# Paper:
+# Paper (8 GB VRAM, the laptop variant used for v0.6c-d paper data):
+nbn-bench param-learning --config benchmarking/configs/parameter_learning_paper_laptop.yaml
+nbn-bench inference      --config benchmarking/configs/inference_paper_laptop.yaml
+
+# Paper (≥16 GB VRAM, canonical config without batch reductions):
 nbn-bench param-learning --config benchmarking/configs/parameter_learning_paper.yaml
 nbn-bench inference      --config benchmarking/configs/inference_paper.yaml
 ```
@@ -163,7 +167,7 @@ Each invocation writes its output under `benchmarking/results/`:
     benchmarking/results/raw/{prefix}_metrics.parquet
     benchmarking/results/raw/{prefix}_{timestamp}.log         (gitignored)
     benchmarking/results/raw/{prefix}_{timestamp}.run.json    (gitignored)
-    benchmarking/results/tables/                              (placeholder for v0.6c-C)
+    benchmarking/results/tables/{prefix}_summary.{csv,md,parquet,tex}
 
 ## Configuration
 
