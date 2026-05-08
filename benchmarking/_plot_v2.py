@@ -295,7 +295,7 @@ def _render_single_metric(
                 fontsize=10, alpha=0.5,
             )
 
-    # Figure-level title + footer.
+    # Figure-level title.
     metric_label = (
         "accuracy" if metric in ("accuracy", "tv_per_node", "w1_per_node",
                                   "cpd_accuracy")
@@ -305,15 +305,39 @@ def _render_single_metric(
         f"{output_prefix} — {metric_label} vs network size",
         fontsize=13, fontweight="bold",
     )
-    if error_footnotes:
-        fig.text(
-            0.02, 0.005,
-            "Error/timeout/oom cells:\n" + "\n".join(error_footnotes),
-            fontsize=7, family="monospace", alpha=0.75,
-        )
-    fig.tight_layout(rect=[0, 0.04 if error_footnotes else 0.01, 1, 0.96])
 
     view_name = "accuracy_vs_size" if metric != "total_time_s" else "total_time_vs_size"
+
+    # DNF sidecar + corner annotation (#49): the multi-line footer that
+    # used to render via ``fig.text(0.02, 0.005, ...)`` overlapped axes
+    # on dense-DNF panels (continuous_nongauss especially).  The full DNF
+    # list now goes to ``<prefix>_<view>_dnf.txt`` next to the figure;
+    # the figure gains only a single-line corner annotation pointing at
+    # the sidecar.
+    if error_footnotes:
+        sidecar_name = f"{output_prefix}_{view_name}_dnf.txt"
+        sidecar_path = out_dir / sidecar_name
+        sidecar_path.write_text(
+            f"{output_prefix}_{view_name} — DNF cells\n\n"
+            "Error/timeout/oom cells:\n"
+            + "\n".join(error_footnotes)
+            + "\n",
+            encoding="utf-8",
+        )
+        # Annotation text uses ``*_dnf.txt`` (rather than the verbose
+        # sidecar_name) so the rendered string is short enough to dodge
+        # the centered suptitle on canonical figures (longest suptitle
+        # right-edge ≈ 0.76 figure-fraction; verbose text would extend
+        # left to 0.68 and collide).  The sidecar file on disk keeps
+        # its full deterministic name so it's discoverable per-figure.
+        fig.text(
+            0.98, 0.98,
+            f"DNF: {len(error_footnotes)} cells (see *_dnf.txt)",
+            fontsize=7, alpha=0.6, ha="right", va="top",
+        )
+
+    fig.tight_layout(rect=[0, 0.01, 1, 0.96])
+
     written: List[str] = []
     for ext in formats:
         out = out_dir / f"{output_prefix}_{view_name}.{ext}"
