@@ -108,6 +108,29 @@ See `benchmarking/configs/*.yaml` for all four shipped configs.
 | 5-seed error bars                        | ⏳ tracked on #7      |
 | Strongly-non-Gaussian ablation           | ⏳ v0.5/v0.6          |
 
+## Paper data (v0.6c-d)
+
+Canonical paper data committed at master SHA `8190e35` (laptop YAMLs at
+branch `release/v0.6c-d-paper-data`, SHA `33ca98c`):
+
+- **Raw parquets**: `benchmarking/results/raw/{inference,parameter_learning}_paper_metrics.parquet`
+- **Tables**: `benchmarking/results/tables/{inference,parameter_learning}_paper_summary.{csv,md,parquet,tex}`
+- **Figures**: `benchmarking/results/figures/{inference,parameter_learning}_paper_*_vs_size.{png,pdf,svg}`
+- **Run metadata**: `benchmarking/results/raw/{inference,parameter_learning}_paper_v0.6c-d.run.json`
+
+Run on RTX 4070 Laptop (8 GB VRAM); 11.4 h inference + 6.5 h parameter
+learning. See [`docs/v0.6c-d/run_summary.md`](docs/v0.6c-d/run_summary.md)
+for headline findings and [`docs/v0.6c-d/dnf_cells.md`](docs/v0.6c-d/dnf_cells.md)
+for the DNF table.
+
+Reproduce:
+
+```bash
+git checkout 33ca98c
+nbn-bench inference --config benchmarking/configs/inference_paper_laptop.yaml
+nbn-bench param-learning --config benchmarking/configs/parameter_learning_paper_laptop.yaml
+```
+
 ## License
 
 Apache 2.0.
