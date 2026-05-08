@@ -18,7 +18,7 @@ value as if it were a ``long``, raising ``IndexError: tensors used as
 indices must be long, ...`` when the value tensor is ``float``. The
 workaround (PR-B §A.3, v0.5b) is to construct the ``row`` tensor as
 ``dtype=torch.long`` before wrapping it in ``torch.masked.masked_tensor``
-(line 117 below); pomegranate's internal indexing then receives a
+(line 126 below); pomegranate's internal indexing then receives a
 long-typed value, which avoids the float-vs-long coercion bug. Marginal
 queries were never affected.
 
