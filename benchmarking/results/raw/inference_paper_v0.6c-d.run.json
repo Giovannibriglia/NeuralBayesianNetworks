@@ -1,0 +1,134 @@
+{
+  "timestamp": "20260506_181929",
+  "started_at": 1778084369.6114984,
+  "log_path": "benchmarking/results/raw/inference_paper_20260506_181929.log",
+  "meta_path": "benchmarking/results/raw/inference_paper_20260506_181929.run.json",
+  "git_sha": "33ca98c99b702ae8ed72b97f778971a5286ee774",
+  "torch_version": "2.11.0+cu130",
+  "cuda_available": true,
+  "cuda_device": "NVIDIA GeForce RTX 4070 Laptop GPU",
+  "config": {
+    "mode": "inference",
+    "families": [
+      "discrete",
+      "continuous_lg",
+      "continuous_nongauss",
+      "hybrid"
+    ],
+    "n_nodes": [
+      10,
+      50,
+      100,
+      500,
+      1000
+    ],
+    "n_seeds": 5,
+    "n_queries_per_cell": 1024,
+    "n_train": 10000,
+    "n_test": 1024,
+    "n_reference": 50000,
+    "edge_density": 0.2,
+    "max_in_degree": 4,
+    "cardinality": 4,
+    "fraction_continuous": 0.5,
+    "baselines": [
+      {
+        "library": "pgmpy",
+        "mechanism": "discrete",
+        "param_method": "mle",
+        "inference_method": "ve"
+      },
+      {
+        "library": "pgmpy",
+        "mechanism": "discrete",
+        "param_method": "bayes",
+        "inference_method": "ve"
+      },
+      {
+        "library": "pgmpy",
+        "mechanism": "lg",
+        "param_method": "mle",
+        "inference_method": "predict"
+      },
+      {
+        "library": "nbn",
+        "mechanism": "cat",
+        "param_method": "mle",
+        "inference_method": "ve"
+      },
+      {
+        "library": "nbn",
+        "mechanism": "cat",
+        "param_method": "mle",
+        "inference_method": "lw"
+      },
+      {
+        "library": "nbn",
+        "mechanism": "neuralcat",
+        "param_method": "mle",
+        "inference_method": "lw"
+      },
+      {
+        "library": "nbn",
+        "mechanism": "lg",
+        "param_method": "mle",
+        "inference_method": "lw"
+      },
+      {
+        "library": "nbn",
+        "mechanism": "mdn",
+        "param_method": "mle",
+        "inference_method": "lw"
+      },
+      {
+        "library": "nbn",
+        "mechanism": "flow",
+        "param_method": "mle",
+        "inference_method": "lw"
+      },
+      {
+        "library": "nbn",
+        "mechanism": "hybrid",
+        "param_method": "mle",
+        "inference_method": "router"
+      },
+      {
+        "library": "gpytorch",
+        "mechanism": "gp",
+        "param_method": "mle",
+        "inference_method": "predict"
+      },
+      {
+        "library": "pomegranate",
+        "mechanism": "discrete",
+        "param_method": "mle",
+        "inference_method": "ve"
+      },
+      {
+        "library": "pyro",
+        "mechanism": "empirical",
+        "param_method": "mle",
+        "inference_method": "importance"
+      }
+    ],
+    "per_cell_timeout_s": 600,
+    "output_dir": "benchmarking/results",
+    "output_prefix": "inference_paper",
+    "fit_epochs": 50,
+    "batch_size": 1024,
+    "nbn_batch_size": 256,
+    "nbn_lw_n_samples": 4000,
+    "device": "auto",
+    "_SCHEMA_VERSION": 2
+  },
+  "ended_at": 1778125403.931294,
+  "wall_time_s": 41034.31979560852,
+  "status_summary": {
+    "ok": 501,
+    "not_supported": 936,
+    "no_result": 5,
+    "error": 75,
+    "oom": 20,
+    "timeout": 34
+  }
+}
