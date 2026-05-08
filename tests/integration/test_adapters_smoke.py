@@ -87,6 +87,58 @@ def test_pomegranate_adapter_smoke_discrete() -> None:
     _smoke_query(get_adapter("pomegranate"), _problem("discrete"))
 
 
+@pytest.mark.skipif(not _has("pomegranate"), reason="needs pomegranate")
+def test_pomegranate_conditional_query_31() -> None:
+    """Regression for v0.7-#31: pomegranate predict_proba on conditional
+    queries must not raise IndexError.
+
+    pomegranate v1.1.x indexes per-node probability tensors using the
+    masked-tensor's underlying value as a ``long``; passing a ``float``
+    raises ``IndexError: tensors used as indices must be long, ...``.
+    The adapter constructs the ``row`` tensor as ``dtype=torch.long``
+    (``benchmarking/baselines/pomegranate_adapter.py``) so the upstream
+    indexing receives the expected dtype.
+
+    This test exercises three query shapes — marginal, single-evidence
+    conditional, multi-evidence conditional — on a 3-node chain
+    ``A -> B -> C`` and asserts each returns a valid probability vector
+    summing to 1.  Without the dtype cast, the conditional cases raise
+    IndexError; the marginal case never did.
+    """
+    adapter = get_adapter("pomegranate")
+    torch.manual_seed(0)
+    n_train = 1000
+    a = torch.randint(0, 2, (n_train,))
+    b = torch.randint(0, 3, (n_train,))
+    c = torch.randint(0, 2, (n_train,))
+    problem = BenchmarkProblem(
+        name="pomegranate_conditional_31",
+        dag=[("A", "B"), ("B", "C")],
+        variables={"A": ("discrete", 2), "B": ("discrete", 3), "C": ("discrete", 2)},
+        train_data={"A": a, "B": b, "C": c},
+        test_data={"A": a, "B": b, "C": c},
+        queries=[],
+        ground_truth=None,
+    )
+    adapter.fit(problem)
+    try:
+        for q in (
+            Query(targets=["C"], evidence={}, kind="marginal"),
+            Query(targets=["C"], evidence={"A": 1}, kind="conditional"),
+            Query(targets=["C"], evidence={"A": 1, "B": 0}, kind="conditional"),
+            Query(targets=["B"], evidence={"A": 0}, kind="conditional"),
+        ):
+            res = adapter.query(q)
+            assert isinstance(res, torch.Tensor)
+            assert res.dim() in (1, 2)
+            probs = res.reshape(-1)
+            assert probs.numel() in (2, 3)  # K for the target
+            assert torch.all(probs >= 0)
+            assert abs(float(probs.sum()) - 1.0) < 1e-4
+    finally:
+        adapter.teardown()
+
+
 @pytest.mark.skipif(not _has("pyro"), reason="needs pyro-ppl")
 def test_pyro_adapter_smoke_discrete() -> None:
     _smoke_query(get_adapter("pyro"), _problem("discrete"))

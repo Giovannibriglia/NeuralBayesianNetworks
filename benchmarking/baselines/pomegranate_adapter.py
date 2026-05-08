@@ -10,14 +10,21 @@ Inference path: pomegranate's ``predict_proba`` takes a
 states. We construct that tensor from the query's evidence dict; the
 returned per-node probability vectors are extracted via ``.get_data()``.
 
-Known limitation
-----------------
-pomegranate v1.1.x has a bug in ``predict_proba`` when evidence is present
-(internally it indexes a float-typed masked-tensor value as if it were a
-long, raising ``IndexError: tensors used as indices must be long, ...``).
-Marginal queries (no evidence) are unaffected. The
-v0.5 inference crash test therefore excludes pomegranate
-from its conditional-query lineup.
+Conditional-query handling
+--------------------------
+pomegranate v1.1.x has a known internal bug in ``predict_proba`` where it
+indexes per-node probability tensors with the masked-tensor's underlying
+value as if it were a ``long``, raising ``IndexError: tensors used as
+indices must be long, ...`` when the value tensor is ``float``. The fix
+(PR-B §A.3, v0.5b) is to construct the ``row`` tensor as ``dtype=torch.long``
+before wrapping it in ``torch.masked.masked_tensor`` (line 117 below);
+pomegranate's internal indexing then receives a long-typed value as
+expected. Marginal queries were never affected.
+
+Verified end-to-end at v0.6c-d (15/15 ok cells for ``pomegranate-discrete-ve``
+in the inference paper parquet) and locked in by
+``tests/integration/test_adapters_smoke.py::test_pomegranate_conditional_query_31``.
+Closes v0.7-#31.
 """
 from __future__ import annotations
 
@@ -109,11 +116,13 @@ class PomegranateAdapter(BaselineAdapter):
 
         target = q.targets[0]
         n = len(self._topo)
-        # PR-B §A.3: pomegranate v1.1's predict_proba uses evidence values
-        # as indices into per-node probability tensors; if `row` is float
-        # we hit ``IndexError: tensors used as indices must be long…``.
+        # PR-B §A.3 (v0.5b) / v0.7-#31: pomegranate v1.1's predict_proba
+        # uses evidence values as indices into per-node probability tensors;
+        # if ``row`` is float we hit
+        # ``IndexError: tensors used as indices must be long, ...``.
         # The adapter is discrete-only, so all evidence values can safely
-        # be encoded as long.
+        # be encoded as long.  Regression test:
+        # ``tests/integration/test_adapters_smoke.py::test_pomegranate_conditional_query_31``.
         row = torch.zeros((1, n), dtype=torch.long)
         mask = torch.zeros((1, n), dtype=torch.bool)
         for k, v in q.evidence.items():

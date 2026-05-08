@@ -5,6 +5,23 @@ two paper runs (inference + parameter learning) executed on Giovanni's
 RTX 4070 Laptop at branch SHA `33ca98c`, against master SHA `8190e35`
 (post v0.7-#37 W₁ truncation fix).
 
+> **Audit caveat (added v0.7)** — parameter-learning rows for `nbn-neuralcat`
+> and `pgmpy-bayes` are bit-identical to `nbn-cat` and `pgmpy-mle`
+> respectively (max abs diff = 0.0 across all 24-25 cells per pair). The
+> v0.6c-C-1b runner refactor wires `_param_learning_cell` to dispatch on the
+> legacy adapter string (`"nbn"` / `"pgmpy"`), then relabels result rows by
+> method-keyed label. The relabeling produces method-keyed columns in the
+> parquet, but the underlying fit is shared per family. See
+> [`docs/audits/v0.7-43-fit-path-audit.md`](../audits/v0.7-43-fit-path-audit.md)
+> for the full trace and v0.8-targeted fix scope.
+>
+> The paper's headline `nbn-cat` 2.3× quality finding compares `nbn-cat` to
+> `pgmpy-mle` — these dispatch to genuinely distinct fit paths
+> (`CategoricalTableMechanism` closed-form counting vs pgmpy's
+> `MaximumLikelihoodEstimator`). That comparison is honest and stands. The
+> `continuous_lg` `nbn-lg` vs `pgmpy-lg` comparison is also unaffected
+> (different family, different code path).
+
 ## Hardware and software
 
 - **GPU**: NVIDIA GeForce RTX 4070 Laptop (8 GB VRAM)
