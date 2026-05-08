@@ -82,11 +82,22 @@ class PgmpyAdapter(BaselineAdapter):
             if self.param_method == "bayes":
                 # v0.6c-C-1b: BayesianEstimator with the standard pgmpy
                 # default prior (BDeu, equivalent_sample_size=5).
+                #
+                # v0.8-#53: pgmpy 1.x dropped the `prior_type` and
+                # `equivalent_sample_size` kwargs from `bn.fit`;
+                # they must be passed to `BayesianEstimator.get_parameters`
+                # instead.  Pre-fix path was structurally dead — pgmpy 1.x
+                # raises `TypeError` on the legacy kwarg form — but the
+                # bayes branch never fired through `_fit_and_score_pgmpy`
+                # (the runner constructed `PgmpyAdapter()` with no kwargs),
+                # so the API regression was hidden until #53's plumbing
+                # made the branch reachable.
                 from pgmpy.estimators import BayesianEstimator
-                bn.fit(
-                    df, estimator=BayesianEstimator,
+                estimator = BayesianEstimator(model=bn, data=df)
+                cpds = estimator.get_parameters(
                     prior_type="BDeu", equivalent_sample_size=5,
                 )
+                bn.add_cpds(*cpds)
             else:
                 try:
                     from pgmpy.parameter_estimator import DiscreteMLE

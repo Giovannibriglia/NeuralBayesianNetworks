@@ -328,7 +328,7 @@ def _param_learning_cell(
     if spec.library == "nbn":
         metric, value = _fit_and_score_nbn(cfg, bn, family, spec)
     elif spec.library == "pgmpy":
-        metric, value = _fit_and_score_pgmpy(bn, family)
+        metric, value = _fit_and_score_pgmpy(bn, family, spec)
     else:
         # pomegranate / gpytorch / pyro accuracy plumbing lands in v0.5b.
         raise NotImplementedError(
@@ -470,14 +470,22 @@ def _fit_and_score_nbn(
     return "w1_per_node", _avg_w1_per_node(fitted, bn, n_eval=20, n_samples=200)
 
 
-def _fit_and_score_pgmpy(bn: SyntheticBN, family: str) -> tuple[str, float]:
+def _fit_and_score_pgmpy(
+    bn: SyntheticBN, family: str, spec: BaselineSpec,
+) -> tuple[str, float]:
     from benchmarking.baselines.pgmpy_adapter import PgmpyAdapter
     from benchmarking.domains.base import BenchmarkProblem
     problem = BenchmarkProblem(
         name=bn.name, dag=list(bn.dag.edges()), variables=bn.variable_specs,
         train_data=bn.train_data, test_data=bn.test_data, queries=[],
     )
-    adapter = PgmpyAdapter()
+    # v0.8-#53: pre-fix constructed PgmpyAdapter() with no kwargs,
+    # which defaults param_method="mle" — so pgmpy-bayes silently ran
+    # the MLE branch and produced rows bit-identical to pgmpy-mle in
+    # the v0.6c-d parquet.  Now we plumb spec.param_method through so
+    # the BayesianEstimator branch (BDeu prior, ESS=5) actually fires
+    # for pgmpy-bayes specs.  Audit: docs/audits/v0.7-43-fit-path-audit.md.
+    adapter = PgmpyAdapter(param_method=spec.param_method)
     adapter.fit(problem)
     if adapter.kind == "unsupported":
         raise NotImplementedError(f"pgmpy refused the {family} family")
