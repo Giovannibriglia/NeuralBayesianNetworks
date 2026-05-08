@@ -15,16 +15,16 @@ Conditional-query handling
 pomegranate v1.1.x has a known internal bug in ``predict_proba`` where it
 indexes per-node probability tensors with the masked-tensor's underlying
 value as if it were a ``long``, raising ``IndexError: tensors used as
-indices must be long, ...`` when the value tensor is ``float``. The fix
-(PR-B §A.3, v0.5b) is to construct the ``row`` tensor as ``dtype=torch.long``
-before wrapping it in ``torch.masked.masked_tensor`` (line 117 below);
-pomegranate's internal indexing then receives a long-typed value as
-expected. Marginal queries were never affected.
+indices must be long, ...`` when the value tensor is ``float``. The
+workaround (PR-B §A.3, v0.5b) is to construct the ``row`` tensor as
+``dtype=torch.long`` before wrapping it in ``torch.masked.masked_tensor``
+(line 117 below); pomegranate's internal indexing then receives a
+long-typed value, which avoids the float-vs-long coercion bug. Marginal
+queries were never affected.
 
 Verified end-to-end at v0.6c-d (15/15 ok cells for ``pomegranate-discrete-ve``
 in the inference paper parquet) and locked in by
 ``tests/integration/test_adapters_smoke.py::test_pomegranate_conditional_query_31``.
-Closes v0.7-#31.
 """
 from __future__ import annotations
 
