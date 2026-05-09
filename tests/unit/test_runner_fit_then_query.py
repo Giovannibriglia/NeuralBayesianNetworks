@@ -194,14 +194,22 @@ def test_pgmpy_lg_predict_returns_finite_samples() -> None:
 
 def test_param_learning_cell_emits_total_time_s() -> None:
     """v0.6c-C-1b: parameter-learning crash test reports BOTH per-CPD
-    accuracy AND ``total_time_s``."""
+    accuracy AND ``total_time_s``.
+
+    v0.8-#51: ``_param_learning_cell`` now takes a ``BaselineSpec``
+    (method-keyed dispatch) rather than a legacy adapter string.
+    """
     from benchmarking._crash_test_utils import CrashTestConfig
+    from benchmarking._baseline_registry import BaselineSpec
     from benchmarking.crash_test_runner import _param_learning_cell
 
     cfg = CrashTestConfig.from_yaml(
         "benchmarking/configs/parameter_learning_smoke.yaml",
     )
-    rows = _param_learning_cell(cfg, "discrete", 5, 0, "nbn")
+    spec = BaselineSpec(
+        library="nbn", mechanism="cat", param_method="mle",
+    )
+    rows = _param_learning_cell(cfg, "discrete", 5, 0, spec)
     metrics = {r.metric for r in rows}
     assert "total_time_s" in metrics, (
         f"expected 'total_time_s' in metrics, got {metrics}"
