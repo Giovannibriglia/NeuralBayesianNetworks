@@ -27,15 +27,15 @@ Adding a new baseline requires:
 
 Notes on what's deferred from v0.6c-C-1a:
 
-* ``nbn-neuralcat-ve`` is **deferred to v0.7**.  The §4.4 diagnostic
-  on PR #28 (this PR) showed that
-  ``TensorVariableElimination._extract_factors`` structurally requires
-  ``mech._logits`` (a tabulated CPT tensor), but
+* ``nbn-neuralcat-ve`` was deferred at v0.6c-C-1a — the §4.4
+  diagnostic on PR #28 showed ``TensorVariableElimination._extract_factors``
+  structurally required ``mech._logits``, but
   ``NeuralCategoricalMechanism`` computes logits per-parent via a
-  neural-net forward pass and has no tabulated form.  Adapter glue
-  can't bridge this; the engine itself needs a "tabulate by
-  enumerating parent configurations" code path.  See v0.7 issue
-  filed alongside this PR.
+  neural-net forward pass and has no tabulated form.  v0.8-#26
+  (PR landing this comment) closes the gap: the engine now reads
+  CPDs via ``mech.tabulate(parent_cards)``, which enumerates parent
+  configurations once for forward-based mechanisms.
+  ``nbn-neuralcat-ve`` is now in the registry.
 
 * gpytorch / pomegranate / pyro adapters keep their pre-PR labels
   for now; v0.6c-C-2 expands them with the same spec-based dispatch.
@@ -132,12 +132,13 @@ _BASELINE_APPLICABILITY: dict[str, FrozenSet[str]] = {
     "pgmpy-lg-predict":        frozenset({"continuous_lg"}),
     "nbn-cat-ve":              frozenset({"discrete"}),
     "nbn-cat-lw":              frozenset({"discrete"}),
-    # nbn-neuralcat-ve: DEFERRED to v0.7.  TensorVariableElimination
-    # structurally requires a tabulated _logits tensor;
-    # NeuralCategoricalMechanism computes logits via a neural-network
-    # forward pass and has no such tensor.  Implementing this requires
-    # a "tabulate by enumeration" code path in the engine itself, not
-    # adapter glue.  See v0.7 issue filed alongside this PR.
+    # v0.8-#26: nbn-neuralcat-ve was deferred at v0.6c-C-1a because
+    # TensorVariableElimination structurally required a tabulated
+    # _logits tensor; the engine now reads CPDs via
+    # mech.tabulate(parent_cards), which enumerates parent
+    # configurations once for forward-based mechanisms like
+    # NeuralCategoricalMechanism.  Discrete-only.
+    "nbn-neuralcat-ve":        frozenset({"discrete"}),
     "nbn-neuralcat-lw":        frozenset({"discrete"}),
     "nbn-lg-lw":               frozenset({"continuous_lg"}),
     "nbn-mdn-lw":              frozenset({"continuous_lg", "continuous_nongauss"}),

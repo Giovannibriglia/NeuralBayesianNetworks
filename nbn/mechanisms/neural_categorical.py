@@ -118,6 +118,73 @@ class NeuralCategoricalMechanism(Mechanism):
         parents_2d = ensure_2d(parents)
         return Categorical(logits=self._logits_from_parents(parents_2d))
 
+    @property
+    def is_fitted(self) -> bool:
+        """True iff ``fit_local`` produced a usable CPD.
+
+        Root nodes (``_d_pa == 0``): fitted iff ``_root_logits``
+        parameter is registered.  Non-root: fitted iff the MLP
+        ``net`` is built.  Pre-``fit_local``: ``_d_pa = 0`` (default)
+        and ``_root_logits`` is unregistered, so this returns
+        ``False``.
+        """
+        if self._d_pa == 0:
+            return getattr(self, "_root_logits", None) is not None
+        return self.net is not None
+
+    def tabulate(
+        self, parent_cards: list[int] | None = None
+    ) -> torch.Tensor:
+        """Return tabulated CPD in logit space.
+
+        Root nodes (``self._d_pa == 0``): returns ``self._root_logits``
+        of shape ``[K]``.
+
+        Non-root nodes: enumerates the cartesian product of parent
+        values once, runs a single batched ``_logits_from_parents``
+        forward pass, and reshapes to ``[*parent_cards, K]``.
+        ``parent_cards`` is required (the mechanism does not store
+        them; embeddings store them implicitly via ``num_embeddings``
+        but the no-embedding path would have no signal).
+
+        At v0.6c-d cardinality / max_in_degree caps (4 / 4),
+        ``prod(parent_cards) <= 256`` so enumeration is a single
+        small MLP forward — well under the 10ms budget surfaced in
+        Phase 0.
+        """
+        if self._d_pa == 0:
+            assert self._root_logits is not None, "Call fit_local first."
+            return self._root_logits
+        if parent_cards is None:
+            raise ValueError(
+                "NeuralCategoricalMechanism.tabulate(): parent_cards is "
+                "required for non-root nodes — the mechanism does not "
+                "store parent cardinalities, and the MLP cannot be "
+                "enumerated without them."
+            )
+        if len(parent_cards) != self._d_pa:
+            raise ValueError(
+                f"parent_cards has {len(parent_cards)} entries but "
+                f"mechanism was fit with d_pa={self._d_pa}."
+            )
+        device = next(self.net.parameters()).device
+        grids = torch.meshgrid(
+            *[torch.arange(c, device=device) for c in parent_cards],
+            indexing="ij",
+        )
+        pa_flat = torch.stack(
+            [g.reshape(-1) for g in grids], dim=-1,
+        ).float()  # [prod(pa_cards), d_pa]
+        was_training = self.training
+        self.eval()
+        try:
+            with torch.no_grad():
+                logits_flat = self._logits_from_parents(pa_flat)
+        finally:
+            if was_training:
+                self.train()
+        return logits_flat.reshape(*parent_cards, self.n_classes)
+
     def log_prob(self, x: torch.Tensor, parents: torch.Tensor | None) -> torch.Tensor:
         squeeze_s = False
         if x.dim() == 1:

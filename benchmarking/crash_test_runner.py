@@ -496,12 +496,27 @@ def _fit_and_score_pgmpy(
 def _avg_tv_per_node(fitted, bn: SyntheticBN) -> float:
     out = []
     for node in bn.dag.nodes():
+        # v0.8-#59: read tabulated CPDs via Mechanism.tabulate() instead
+        # of mech._logits directly — the latter is None on
+        # NeuralCategoricalMechanism (no flat _logits attribute) so the
+        # nbn-neuralcat baseline crashed with AttributeError.  Both the
+        # truth side (always CategoricalTableMechanism today, but going
+        # through the interface defends against the bug-hides-bug
+        # pattern surfacing again if the synthetic generator ever
+        # uses a forward-based mechanism for the truth) and the
+        # fitted side go through tabulate().
+        parents = list(bn.dag.predecessors(node))
+        parent_cards = [bn.true_model.mechanisms[p].n_classes for p in parents]
         # device-align both tensors to CPU before subtraction (Bug 1):
         # NBN's fitted model lives on cuda when device='auto'; the truth
         # model may live on cpu (or vice-versa).  Normalise to cpu for
         # the metric — these are tiny tensors so the move is free.
-        true_logits = bn.true_model.mechanisms[node]._logits.detach().cpu()
-        fit_logits = fitted.mechanisms[node]._logits.detach().cpu()
+        true_logits = (
+            bn.true_model.mechanisms[node].tabulate(parent_cards).detach().cpu()
+        )
+        fit_logits = (
+            fitted.mechanisms[node].tabulate(parent_cards).detach().cpu()
+        )
         if true_logits.shape != fit_logits.shape:
             continue
         true_p = torch.softmax(true_logits, dim=-1)
@@ -516,12 +531,21 @@ def _avg_tv_per_node_pgmpy(adapter, bn: SyntheticBN) -> float:
     out = []
     for cpd in adapter.model.get_cpds():
         node = cpd.variable
+        # v0.8-#59: tabulate() instead of _logits.  Truth is always
+        # CategoricalTableMechanism today (pgmpy doesn't cross paths
+        # with neural mechanisms), but routing through the interface
+        # keeps the call shape uniform with _avg_tv_per_node.
+        parents = list(bn.dag.predecessors(node))
+        parent_cards = [bn.true_model.mechanisms[p].n_classes for p in parents]
         # Both tensors normalised to cpu (Bug 1).
-        true_logits = bn.true_model.mechanisms[node]._logits.detach().cpu()
-        true_p = torch.softmax(true_logits, dim=-1)
+        true_logits = (
+            bn.true_model.mechanisms[node].tabulate(parent_cards).detach().cpu()
+        )
+        true_p = torch.softmax(true_logits, dim=-1)  # [*parent_cards, K]
+        # pgmpy CPD: shape [K, *parent_cards]; move K to last to match
+        # tabulate()'s [*parent_cards, K] convention.
         vals = np.asarray(cpd.values)
-        k = true_p.shape[-1]
-        fit_p = torch.tensor(vals.reshape(k, -1).T, dtype=torch.float)
+        fit_p = torch.tensor(vals, dtype=torch.float).movedim(0, -1).contiguous()
         if fit_p.shape != true_p.shape:
             continue
         tv = 0.5 * (true_p - fit_p).abs().sum(dim=-1).mean().item()

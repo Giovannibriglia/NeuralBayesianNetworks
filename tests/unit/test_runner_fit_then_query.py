@@ -552,20 +552,3 @@ def test_pgmpy_lg_predict_w1_in_expected_range(tmp_path) -> None:
         f"gap {abs(pgmpy_w1 - nbn_w1):.4f} suggests metric still has bias "
         f"(pgmpy={pgmpy_w1:.4f}, nbn={nbn_w1:.4f})"
     )
-
-
-def test_nbn_neuralcat_ve_remains_deferred_in_c1b() -> None:
-    """C-1a deferred ``nbn-neuralcat-ve`` to v0.7.  C-1b's adapter
-    factory must not silently start supporting it (which would route
-    a label that no engine can actually evaluate).  Issue #26."""
-    assert "nbn-neuralcat-ve" not in known_labels()
-    for family in ("discrete", "continuous_lg", "continuous_nongauss",
-                   "hybrid"):
-        assert not is_applicable("nbn-neuralcat-ve", family)
-    spec = BaselineSpec(library="nbn", mechanism="neuralcat",
-                        param_method="mle", inference_method="ve")
-    # The factory should produce *some* adapter (the spec is well-
-    # formed) but the underlying engine call would fail.  We only
-    # check that the registry refuses to mark it applicable.
-    # Building should not crash.
-    _ = build_adapter_v2(spec, device="cpu")

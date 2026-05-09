@@ -23,13 +23,14 @@ nbn_lw_n_samples: 4000
 # applies to (e.g., pgmpy-mle-ve runs on discrete only, nbn-mdn-lw on
 # continuous_lg + continuous_nongauss).
 #
-# nbn-neuralcat-ve is omitted (deferred to v0.7 issue #26).
+# v0.8-#26 closes the v0.6c-C-1a deferral: nbn-neuralcat-ve included.
 baselines:
   - {library: pgmpy, mechanism: discrete, param_method: mle,   inference_method: ve}
   - {library: pgmpy, mechanism: discrete, param_method: bayes, inference_method: ve}
   - {library: pgmpy, mechanism: lg,       param_method: mle,   inference_method: predict}
   - {library: nbn,   mechanism: cat,      param_method: mle,   inference_method: ve}
   - {library: nbn,   mechanism: cat,      param_method: mle,   inference_method: lw}
+  - {library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: ve}
   - {library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: lw}
   - {library: nbn,   mechanism: lg,       param_method: mle,   inference_method: lw}
   - {library: nbn,   mechanism: mdn,      param_method: mle,   inference_method: lw}

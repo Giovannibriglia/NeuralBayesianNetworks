@@ -12,7 +12,7 @@ string and silently relabeled rows post-hoc.  The audit at
 ``docs/audits/v0.7-43-fit-path-audit.md`` documents the full diagnosis;
 this test locks in the runtime fix.
 
-Four assertions:
+Five assertions:
 
 1. ``pgmpy-mle`` and ``pgmpy-bayes`` produce distinct TV on a fixture
    where the fits genuinely differ (~0.5% relative margin at
@@ -30,16 +30,14 @@ Four assertions:
    log-frequency, not uniform (catches a #52-only regression even if
    downstream TV happens to differ for unrelated reasons).
 
-Note: a fifth assertion ``nbn-cat`` vs ``nbn-neuralcat`` distinct TV
-(the most direct echo of the v0.6c-d bit-identical pattern for the NBN
-pair) is *not* included here.  The metric ``_avg_tv_per_node`` reads
-``mech._logits`` directly, an interface assumption that
-``NeuralCategoricalMechanism`` doesn't satisfy.  Pre-#51 every ``nbn-*``
-route went through ``CategoricalTableMechanism`` (which has ``_logits``),
-masking the gap; #51's dispatch fix exposes it.  Tracked at #59 with
-``v0.7-#26`` as parent architectural concern (both want the same
-"tabulate by enumeration" helper).  Once #59 lands, this test file
-should add the missing assertion.
+5. ``nbn-cat`` and ``nbn-neuralcat`` produce distinct TV on the same
+   fixture — the most direct echo of the v0.6c-d bit-identical pattern
+   for the NBN pair.  This assertion was originally dropped because
+   ``_avg_tv_per_node`` read ``mech._logits`` directly and crashed on
+   ``NeuralCategoricalMechanism`` (no flat ``_logits`` attribute).
+   v0.8-#59 + v0.8-#26 introduced ``Mechanism.tabulate(parent_cards)``
+   on the discrete mechanisms and rewired the metric site to use it,
+   so the NBN-pair TV comparison can now run.
 """
 from __future__ import annotations
 
@@ -99,11 +97,11 @@ def smoke_cfg() -> CrashTestConfig:
 def test_param_learning_dispatch_triplet(
     fixture_bn, smoke_cfg: CrashTestConfig,
 ) -> None:
-    """v0.8-#51/#52/#53 regression: pre-fix the v0.6c-d parquet showed
-    bit-identical TV across ``(nbn-cat, nbn-neuralcat)`` and
+    """v0.8-#51/#52/#53/#59/#26 regression: pre-fix the v0.6c-d parquet
+    showed bit-identical TV across ``(nbn-cat, nbn-neuralcat)`` and
     ``(pgmpy-mle, pgmpy-bayes)``; post-fix each must be measurably
-    distinct or structurally caught.  See module docstring for why
-    the NBN-pair TV check is dropped (tracked at #59).
+    distinct or structurally caught.  Five assertions; see module
+    docstring for the per-assertion rationale.
     """
     bn = fixture_bn
     cat_spec       = BaselineSpec(library="nbn",   mechanism="cat",       param_method="mle")
@@ -176,4 +174,25 @@ def test_param_learning_dispatch_triplet(
         f"NeuralCategoricalMechanism root-node logits must NOT be uniform "
         f"(uniform-init was the v0.7-#43 audit's #52 finding); got "
         f"fitted={fitted_probs.tolist()} (max diff from uniform={max_diff_from_uniform:.6e})"
+    )
+
+    # ── Assertion 5: nbn-cat vs nbn-neuralcat distinct TV ──────────────
+    # The most direct echo of the v0.6c-d bit-identical pattern for the
+    # NBN pair.  Originally dropped because _avg_tv_per_node crashed on
+    # NeuralCategoricalMechanism (no _logits attribute); v0.8-#59 +
+    # v0.8-#26 introduced Mechanism.tabulate() which makes this work.
+    from benchmarking.crash_test_runner import _fit_and_score_nbn
+    cat_metric, cat_value = _fit_and_score_nbn(smoke_cfg, bn, "discrete", cat_spec)
+    neuralcat_metric, neuralcat_value = _fit_and_score_nbn(
+        smoke_cfg, bn, "discrete", neuralcat_spec,
+    )
+    assert cat_metric == neuralcat_metric == "tv_per_node"
+    cat_neural_diff = abs(cat_value - neuralcat_value)
+    assert cat_neural_diff > 1e-4, (
+        f"nbn-cat ({cat_value:.6e}) and nbn-neuralcat ({neuralcat_value:.6e}) "
+        f"are bit-identical (diff={cat_neural_diff:.6e}); the v0.6c-d "
+        f"runner-dispatch pattern has regressed for the NBN pair (#51) or "
+        f"_avg_tv_per_node has reverted to reading mech._logits directly "
+        f"(#59) — both mechanisms would then be measured via the same "
+        f"path and produce the same value."
     )

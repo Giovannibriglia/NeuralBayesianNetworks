@@ -109,3 +109,57 @@ class Mechanism(nn.Module, ABC):
         self, x: torch.Tensor, parents: torch.Tensor | None, **kwargs
     ) -> dict:
         """Closed-form or small-loop local MLE.  Returns a dict of metrics."""
+
+    @property
+    def is_fitted(self) -> bool:
+        """True iff ``fit_local`` has produced a usable CPD.
+
+        Default ``False``.  Each concrete mechanism that supports
+        fitting overrides this with a check appropriate for its
+        internal state (e.g. ``self._logits is not None`` for
+        ``CategoricalTableMechanism``; presence of ``_root_logits``
+        or a fitted ``net`` for ``NeuralCategoricalMechanism``).
+
+        Used by the variable-elimination engine
+        (``nbn/inference/tensor_ve.py:_extract_factors``) to surface
+        a clear ``RuntimeError`` rather than letting an unfitted
+        mechanism propagate as an opaque ``AssertionError`` from
+        deeper inside ``tabulate()``.  See v0.8 issue #26.
+        """
+        return False
+
+    def tabulate(
+        self, parent_cards: list[int] | None = None
+    ) -> torch.Tensor:
+        """Return the tabulated CPD as a tensor.
+
+        Shape ``[*parent_cards, K]`` for non-root discrete mechanisms;
+        ``[K]`` for root.  Returned values are in logit space — apply
+        ``softmax`` along the last axis to get a normalised CPD.  Some
+        mechanisms (e.g. ``CategoricalTableMechanism``) store log-probs
+        internally; others (``NeuralCategoricalMechanism``) return
+        unnormalised logits.  Both are equivalent under softmax
+        shift-invariance.
+
+        ``parent_cards`` is the cardinality of each parent in DAG
+        order; required for mechanisms that enumerate via
+        ``forward()`` (e.g. neural categorical), and may be ignored
+        by mechanisms that already store the tabulation
+        (e.g. categorical table).
+
+        Default raises ``NotImplementedError`` — only meaningful for
+        discrete mechanisms.  Used by:
+
+        * The benchmarking metric site
+          (``benchmarking/crash_test_runner.py:_avg_tv_per_node``)
+        * The variable-elimination engine
+          (``nbn/inference/tensor_ve.py:_extract_factors``)
+
+        Both previously read ``mech._logits`` directly, which broke
+        on mechanisms whose CPD is computed per-call rather than
+        stored.  See v0.8 issues #59 and #26.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__}.tabulate() is only defined for "
+            f"discrete mechanisms."
+        )
