@@ -435,11 +435,19 @@ def _inference_cell(
         ))
         return rows
 
-    accuracy = _compute_inference_accuracy(
+    # v0.8 Pass-9: compute the full {tv, jsd, w1} metric dict once;
+    # derive the family-dispatched 'accuracy' value AND emit explicit
+    # per-metric rows (tv_per_node, jsd_per_node, w1_per_node).  The
+    # 'accuracy' row preserves backward compat with existing
+    # aggregator/plotter consumers; explicit rows are additive.
+    metric_dict = _compute_inference_metrics(
         bn, baseline, queries_batch, family,
         n_lw_samples=cfg.nbn_lw_n_samples,
     )
-    if isinstance(accuracy, float) and accuracy == accuracy:  # not NaN
+    target_kind = bn.variable_specs[queries_batch.targets[0]][0]
+    accuracy_key = "tv_per_node" if target_kind == "discrete" else "w1_per_node"
+    accuracy = metric_dict.get(accuracy_key)
+    if accuracy is not None:
         rows.append(CellResult(
             family=family, n_nodes=n, seed=seed, baseline=baseline,
             metric="accuracy", value=float(accuracy),
@@ -449,6 +457,17 @@ def _inference_cell(
             family=family, n_nodes=n, seed=seed, baseline=baseline,
             metric="accuracy", value=float("nan"), status="no_result",
             extra={"error_msg": "accuracy: filter or posterior unavailable"},
+        ))
+    # Explicit per-metric rows.  Same _format_metric_rows shape as
+    # Phase 2's param-learning emit, with skip reasons mapped via
+    # _SKIP_REASONS (e.g. W1 on pure-discrete-target cells).
+    for metric_name, value, status, error_msg in _format_metric_rows(
+        metric_dict, family,
+    ):
+        rows.append(CellResult(
+            family=family, n_nodes=n, seed=seed, baseline=baseline,
+            metric=metric_name, value=value, status=status,
+            extra={"error_msg": error_msg} if error_msg else {},
         ))
     return rows
 
@@ -977,35 +996,67 @@ def _compute_inference_accuracy(
 ) -> float:
     """Average distributional metric over the query battery.
 
-    Round-4 oracle change (PR #14)
-    ------------------------------
-    Continuous + hybrid targets now use **forward-with-clamp** ancestral
-    sampling from ``bn.true_model`` as the ground-truth oracle.  The
-    previous ε-ball rejection filter was correct for evidence at the
-    marginal mean but *biased* on multi-evidence queries with non-zero
-    evidence — the round-3 closed-form LG proof showed the analytic
-    posterior agreed with LW (W₁ < 0.02) while ε-ball rejection
-    disagreed by ≈1.4σ.  Forward-with-clamp generates exact samples
-    from ``p(target | evidence)`` for every SCM family this generator
-    produces.
+    Backward-compat wrapper around _compute_inference_metrics
+    (introduced v0.8 Pass-9): family-dispatches the dict to a single
+    float — TV for discrete targets, W1 for continuous targets —
+    matching the pre-Pass-9 contract so existing callers (the
+    accuracy-row emit path in _inference_cell, and external tests
+    keying on this signature) continue to work.
 
-    Discrete targets continue to use exact-match rejection on
-    ``bn.ground_truth_samples`` (synthesising the pool on demand for
-    the discrete family); that path is unaffected by the bias because
-    discrete-evidence rejection is exact-equality, not band-filtering.
+    Round-4 oracle change (PR #14): continuous + hybrid targets use
+    forward-with-clamp ancestral sampling; discrete targets use
+    exact-match rejection on bn.ground_truth_samples.  Both paths are
+    delegated to _compute_inference_metrics; this wrapper only does
+    family-dispatch and None→NaN mapping.
     """
+    target_kind = bn.variable_specs[q.targets[0]][0]
+    metric_dict = _compute_inference_metrics(
+        bn, baseline, q, family,
+        n_samples=n_samples, eps_factor=eps_factor, n_eff_min=n_eff_min,
+        n_lw_samples=n_lw_samples, n_oracle_samples=n_oracle_samples,
+    )
+    # Family-dispatch: TV for discrete-target, W1 for continuous-target.
+    # Hybrid family with continuous target falls into the W1 branch
+    # (matches pre-Pass-9 behaviour at lines 1052-1062).
+    if target_kind == "discrete":
+        value = metric_dict.get("tv_per_node")
+    else:
+        value = metric_dict.get("w1_per_node")
+    # All-skipped cell → None → NaN (matches pre-Pass-9 line 1064:
+    # "if not accs: return float('nan')").  The aggregator + plotter
+    # already filter NaN; emitting NaN here preserves the existing
+    # no_result path in _inference_cell.
+    return float(value) if value is not None else float("nan")
+
+
+def _compute_inference_metrics(
+    bn: SyntheticBN, baseline: str, q, family: str,
+    *, n_samples: int = 200, eps_factor: float = 0.50, n_eff_min: int = 10,
+    n_lw_samples: int = 512, n_oracle_samples: int = 2000,
+) -> "dict[str, float | None]":
+    """Compute {tv, jsd, w1}_per_node for the inference query battery.
+
+    Per row in the up-to-16-row loop, build either a (truth_logits,
+    pred_logits) cpd_pair (discrete target) or a (truth_samples,
+    pred_samples) sample_pair (continuous target).  Per-row failures
+    (pred is None, ground-truth filter empty, oracle too few samples)
+    skip that row but don't fail the cell — same masking shape as the
+    pre-Pass-9 _compute_inference_accuracy.
+
+    Returns dict[str, float | None] keyed by metric name (tv_per_node,
+    jsd_per_node, w1_per_node).  None for any metric whose pair-list
+    is empty (caller decides None → NaN via _format_metric_rows or
+    _compute_inference_accuracy wrapper).
+    """
+    from benchmarking.metrics import _compute_metrics_per_node
+
     target = q.targets[0]
     target_kind = bn.variable_specs[target][0]
-    # v0.6a: ``bn.column_index`` is the canonical name → column-index
-    # map (single source of truth for the topological-sort schema
-    # established by ``make_synthetic_bn``).  PR #14 round-4 root cause
-    # was indexing via insertion order — never recompute the topo sort
-    # from ``bn.dag.nodes()`` for column lookups.
     target_idx = bn.column_index(target)
     B = next(iter(q.evidence.values())).shape[0]
 
-    # Ensure we have a discrete-family ground-truth pool for exact-match
-    # rejection; the round-2 fix synthesised this on demand.
+    # Discrete ground-truth-pool synthesis (verbatim from
+    # pre-Pass-9 _compute_inference_accuracy lines 1009-1020):
     if target_kind == "discrete" and bn.ground_truth_samples is None:
         try:
             n_ref = 5000
@@ -1017,9 +1068,10 @@ def _compute_inference_accuracy(
             )
             object.__setattr__(bn, "ground_truth_samples", cached)
         except Exception:  # pragma: no cover
-            return float("nan")
+            return {f"{m}_per_node": None for m in _PARAM_LEARNING_METRICS}
 
-    accs: list[float] = []
+    cpd_pairs = []
+    sample_pairs = []
     for i in range(min(B, 16)):  # cap accuracy work to keep smoke fast
         ev_row = {k: v[i] for k, v in q.evidence.items()}
         try:
@@ -1033,7 +1085,6 @@ def _compute_inference_accuracy(
             continue
 
         if target_kind == "discrete":
-            # Discrete: exact-match rejection on the cached pool.
             gt_target = _filter_ground_truth(
                 bn, ev_row, target_idx,
                 eps_factor=eps_factor, n_eff_min=n_eff_min,
@@ -1047,8 +1098,14 @@ def _compute_inference_accuracy(
                 torch.ones_like(gt_target, dtype=torch.float),
             )
             empirical = empirical / empirical.sum().clamp_min(1e-12)
-            tv = 0.5 * (pred.cpu().reshape(-1)[:k] - empirical).abs().sum().item()
-            accs.append(tv)
+            # Both empirical (truth) and pred are probability vectors;
+            # log-clamp to logit space for the helper (helper softmaxes,
+            # so log-probs and raw logits are equivalent under
+            # shift-invariance).
+            true_logits = torch.log(empirical.clamp_min(1e-12))
+            pred_vec = pred.cpu().reshape(-1)[:k]
+            fit_logits = torch.log(pred_vec.clamp_min(1e-12))
+            cpd_pairs.append((true_logits, fit_logits))
         else:
             # Continuous / hybrid-continuous-target: forward-with-clamp.
             try:
@@ -1059,10 +1116,12 @@ def _compute_inference_accuracy(
                 continue
             if oracle is None or oracle.shape[0] < 100:
                 continue
-            accs.append(_w1(pred, oracle.reshape(-1)))
-    if not accs:
-        return float("nan")
-    return float(sum(accs) / len(accs))
+            sample_pairs.append((oracle.reshape(-1).cpu(), pred.cpu().reshape(-1)))
+
+    return _compute_metrics_per_node(
+        cpd_pairs=cpd_pairs, sample_pairs=sample_pairs,
+        metrics=_PARAM_LEARNING_METRICS,
+    )
 
 
 def _forward_with_clamp_posterior_samples(
