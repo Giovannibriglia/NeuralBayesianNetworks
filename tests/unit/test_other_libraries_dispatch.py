@@ -16,10 +16,11 @@ registry.  No adapter code changes:
   ``predict_proba`` IndexError on conditional queries — filed as v0.7.
 
 * pyro: v1 adapter is Importance sampler over ancestral generative
-  model.  Continuous path is structurally broken (parent-ignoring
-  Gaussian leaves) — tracked as v0.7.  Labels: ``pyro-empirical`` /
-  ``pyro-empirical-importance``, applicable to ``{discrete}`` despite
-  the v1 adapter's broader ``supports`` declaration.
+  model.  Labels: ``pyro-empirical`` / ``pyro-empirical-importance``,
+  applicable to ``{discrete, continuous_lg}`` post-v0.8-#32 (the
+  LG-conditional fit-path replaced the parent-ignoring Gaussian
+  leaves).  ``continuous_nongauss`` and ``hybrid`` still excluded;
+  v0.8 follow-up #61 tracks the hybrid mixed-parent case.
 
 This file pins:
 1. The 6 new labels appear in the registry with the right applicability.
@@ -86,15 +87,24 @@ def test_pomegranate_labels_in_registry() -> None:
 
 
 def test_pyro_labels_in_registry() -> None:
-    """pyro labels: applicable to discrete only despite the v1 adapter's
-    broader ``supports`` declaration (the continuous path is structurally
-    broken — see ``benchmarking/baselines/pyro_adapter.py`` docstring;
-    v0.7 issue tracks the rework)."""
+    """pyro labels: applicable to ``{discrete, continuous_lg}``.
+
+    v0.6c-C-1a: applicability was originally ``{discrete}`` only — the
+    v1 adapter's continuous path was structurally broken
+    (parent-ignoring marginal Gaussian leaves).
+    v0.8-#32: the LG-conditional fit-path replaced ``_fit_gaussian_leaf``
+    with ``_fit_lg_leaf`` (linear regression on continuous parents),
+    so ``continuous_lg`` is now correct and applicability extends to
+    ``{discrete, continuous_lg}``.  ``continuous_nongauss`` and
+    ``hybrid`` stay excluded — see the ``.. note::`` block in
+    ``benchmarking/baselines/pyro_adapter.py`` and v0.8 follow-up
+    issue #61 (mixed-parent hybrid case).
+    """
     assert "pyro-empirical" in known_labels()
     assert "pyro-empirical-importance" in known_labels()
     for label in ("pyro-empirical", "pyro-empirical-importance"):
         assert is_applicable(label, "discrete")
-        assert not is_applicable(label, "continuous_lg")
+        assert is_applicable(label, "continuous_lg")
         assert not is_applicable(label, "continuous_nongauss")
         assert not is_applicable(label, "hybrid")
 
@@ -168,10 +178,14 @@ def test_applicability_gate_rejects_other_library_cross_family() -> None:
     for label in ("pomegranate-discrete", "pomegranate-discrete-ve"):
         for fam in ("continuous_lg", "continuous_nongauss", "hybrid"):
             assert not is_applicable(label, fam)
-    # pyro on continuous / hybrid → not applicable (continuous path is
-    # broken; tracked as v0.7).
+    # pyro on continuous_nongauss / hybrid → not applicable.
+    # v0.8-#32: continuous_lg removed from this rejection set — the
+    # LG-conditional fit-path now handles it correctly.
+    # continuous_nongauss stays out (Normal sampling family is the
+    # structural mismatch; needs SVI+guide).  hybrid stays out
+    # (mixed-parent gap tracked as #61).
     for label in ("pyro-empirical", "pyro-empirical-importance"):
-        for fam in ("continuous_lg", "continuous_nongauss", "hybrid"):
+        for fam in ("continuous_nongauss", "hybrid"):
             assert not is_applicable(label, fam)
 
 
