@@ -55,7 +55,17 @@ class PyroAdapter(BaselineAdapter):
     name = "pyro"
     supports = {"discrete", "continuous", "hybrid"}
 
-    def __init__(self, n_samples: int = 200) -> None:
+    def __init__(self, n_samples: int = 50) -> None:
+        # n_samples=50 default: paper-config (n_nodes=10, B=1024) hits a
+        # 600s per-cell timeout — at the prior 200 default, the per-row
+        # ``[marg() for _ in range(n_samples)]`` loop in
+        # ``_posterior_samples`` extrapolates to ~1273s (200 × 1024 calls
+        # to ``EmpiricalMarginal()``).  Pyro's ``EmpiricalMarginal``
+        # exposes no batched-sample API; the only native path is the
+        # per-call loop, so we cut n_samples ~4× to fit the budget
+        # (projected ~318s, ~282s margin).  MC standard error rises
+        # ~2× (sqrt(1/200)≈0.07 → sqrt(1/50)≈0.14), acceptable for
+        # this baseline's role as a noisy importance-sampling reference.
         self.n_samples = int(n_samples)
         self.problem: BenchmarkProblem | None = None
         self._cpts: Dict[str, torch.Tensor] = {}
