@@ -144,6 +144,90 @@ def test_pyro_adapter_smoke_discrete() -> None:
     _smoke_query(get_adapter("pyro"), _problem("discrete"))
 
 
+@pytest.mark.skipif(not _has("pyro"), reason="needs pyro-ppl")
+def test_pyro_adapter_lg_conditional_32() -> None:
+    """Regression for #32: pyro continuous path must condition on parents.
+
+    Pre-fix, ``_fit_gaussian_leaf`` stored a per-node marginal
+    ``(mean, std)`` and ``_pyro_model`` sampled ``Normal(mean, std)``
+    independent of parent values — for any continuous_lg network the
+    posterior P(B|A=a) collapsed to the marginal of B, regardless of
+    a.  Post-fix, ``_fit_lg_leaf`` regresses each continuous node on
+    its continuous parents and ``_pyro_model`` samples
+    ``Normal(beta_0 + sum_i beta_i * pa_i, sigma)``.
+
+    Fixture: 2-node chain ``A -> B`` with B = 2A + N(0, 0.1).  Query
+    P(B|A=+2) and P(B|A=-2); empirical means must cluster near +4 and
+    -4 respectively (the conditional means), not near 0 (the marginal
+    of B).
+    """
+    from benchmarking.baselines.pyro_adapter import PyroAdapter
+    torch.manual_seed(0)
+    n = 2000
+    a = torch.randn(n)
+    b = 2.0 * a + 0.1 * torch.randn(n)
+    problem = BenchmarkProblem(
+        name="pyro_lg_conditional_32",
+        dag=[("A", "B")],
+        variables={"A": ("continuous", 1), "B": ("continuous", 1)},
+        train_data={"A": a, "B": b}, test_data={"A": a, "B": b},
+        queries=[], ground_truth=None,
+    )
+    adapter = PyroAdapter(n_samples=200)
+    adapter.fit(problem)
+    try:
+        # The primary regression check is observable behaviour: posterior
+        # means under different parent values must differ by the planted
+        # slope.  Internal ``_gaussian`` storage shape is an
+        # implementation detail and not asserted here.
+        means = {}
+        for a_obs in (2.0, -2.0):
+            samples = adapter._posterior_samples(
+                Query(targets=("B",),
+                      evidence={"A": torch.tensor(a_obs)},
+                      kind="marginal"),
+                n_samples=400,
+            )
+            means[a_obs] = float(samples.mean())
+
+        # Pre-fix marginal path: P(B|A=+2) and P(B|A=-2) both have mean
+        # ~ E[B] ~ 0, so means[+2] - means[-2] ~ 0.  Post-fix LG path:
+        # B = 2A + N(0, 0.1), so means[+2] - means[-2] ~ 8.  Tolerance
+        # of 1.0 around the expected gap of 8 leaves wide MC headroom
+        # while still catching any regression to the marginal path.
+        gap = means[2.0] - means[-2.0]
+        assert abs(gap - 8.0) < 1.0, (
+            f"P(B|A=+2) mean = {means[2.0]:+.3f}, P(B|A=-2) mean = "
+            f"{means[-2.0]:+.3f}, gap = {gap:+.3f} (expected ~8.0). "
+            f"A gap near 0 indicates regression to the pre-#32 "
+            f"marginal-Gaussian fit which ignored parent values."
+        )
+
+        # Both individual means should also be near their conditional
+        # values (sanity check on the absolute scale, not just the gap).
+        assert abs(means[2.0] - 4.0) < 0.5
+        assert abs(means[-2.0] - (-4.0)) < 0.5
+    finally:
+        adapter.teardown()
+
+
+@pytest.mark.skipif(not _has("pyro"), reason="needs pyro-ppl")
+def test_pyro_adapter_default_n_samples_36() -> None:
+    """Regression for #36: PyroAdapter default n_samples stays at 50.
+
+    Bumping the default back to 200 (or higher) re-introduces the
+    paper-config 600s per-cell timeout — at n_nodes=10, B=1024 the
+    per-row ``[marg() for _ in range(n_samples)]`` loop in
+    ``_posterior_samples`` extrapolates to ~1273s, 2.1× over budget.
+    Pyro's EmpiricalMarginal exposes no batched-sample API, so the
+    only native fix is keeping n_samples low (~50).  Companion
+    end-to-end smoke (``test_pyro_adapter_smoke_discrete``) verifies
+    the path still produces a usable posterior at this default.
+    """
+    from benchmarking.baselines.pyro_adapter import PyroAdapter
+    assert PyroAdapter().n_samples == 50
+
+
 @pytest.mark.skipif(not _has("gpytorch"), reason="needs gpytorch")
 def test_gpytorch_adapter_skips_discrete_evidence() -> None:
     """GPyTorch is continuous-only — discrete evidence must raise NotImplementedError."""
