@@ -277,3 +277,19 @@ class CategoricalTableMechanism(Mechanism):
         """CPT probabilities of shape ``[n_parent_states, K]``."""
         assert self._logits is not None
         return torch.softmax(self._logits, dim=-1).detach()
+
+    def tabulate(
+        self, parent_cards: list[int] | None = None
+    ) -> torch.Tensor:
+        """Return tabulated CPD in logit space (shape ``[*parent_cards, K]``).
+
+        ``parent_cards`` is ignored when the mechanism's own
+        ``_parent_cards`` (set by ``fit_local``) is non-empty — the
+        stored tabulation already encodes parent cardinality.  Passed
+        in for API uniformity with enumeration-based mechanisms (see
+        ``Mechanism.tabulate``).
+        """
+        assert self._logits is not None, "Call fit_local before tabulate()."
+        if not self._parent_cards:
+            return self._logits[0]
+        return self._logits.reshape(*self._parent_cards, self._n_classes)
