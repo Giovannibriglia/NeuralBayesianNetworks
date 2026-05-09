@@ -6,26 +6,26 @@ then run inference via ``pyro.infer.Importance`` (the canonical Pyro path
 for unconditional models) and read the empirical posterior marginal of the
 query target.
 
-.. warning::
-    The continuous path in this adapter is **structurally incorrect**.
-    ``_fit_gaussian_leaf`` stores per-node *marginal* ``(mean, std)`` from
-    the training data, and ``_pyro_model`` samples each continuous node
-    from ``Normal(mean, std)`` independently of its parents — see the
-    ``s[node] = pyro.sample(node, dist.Normal(mu, sigma))`` line in
-    ``_pyro_model``.  This ignores parent values entirely, which is wrong
-    for any continuous_lg or hybrid network with non-trivial structure.
-    Despite ``supports = {discrete, continuous, hybrid}`` declared on the
-    class below, the adapter is correct **only on discrete**.
+For ``continuous_lg`` networks each continuous node is fit with a
+linear-Gaussian conditional ``Normal(beta_0 + sum_i beta_i * pa_i, sigma)``
+via least-squares regression on its continuous parents (see
+``_fit_lg_leaf``); ``_pyro_model`` then samples the conditional Normal
+ancestrally.
 
-    The C-1a baseline registry's ``_BASELINE_APPLICABILITY`` matrix
-    accordingly restricts ``pyro-empirical`` and
-    ``pyro-empirical-importance`` to ``{discrete}`` — the runner-loop
-    applicability gate (introduced in v0.6c-C-1b) early-skips cells
-    where pyro would otherwise produce wrong answers.
-
-    Reworking the continuous path (e.g., ``Normal(parent_linear, sigma)``
-    for LG, or moving to SVI with proper conditional CPDs) is tracked
-    as a v0.7 issue.
+.. note::
+    ``continuous_nongauss`` and ``hybrid`` are still out of scope.
+    ``continuous_nongauss`` is excluded because the sampling
+    distribution itself is the structural mismatch — the lstsq path
+    would still yield a linear mean fit, but ``Normal(mu, sigma)``
+    is the wrong family when residuals aren't Gaussian; correcting
+    this needs SVI with a parameterised guide, not a different
+    fit-path.  ``hybrid`` is excluded because the LG-conditional
+    path assumes continuous parents only — a continuous node with
+    discrete parents currently falls back to a marginal Gaussian
+    fit, which is structurally wrong.  ``_BASELINE_APPLICABILITY``
+    accordingly excludes both families for ``pyro-empirical`` and
+    ``pyro-empirical-importance``.  The mixed-parent (discrete-parent
+    / continuous-child) gap is tracked as a v0.8 follow-up.
 
 Notes
 -----
@@ -69,7 +69,15 @@ class PyroAdapter(BaselineAdapter):
         self.n_samples = int(n_samples)
         self.problem: BenchmarkProblem | None = None
         self._cpts: Dict[str, torch.Tensor] = {}
-        self._gaussian: Dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        # _gaussian[node] = (beta, sigma, cont_parents) where beta is a
+        # 1-D tensor of length len(cont_parents)+1 (intercept first), and
+        # cont_parents is the ordered list of continuous parent names
+        # used to build the design matrix.  Empty cont_parents → beta is
+        # length-1 (just the marginal mean), recovering the prior
+        # marginal-Gaussian fit for continuous root nodes.
+        self._gaussian: Dict[
+            str, tuple[torch.Tensor, torch.Tensor, List[str]]
+        ] = {}
         self._parents: Dict[str, List[str]] = {}
         self._cards: Dict[str, int] = {}
         self._topo: List[str] = []
@@ -95,7 +103,7 @@ class PyroAdapter(BaselineAdapter):
                 self._cards[node] = k
                 self._fit_discrete_cpt(node, k, problem)
             else:
-                self._fit_gaussian_leaf(node, problem)
+                self._fit_lg_leaf(node, problem)
 
     def _fit_discrete_cpt(self, node, k, problem):
         x = problem.train_data[node].cpu().long().reshape(-1)
@@ -121,9 +129,36 @@ class PyroAdapter(BaselineAdapter):
         cnt = cnt.reshape(n_pa, k) + 1.0
         self._cpts[node] = cnt / cnt.sum(-1, keepdim=True)
 
-    def _fit_gaussian_leaf(self, node, problem):
-        x = problem.train_data[node].cpu().float().reshape(-1)
-        self._gaussian[node] = (x.mean(), x.std().clamp_min(1e-3))
+    def _fit_lg_leaf(self, node, problem):
+        """Linear-Gaussian conditional fit for a continuous node.
+
+        Fits ``y = beta_0 + sum_i beta_i * pa_i + eps`` via least-squares
+        on the continuous parents.  Discrete parents (only present in
+        the hybrid family, which is gated out in
+        ``_BASELINE_APPLICABILITY``) are ignored — a continuous node
+        with no continuous parents falls back to the marginal-Gaussian
+        fit ``Normal(mean, std)``.
+        """
+        y = problem.train_data[node].cpu().float().reshape(-1)
+        cont_parents = [
+            p for p in self._parents[node]
+            if problem.variables[p][0] == "continuous"
+        ]
+        if not cont_parents:
+            beta = y.mean().reshape(1)
+            sigma = y.std().clamp_min(1e-3)
+            self._gaussian[node] = (beta, sigma, [])
+            return
+
+        cols = [torch.ones_like(y)]
+        for p in cont_parents:
+            cols.append(problem.train_data[p].cpu().float().reshape(-1))
+        X = torch.stack(cols, dim=1)
+        # gelsd handles rank-deficient X (e.g. n_train < num_parents+1).
+        beta = torch.linalg.lstsq(X, y, driver="gelsd").solution.reshape(-1)
+        residuals = y - X @ beta
+        sigma = residuals.std().clamp_min(1e-3)
+        self._gaussian[node] = (beta, sigma, cont_parents)
 
     # ------------------------------------------------------------------
     # Pyro model + Importance sampler
@@ -156,7 +191,10 @@ class PyroAdapter(BaselineAdapter):
                         probs = cpts[node][0]
                     s[node] = pyro.sample(node, dist.Categorical(probs))
                 else:
-                    mu, sigma = gauss[node]
+                    beta, sigma, cont_pa = gauss[node]
+                    mu = beta[0]
+                    for i, p in enumerate(cont_pa):
+                        mu = mu + beta[i + 1] * s[p]
                     s[node] = pyro.sample(node, dist.Normal(mu, sigma))
             return s
         return model

@@ -161,15 +161,17 @@ _BASELINE_APPLICABILITY: dict[str, FrozenSet[str]] = {
     "pomegranate-discrete-ve":   frozenset({"discrete"}),
 
     # pyro: Importance sampler over an ancestral generative model.
-    # Empirical CPT for discrete; per-node Gaussian leaves for continuous.
-    # The continuous path is structurally broken (parent-ignoring
-    # marginal Gaussian; filed as v0.7 issue), so applicability is
-    # restricted to discrete despite the v1 adapter declaring
-    # supports = {discrete, continuous, hybrid}.  Mechanism label
-    # "empirical" describes the empirical-distribution-fit style;
-    # inference_method "importance" is pyro.infer.Importance.
-    "pyro-empirical":            frozenset({"discrete"}),
-    "pyro-empirical-importance": frozenset({"discrete"}),
+    # Empirical CPT for discrete; linear-Gaussian conditional
+    # ``Normal(beta_0 + sum_i beta_i * pa_i, sigma)`` for continuous_lg
+    # (#32 fix).  Applicability covers discrete + continuous_lg;
+    # continuous_nongauss and hybrid stay excluded — non-Gaussian
+    # continuous would need SVI with a parameterised guide, and the
+    # hybrid mixed-parent (discrete-parent / continuous-child) case
+    # is tracked as a v0.8 follow-up.  Mechanism label "empirical"
+    # describes the empirical-distribution-fit style; inference_method
+    # "importance" is pyro.infer.Importance.
+    "pyro-empirical":            frozenset({"discrete", "continuous_lg"}),
+    "pyro-empirical-importance": frozenset({"discrete", "continuous_lg"}),
 }
 
 
