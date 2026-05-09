@@ -480,7 +480,7 @@ def _inference_cell(
 def _fit_and_score_nbn(
     cfg: CrashTestConfig, bn: SyntheticBN, family: str,
     spec: BaselineSpec,
-) -> "list[tuple[str, float, str, str | None]]":
+) -> list[tuple[str, float, str, str | None]]:
     from nbn.core.network import NeuralBayesianNetwork
     fitted = NeuralBayesianNetwork(
         list(bn.dag.edges()), variables=bn.variable_specs, device="cpu",
@@ -505,7 +505,7 @@ def _fit_and_score_nbn(
 
 def _fit_and_score_pgmpy(
     bn: SyntheticBN, family: str, spec: BaselineSpec,
-) -> "list[tuple[str, float, str, str | None]]":
+) -> list[tuple[str, float, str, str | None]]:
     from benchmarking.baselines.pgmpy_adapter import PgmpyAdapter
     from benchmarking.domains.base import BenchmarkProblem
     problem = BenchmarkProblem(
@@ -548,7 +548,7 @@ def _fit_and_score_pgmpy(
 
 def _build_param_learning_pairs_nbn(
     fitted, bn: SyntheticBN, *, n_eval: int = 20, n_samples: int = 200,
-) -> "tuple[list, list]":
+) -> tuple[list, list]:
     """Build (cpd_pairs, sample_pairs) from fitted vs bn.true_model.
 
     Iterates topologically over bn.dag; for each discrete node appends
@@ -606,7 +606,7 @@ def _build_param_learning_pairs_nbn(
 
 def _build_param_learning_pairs_pgmpy(
     adapter, bn: SyntheticBN, *, n_eval: int = 20, n_samples: int = 200,
-) -> "tuple[list, list]":
+) -> tuple[list, list]:
     """Build (cpd_pairs, sample_pairs) for pgmpy-fitted models.
 
     Discrete (adapter.kind == "discrete"): truth uses tabulate(), pgmpy
@@ -675,8 +675,8 @@ def _build_param_learning_pairs_pgmpy(
 
 
 def _format_metric_rows(
-    metric_dict: "dict[str, float | None]", family: str,
-) -> "list[tuple[str, float, str, str | None]]":
+    metric_dict: dict[str, float | None], family: str,
+) -> list[tuple[str, float, str, str | None]]:
     """Convert helper-output dict to per-metric (name, value, status, error_msg) rows.
 
     None values (skipped metrics) emit NaN with status='not_supported'
@@ -701,7 +701,7 @@ def _format_metric_rows(
 
 def _score_param_learning_metrics_nbn(
     fitted, bn: SyntheticBN, family: str,
-) -> "list[tuple[str, float, str, str | None]]":
+) -> list[tuple[str, float, str, str | None]]:
     from benchmarking.metrics import _compute_metrics_per_node
     cpd_pairs, sample_pairs = _build_param_learning_pairs_nbn(fitted, bn)
     metric_dict = _compute_metrics_per_node(
@@ -713,7 +713,7 @@ def _score_param_learning_metrics_nbn(
 
 def _score_param_learning_metrics_pgmpy(
     adapter, bn: SyntheticBN, family: str,
-) -> "list[tuple[str, float, str, str | None]]":
+) -> list[tuple[str, float, str, str | None]]:
     from benchmarking.metrics import _compute_metrics_per_node
     cpd_pairs, sample_pairs = _build_param_learning_pairs_pgmpy(adapter, bn)
     metric_dict = _compute_metrics_per_node(
@@ -1033,7 +1033,7 @@ def _compute_inference_metrics(
     bn: SyntheticBN, baseline: str, q, family: str,
     *, n_samples: int = 200, eps_factor: float = 0.50, n_eff_min: int = 10,
     n_lw_samples: int = 512, n_oracle_samples: int = 2000,
-) -> "dict[str, float | None]":
+) -> dict[str, float | None]:
     """Compute {tv, jsd, w1}_per_node for the inference query battery.
 
     Per row in the up-to-16-row loop, build either a (truth_logits,

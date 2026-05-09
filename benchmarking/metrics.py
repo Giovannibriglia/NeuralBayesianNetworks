@@ -225,11 +225,11 @@ def marginal_mae(p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
 
 def _compute_metrics_per_node(
     *,
-    cpd_pairs: "list[tuple[torch.Tensor, torch.Tensor]] | tuple" = (),
-    sample_pairs: "list[tuple[torch.Tensor, torch.Tensor]] | tuple" = (),
-    metrics: "tuple[str, ...]" = ("tv", "jsd", "w1"),
+    cpd_pairs: list[tuple[torch.Tensor, torch.Tensor]] | tuple = (),
+    sample_pairs: list[tuple[torch.Tensor, torch.Tensor]] | tuple = (),
+    metrics: tuple[str, ...] = ("tv", "jsd", "w1"),
     n_bins: int = 256,
-) -> "dict[str, float | None]":
+) -> dict[str, float | None]:
     """Average TV / JSD / W₁ across a collection of CPD or sample pairs.
 
     Single helper for both pipelines (param-learning + inference) and
@@ -290,7 +290,7 @@ def _compute_metrics_per_node(
     """
     import math
 
-    out: "dict[str, list[float]]" = {m: [] for m in metrics}
+    out: dict[str, list[float]] = {m: [] for m in metrics}
 
     for true_logits, fit_logits in cpd_pairs:
         if true_logits.shape != fit_logits.shape:
