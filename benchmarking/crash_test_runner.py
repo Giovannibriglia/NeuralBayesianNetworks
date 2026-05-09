@@ -144,6 +144,18 @@ _ACCURACY_NOT_APPLICABLE: set[tuple[str, str]] = {
 }
 
 
+# v0.8 Pass-9: parametrized per-cell metric scoring config.
+_PARAM_LEARNING_METRICS = ("tv", "jsd", "w1")
+_DISCRETE_FAMILIES = {"discrete"}
+_CONTINUOUS_FAMILIES = {"continuous_lg", "continuous_nongauss"}
+_SKIP_REASONS = {
+    ("discrete", "w1"): (
+        "W1 not meaningful on unordered-categorical discrete CPDs "
+        "(collapses to 1/2 * TV under Hamming metric)"
+    ),
+}
+
+
 def _not_applicable_row(
     family: str, n_nodes: int, seed: int, baseline: str,
 ) -> List[CellResult]:
@@ -325,25 +337,30 @@ def _param_learning_cell(
     bn = _generate_bn(cfg, family, n, seed)
     t0 = time.perf_counter()
     if spec.library == "nbn":
-        metric, value = _fit_and_score_nbn(cfg, bn, family, spec)
+        # v0.8 Pass-9: returns list of (metric, value, status, error_msg)
+        # so each cell can emit one row per metric (tv_per_node,
+        # jsd_per_node, w1_per_node).  Skipped metrics get
+        # status="not_supported".
+        metric_rows = _fit_and_score_nbn(cfg, bn, family, spec)
     elif spec.library == "pgmpy":
-        metric, value = _fit_and_score_pgmpy(bn, family, spec)
+        metric_rows = _fit_and_score_pgmpy(bn, family, spec)
     else:
-        # pomegranate / gpytorch / pyro accuracy plumbing lands in v0.5b.
         raise NotImplementedError(
             f"param-learning library {spec.library!r} accuracy wiring is v0.5b",
         )
     total_time = time.perf_counter() - t0
-    return [
-        CellResult(
+    rows: List[CellResult] = []
+    for metric_name, value, status, error_msg in metric_rows:
+        rows.append(CellResult(
             family=family, n_nodes=n, seed=seed, baseline=label,
-            metric=metric, value=value,
-        ),
-        CellResult(
-            family=family, n_nodes=n, seed=seed, baseline=label,
-            metric="total_time_s", value=float(total_time),
-        ),
-    ]
+            metric=metric_name, value=value, status=status,
+            extra={"error_msg": error_msg} if error_msg else {},
+        ))
+    rows.append(CellResult(
+        family=family, n_nodes=n, seed=seed, baseline=label,
+        metric="total_time_s", value=float(total_time),
+    ))
+    return rows
 
 
 def _inference_cell(
@@ -444,7 +461,7 @@ def _inference_cell(
 def _fit_and_score_nbn(
     cfg: CrashTestConfig, bn: SyntheticBN, family: str,
     spec: BaselineSpec,
-) -> tuple[str, float]:
+) -> "list[tuple[str, float, str, str | None]]":
     from nbn.core.network import NeuralBayesianNetwork
     fitted = NeuralBayesianNetwork(
         list(bn.dag.edges()), variables=bn.variable_specs, device="cpu",
@@ -464,14 +481,12 @@ def _fit_and_score_nbn(
     fitted.fit(
         bn.train_data, epochs=cfg.fit_epochs, batch_size=cfg.batch_size, lr=5e-3,
     )
-    if family == "discrete":
-        return "tv_per_node", _avg_tv_per_node(fitted, bn)
-    return "w1_per_node", _avg_w1_per_node(fitted, bn, n_eval=20, n_samples=200)
+    return _score_param_learning_metrics_nbn(fitted, bn, family)
 
 
 def _fit_and_score_pgmpy(
     bn: SyntheticBN, family: str, spec: BaselineSpec,
-) -> tuple[str, float]:
+) -> "list[tuple[str, float, str, str | None]]":
     from benchmarking.baselines.pgmpy_adapter import PgmpyAdapter
     from benchmarking.domains.base import BenchmarkProblem
     problem = BenchmarkProblem(
@@ -488,147 +503,254 @@ def _fit_and_score_pgmpy(
     adapter.fit(problem)
     if adapter.kind == "unsupported":
         raise NotImplementedError(f"pgmpy refused the {family} family")
-    if family == "discrete":
-        return "tv_per_node", _avg_tv_per_node_pgmpy(adapter, bn)
-    return "w1_per_node", _avg_w1_per_node_pgmpy_lg(adapter, bn, n_eval=20, n_samples=200)
+    return _score_param_learning_metrics_pgmpy(adapter, bn, family)
 
 
-def _avg_tv_per_node(fitted, bn: SyntheticBN) -> float:
-    out = []
-    for node in bn.dag.nodes():
-        # v0.8-#59: read tabulated CPDs via Mechanism.tabulate() instead
-        # of mech._logits directly — the latter is None on
-        # NeuralCategoricalMechanism (no flat _logits attribute) so the
-        # nbn-neuralcat baseline crashed with AttributeError.  Both the
-        # truth side (always CategoricalTableMechanism today, but going
-        # through the interface defends against the bug-hides-bug
-        # pattern surfacing again if the synthetic generator ever
-        # uses a forward-based mechanism for the truth) and the
-        # fitted side go through tabulate().
-        parents = list(bn.dag.predecessors(node))
-        parent_cards = [bn.true_model.mechanisms[p].n_classes for p in parents]
-        # device-align both tensors to CPU before subtraction (Bug 1):
-        # NBN's fitted model lives on cuda when device='auto'; the truth
-        # model may live on cpu (or vice-versa).  Normalise to cpu for
-        # the metric — these are tiny tensors so the move is free.
-        true_logits = (
-            bn.true_model.mechanisms[node].tabulate(parent_cards).detach().cpu()
-        )
-        fit_logits = (
-            fitted.mechanisms[node].tabulate(parent_cards).detach().cpu()
-        )
-        if true_logits.shape != fit_logits.shape:
-            continue
-        true_p = torch.softmax(true_logits, dim=-1)
-        fit_p = torch.softmax(fit_logits, dim=-1)
-        tv = 0.5 * (true_p - fit_p).abs().sum(dim=-1).mean().item()
-        out.append(tv)
-    return float(sum(out) / max(1, len(out)))
+# ---------------------------------------------------------------------- #
+# v0.8 Pass-9: parametrized metric scoring (TV / JSD / W1 per cell)
+# ---------------------------------------------------------------------- #
+#
+# _score_param_learning_metrics_nbn / _pgmpy build (true_logits,
+# fit_logits) cpd_pairs for discrete nodes via Mechanism.tabulate()
+# (Pass 8 #59/#26) and (true_samples, fit_samples) sample_pairs for
+# continuous nodes via mechanism.sample().  Both lists are passed to
+# benchmarking.metrics._compute_metrics_per_node which averages each
+# requested metric over its contributing pairs.
+#
+# Returns list[tuple[metric_name, value, status, error_msg]] —
+# one per requested metric.  Skipped metrics (e.g. W1 on pure
+# discrete-unordered) emit (metric, NaN, "not_supported", reason).
+#
+# The four legacy helpers (_avg_tv_per_node, _avg_tv_per_node_pgmpy,
+# _avg_w1_per_node, _avg_w1_per_node_pgmpy_lg) are kept as thin
+# wrappers around the new scoring path — backward compat for any
+# external callers / tests that key on the old names.
 
 
-def _avg_tv_per_node_pgmpy(adapter, bn: SyntheticBN) -> float:
-    import numpy as np
-    out = []
-    for cpd in adapter.model.get_cpds():
-        node = cpd.variable
-        # v0.8-#59: tabulate() instead of _logits.  Truth is always
-        # CategoricalTableMechanism today (pgmpy doesn't cross paths
-        # with neural mechanisms), but routing through the interface
-        # keeps the call shape uniform with _avg_tv_per_node.
-        parents = list(bn.dag.predecessors(node))
-        parent_cards = [bn.true_model.mechanisms[p].n_classes for p in parents]
-        # Both tensors normalised to cpu (Bug 1).
-        true_logits = (
-            bn.true_model.mechanisms[node].tabulate(parent_cards).detach().cpu()
-        )
-        true_p = torch.softmax(true_logits, dim=-1)  # [*parent_cards, K]
-        # pgmpy CPD: shape [K, *parent_cards]; move K to last to match
-        # tabulate()'s [*parent_cards, K] convention.
-        vals = np.asarray(cpd.values)
-        fit_p = torch.tensor(vals, dtype=torch.float).movedim(0, -1).contiguous()
-        if fit_p.shape != true_p.shape:
-            continue
-        tv = 0.5 * (true_p - fit_p).abs().sum(dim=-1).mean().item()
-        out.append(tv)
-    return float(sum(out) / max(1, len(out)))
+def _build_param_learning_pairs_nbn(
+    fitted, bn: SyntheticBN, *, n_eval: int = 20, n_samples: int = 200,
+) -> "tuple[list, list]":
+    """Build (cpd_pairs, sample_pairs) from fitted vs bn.true_model.
 
-
-def _avg_w1_per_node(
-    fitted, bn: SyntheticBN, *, n_eval: int, n_samples: int,
-) -> float:
-    out = []
-    test = bn.test_data
-    n_test = next(iter(test.values())).shape[0]
+    Iterates topologically over bn.dag; for each discrete node appends
+    one (true_logits, fit_logits) pair via Mechanism.tabulate(); for
+    each continuous node appends ``n_pa_eval`` (true_samples,
+    fit_samples) pairs via mechanism.sample().  Hybrid families
+    naturally produce both lists populated.
+    """
+    cpd_pairs = []
+    sample_pairs = []
+    n_test = next(iter(bn.test_data.values())).shape[0]
     n_pa_eval = min(n_eval, n_test)
     for node in nx.topological_sort(bn.dag):
-        if bn.variable_specs[node][0] == "discrete":
-            continue
+        kind = bn.variable_specs[node][0]
         parents = list(bn.dag.predecessors(node))
         true_mech = bn.true_model.mechanisms[node]
         fit_mech = fitted.mechanisms[node]
-        # Place the parent tensor on the FITTED model's device so
-        # mech.sample(pa) doesn't trip on device mismatch (Bug 1).
-        # _w1 then operates on cpu copies of the resulting samples.
-        fit_device = next(
-            (p.device for p in fit_mech.parameters() if p is not None),
-            torch.device("cpu"),
-        )
-        if parents:
-            pa = torch.cat(
-                [test[p][:n_pa_eval].reshape(n_pa_eval, -1).float()
-                 for p in parents], dim=-1,
-            ).to(fit_device)
+        if kind == "discrete":
+            parent_cards = [bn.true_model.mechanisms[p].n_classes for p in parents]
+            true_logits = true_mech.tabulate(parent_cards).detach().cpu()
+            fit_logits = fit_mech.tabulate(parent_cards).detach().cpu()
+            cpd_pairs.append((true_logits, fit_logits))
         else:
-            pa = None
-        with torch.no_grad():
-            try:
-                true_pa = pa.to(next(true_mech.parameters()).device) if pa is not None else None
-                true_s = true_mech.sample(true_pa, n=n_samples).reshape(n_pa_eval, n_samples)
-                fit_s = fit_mech.sample(pa, n=n_samples).reshape(n_pa_eval, n_samples)
-            except Exception:
+            # Continuous: place pa tensor on fitted device for
+            # fit_mech.sample(); _w1 / helper run on cpu copies.
+            fit_device = next(
+                (p.device for p in fit_mech.parameters() if p is not None),
+                torch.device("cpu"),
+            )
+            if parents:
+                pa = torch.cat(
+                    [bn.test_data[p][:n_pa_eval].reshape(n_pa_eval, -1).float()
+                     for p in parents], dim=-1,
+                ).to(fit_device)
+            else:
+                pa = None
+            with torch.no_grad():
+                try:
+                    true_pa = (
+                        pa.to(next(true_mech.parameters()).device)
+                        if pa is not None else None
+                    )
+                    true_s = true_mech.sample(true_pa, n=n_samples).reshape(
+                        n_pa_eval, n_samples,
+                    )
+                    fit_s = fit_mech.sample(pa, n=n_samples).reshape(
+                        n_pa_eval, n_samples,
+                    )
+                except Exception:
+                    continue
+            for i in range(n_pa_eval):
+                sample_pairs.append((true_s[i].cpu(), fit_s[i].cpu()))
+    return cpd_pairs, sample_pairs
+
+
+def _build_param_learning_pairs_pgmpy(
+    adapter, bn: SyntheticBN, *, n_eval: int = 20, n_samples: int = 200,
+) -> "tuple[list, list]":
+    """Build (cpd_pairs, sample_pairs) for pgmpy-fitted models.
+
+    Discrete (adapter.kind == "discrete"): truth uses tabulate(), pgmpy
+    side reads cpd.values and reshapes to [*parent_cards, K] then
+    converts probabilities to logits via log() for shape parity with
+    the discrete cpd_pairs convention (helper softmaxes anyway, so
+    log-probs and logits are equivalent under shift-invariance).
+
+    Continuous LG (adapter.kind == "continuous_lg"): hand-rolled LG
+    sampling from the pgmpy CPD, matching the previous
+    _avg_w1_per_node_pgmpy_lg shape.
+    """
+    import numpy as np
+    cpd_pairs = []
+    sample_pairs = []
+    n_test = next(iter(bn.test_data.values())).shape[0]
+    n_pa_eval = min(n_eval, n_test)
+    if adapter.kind == "discrete":
+        for cpd in adapter.model.get_cpds():
+            node = cpd.variable
+            parents = list(bn.dag.predecessors(node))
+            parent_cards = [bn.true_model.mechanisms[p].n_classes for p in parents]
+            true_logits = (
+                bn.true_model.mechanisms[node].tabulate(parent_cards).detach().cpu()
+            )
+            vals = np.asarray(cpd.values)
+            # pgmpy CPD shape [K, *pa]; movedim → [*pa, K] to match
+            # tabulate()'s convention.
+            fit_p = torch.tensor(vals, dtype=torch.float).movedim(0, -1).contiguous()
+            # Helper softmaxes its inputs; pass log-probs so softmax
+            # recovers fit_p.  clamp_min(1e-12) to avoid log(0).
+            fit_logits = torch.log(fit_p.clamp_min(1e-12))
+            cpd_pairs.append((true_logits, fit_logits))
+    elif adapter.kind == "continuous_lg":
+        cpd_by_var = {cpd.variable: cpd for cpd in adapter.lg_model.get_cpds()}
+        for node in nx.topological_sort(bn.dag):
+            cpd = cpd_by_var.get(node)
+            if cpd is None:
                 continue
-        for i in range(n_pa_eval):
-            out.append(_w1(true_s[i], fit_s[i]))
-    return float(sum(out) / max(1, len(out)))
+            parents = list(cpd.evidence) if hasattr(cpd, "evidence") else []
+            beta = list(cpd.beta)
+            std = float(cpd.std)
+            true_mech = bn.true_model.mechanisms[node]
+            true_device = next(true_mech.parameters()).device
+            for i in range(n_pa_eval):
+                if parents:
+                    pa_vals = torch.tensor(
+                        [float(bn.test_data[p][i].reshape(-1)[0].cpu().item())
+                         for p in parents],
+                    ).float()
+                    mean = beta[0] + sum(
+                        beta[k + 1] * pa_vals[k].item() for k in range(len(parents))
+                    )
+                    fit_s = mean + std * torch.randn(n_samples)
+                    pa_t = pa_vals.reshape(1, -1).to(true_device)
+                else:
+                    fit_s = beta[0] + std * torch.randn(n_samples)
+                    pa_t = None
+                with torch.no_grad():
+                    try:
+                        true_s = true_mech.sample(pa_t, n=n_samples).reshape(-1)[:n_samples]
+                    except Exception:
+                        continue
+                sample_pairs.append((true_s.cpu(), fit_s.cpu()))
+    return cpd_pairs, sample_pairs
+
+
+def _format_metric_rows(
+    metric_dict: "dict[str, float | None]", family: str,
+) -> "list[tuple[str, float, str, str | None]]":
+    """Convert helper-output dict to per-metric (name, value, status, error_msg) rows.
+
+    None values (skipped metrics) emit NaN with status='not_supported'
+    and a human-readable reason.  Computed values emit status='ok'.
+    """
+    rows = []
+    for short_name, value in metric_dict.items():
+        # short_name is like "tv_per_node" (already suffixed by helper)
+        metric_name = short_name
+        short_kind = short_name.replace("_per_node", "")
+        if value is None:
+            reason = _SKIP_REASONS.get(
+                (family, short_kind),
+                f"{short_kind} not applicable to family {family!r} "
+                f"(no contributing pairs)",
+            )
+            rows.append((metric_name, float("nan"), "not_supported", reason))
+        else:
+            rows.append((metric_name, float(value), "ok", None))
+    return rows
+
+
+def _score_param_learning_metrics_nbn(
+    fitted, bn: SyntheticBN, family: str,
+) -> "list[tuple[str, float, str, str | None]]":
+    from benchmarking.metrics import _compute_metrics_per_node
+    cpd_pairs, sample_pairs = _build_param_learning_pairs_nbn(fitted, bn)
+    metric_dict = _compute_metrics_per_node(
+        cpd_pairs=cpd_pairs, sample_pairs=sample_pairs,
+        metrics=_PARAM_LEARNING_METRICS,
+    )
+    return _format_metric_rows(metric_dict, family)
+
+
+def _score_param_learning_metrics_pgmpy(
+    adapter, bn: SyntheticBN, family: str,
+) -> "list[tuple[str, float, str, str | None]]":
+    from benchmarking.metrics import _compute_metrics_per_node
+    cpd_pairs, sample_pairs = _build_param_learning_pairs_pgmpy(adapter, bn)
+    metric_dict = _compute_metrics_per_node(
+        cpd_pairs=cpd_pairs, sample_pairs=sample_pairs,
+        metrics=_PARAM_LEARNING_METRICS,
+    )
+    return _format_metric_rows(metric_dict, family)
+
+
+# ---------------------------------------------------------------------- #
+# Backward-compat thin wrappers around the Pass-9 scoring path.
+# Pre-Pass-9 callers (tests, external scripts) may still key on these
+# names; each returns a single float for its specific metric.
+# ---------------------------------------------------------------------- #
+
+
+def _avg_tv_per_node(fitted, bn: SyntheticBN) -> float:
+    """Backward-compat wrapper: average per-node TV on a NBN-fitted model."""
+    from benchmarking.metrics import _compute_metrics_per_node
+    cpd_pairs, _ = _build_param_learning_pairs_nbn(fitted, bn)
+    out = _compute_metrics_per_node(cpd_pairs=cpd_pairs, metrics=("tv",))
+    return float(out["tv_per_node"]) if out["tv_per_node"] is not None else float("nan")
+
+
+def _avg_tv_per_node_pgmpy(adapter, bn: SyntheticBN) -> float:
+    """Backward-compat wrapper: average per-node TV on a pgmpy-fitted model."""
+    from benchmarking.metrics import _compute_metrics_per_node
+    cpd_pairs, _ = _build_param_learning_pairs_pgmpy(adapter, bn)
+    out = _compute_metrics_per_node(cpd_pairs=cpd_pairs, metrics=("tv",))
+    return float(out["tv_per_node"]) if out["tv_per_node"] is not None else float("nan")
+
+
+def _avg_w1_per_node(
+    fitted, bn: SyntheticBN, *, n_eval: int = 20, n_samples: int = 200,
+) -> float:
+    """Backward-compat wrapper: average per-node W1 on a NBN-fitted model."""
+    from benchmarking.metrics import _compute_metrics_per_node
+    _, sample_pairs = _build_param_learning_pairs_nbn(
+        fitted, bn, n_eval=n_eval, n_samples=n_samples,
+    )
+    out = _compute_metrics_per_node(sample_pairs=sample_pairs, metrics=("w1",))
+    return float(out["w1_per_node"]) if out["w1_per_node"] is not None else float("nan")
 
 
 def _avg_w1_per_node_pgmpy_lg(
-    adapter, bn: SyntheticBN, *, n_eval: int, n_samples: int,
+    adapter, bn: SyntheticBN, *, n_eval: int = 20, n_samples: int = 200,
 ) -> float:
+    """Backward-compat wrapper: average per-node W1 on pgmpy-LG-fitted model."""
+    from benchmarking.metrics import _compute_metrics_per_node
     if adapter.kind != "continuous_lg":
         raise NotImplementedError("pgmpy LG path not active")
-    test = bn.test_data
-    n_test = next(iter(test.values())).shape[0]
-    n_pa_eval = min(n_eval, n_test)
-    cpd_by_var = {cpd.variable: cpd for cpd in adapter.lg_model.get_cpds()}
-    out = []
-    for node in nx.topological_sort(bn.dag):
-        cpd = cpd_by_var.get(node)
-        if cpd is None:
-            continue
-        parents = list(cpd.evidence) if hasattr(cpd, "evidence") else []
-        beta = list(cpd.beta)
-        std = float(cpd.std)
-        true_mech = bn.true_model.mechanisms[node]
-        true_device = next(true_mech.parameters()).device
-        for i in range(n_pa_eval):
-            if parents:
-                # parents come from bn.test_data (may be on cuda).
-                # Move to cpu for the pgmpy-side arithmetic, then put
-                # the tensor for true_mech.sample on its native device.
-                pa_vals = torch.tensor(
-                    [float(test[p][i].reshape(-1)[0].cpu().item()) for p in parents],
-                ).float()
-                mean = beta[0] + sum(beta[k + 1] * pa_vals[k].item() for k in range(len(parents)))
-                fit_s = mean + std * torch.randn(n_samples)
-                pa_t = pa_vals.reshape(1, -1).to(true_device)
-            else:
-                fit_s = beta[0] + std * torch.randn(n_samples)
-                pa_t = None
-            with torch.no_grad():
-                true_s = true_mech.sample(pa_t, n=n_samples).reshape(-1)[:n_samples]
-            out.append(_w1(true_s, fit_s))
-    return float(sum(out) / max(1, len(out)))
+    _, sample_pairs = _build_param_learning_pairs_pgmpy(
+        adapter, bn, n_eval=n_eval, n_samples=n_samples,
+    )
+    out = _compute_metrics_per_node(sample_pairs=sample_pairs, metrics=("w1",))
+    return float(out["w1_per_node"]) if out["w1_per_node"] is not None else float("nan")
 
 
 def _w1(a: torch.Tensor, b: torch.Tensor) -> float:

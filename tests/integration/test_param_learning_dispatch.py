@@ -110,11 +110,23 @@ def test_param_learning_dispatch_triplet(
     bayes_spec     = BaselineSpec(library="pgmpy", mechanism="discrete",  param_method="bayes")
 
     # ── Assertion 1: pgmpy-mle vs pgmpy-bayes distinct TV ─────────────
+    # v0.8 Pass-9: _fit_and_score_pgmpy now returns
+    # list[tuple[name, value, status, error_msg]] — one row per metric
+    # in {tv_per_node, jsd_per_node, w1_per_node}.  Pluck tv_per_node
+    # via name lookup; the assertion semantics (bit-identical TV
+    # detection) are unchanged.
+    def _tv_value(rows):
+        for name, value, status, _err in rows:
+            if name == "tv_per_node" and status == "ok":
+                return value
+        raise AssertionError(f"no tv_per_node row in {rows!r}")
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        mle_metric, mle_value     = _fit_and_score_pgmpy(bn, "discrete", mle_spec)
-        bayes_metric, bayes_value = _fit_and_score_pgmpy(bn, "discrete", bayes_spec)
-    assert mle_metric == bayes_metric == "tv_per_node"
+        mle_rows   = _fit_and_score_pgmpy(bn, "discrete", mle_spec)
+        bayes_rows = _fit_and_score_pgmpy(bn, "discrete", bayes_spec)
+    mle_value = _tv_value(mle_rows)
+    bayes_value = _tv_value(bayes_rows)
     mle_bayes_diff = abs(mle_value - bayes_value)
     assert mle_bayes_diff > 1e-6, (
         f"pgmpy-mle ({mle_value:.6e}) and pgmpy-bayes ({bayes_value:.6e}) "
@@ -181,12 +193,13 @@ def test_param_learning_dispatch_triplet(
     # NBN pair.  Originally dropped because _avg_tv_per_node crashed on
     # NeuralCategoricalMechanism (no _logits attribute); v0.8-#59 +
     # v0.8-#26 introduced Mechanism.tabulate() which makes this work.
+    # v0.8 Pass-9: _fit_and_score_nbn returns list of metric rows;
+    # pluck tv_per_node via _tv_value (defined above).
     from benchmarking.crash_test_runner import _fit_and_score_nbn
-    cat_metric, cat_value = _fit_and_score_nbn(smoke_cfg, bn, "discrete", cat_spec)
-    neuralcat_metric, neuralcat_value = _fit_and_score_nbn(
-        smoke_cfg, bn, "discrete", neuralcat_spec,
-    )
-    assert cat_metric == neuralcat_metric == "tv_per_node"
+    cat_rows = _fit_and_score_nbn(smoke_cfg, bn, "discrete", cat_spec)
+    neuralcat_rows = _fit_and_score_nbn(smoke_cfg, bn, "discrete", neuralcat_spec)
+    cat_value = _tv_value(cat_rows)
+    neuralcat_value = _tv_value(neuralcat_rows)
     cat_neural_diff = abs(cat_value - neuralcat_value)
     assert cat_neural_diff > 1e-4, (
         f"nbn-cat ({cat_value:.6e}) and nbn-neuralcat ({neuralcat_value:.6e}) "

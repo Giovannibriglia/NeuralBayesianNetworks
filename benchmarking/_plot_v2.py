@@ -45,7 +45,8 @@ from benchmarking._baseline_registry import is_applicable
 # Std bands around the mean are clipped at 0 for these so the rendered
 # region stays geometrically valid (#42).
 NON_NEGATIVE_METRICS = frozenset({
-    "accuracy", "tv_per_node", "w1_per_node", "cpd_accuracy", "total_time_s",
+    "accuracy", "tv_per_node", "jsd_per_node", "w1_per_node",
+    "cpd_accuracy", "total_time_s",
 })
 
 
@@ -159,6 +160,11 @@ def render_figures(
     # Pick the metric pair to render.  Inference uses
     # (accuracy, total_time_s); param-learning uses
     # (tv_per_node|w1_per_node, total_time_s) — fall through both.
+    # v0.8 Pass-9: jsd_per_node is also stored in the parquet but
+    # isn't rendered as an auto-figure to keep the figure naming
+    # backward-compatible (view_name "accuracy_vs_size" produces one
+    # file path).  Downstream consumers can read jsd_per_node rows
+    # directly; a dedicated JSD figure-render is deferred.
     accuracy_metric = None
     for cand in ("accuracy", "tv_per_node", "w1_per_node", "cpd_accuracy"):
         if cand in df["metric"].unique():
@@ -223,6 +229,7 @@ def _render_single_metric(
         ylabel = (
             "Wasserstein-1 (W₁)" if family_metric in ("accuracy", "w1_per_node")
             else "Total variation (TV)" if family_metric == "tv_per_node"
+            else "Jensen-Shannon (JSD/log 2)" if family_metric == "jsd_per_node"
             else "Wall-clock seconds" if family_metric == "total_time_s"
             else family_metric
         )
@@ -297,8 +304,8 @@ def _render_single_metric(
 
     # Figure-level title.
     metric_label = (
-        "accuracy" if metric in ("accuracy", "tv_per_node", "w1_per_node",
-                                  "cpd_accuracy")
+        "accuracy" if metric in ("accuracy", "tv_per_node", "jsd_per_node",
+                                  "w1_per_node", "cpd_accuracy")
         else "total query time"
     )
     fig.suptitle(
