@@ -219,3 +219,120 @@ def js_normalized(p: torch.Tensor, q: torch.Tensor) -> MetricResult:
 
 def marginal_mae(p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
     return (p - q).abs().mean()
+
+
+# ── Pass-9 parametrized per-node aggregator ─────────────────────────────────
+
+def _compute_metrics_per_node(
+    *,
+    cpd_pairs: list[tuple[torch.Tensor, torch.Tensor]] | tuple = (),
+    sample_pairs: list[tuple[torch.Tensor, torch.Tensor]] | tuple = (),
+    metrics: tuple[str, ...] = ("tv", "jsd", "w1"),
+    n_bins: int = 256,
+) -> dict[str, float | None]:
+    """Average TV / JSD / W₁ across a collection of CPD or sample pairs.
+
+    Single helper for both pipelines (param-learning + inference) and
+    both family classes (discrete + continuous), with hybrid handled
+    via per-target dispatch by the caller (discrete sub-targets go in
+    ``cpd_pairs``; continuous sub-targets go in ``sample_pairs``).
+
+    Parameters
+    ----------
+    cpd_pairs : sequence of (true_logits, fit_logits)
+        Per-node pairs of tabulated CPDs in logit space (shape
+        ``[*parent_cards, K]`` or ``[K]``).  Used for discrete metrics
+        (TV, JSD); each pair contributes one TV and one JSD value
+        (averaged over parent configurations).  W₁ is **skipped** on
+        these pairs — the synthetic generator's discrete categories are
+        unordered, so W₁ collapses to ½·TV under any sensible metric
+        and is not informative.
+    sample_pairs : sequence of (true_samples, fit_samples)
+        Per-evaluation-row pairs of 1-D sample tensors (shape
+        ``[n_samples]``).  Used for continuous metrics: W₁ via
+        ``wasserstein_1d`` (sliced 1-D quantile-CDF) plus binned-TV
+        and binned-JSD via ``torch.histc`` with ``n_bins`` bins.
+    metrics : tuple of {"tv", "jsd", "w1"}
+        Which metrics to compute.  Output keys are
+        ``"<name>_per_node"`` matching the long-form parquet's
+        ``metric`` column convention.
+    n_bins : int, default 256
+        Histogram bin count for binned-TV / binned-JSD on
+        ``sample_pairs``.  Matches the default in
+        :func:`tv_continuous`.
+
+    Returns
+    -------
+    dict[str, float | None]
+        Mapping ``"<metric>_per_node"`` → average value.  ``None`` for
+        a metric whose contributing-pair list is empty (e.g. ``"w1"``
+        on a pure-discrete cell, or ``"tv"`` on an empty fixture).
+        The caller decides whether ``None`` becomes a ``not_supported``
+        row, a skipped row, or a NaN.
+
+    Notes
+    -----
+    Caller responsibility:
+
+    * Build ``cpd_pairs`` for discrete nodes only (use
+      ``Mechanism.tabulate(parent_cards)`` from Pass 8).
+    * Build ``sample_pairs`` for continuous nodes only (sample from
+      both true and fitted mechanisms at matched evidence rows).
+    * Hybrid families: send each node's contribution to the right
+      list based on ``variable_specs[node][0]``.
+
+    The shape-mismatch guard in the discrete branch (``true_logits.shape
+    != fit_logits.shape``) silently drops pairs to match the existing
+    ``_avg_tv_per_node`` behaviour from Pass 8 — these correspond to
+    cases where the fitted mechanism's parent cardinalities don't
+    match the truth (e.g. a categorical didn't see all parent
+    configurations in train_data and tabulated a smaller CPT).
+    """
+    import math
+
+    out: dict[str, list[float]] = {m: [] for m in metrics}
+
+    for true_logits, fit_logits in cpd_pairs:
+        if true_logits.shape != fit_logits.shape:
+            continue
+        true_p = torch.softmax(true_logits, dim=-1)
+        fit_p = torch.softmax(fit_logits, dim=-1)
+        if "tv" in metrics:
+            out["tv"].append(
+                float(0.5 * (true_p - fit_p).abs().sum(dim=-1).mean())
+            )
+        if "jsd" in metrics:
+            # js_divergence returns shape [*parent_cards]; mean → scalar.
+            # Normalise by log(2) so the value lives in [0, 1].
+            jsd_per_row = js_divergence(true_p, fit_p)
+            out["jsd"].append(float(jsd_per_row.mean() / math.log(2)))
+        # "w1" intentionally skipped: discrete-unordered.
+
+    for true_s, fit_s in sample_pairs:
+        true_s = true_s.reshape(-1).float()
+        fit_s = fit_s.reshape(-1).float()
+        if true_s.numel() == 0 or fit_s.numel() == 0:
+            continue
+        if "w1" in metrics:
+            out["w1"].append(wasserstein_1d(true_s, fit_s).value)
+        if "tv" in metrics:
+            out["tv"].append(tv_continuous(true_s, fit_s, bins=n_bins).value)
+        if "jsd" in metrics:
+            lo = float(min(true_s.min(), fit_s.min()))
+            hi = float(max(true_s.max(), fit_s.max()))
+            if hi <= lo:
+                # Degenerate range: identical samples → JSD = 0.
+                out["jsd"].append(0.0)
+                continue
+            true_h = torch.histc(true_s, bins=n_bins, min=lo, max=hi)
+            true_h = true_h / true_h.sum().clamp_min(1e-12)
+            fit_h = torch.histc(fit_s, bins=n_bins, min=lo, max=hi)
+            fit_h = fit_h / fit_h.sum().clamp_min(1e-12)
+            out["jsd"].append(
+                float(js_divergence(true_h, fit_h) / math.log(2))
+            )
+
+    return {
+        f"{m}_per_node": (float(sum(vals) / len(vals)) if vals else None)
+        for m, vals in out.items()
+    }
