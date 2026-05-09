@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import statistics
 import time
-from typing import Any, Dict, List
+from typing import Dict, List
 
 import networkx as nx
 import torch
@@ -36,7 +36,6 @@ import torch
 from benchmarking._crash_test_utils import (
     CellResult,
     CrashTestConfig,
-    fresh_mechanism_for,
     fresh_mechanism_for_spec,
     run_with_guard,
     write_parquet,
