@@ -110,6 +110,24 @@ class Mechanism(nn.Module, ABC):
     ) -> dict:
         """Closed-form or small-loop local MLE.  Returns a dict of metrics."""
 
+    @property
+    def is_fitted(self) -> bool:
+        """True iff ``fit_local`` has produced a usable CPD.
+
+        Default ``False``.  Each concrete mechanism that supports
+        fitting overrides this with a check appropriate for its
+        internal state (e.g. ``self._logits is not None`` for
+        ``CategoricalTableMechanism``; presence of ``_root_logits``
+        or a fitted ``net`` for ``NeuralCategoricalMechanism``).
+
+        Used by the variable-elimination engine
+        (``nbn/inference/tensor_ve.py:_extract_factors``) to surface
+        a clear ``RuntimeError`` rather than letting an unfitted
+        mechanism propagate as an opaque ``AssertionError`` from
+        deeper inside ``tabulate()``.  See v0.8 issue #26.
+        """
+        return False
+
     def tabulate(
         self, parent_cards: list[int] | None = None
     ) -> torch.Tensor:

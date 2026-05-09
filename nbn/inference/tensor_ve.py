@@ -61,17 +61,25 @@ class TensorVariableElimination(InferenceEngine):
                     f"TensorVariableElimination only supports discrete mechanisms; "
                     f"node '{node}' has a continuous mechanism."
                 )
-            if not hasattr(mech, "_logits") or mech._logits is None:
+            # v0.8-#26: was ``not hasattr(mech, "_logits") or mech._logits
+            # is None`` — that check incorrectly reported
+            # NeuralCategoricalMechanism as "not fitted" because it has
+            # no flat ``_logits`` attribute (the CPD is computed via
+            # MLP forward pass per-call).  ``Mechanism.is_fitted``
+            # delegates to each mechanism's own definition of
+            # fittedness; ``mech.tabulate()`` then materialises the
+            # CPD by enumeration when needed.
+            if not mech.is_fitted:
                 raise RuntimeError(f"Mechanism for node '{node}' has not been fitted.")
             parents = model.dag.parents(node)
             var_scope = parents + [node]
             cards = {n: model.mechanisms[n].n_classes for n in var_scope}
-            logits = mech._logits.detach()
             parent_cards = [model.mechanisms[p].n_classes for p in parents]
-            if parent_cards:
-                logits = logits.reshape(*parent_cards, cards[node])
-            else:
-                logits = logits.reshape(cards[node])
+            # v0.8-#26: tabulate() returns [*parent_cards, K] (or [K]
+            # for root) in logit space; log_softmax along the last
+            # axis recovers the conditional log-CPT regardless of
+            # whether the mechanism stores logits or log-probs.
+            logits = mech.tabulate(parent_cards).detach()
             log_cpt = torch.log_softmax(logits, dim=-1)
             factors[node] = LogFactor(log_cpt, var_scope, cards)
         self._factor_cache[id(model)] = factors

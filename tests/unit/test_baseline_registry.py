@@ -5,10 +5,11 @@ baselines added in v0.6c-C-1b/2/3 don't accidentally regress the
 parquet's baseline-column conventions or the family applicability
 gates.
 
-Also pins ``nbn-neuralcat-ve`` as **deferred** — the §4.4 diagnostic
-for PR #28 found that ``TensorVariableElimination._extract_factors``
-structurally requires a tabulated ``mech._logits`` tensor that
-``NeuralCategoricalMechanism`` does not expose.  Tracked in v0.7.
+v0.8-#26: ``nbn-neuralcat-ve`` is no longer deferred — the engine
+now reads CPDs via ``mech.tabulate(parent_cards)``, so the
+NeuralCategorical-VE combination works.  The corresponding
+``test_nbn_neuralcat_ve_deferred_to_v07`` deferral-pinning test
+was removed in the same commit.
 """
 from __future__ import annotations
 
@@ -144,35 +145,6 @@ def test_known_labels_returns_sorted_list() -> None:
     assert len(labels) == len(set(labels))  # no duplicates
     assert "nbn-cat-ve" in labels
     assert "pgmpy-lg-predict" in labels
-
-
-# ---------------------------------------------------------------------- #
-# v0.7 deferral pin: nbn-neuralcat-ve must NOT be in the registry.
-# ---------------------------------------------------------------------- #
-
-
-def test_nbn_neuralcat_ve_deferred_to_v07() -> None:
-    """``nbn-neuralcat-ve`` is deferred to v0.7 per §4.4 of the v0.6c-C-1
-    brief.  The diagnostic on PR #28 showed
-    ``TensorVariableElimination._extract_factors`` requires a tabulated
-    ``mech._logits`` tensor; ``NeuralCategoricalMechanism`` computes
-    logits per-parent via a neural net and has none.  Implementing
-    ``nbn-neuralcat-ve`` requires a "tabulate by enumeration" path in
-    the engine itself, not adapter glue.
-
-    This test pins the deferral: if a future commit adds
-    ``nbn-neuralcat-ve`` to the registry, the test fails and the author
-    must either ship the engine refactor (closing the v0.7 issue) or
-    remove the addition.
-    """
-    assert "nbn-neuralcat-ve" not in _BASELINE_APPLICABILITY, (
-        "nbn-neuralcat-ve was added to the registry — make sure the "
-        "TensorVE engine refactor (v0.7 issue) landed first.  "
-        "Otherwise the runner will dispatch a label whose underlying "
-        "engine cannot evaluate NeuralCategorical mechanisms."
-    )
-    # Sanity: the lw variant IS supported.
-    assert "nbn-neuralcat-lw" in _BASELINE_APPLICABILITY
 
 
 # ---------------------------------------------------------------------- #

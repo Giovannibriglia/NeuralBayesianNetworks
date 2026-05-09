@@ -269,6 +269,11 @@ class CategoricalTableMechanism(Mechanism):
     # ------------------------------------------------------------------
 
     @property
+    def is_fitted(self) -> bool:
+        """True iff ``fit_local`` populated the ``_logits`` tabulation."""
+        return self._logits is not None
+
+    @property
     def n_classes(self) -> int:
         return self._n_classes
 

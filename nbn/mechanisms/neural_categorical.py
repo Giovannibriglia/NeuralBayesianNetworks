@@ -118,6 +118,20 @@ class NeuralCategoricalMechanism(Mechanism):
         parents_2d = ensure_2d(parents)
         return Categorical(logits=self._logits_from_parents(parents_2d))
 
+    @property
+    def is_fitted(self) -> bool:
+        """True iff ``fit_local`` produced a usable CPD.
+
+        Root nodes (``_d_pa == 0``): fitted iff ``_root_logits``
+        parameter is registered.  Non-root: fitted iff the MLP
+        ``net`` is built.  Pre-``fit_local``: ``_d_pa = 0`` (default)
+        and ``_root_logits`` is unregistered, so this returns
+        ``False``.
+        """
+        if self._d_pa == 0:
+            return getattr(self, "_root_logits", None) is not None
+        return self.net is not None
+
     def tabulate(
         self, parent_cards: list[int] | None = None
     ) -> torch.Tensor:
