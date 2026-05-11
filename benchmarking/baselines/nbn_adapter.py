@@ -96,11 +96,25 @@ class NBNAdapter(BaselineAdapter):
         return MDNMechanism(num_components=3, hidden=(32,))
 
     def fit(self, problem: BenchmarkProblem) -> None:
+        import networkx as nx
         model = NeuralBayesianNetwork(
             problem.dag, variables=problem.variables, device=str(self.device),
         )
+        dag_nx = nx.DiGraph()
+        dag_nx.add_nodes_from(problem.variables)
+        dag_nx.add_edges_from(problem.dag)
         for node, (kind, k) in problem.variables.items():
-            model.set_mechanism(node, self._make_mech(kind, k))
+            parent_kinds = [
+                problem.variables[p][0] for p in dag_nx.predecessors(node)
+            ]
+            if kind == "discrete" and any(pk == "continuous" for pk in parent_kinds):
+                # Discrete child with continuous parents: CategoricalTableMechanism
+                # uses integer parent indexing and crashes on float inputs.
+                # NeuralCategoricalMechanism accepts float parents via its MLP.
+                mech = NeuralCategoricalMechanism(n_classes=k or 2)
+            else:
+                mech = self._make_mech(kind, k)
+            model.set_mechanism(node, mech)
         model.fit(problem.train_data, epochs=20, batch_size=512, lr=1e-3)
         self.model = model
 
