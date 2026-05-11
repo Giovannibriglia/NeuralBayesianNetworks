@@ -543,9 +543,20 @@ def _build_param_learning_pairs_nbn(
         true_mech = bn.true_model.mechanisms[node]
         fit_mech = fitted.mechanisms[node]
         if kind == "discrete":
-            parent_cards = [bn.true_model.mechanisms[p].n_classes for p in parents]
-            true_logits = true_mech.tabulate(parent_cards).detach().cpu()
-            fit_logits = fit_mech.tabulate(parent_cards).detach().cpu()
+            # parent_cards: use the cardinalities stored by the true
+            # mechanism's fit_local (handles hybrid nodes where some
+            # parents are continuous and have no n_classes attribute —
+            # BinningCategoricalTable stores [n_bins]*n_pa in _parent_cards).
+            stored = getattr(true_mech, "_parent_cards", None)
+            if stored and len(stored) == len(parents):
+                parent_cards = list(stored)
+            else:
+                parent_cards = [bn.true_model.mechanisms[p].n_classes for p in parents]
+            try:
+                true_logits = true_mech.tabulate(parent_cards).detach().cpu()
+                fit_logits = fit_mech.tabulate(parent_cards).detach().cpu()
+            except Exception:
+                continue
             cpd_pairs.append((true_logits, fit_logits))
         else:
             # Continuous: place pa tensor on fitted device for
