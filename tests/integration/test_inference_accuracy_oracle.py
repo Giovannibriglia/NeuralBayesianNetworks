@@ -243,7 +243,7 @@ def test_gpytorch_continuous_accuracy_classified_as_not_supported() -> None:
     cfg = CrashTestConfig.from_yaml(
         "benchmarking/configs/inference_smoke.yaml",
     )
-    rows = _inference_cell(cfg, "continuous_lg", 5, 0, "gpytorch")
+    rows = _inference_cell(cfg, "continuous_lg", 5, 0, "gpytorch", "gpytorch-gp-predict")
     speed = [r for r in rows if r.metric == "total_time_s"]
     accuracy = [r for r in rows if r.metric == "accuracy"]
 

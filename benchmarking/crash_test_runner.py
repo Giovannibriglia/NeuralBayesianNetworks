@@ -43,6 +43,7 @@ from benchmarking._crash_test_utils import (
 from benchmarking._baseline_registry import (
     BaselineSpec,
     _label_from_spec,
+    accuracy_supported,
     is_applicable,
 )
 from benchmarking._run_logging import finalise_run_logging, setup_run_logging
@@ -61,8 +62,9 @@ logger = logging.getLogger(__name__)
 #
 # The runner refactor that consumes these specs natively (fit-then-
 # query semantics, per-method dispatch) lands in v0.6c-C-1b.  In 1a
-# we keep the runner's existing string-keyed dispatch + the legacy
-# ``_NOT_APPLICABLE`` table; ``_legacy_adapter_for_spec`` translates
+# we kept the runner's existing string-keyed dispatch + the legacy
+# adapter-keyed applicability table (removed in Pass-10 priority-1);
+# ``_legacy_adapter_for_spec`` translates
 # each spec to its legacy-adapter string.  After the cell runs, the
 # resulting rows are *relabeled* to use the new
 # ``_label_from_spec(spec)`` label in the parquet ``baseline`` column.
@@ -108,40 +110,17 @@ def _legacy_adapter_for_spec(spec) -> str:
     )
 
 
-# PR-B §A.4: Structurally-invalid (family, baseline) combinations.
-# Listed here so the runner skips the cell up-front with a single
-# ``not_supported`` row rather than dispatching a doomed call that
-# would surface as a ValueError or NotImplementedError downstream.
-_NOT_APPLICABLE: set[tuple[str, str]] = {
-    ("discrete", "gpytorch"),                      # GP is continuous
-    ("continuous_lg", "pomegranate"),              # pomegranate adapter is discrete-only
-    ("continuous_nongauss", "pomegranate"),
-    ("continuous_lg", "nbn_ve"),                   # exact VE is discrete-only
-    ("continuous_nongauss", "nbn_ve"),
-    ("continuous_nongauss", "pgmpy"),              # pgmpy LG cannot do non-Gaussian
-    ("hybrid", "gpytorch"),                        # hybrid has discrete components
-    ("hybrid", "pomegranate"),                     # hybrid has continuous components
-    ("hybrid", "pgmpy"),                           # conservative skip; LG mix unsupported
-    ("hybrid", "nbn_ve"),                          # hybrid has continuous components
-}
+# Pass-10 priority-1 (v0.10): _NOT_APPLICABLE removed.  The registry
+# gate at run_parameter_learning:206 / run_inference:257 short-circuits
+# every (family, label) pair that this set would have caught — proven
+# by /tmp/dual_gate_proof.py (28 Gate-B-rejects, 28 Gate-A-rejects,
+# 0 drift) and pinned by tests/integration/test_baseline_applicability_consolidation.py.
 
 
-# v0.5c bug 2: baselines that produce a valid throughput measurement but
-# cannot meaningfully report posterior-quality accuracy because they do
-# not condition on evidence at the BN level.  The speed measurement
-# runs normally; only the accuracy row is gated.
-#
-# GPyTorch SVGPs return ``posterior.sample(target_inputs)`` which is the
-# *prior* marginal at the target — independent of ``q.evidence``.  Pre-fix,
-# this scored as W₁ ≈ 1.0 flat-line on continuous_lg / continuous_nongauss
-# (same signature as the v0.5b round-1 LW-uniform-weights bug we
-# eliminated, but here it is the baseline's own structural limit, not a
-# runner bug).  Plotting that line would mislead a reader; reporting
-# ``not_supported`` for accuracy is honest.
-_ACCURACY_NOT_APPLICABLE: set[tuple[str, str]] = {
-    ("continuous_lg", "gpytorch"),
-    ("continuous_nongauss", "gpytorch"),
-}
+# Pass-10 priority-1 (v0.10): _ACCURACY_NOT_APPLICABLE removed.
+# The semantic moved into BaselineApplicability.accuracy_supported
+# in the registry; consumed via accuracy_supported(label, family)
+# in _inference_cell (signature now takes the canonical label).
 
 
 # v0.8 Pass-9: parametrized per-cell metric scoring config.
@@ -195,14 +174,14 @@ def run_parameter_learning(
                     # v0.6c-C-1b: registry-based applicability gate
                     # (BEFORE adapter dispatch).  Method-keyed labels
                     # like ``pgmpy-mle-ve`` are discrete-only per the
-                    # C-1a registry; the legacy ``_NOT_APPLICABLE``
-                    # table inside the cell functions is keyed by the
-                    # *polymorphic* legacy adapter string ("pgmpy",
-                    # "nbn_lw") which gates a different (less strict)
-                    # set of combinations.  Without this gate, e.g.,
-                    # ``pgmpy-mle-ve`` would dispatch on continuous_lg
-                    # via the legacy adapter's lg path and emit a
-                    # nonsense ``ok`` row in the parquet.
+                    # C-1a registry; the legacy adapter-keyed
+                    # applicability table (removed in Pass-10 priority-1)
+                    # was keyed by the *polymorphic* legacy adapter
+                    # string ("pgmpy", "nbn_lw") and gated a different
+                    # (less strict) set of combinations.  Without this
+                    # gate, e.g., ``pgmpy-mle-ve`` would dispatch on
+                    # continuous_lg via the legacy adapter's lg path and
+                    # emit a nonsense ``ok`` row in the parquet.
                     if not is_applicable(label, family):
                         rows.append(_not_applicable_row(
                             family, n, s, label,
@@ -261,8 +240,8 @@ def run_inference(
                         continue
                     legacy = _legacy_adapter_for_spec(spec)
                     cell_rows = run_with_guard(
-                        lambda f=family, nn=n, ss=s, lg=legacy:
-                            _inference_cell(cfg, f, nn, ss, lg),
+                        lambda f=family, nn=n, ss=s, lg=legacy, lb=label:
+                            _inference_cell(cfg, f, nn, ss, lg, lb),
                         family=family, n_nodes=n, seed=s, baseline=label,
                         timeout_s=cfg.per_cell_timeout_s,
                     )
@@ -332,8 +311,6 @@ def _param_learning_cell(
         )
     label = _label_from_spec(spec)
     legacy = _legacy_adapter_for_spec(spec)
-    if (family, legacy) in _NOT_APPLICABLE:
-        return _not_applicable_row(family, n, seed, label)
     bn = _generate_bn(cfg, family, n, seed)
     t0 = time.perf_counter()
     if spec.library == "nbn":
@@ -365,10 +342,9 @@ def _param_learning_cell(
 
 def _inference_cell(
     cfg: CrashTestConfig, family: str, n: int, seed: int, baseline: str,
+    label: str,
 ) -> List[CellResult]:
     """Time `B` queries against the *true* model under the workload contract."""
-    if (family, baseline) in _NOT_APPLICABLE:
-        return _not_applicable_row(family, n, seed, baseline)
     bn = _generate_bn(cfg, family, n, seed)
     # PR-B-round-2 §3 fix: discrete family has no ``ground_truth_samples``
     # by design; synthesise one reference pool per cell so the accuracy
@@ -424,7 +400,7 @@ def _inference_cell(
     # on continuous families).  Speed measurement above already ran;
     # accuracy is honest ``not_supported`` rather than a misleading
     # W₁ ≈ 1.0 flat-line that looks like a real benchmark result.
-    if (family, baseline) in _ACCURACY_NOT_APPLICABLE:
+    if not accuracy_supported(label, family):
         rows.append(CellResult(
             family=family, n_nodes=n, seed=seed, baseline=baseline,
             metric="accuracy", value=float("nan"), status="not_supported",
@@ -1321,7 +1297,7 @@ def _baseline_posterior_for_query(
         # ``target_kind != "discrete"`` and every pgmpy continuous_lg
         # accuracy cell skipped → ``no_result`` on all 3 cells in
         # PR #14's smoke parquet.  pomegranate is structurally excluded
-        # from continuous families via ``_NOT_APPLICABLE`` so only
+        # from continuous families by the registry's applicability gate, so only
         # pgmpy reaches this branch in practice.
         #
         # Sample-budget parity: use the larger of ``n_samples`` (200

@@ -36,11 +36,15 @@ def test_paper_yaml_has_nbn_lw_n_samples_explicit() -> None:
 
 
 def test_smoke_yaml_has_nbn_lw_n_samples_explicit() -> None:
-    """Mirror check for smoke."""
+    """Smoke configs are CI sentinels, not accuracy-meaningful runs —
+    they verify cell dispatch and completion, not W₁ quality.  The
+    >= 4000 phase-transition floor is load-bearing for paper configs
+    only; smoke gets >= 256 to catch accidental zeros while permitting
+    reduced values (e.g. 1024) for wall-clock budget control."""
     path = Path("benchmarking/configs/inference_smoke.yaml")
     data = yaml.safe_load(path.read_text())
     assert "nbn_lw_n_samples" in data
-    assert data["nbn_lw_n_samples"] >= 4000
+    assert data["nbn_lw_n_samples"] >= 256
 
 
 def _v2_inference_yaml(tmp_path: Path, **overrides) -> Path:

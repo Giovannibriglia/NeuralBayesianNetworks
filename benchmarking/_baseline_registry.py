@@ -12,11 +12,12 @@ v0.6c-C-1a (this file) ships:
 * The applicability matrix (``_BASELINE_APPLICABILITY``).
 * ``BaselineSpec`` dataclass + ``known_labels()``.
 
-v0.6c-C-1b will land the runner refactor that consumes this registry
+v0.6c-C-1b landed the runner refactor that consumes this registry
 for fit-then-query semantics and gates dispatch via the applicability
-matrix.  In 1a the registry is consumed only for parquet relabeling;
-the legacy ``_NOT_APPLICABLE`` table in ``crash_test_runner.py`` still
-controls dispatch.
+matrix.  Pass-10 priority-1 consolidated the historically-parallel
+``_NOT_APPLICABLE`` and ``_ACCURACY_NOT_APPLICABLE`` tables from
+``crash_test_runner.py`` into ``BaselineApplicability`` entries below,
+making this registry the single source of truth.
 
 Adding a new baseline requires:
 
@@ -111,68 +112,84 @@ def _label_from_spec(spec: BaselineSpec | Mapping[str, str | None]) -> str:
     return head
 
 
-# Family applicability per baseline label.  The applicability matrix
-# is consumed by v0.6c-C-1b's runner refactor for early-skip dispatch;
-# in v0.6c-C-1a it is only exercised by tests.
-_BASELINE_APPLICABILITY: dict[str, FrozenSet[str]] = {
+@dataclass(frozen=True)
+class BaselineApplicability:
+    """Per-label applicability + per-label capability flags.
+
+    ``families``: the families on which the label can be dispatched
+    (replaces the bare ``frozenset[str]`` value the registry previously
+    held).
+
+    ``accuracy_supported``: True (default) iff the label can produce a
+    meaningful accuracy row.  GPyTorch SVGPs return the prior marginal
+    independent of evidence, so they emit honest speed measurements
+    but cannot score posterior accuracy — these set this flag to False
+    and the inference cell short-circuits the accuracy row to
+    ``not_supported`` while still emitting the speed row.  Replaces the
+    old ``_ACCURACY_NOT_APPLICABLE`` set in ``crash_test_runner.py``.
+    """
+
+    families: FrozenSet[str]
+    accuracy_supported: bool = True
+
+
+# Family applicability + capability flags per baseline label.
+# Single source of truth — replaces the legacy ``_NOT_APPLICABLE`` and
+# ``_ACCURACY_NOT_APPLICABLE`` sets that lived in
+# ``crash_test_runner.py`` (Pass-10 priority-1 consolidation, v0.10).
+_BASELINE_APPLICABILITY: dict[str, BaselineApplicability] = {
     # --- Parameter learning (no inference_method suffix) ---
-    "pgmpy-mle":               frozenset({"discrete"}),
-    "pgmpy-bayes":             frozenset({"discrete"}),
-    "pgmpy-lg":                frozenset({"continuous_lg"}),
-    "nbn-cat":                 frozenset({"discrete"}),
-    "nbn-neuralcat":           frozenset({"discrete"}),
-    "nbn-lg":                  frozenset({"continuous_lg"}),
-    "nbn-mdn":                 frozenset({"continuous_lg", "continuous_nongauss"}),
-    "nbn-flow":                frozenset({"continuous_lg", "continuous_nongauss"}),
-    "nbn-hybrid":              frozenset({"hybrid"}),
+    "pgmpy-mle":               BaselineApplicability(frozenset({"discrete"})),
+    "pgmpy-bayes":             BaselineApplicability(frozenset({"discrete"})),
+    "pgmpy-lg":                BaselineApplicability(frozenset({"continuous_lg"})),
+    "nbn-cat":                 BaselineApplicability(frozenset({"discrete"})),
+    "nbn-neuralcat":           BaselineApplicability(frozenset({"discrete"})),
+    "nbn-lg":                  BaselineApplicability(frozenset({"continuous_lg"})),
+    # Pass-10 priority-1: hybrid added (verified WORKS on smoke n=5).
+    "nbn-mdn":                 BaselineApplicability(
+        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
+    # Pass-10 priority-1: hybrid added (verified WORKS on laptop with zuko;
+    # Section 6's pre-flight verification gates this entry's hybrid inclusion).
+    "nbn-flow":                BaselineApplicability(
+        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
+    "nbn-hybrid":              BaselineApplicability(frozenset({"hybrid"})),
 
     # --- Inference ---
-    "pgmpy-mle-ve":            frozenset({"discrete"}),
-    "pgmpy-bayes-ve":          frozenset({"discrete"}),
-    "pgmpy-lg-predict":        frozenset({"continuous_lg"}),
-    "nbn-cat-ve":              frozenset({"discrete"}),
-    "nbn-cat-lw":              frozenset({"discrete"}),
-    # v0.8-#26: nbn-neuralcat-ve was deferred at v0.6c-C-1a because
-    # TensorVariableElimination structurally required a tabulated
-    # _logits tensor; the engine now reads CPDs via
-    # mech.tabulate(parent_cards), which enumerates parent
-    # configurations once for forward-based mechanisms like
-    # NeuralCategoricalMechanism.  Discrete-only.
-    "nbn-neuralcat-ve":        frozenset({"discrete"}),
-    "nbn-neuralcat-lw":        frozenset({"discrete"}),
-    "nbn-lg-lw":               frozenset({"continuous_lg"}),
-    "nbn-mdn-lw":              frozenset({"continuous_lg", "continuous_nongauss"}),
-    "nbn-flow-lw":             frozenset({"continuous_lg", "continuous_nongauss"}),
-    "nbn-hybrid-router":       frozenset({"hybrid"}),
+    "pgmpy-mle-ve":            BaselineApplicability(frozenset({"discrete"})),
+    "pgmpy-bayes-ve":          BaselineApplicability(frozenset({"discrete"})),
+    "pgmpy-lg-predict":        BaselineApplicability(frozenset({"continuous_lg"})),
+    "nbn-cat-ve":              BaselineApplicability(frozenset({"discrete"})),
+    "nbn-cat-lw":              BaselineApplicability(frozenset({"discrete"})),
+    "nbn-neuralcat-ve":        BaselineApplicability(frozenset({"discrete"})),
+    "nbn-neuralcat-lw":        BaselineApplicability(frozenset({"discrete"})),
+    "nbn-lg-lw":               BaselineApplicability(frozenset({"continuous_lg"})),
+    # Pass-10 priority-1: hybrid added (verified WORKS on smoke n=5).
+    "nbn-mdn-lw":              BaselineApplicability(
+        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
+    # Pass-10 priority-1: hybrid added (verified WORKS on smoke n=5).
+    "nbn-flow-lw":             BaselineApplicability(
+        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
+    "nbn-hybrid-router":       BaselineApplicability(frozenset({"hybrid"})),
 
-    # --- Other libraries (v0.6c-C-2) ---
-    # gpytorch: SVGP per continuous node (independent leaves on parents).
-    # Already vectorised in the v1 adapter (pred.sample(torch.Size([n])))
-    # so no per-method fan-out beyond gp / gp-predict.  GPs cannot
-    # condition on discrete evidence, so applicability is continuous-only.
-    "gpytorch-gp":               frozenset({"continuous_lg", "continuous_nongauss"}),
-    "gpytorch-gp-predict":       frozenset({"continuous_lg", "continuous_nongauss"}),
-
-    # pomegranate v1.x: empirical-CPT BayesianNetwork on torch backend.
-    # Discrete-only.  Single canonical method (Laplace-smoothed counts +
-    # predict_proba).  Known v1 bug: predict_proba raises IndexError on
-    # conditional queries (filed as v0.7 issue).  Applicability matrix
-    # marks discrete-only; cells with continuous targets/evidence skip.
-    "pomegranate-discrete":      frozenset({"discrete"}),
-    "pomegranate-discrete-ve":   frozenset({"discrete"}),
-
-    # pyro: Importance sampler over an ancestral generative model.
-    # Empirical CPT for discrete; linear-Gaussian conditional
-    # ``Normal(beta_0 + sum_i beta_i * pa_i, sigma)`` for continuous_lg
-    # (#32 fix).  Applicability covers discrete + continuous_lg;
-    # continuous_nongauss and hybrid stay excluded — non-Gaussian
-    # continuous would need SVI with a parameterised guide, and the
-    # hybrid mixed-parent (discrete-parent / continuous-child) case
-    # is tracked as a v0.8 follow-up.  Mechanism label "empirical"
-    # describes the empirical-distribution-fit style; inference_method
-    # "importance" is pyro.infer.Importance.
-    "pyro-empirical":            frozenset({"discrete", "continuous_lg"}),
-    "pyro-empirical-importance": frozenset({"discrete", "continuous_lg"}),
+    # --- Other libraries ---
+    # GPyTorch: SVGP returns the prior marginal at the target,
+    # independent of evidence.  Speed timing is meaningful; accuracy
+    # is not.  ``accuracy_supported=False`` produces an honest
+    # not_supported row instead of a misleading flat W₁≈1.0 line.
+    "gpytorch-gp": BaselineApplicability(
+        frozenset({"continuous_lg", "continuous_nongauss"}),
+        accuracy_supported=False,
+    ),
+    "gpytorch-gp-predict": BaselineApplicability(
+        frozenset({"continuous_lg", "continuous_nongauss"}),
+        accuracy_supported=False,
+    ),
+    "pomegranate-discrete":      BaselineApplicability(frozenset({"discrete"})),
+    "pomegranate-discrete-ve":   BaselineApplicability(frozenset({"discrete"})),
+    "pyro-empirical":            BaselineApplicability(
+        frozenset({"discrete", "continuous_lg"})),
+    "pyro-empirical-importance": BaselineApplicability(
+        frozenset({"discrete", "continuous_lg"})),
 }
 
 
@@ -180,10 +197,30 @@ def is_applicable(label: str, family: str) -> bool:
     """True iff the baseline is applicable to the family.
 
     Unknown labels return ``False`` rather than raising — the runner
-    can emit a ``not_supported`` row for unknown labels with a
-    warning, so a typo in a YAML produces a clean parquet rather than
-    a hard crash."""
-    return family in _BASELINE_APPLICABILITY.get(label, frozenset())
+    emits a ``not_supported`` row for unknown labels, so a typo in a
+    YAML produces a clean parquet rather than a hard crash.
+    """
+    entry = _BASELINE_APPLICABILITY.get(label)
+    if entry is None:
+        return False
+    return family in entry.families
+
+
+def accuracy_supported(label: str, family: str) -> bool:
+    """True iff the (label, family) cell can emit a meaningful
+    accuracy row.  Used by ``_inference_cell`` to short-circuit the
+    accuracy row to ``not_supported`` while still emitting the speed
+    row (Pass-9 Phase 3 Option I).
+
+    Returns ``False`` for unknown labels and for labels not applicable
+    to the given family — both cases are guarded by the runner's
+    upstream ``is_applicable`` gate, but defensive False here keeps
+    the contract clean.
+    """
+    entry = _BASELINE_APPLICABILITY.get(label)
+    if entry is None or family not in entry.families:
+        return False
+    return entry.accuracy_supported
 
 
 def known_labels() -> Sequence[str]:
@@ -193,8 +230,10 @@ def known_labels() -> Sequence[str]:
 
 
 __all__ = [
+    "BaselineApplicability",
     "BaselineSpec",
     "_label_from_spec",
+    "accuracy_supported",
     "is_applicable",
     "known_labels",
     "_BASELINE_APPLICABILITY",

@@ -165,10 +165,10 @@ def test_applicability_gate_rejects_other_library_cross_family() -> None:
     """Cross-family applicability assertions for the v0.6c-C-2 labels.
 
     Critical audit: the C-1b post-merge bug was that the runner consulted
-    the legacy ``_NOT_APPLICABLE`` table which didn't catch every
-    method-keyed cross-family combination.  These assertions pin that
-    the registry-based gate (now the canonical filter) handles all six
-    new labels.
+    a legacy adapter-keyed applicability table (removed in Pass-10
+    priority-1) which didn't catch every method-keyed cross-family
+    combination.  These assertions pin that the registry-based gate
+    (now the canonical filter) handles all six new labels.
     """
     # gpytorch on discrete / hybrid → not applicable.
     for label in ("gpytorch-gp", "gpytorch-gp-predict"):
