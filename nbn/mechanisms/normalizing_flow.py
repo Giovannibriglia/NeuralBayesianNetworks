@@ -124,7 +124,7 @@ class NormalizingFlowMechanism(Mechanism):
                 perm = torch.randperm(n, device=device)
                 for i in range(0, n, batch_size):
                     bx = x[perm[i:i + batch_size]]
-                    loss = -self._flow(torch.zeros(bx.shape[0], 0, device=device)).log_prob(bx).mean()
+                    loss = -self._flow(None).log_prob(bx).mean()
                     opt.zero_grad(); loss.backward(); opt.step()
         else:
             dataset = torch.utils.data.TensorDataset(parents, x)
@@ -142,11 +142,8 @@ class NormalizingFlowMechanism(Mechanism):
     def forward(self, parents: torch.Tensor | None) -> _FlowDistribution:
         assert self._flow is not None, "Call fit_local before forward()."
         if self._d_pa == 0 or parents is None:
-            b = 1 if parents is None else ensure_2d(parents).shape[0]
-            ctx = torch.zeros(b, 0, device=next(self.parameters()).device)
-        else:
-            ctx = ensure_2d(parents)
-        return _FlowDistribution(self._flow(ctx))
+            return _FlowDistribution(self._flow(None))
+        return _FlowDistribution(self._flow(ensure_2d(parents)))
 
     def log_prob(self, x: torch.Tensor, parents: torch.Tensor | None) -> torch.Tensor:
         assert self._flow is not None
@@ -158,7 +155,7 @@ class NormalizingFlowMechanism(Mechanism):
         b, s, d_x = x.shape
 
         if self._d_pa == 0 or parents is None:
-            ctx = torch.zeros(b * s, 0, device=x.device, dtype=x.dtype)
+            ctx = None
         else:
             if parents.dim() == 2:
                 parents = parents.unsqueeze(1).expand(-1, s, -1)
@@ -173,13 +170,13 @@ class NormalizingFlowMechanism(Mechanism):
         assert self._flow is not None
         b = 1 if parents is None else ensure_2d(parents).shape[0]
         if self._d_pa == 0 or parents is None:
-            ctx = torch.zeros(b * n, 0, device=next(self.parameters()).device)
+            with torch.no_grad():
+                samp = self._flow(None).sample((b * n,))  # [B*n, D_x]
         else:
             ctx = ensure_2d(parents).unsqueeze(1).expand(-1, n, -1)
             flat, _, _ = flatten_samples(ctx)
-            ctx = flat
-        with torch.no_grad():
-            samp = self._flow(ctx).sample()  # [B*n, D_x]
+            with torch.no_grad():
+                samp = self._flow(flat).sample()  # [B*n, D_x]
         return samp.reshape(b, n, self.d_x)
 
 
