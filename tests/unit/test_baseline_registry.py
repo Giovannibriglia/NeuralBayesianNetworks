@@ -118,11 +118,11 @@ def test_applicability_pgmpy_lg_predict_continuous_lg_only() -> None:
     assert not is_applicable("pgmpy-lg-predict", "hybrid")
 
 
-def test_applicability_nbn_mdn_lw_continuous_only() -> None:
+def test_applicability_nbn_mdn_lw_continuous_and_hybrid() -> None:
     assert is_applicable("nbn-mdn-lw", "continuous_lg")
     assert is_applicable("nbn-mdn-lw", "continuous_nongauss")
+    assert is_applicable("nbn-mdn-lw", "hybrid")
     assert not is_applicable("nbn-mdn-lw", "discrete")
-    assert not is_applicable("nbn-mdn-lw", "hybrid")
 
 
 def test_applicability_nbn_hybrid_router_hybrid_only() -> None:

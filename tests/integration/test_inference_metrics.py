@@ -42,7 +42,7 @@ def test_inference_discrete_accuracy_aliases_tv(smoke_cfg):
     """
     pytest.importorskip("pgmpy")
     torch.manual_seed(0)
-    rows = _inference_cell(smoke_cfg, "discrete", 5, 0, "pgmpy")
+    rows = _inference_cell(smoke_cfg, "discrete", 5, 0, "pgmpy", "pgmpy-mle-ve")
     m = _by_metric(rows)
 
     for name in ("accuracy", "tv_per_node", "jsd_per_node", "w1_per_node", "total_time_s"):
@@ -77,7 +77,7 @@ def test_inference_continuous_accuracy_aliases_w1(smoke_cfg):
     - total_time_s: present
     """
     torch.manual_seed(0)
-    rows = _inference_cell(smoke_cfg, "continuous_lg", 5, 0, "nbn_lw")
+    rows = _inference_cell(smoke_cfg, "continuous_lg", 5, 0, "nbn_lw", "nbn-lg-lw")
     m = _by_metric(rows)
 
     for name in ("accuracy", "tv_per_node", "jsd_per_node", "w1_per_node", "total_time_s"):
@@ -104,7 +104,7 @@ def test_inference_hybrid_emits_all_rows(smoke_cfg):
     machine-dependent hybrid mix.
     """
     torch.manual_seed(0)
-    rows = _inference_cell(smoke_cfg, "hybrid", 5, 0, "nbn_lw")
+    rows = _inference_cell(smoke_cfg, "hybrid", 5, 0, "nbn_lw", "nbn-mdn-lw")
     m = _by_metric(rows)
 
     for name in ("accuracy", "tv_per_node", "jsd_per_node", "w1_per_node", "total_time_s"):
@@ -112,7 +112,7 @@ def test_inference_hybrid_emits_all_rows(smoke_cfg):
 
 
 def test_inference_accuracy_not_applicable_short_circuit(smoke_cfg):
-    """_ACCURACY_NOT_APPLICABLE branch: only the accuracy row emitted (status='not_supported').
+    """accuracy_supported=False short-circuit: only the accuracy row emitted (status='not_supported').
 
     gpytorch on continuous_lg hits the short-circuit that skips
     _compute_inference_metrics entirely.  The cell must emit exactly one
@@ -120,7 +120,7 @@ def test_inference_accuracy_not_applicable_short_circuit(smoke_cfg):
     """
     pytest.importorskip("gpytorch")
     torch.manual_seed(0)
-    rows = _inference_cell(smoke_cfg, "continuous_lg", 5, 0, "gpytorch")
+    rows = _inference_cell(smoke_cfg, "continuous_lg", 5, 0, "gpytorch", "gpytorch-gp-predict")
 
     accuracy_rows = [r for r in rows if r.metric == "accuracy"]
     explicit_rows = [r for r in rows if r.metric in ("tv_per_node", "jsd_per_node", "w1_per_node")]
@@ -128,6 +128,6 @@ def test_inference_accuracy_not_applicable_short_circuit(smoke_cfg):
     assert len(accuracy_rows) == 1
     assert accuracy_rows[0].status == "not_supported"
     assert len(explicit_rows) == 0, (
-        "_ACCURACY_NOT_APPLICABLE short-circuit must emit ONLY the accuracy row, "
+        "accuracy_supported=False short-circuit must emit ONLY the accuracy row, "
         f"not explicit per-metric rows; got {[r.metric for r in explicit_rows]}"
     )

@@ -314,10 +314,11 @@ def test_inference_runner_skips_non_applicable_cells(tmp_path) -> None:
     applicable cells.
 
     Regression for the v0.6c-C-1b post-merge bug: pre-fix the runner
-    consulted only the legacy ``_NOT_APPLICABLE`` table inside
-    ``_inference_cell``, which is keyed by polymorphic legacy adapter
-    strings ("pgmpy", "nbn_lw") that pre-date the C-1a per-mechanism
-    label scheme.  As a result, ``pgmpy-mle-ve`` ran on continuous_lg
+    consulted only a legacy adapter-keyed applicability table inside
+    ``_inference_cell`` (removed in Pass-10 priority-1), which was
+    keyed by polymorphic legacy adapter strings ("pgmpy", "nbn_lw")
+    that pre-dated the C-1a per-mechanism label scheme.  As a result,
+    ``pgmpy-mle-ve`` ran on continuous_lg
     (via pgmpy's lg path), ``nbn-cat-lw`` ran on continuous_nongauss
     (via NBN's mdn default), and ``nbn-cat-lw`` on hybrid hit a cuda
     device-side assert.  The fix routes the registry-based applicability
