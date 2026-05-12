@@ -91,11 +91,13 @@ class NeuralCategoricalMechanism(Mechanism):
 
         self.net = _build_mlp(in_dim, self.hidden, k, self.activation).to(device)
         opt = torch.optim.Adam(self.parameters(), lr=lr)
-        dataset = torch.utils.data.TensorDataset(parents, x)
-        loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        n = x.shape[0]
         self.train()
         for _ in range(epochs):
-            for bp, bx in loader:
+            perm = torch.randperm(n, device=device)
+            for i in range(0, n, batch_size):
+                idx = perm[i:i + batch_size]
+                bp, bx = parents[idx], x[idx]
                 logits = self._logits_from_parents(bp.float())
                 loss = nn.CrossEntropyLoss()(logits, bx)
                 opt.zero_grad(); loss.backward()
