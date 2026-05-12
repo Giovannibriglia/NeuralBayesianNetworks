@@ -127,11 +127,12 @@ class NormalizingFlowMechanism(Mechanism):
                     loss = -self._flow(None).log_prob(bx).mean()
                     opt.zero_grad(); loss.backward(); opt.step()
         else:
-            dataset = torch.utils.data.TensorDataset(parents, x)
-            loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
             self.train()
             for _ in range(epochs):
-                for bp, bx in loader:
+                perm = torch.randperm(n, device=device)
+                for i in range(0, n, batch_size):
+                    idx = perm[i:i + batch_size]
+                    bp, bx = parents[idx], x[idx]
                     loss = -self._flow(bp).log_prob(bx).mean()
                     opt.zero_grad(); loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.parameters(), 5.0)
