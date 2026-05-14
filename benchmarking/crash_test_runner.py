@@ -200,6 +200,8 @@ def run_parameter_learning(
                         timeout_s=cfg.per_cell_timeout_s,
                     )
                     rows.extend(cell_rows)
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
     write_parquet(rows, cfg.parquet_path())
     _render_two_figures(rows, cfg)
@@ -251,6 +253,8 @@ def run_inference(
                     for r in cell_rows:
                         r.baseline = label
                     rows.extend(cell_rows)
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
     write_parquet(rows, cfg.parquet_path())
     _render_two_figures(rows, cfg)
@@ -865,14 +869,15 @@ def _time_nbn_inference(
     # at all (so the base class always raised), the parquet's
     # ``total_time_s`` rows for every NBN inference baseline came out as
     # NaN-with-status='ok' and disappeared from the figures.
-    for _ in range(3):
-        adapter.query_batch_samples(fitted, q, n_samples=n_lw_samples)
+    with torch.no_grad():
+        for _ in range(3):
+            adapter.query_batch_samples(fitted, q, n_samples=n_lw_samples)
 
-    times = []
-    for _ in range(5):
-        t0 = time.perf_counter()
-        adapter.query_batch_samples(fitted, q, n_samples=n_lw_samples)
-        times.append(time.perf_counter() - t0)
+        times = []
+        for _ in range(5):
+            t0 = time.perf_counter()
+            adapter.query_batch_samples(fitted, q, n_samples=n_lw_samples)
+            times.append(time.perf_counter() - t0)
     return statistics.median(times)
 
 
