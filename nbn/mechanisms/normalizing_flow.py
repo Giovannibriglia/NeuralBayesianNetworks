@@ -7,6 +7,7 @@ import torch.nn as nn
 from torch.distributions import Distribution
 
 from nbn.mechanisms.base import Mechanism
+from nbn.mechanisms.mdn import _sanitise_parents
 from nbn.utils.batching import ensure_2d, flatten_samples
 
 
@@ -158,6 +159,7 @@ class NormalizingFlowMechanism(Mechanism):
         if self._d_pa == 0 or parents is None:
             ctx = None
         else:
+            parents = _sanitise_parents(parents, mech_name="NormalizingFlow.log_prob")
             if parents.dim() == 2:
                 parents = parents.unsqueeze(1).expand(-1, s, -1)
             flat, _, _ = flatten_samples(parents)
@@ -174,7 +176,8 @@ class NormalizingFlowMechanism(Mechanism):
             with torch.no_grad():
                 samp = self._flow(None).sample((b * n,))  # [B*n, D_x]
         else:
-            ctx = ensure_2d(parents).unsqueeze(1).expand(-1, n, -1)
+            parents = _sanitise_parents(ensure_2d(parents), mech_name="NormalizingFlow.sample")
+            ctx = parents.unsqueeze(1).expand(-1, n, -1)
             flat, _, _ = flatten_samples(ctx)
             with torch.no_grad():
                 samp = self._flow(flat).sample()  # [B*n, D_x]
