@@ -93,6 +93,8 @@ class CrashTestConfig:
 
     device: str = "auto"
 
+    runtime_skip_after_timeout: bool = False
+
     _SCHEMA_VERSION: int = 2
 
     _REQUIRED_YAML_FIELDS = frozenset({
@@ -197,6 +199,9 @@ class CrashTestConfig:
             batch_size=int(d.get("batch_size", 1024)),
             nbn_batch_size=int(d.get("nbn_batch_size", 0)),
             nbn_lw_n_samples=int(d.get("nbn_lw_n_samples", 512)),
+            runtime_skip_after_timeout=bool(
+                d.get("runtime_skip_after_timeout", False)
+            ),
         )
 
     @property

@@ -150,6 +150,23 @@ def _not_applicable_row(
     ]
 
 
+def _timeout_skip_row(
+    family: str, n_nodes: int, seed: int, baseline: str,
+    prior_n: int, n_timed_out: int, n_seeds: int,
+) -> CellResult:
+    """Single not_supported row for a cell skipped by the runtime fail-fast filter."""
+    msg = (
+        f"skipped: {n_timed_out}/{n_seeds} seeds at n={prior_n} timed out; "
+        f"runtime fail-fast filter"
+    )
+    return CellResult(
+        family=family, n_nodes=n_nodes, seed=seed, baseline=baseline,
+        metric="status", value=float("nan"), status="not_supported",
+        n_skipped=n_seeds,
+        extra={"error_msg": msg},
+    )
+
+
 # ---------------------------------------------------------------------- #
 # Public entry points
 # ---------------------------------------------------------------------- #
@@ -166,11 +183,30 @@ def run_parameter_learning(
                 cfg.output_prefix, cfg.device)
 
     rows: List[CellResult] = []
+    # (family, label) → {n_nodes: count_of_timeout_seeds} — used by the
+    # runtime fail-fast filter (cfg.runtime_skip_after_timeout).
+    _timeout_counts: dict[tuple[str, str], dict[int, int]] = {}
     for family in cfg.families:
         for n in cfg.n_nodes:
             for s in cfg.seeds:
                 for spec in cfg.baselines:
                     label = _label_from_spec(spec)
+                    # Runtime fail-fast: skip if immediately-preceding n
+                    # had 100% seed timeouts (or was itself skipped) for
+                    # this (family, baseline).  Propagate skips into the
+                    # tracker so cascades work across 3+ n levels.
+                    if cfg.runtime_skip_after_timeout:
+                        n_idx = cfg.n_nodes.index(n)
+                        if n_idx > 0:
+                            prior_n = cfg.n_nodes[n_idx - 1]
+                            n_to = _timeout_counts.get((family, label), {}).get(prior_n, 0)
+                            if n_to == len(cfg.seeds):
+                                rows.append(_timeout_skip_row(
+                                    family, n, s, label, prior_n, n_to, len(cfg.seeds),
+                                ))
+                                tc = _timeout_counts.setdefault((family, label), {})
+                                tc[n] = tc.get(n, 0) + 1
+                                continue
                     # v0.6c-C-1b: registry-based applicability gate
                     # (BEFORE adapter dispatch).  Method-keyed labels
                     # like ``pgmpy-mle-ve`` are discrete-only per the
@@ -202,6 +238,10 @@ def run_parameter_learning(
                     rows.extend(cell_rows)
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
+                    # Track timeouts for the fail-fast filter.
+                    if cell_rows and cell_rows[0].status == "timeout":
+                        tc = _timeout_counts.setdefault((family, label), {})
+                        tc[n] = tc.get(n, 0) + 1
 
     write_parquet(rows, cfg.parquet_path())
     _render_two_figures(rows, cfg)
@@ -223,11 +263,30 @@ def run_inference(
                 cfg.output_prefix, cfg.device)
 
     rows: List[CellResult] = []
+    # (family, label) → {n_nodes: count_of_timeout_seeds} — used by the
+    # runtime fail-fast filter (cfg.runtime_skip_after_timeout).
+    _timeout_counts: dict[tuple[str, str], dict[int, int]] = {}
     for family in cfg.families:
         for n in cfg.n_nodes:
             for s in cfg.seeds:
                 for spec in cfg.baselines:
                     label = _label_from_spec(spec)
+                    # Runtime fail-fast: skip if immediately-preceding n
+                    # had 100% seed timeouts (or was itself skipped) for
+                    # this (family, baseline).  Propagate skips into the
+                    # tracker so cascades work across 3+ n levels.
+                    if cfg.runtime_skip_after_timeout:
+                        n_idx = cfg.n_nodes.index(n)
+                        if n_idx > 0:
+                            prior_n = cfg.n_nodes[n_idx - 1]
+                            n_to = _timeout_counts.get((family, label), {}).get(prior_n, 0)
+                            if n_to == len(cfg.seeds):
+                                rows.append(_timeout_skip_row(
+                                    family, n, s, label, prior_n, n_to, len(cfg.seeds),
+                                ))
+                                tc = _timeout_counts.setdefault((family, label), {})
+                                tc[n] = tc.get(n, 0) + 1
+                                continue
                     # v0.6c-C-1b: registry-based applicability gate
                     # BEFORE adapter dispatch.  See run_parameter_learning
                     # for the rationale.  Without this, ``pgmpy-mle-ve``
@@ -255,6 +314,10 @@ def run_inference(
                     rows.extend(cell_rows)
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
+                    # Track timeouts for the fail-fast filter.
+                    if cell_rows and cell_rows[0].status == "timeout":
+                        tc = _timeout_counts.setdefault((family, label), {})
+                        tc[n] = tc.get(n, 0) + 1
 
     write_parquet(rows, cfg.parquet_path())
     _render_two_figures(rows, cfg)
