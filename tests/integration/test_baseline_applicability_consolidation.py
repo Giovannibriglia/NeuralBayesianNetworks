@@ -109,15 +109,18 @@ _EXPECTED_APPLICABILITY: dict[tuple[str, str], bool] = {
     ("nbn-lg-lw", "continuous_lg"): True,
     ("nbn-lg-lw", "continuous_nongauss"): False,
     ("nbn-lg-lw", "hybrid"): False,
-    # Pass-10 priority-1: hybrid added.
+    # continuous_nongauss gated out — NaN-driven MultinomialKernel CUDA assert
+    # during LW sampling (issue #81 Bug B; root cause tracked in #24).
+    # Pass-10 priority-1: hybrid added; continuous_nongauss removed by PR #86.
     ("nbn-mdn-lw", "discrete"): False,
     ("nbn-mdn-lw", "continuous_lg"): True,
-    ("nbn-mdn-lw", "continuous_nongauss"): True,
+    ("nbn-mdn-lw", "continuous_nongauss"): False,
     ("nbn-mdn-lw", "hybrid"): True,
-    # Pass-10 priority-1: hybrid added.
+    # nbn-flow-lw uses MDN internally — same NaN CUDA assert as nbn-mdn-lw.
+    # Pass-10 priority-1: hybrid added; continuous_nongauss removed by PR #86.
     ("nbn-flow-lw", "discrete"): False,
     ("nbn-flow-lw", "continuous_lg"): True,
-    ("nbn-flow-lw", "continuous_nongauss"): True,
+    ("nbn-flow-lw", "continuous_nongauss"): False,
     ("nbn-flow-lw", "hybrid"): True,
     ("nbn-hybrid-router", "discrete"): False,
     ("nbn-hybrid-router", "continuous_lg"): False,
