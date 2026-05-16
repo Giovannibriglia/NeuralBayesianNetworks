@@ -36,6 +36,7 @@ import torch
 from benchmarking._crash_test_utils import (
     CellResult,
     CrashTestConfig,
+    JSONLSidecarWriter,
     fresh_mechanism_for_spec,
     run_with_guard,
     write_parquet,
@@ -186,69 +187,82 @@ def run_parameter_learning(
     # (family, label) → {n_nodes: count_of_timeout_seeds} — used by the
     # runtime fail-fast filter (cfg.runtime_skip_after_timeout).
     _timeout_counts: dict[tuple[str, str], dict[int, int]] = {}
-    for family in cfg.families:
-        for n in cfg.n_nodes:
-            for s in cfg.seeds:
-                for spec in cfg.baselines:
-                    label = _label_from_spec(spec)
-                    # Runtime fail-fast: skip if immediately-preceding n
-                    # had 100% seed timeouts (or was itself skipped) for
-                    # this (family, baseline).  Propagate skips into the
-                    # tracker so cascades work across 3+ n levels.
-                    if cfg.runtime_skip_after_timeout:
-                        n_idx = cfg.n_nodes.index(n)
-                        if n_idx > 0:
-                            prior_n = cfg.n_nodes[n_idx - 1]
-                            n_to = _timeout_counts.get((family, label), {}).get(prior_n, 0)
-                            if n_to == len(cfg.seeds):
-                                rows.append(_timeout_skip_row(
-                                    family, n, s, label, prior_n, n_to, len(cfg.seeds),
-                                ))
-                                tc = _timeout_counts.setdefault((family, label), {})
-                                tc[n] = tc.get(n, 0) + 1
-                                continue
-                    # v0.6c-C-1b: registry-based applicability gate
-                    # (BEFORE adapter dispatch).  Method-keyed labels
-                    # like ``pgmpy-mle-ve`` are discrete-only per the
-                    # C-1a registry; the legacy adapter-keyed
-                    # applicability table (removed in Pass-10 priority-1)
-                    # was keyed by the *polymorphic* legacy adapter
-                    # string ("pgmpy", "nbn_lw") and gated a different
-                    # (less strict) set of combinations.  Without this
-                    # gate, e.g., ``pgmpy-mle-ve`` would dispatch on
-                    # continuous_lg via the legacy adapter's lg path and
-                    # emit a nonsense ``ok`` row in the parquet.
-                    if not is_applicable(label, family):
-                        rows.append(_not_applicable_row(
-                            family, n, s, label,
-                        )[0])
-                        continue
-                    # v0.8-#51: dispatch on the method-keyed spec, not
-                    # the legacy polymorphic string.  The cell now
-                    # reads spec.library / spec.mechanism / spec.param_method
-                    # directly and produces label-keyed rows; the post-cell
-                    # relabel is no longer needed (cell already labels
-                    # with the canonical _label_from_spec(spec)).
-                    cell_rows = run_with_guard(
-                        lambda f=family, nn=n, ss=s, sp=spec:
-                            _param_learning_cell(cfg, f, nn, ss, sp),
-                        family=family, n_nodes=n, seed=s, baseline=label,
-                        timeout_s=cfg.per_cell_timeout_s,
-                    )
-                    rows.extend(cell_rows)
-                    if torch.cuda.is_available():
-                        try:
-                            torch.cuda.empty_cache()
-                        except Exception as e:
-                            # CUDA context may be poisoned by a device-side
-                            # assert in the previous cell.  Log and continue.
-                            logger.warning(
-                                "CUDA cleanup failed (likely poisoned context"
-                                " from prior cell): %s", e)
-                    # Track timeouts for the fail-fast filter.
-                    if cell_rows and cell_rows[0].status == "timeout":
-                        tc = _timeout_counts.setdefault((family, label), {})
-                        tc[n] = tc.get(n, 0) + 1
+    _sidecar = JSONLSidecarWriter(cfg.jsonl_path()) if cfg.jsonl_sidecar else None
+    try:
+        for family in cfg.families:
+            for n in cfg.n_nodes:
+                for s in cfg.seeds:
+                    for spec in cfg.baselines:
+                        label = _label_from_spec(spec)
+                        # Runtime fail-fast: skip if immediately-preceding n
+                        # had 100% seed timeouts (or was itself skipped) for
+                        # this (family, baseline).  Propagate skips into the
+                        # tracker so cascades work across 3+ n levels.
+                        if cfg.runtime_skip_after_timeout:
+                            n_idx = cfg.n_nodes.index(n)
+                            if n_idx > 0:
+                                prior_n = cfg.n_nodes[n_idx - 1]
+                                n_to = _timeout_counts.get((family, label), {}).get(prior_n, 0)
+                                if n_to == len(cfg.seeds):
+                                    skip_row = _timeout_skip_row(
+                                        family, n, s, label, prior_n, n_to, len(cfg.seeds),
+                                    )
+                                    rows.append(skip_row)
+                                    if _sidecar is not None:
+                                        _sidecar.append(skip_row)
+                                    tc = _timeout_counts.setdefault((family, label), {})
+                                    tc[n] = tc.get(n, 0) + 1
+                                    continue
+                        # v0.6c-C-1b: registry-based applicability gate
+                        # (BEFORE adapter dispatch).  Method-keyed labels
+                        # like ``pgmpy-mle-ve`` are discrete-only per the
+                        # C-1a registry; the legacy adapter-keyed
+                        # applicability table (removed in Pass-10 priority-1)
+                        # was keyed by the *polymorphic* legacy adapter
+                        # string ("pgmpy", "nbn_lw") and gated a different
+                        # (less strict) set of combinations.  Without this
+                        # gate, e.g., ``pgmpy-mle-ve`` would dispatch on
+                        # continuous_lg via the legacy adapter's lg path and
+                        # emit a nonsense ``ok`` row in the parquet.
+                        if not is_applicable(label, family):
+                            na_rows = _not_applicable_row(family, n, s, label)
+                            rows.extend(na_rows)
+                            if _sidecar is not None:
+                                for r in na_rows:
+                                    _sidecar.append(r)
+                            continue
+                        # v0.8-#51: dispatch on the method-keyed spec, not
+                        # the legacy polymorphic string.  The cell now
+                        # reads spec.library / spec.mechanism / spec.param_method
+                        # directly and produces label-keyed rows; the post-cell
+                        # relabel is no longer needed (cell already labels
+                        # with the canonical _label_from_spec(spec)).
+                        cell_rows = run_with_guard(
+                            lambda f=family, nn=n, ss=s, sp=spec:
+                                _param_learning_cell(cfg, f, nn, ss, sp),
+                            family=family, n_nodes=n, seed=s, baseline=label,
+                            timeout_s=cfg.per_cell_timeout_s,
+                        )
+                        rows.extend(cell_rows)
+                        if _sidecar is not None:
+                            for r in cell_rows:
+                                _sidecar.append(r)
+                        if torch.cuda.is_available():
+                            try:
+                                torch.cuda.empty_cache()
+                            except Exception as e:
+                                # CUDA context may be poisoned by a device-side
+                                # assert in the previous cell.  Log and continue.
+                                logger.warning(
+                                    "CUDA cleanup failed (likely poisoned context"
+                                    " from prior cell): %s", e)
+                        # Track timeouts for the fail-fast filter.
+                        if cell_rows and cell_rows[0].status == "timeout":
+                            tc = _timeout_counts.setdefault((family, label), {})
+                            tc[n] = tc.get(n, 0) + 1
+    finally:
+        if _sidecar is not None:
+            _sidecar.close()
 
     write_parquet(rows, cfg.parquet_path())
     _render_two_figures(rows, cfg)
@@ -273,65 +287,78 @@ def run_inference(
     # (family, label) → {n_nodes: count_of_timeout_seeds} — used by the
     # runtime fail-fast filter (cfg.runtime_skip_after_timeout).
     _timeout_counts: dict[tuple[str, str], dict[int, int]] = {}
-    for family in cfg.families:
-        for n in cfg.n_nodes:
-            for s in cfg.seeds:
-                for spec in cfg.baselines:
-                    label = _label_from_spec(spec)
-                    # Runtime fail-fast: skip if immediately-preceding n
-                    # had 100% seed timeouts (or was itself skipped) for
-                    # this (family, baseline).  Propagate skips into the
-                    # tracker so cascades work across 3+ n levels.
-                    if cfg.runtime_skip_after_timeout:
-                        n_idx = cfg.n_nodes.index(n)
-                        if n_idx > 0:
-                            prior_n = cfg.n_nodes[n_idx - 1]
-                            n_to = _timeout_counts.get((family, label), {}).get(prior_n, 0)
-                            if n_to == len(cfg.seeds):
-                                rows.append(_timeout_skip_row(
-                                    family, n, s, label, prior_n, n_to, len(cfg.seeds),
-                                ))
-                                tc = _timeout_counts.setdefault((family, label), {})
-                                tc[n] = tc.get(n, 0) + 1
-                                continue
-                    # v0.6c-C-1b: registry-based applicability gate
-                    # BEFORE adapter dispatch.  See run_parameter_learning
-                    # for the rationale.  Without this, ``pgmpy-mle-ve``
-                    # would dispatch on continuous_lg via the legacy
-                    # adapter's lg path and emit a nonsense ``ok`` row;
-                    # ``nbn-cat-lw`` would dispatch on hybrid and trip
-                    # a cuda device-side assert during sampling.
-                    if not is_applicable(label, family):
-                        rows.append(_not_applicable_row(
-                            family, n, s, label,
-                        )[0])
-                        continue
-                    legacy = _legacy_adapter_for_spec(spec)
-                    cell_rows = run_with_guard(
-                        lambda f=family, nn=n, ss=s, lg=legacy, lb=label:
-                            _inference_cell(cfg, f, nn, ss, lg, lb),
-                        family=family, n_nodes=n, seed=s, baseline=label,
-                        timeout_s=cfg.per_cell_timeout_s,
-                    )
-                    # v0.6c-C-1a relabel: cells use the legacy adapter
-                    # string internally; replace it with the registry's
-                    # canonical label for the parquet ``baseline`` column.
-                    for r in cell_rows:
-                        r.baseline = label
-                    rows.extend(cell_rows)
-                    if torch.cuda.is_available():
-                        try:
-                            torch.cuda.empty_cache()
-                        except Exception as e:
-                            # CUDA context may be poisoned by a device-side
-                            # assert in the previous cell.  Log and continue.
-                            logger.warning(
-                                "CUDA cleanup failed (likely poisoned context"
-                                " from prior cell): %s", e)
-                    # Track timeouts for the fail-fast filter.
-                    if cell_rows and cell_rows[0].status == "timeout":
-                        tc = _timeout_counts.setdefault((family, label), {})
-                        tc[n] = tc.get(n, 0) + 1
+    _sidecar = JSONLSidecarWriter(cfg.jsonl_path()) if cfg.jsonl_sidecar else None
+    try:
+        for family in cfg.families:
+            for n in cfg.n_nodes:
+                for s in cfg.seeds:
+                    for spec in cfg.baselines:
+                        label = _label_from_spec(spec)
+                        # Runtime fail-fast: skip if immediately-preceding n
+                        # had 100% seed timeouts (or was itself skipped) for
+                        # this (family, baseline).  Propagate skips into the
+                        # tracker so cascades work across 3+ n levels.
+                        if cfg.runtime_skip_after_timeout:
+                            n_idx = cfg.n_nodes.index(n)
+                            if n_idx > 0:
+                                prior_n = cfg.n_nodes[n_idx - 1]
+                                n_to = _timeout_counts.get((family, label), {}).get(prior_n, 0)
+                                if n_to == len(cfg.seeds):
+                                    skip_row = _timeout_skip_row(
+                                        family, n, s, label, prior_n, n_to, len(cfg.seeds),
+                                    )
+                                    rows.append(skip_row)
+                                    if _sidecar is not None:
+                                        _sidecar.append(skip_row)
+                                    tc = _timeout_counts.setdefault((family, label), {})
+                                    tc[n] = tc.get(n, 0) + 1
+                                    continue
+                        # v0.6c-C-1b: registry-based applicability gate
+                        # BEFORE adapter dispatch.  See run_parameter_learning
+                        # for the rationale.  Without this, ``pgmpy-mle-ve``
+                        # would dispatch on continuous_lg via the legacy
+                        # adapter's lg path and emit a nonsense ``ok`` row;
+                        # ``nbn-cat-lw`` would dispatch on hybrid and trip
+                        # a cuda device-side assert during sampling.
+                        if not is_applicable(label, family):
+                            na_rows = _not_applicable_row(family, n, s, label)
+                            rows.extend(na_rows)
+                            if _sidecar is not None:
+                                for r in na_rows:
+                                    _sidecar.append(r)
+                            continue
+                        legacy = _legacy_adapter_for_spec(spec)
+                        cell_rows = run_with_guard(
+                            lambda f=family, nn=n, ss=s, lg=legacy, lb=label:
+                                _inference_cell(cfg, f, nn, ss, lg, lb),
+                            family=family, n_nodes=n, seed=s, baseline=label,
+                            timeout_s=cfg.per_cell_timeout_s,
+                        )
+                        # v0.6c-C-1a relabel: cells use the legacy adapter
+                        # string internally; replace it with the registry's
+                        # canonical label for the parquet ``baseline`` column.
+                        for r in cell_rows:
+                            r.baseline = label
+                        rows.extend(cell_rows)
+                        if _sidecar is not None:
+                            for r in cell_rows:
+                                _sidecar.append(r)
+                        if torch.cuda.is_available():
+                            try:
+                                torch.cuda.empty_cache()
+                            except Exception as e:
+                                # CUDA context may be poisoned by a device-side
+                                # assert in the previous cell.  Log and continue.
+                                logger.warning(
+                                    "CUDA cleanup failed (likely poisoned context"
+                                    " from prior cell): %s", e)
+                        # Track timeouts for the fail-fast filter.
+                        if cell_rows and cell_rows[0].status == "timeout":
+                            tc = _timeout_counts.setdefault((family, label), {})
+                            tc[n] = tc.get(n, 0) + 1
+    finally:
+        if _sidecar is not None:
+            _sidecar.close()
 
     write_parquet(rows, cfg.parquet_path())
     _render_two_figures(rows, cfg)
