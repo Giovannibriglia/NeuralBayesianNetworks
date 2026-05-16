@@ -95,6 +95,10 @@ class CrashTestConfig:
 
     runtime_skip_after_timeout: bool = False
 
+    # Write a JSONL sidecar alongside the parquet so completed cells are
+    # durable on crash.  True by default — opt-out via YAML if needed.
+    jsonl_sidecar: bool = True
+
     _SCHEMA_VERSION: int = 2
 
     _REQUIRED_YAML_FIELDS = frozenset({
@@ -202,6 +206,7 @@ class CrashTestConfig:
             runtime_skip_after_timeout=bool(
                 d.get("runtime_skip_after_timeout", False)
             ),
+            jsonl_sidecar=bool(d.get("jsonl_sidecar", True)),
         )
 
     @property
@@ -233,6 +238,12 @@ class CrashTestConfig:
         out.parent.mkdir(parents=True, exist_ok=True)
         return out
 
+    def jsonl_path(self) -> Path:
+        """Sidecar JSONL output: ``{output_dir}/raw/{prefix}_metrics.jsonl``."""
+        out = Path(self.output_dir) / "raw" / f"{self.output_prefix}_metrics.jsonl"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        return out
+
 
 # ---------------------------------------------------------------------- #
 # Cell iteration with timeout + OOM guards
@@ -252,6 +263,52 @@ class CellResult:
     status: str = "ok"          # ok | timeout | oom | skipped | not_supported
     n_skipped: int = 0
     extra: Dict[str, Any] = field(default_factory=dict)
+
+
+class JSONLSidecarWriter:
+    """Append-mode JSONL writer that flushes after every row.
+
+    Each line is a flat JSON object matching the schema that
+    ``write_parquet`` produces: the eight core ``CellResult`` fields
+    plus any ``extra`` dict keys splatted at the top level.  ``NaN``
+    values are serialised as JSON ``null`` so the file is valid JSON.
+
+    Usage::
+
+        writer = JSONLSidecarWriter(cfg.jsonl_path())
+        try:
+            for row in cell_rows:
+                writer.append(row)
+        finally:
+            writer.close()
+    """
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(path, "a")  # append so partial runs accumulate
+
+    def append(self, row: CellResult) -> None:
+        import json
+        import math
+
+        d: Dict[str, Any] = {
+            "family": row.family,
+            "n_nodes": row.n_nodes,
+            "seed": row.seed,
+            "baseline": row.baseline,
+            "metric": row.metric,
+            # NaN is not valid JSON; use null so the file is parseable
+            # by any JSON consumer.  pd.read_json re-hydrates null → NaN.
+            "value": None if (isinstance(row.value, float) and math.isnan(row.value)) else row.value,
+            "status": row.status,
+            "n_skipped": row.n_skipped,
+            **row.extra,
+        }
+        self._fh.write(json.dumps(d) + "\n")
+        self._fh.flush()  # durable on every append — survives a crash
+
+    def close(self) -> None:
+        self._fh.close()
 
 
 class CellTimeout(Exception):
@@ -448,6 +505,45 @@ def write_parquet(rows: List[CellResult], path: Path) -> None:
 def read_parquet(path: Path):
     import pandas as pd
     return pd.read_parquet(path)
+
+
+def jsonl_to_parquet(jsonl_path: Path, parquet_path: Path) -> None:
+    """Recover a parquet from a JSONL sidecar after a crash.
+
+    Reads the JSONL file line-by-line and writes a parquet with the
+    same schema as ``write_parquet``.  The resulting file is intended
+    to be a drop-in replacement for the parquet the runner would have
+    written on a clean exit.
+
+    Column order and dtypes match ``write_parquet`` because both
+    build a ``pd.DataFrame`` from a list of flat dicts with the same
+    key insertion order (8 fixed fields first, then ``extra`` keys
+    in first-occurrence order).
+    """
+    import json
+    import pandas as pd
+
+    rows = []
+    with open(jsonl_path) as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    if not rows:
+        warnings.warn(f"no rows in {jsonl_path}; parquet not written", stacklevel=2)
+        return
+    df = pd.DataFrame(rows)
+    # Enforce fixed-schema dtypes so the recovered parquet matches write_parquet
+    # regardless of what pandas infers from the JSON values.  In particular,
+    # a column where every value is null infers as object, not float64.
+    for int_col in ("n_nodes", "seed", "n_skipped"):
+        if int_col in df.columns:
+            df[int_col] = df[int_col].astype("int64")
+    if "value" in df.columns:
+        df["value"] = df["value"].astype("float64")
+    Path(parquet_path).parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(parquet_path, index=False)
+    logger.info("recovered %d rows from %s → %s", len(rows), jsonl_path, parquet_path)
 
 
 # ---------------------------------------------------------------------- #
