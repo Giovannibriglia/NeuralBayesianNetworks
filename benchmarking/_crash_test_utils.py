@@ -285,7 +285,7 @@ class JSONLSidecarWriter:
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = open(path, "a")  # append so partial runs accumulate
+        self._fh = open(path, "a")  # noqa: SIM115 - long-lived handle by design; close() called in finally
 
     def append(self, row: CellResult) -> None:
         import json
