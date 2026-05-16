@@ -237,7 +237,14 @@ def run_parameter_learning(
                     )
                     rows.extend(cell_rows)
                     if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                        try:
+                            torch.cuda.empty_cache()
+                        except Exception as e:
+                            # CUDA context may be poisoned by a device-side
+                            # assert in the previous cell.  Log and continue.
+                            logger.warning(
+                                "CUDA cleanup failed (likely poisoned context"
+                                " from prior cell): %s", e)
                     # Track timeouts for the fail-fast filter.
                     if cell_rows and cell_rows[0].status == "timeout":
                         tc = _timeout_counts.setdefault((family, label), {})
@@ -313,7 +320,14 @@ def run_inference(
                         r.baseline = label
                     rows.extend(cell_rows)
                     if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                        try:
+                            torch.cuda.empty_cache()
+                        except Exception as e:
+                            # CUDA context may be poisoned by a device-side
+                            # assert in the previous cell.  Log and continue.
+                            logger.warning(
+                                "CUDA cleanup failed (likely poisoned context"
+                                " from prior cell): %s", e)
                     # Track timeouts for the fail-fast filter.
                     if cell_rows and cell_rows[0].status == "timeout":
                         tc = _timeout_counts.setdefault((family, label), {})

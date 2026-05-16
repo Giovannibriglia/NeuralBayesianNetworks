@@ -163,12 +163,18 @@ _BASELINE_APPLICABILITY: dict[str, BaselineApplicability] = {
     "nbn-neuralcat-ve":        BaselineApplicability(frozenset({"discrete"})),
     "nbn-neuralcat-lw":        BaselineApplicability(frozenset({"discrete"})),
     "nbn-lg-lw":               BaselineApplicability(frozenset({"continuous_lg"})),
+    # nbn-mdn-lw on continuous_nongauss hits NaN-driven multinomial CUDA
+    # assert at n>=50 (issue #81 Bug B; upstream root cause #24 MDN gradient
+    # stability in deep ancestral chains).  Gated out until #24 lands.
     # Pass-10 priority-1: hybrid added (verified WORKS on smoke n=5).
     "nbn-mdn-lw":              BaselineApplicability(
-        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
+        frozenset({"continuous_lg", "hybrid"})),
+    # nbn-flow-lw on continuous_nongauss uses MDN internally and hits the
+    # same NaN-driven multinomial CUDA assert as nbn-mdn-lw (issue #81 Bug B;
+    # root cause #24).  Gated out until #24 lands.
     # Pass-10 priority-1: hybrid added (verified WORKS on smoke n=5).
     "nbn-flow-lw":             BaselineApplicability(
-        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
+        frozenset({"continuous_lg", "hybrid"})),
     "nbn-hybrid-router":       BaselineApplicability(frozenset({"hybrid"})),
 
     # --- Other libraries ---
