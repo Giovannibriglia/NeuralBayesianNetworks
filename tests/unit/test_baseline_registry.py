@@ -118,11 +118,19 @@ def test_applicability_pgmpy_lg_predict_continuous_lg_only() -> None:
     assert not is_applicable("pgmpy-lg-predict", "hybrid")
 
 
-def test_applicability_nbn_mdn_lw_continuous_and_hybrid() -> None:
+def test_applicability_nbn_mdn_lw_and_flow_lw_gated_off_continuous_nongauss() -> None:
+    # continuous_lg and hybrid: applicable (MDN stable on these families)
     assert is_applicable("nbn-mdn-lw", "continuous_lg")
-    assert is_applicable("nbn-mdn-lw", "continuous_nongauss")
     assert is_applicable("nbn-mdn-lw", "hybrid")
+    assert is_applicable("nbn-flow-lw", "continuous_lg")
+    assert is_applicable("nbn-flow-lw", "hybrid")
+    # continuous_nongauss: gated out — NaN-driven MultinomialKernel CUDA
+    # assert during LW sampling (issue #81 Bug B; root cause tracked in #24)
+    assert not is_applicable("nbn-mdn-lw", "continuous_nongauss")
+    assert not is_applicable("nbn-flow-lw", "continuous_nongauss")
+    # discrete: never applicable
     assert not is_applicable("nbn-mdn-lw", "discrete")
+    assert not is_applicable("nbn-flow-lw", "discrete")
 
 
 def test_applicability_nbn_hybrid_router_hybrid_only() -> None:
