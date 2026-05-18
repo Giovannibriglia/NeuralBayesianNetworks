@@ -122,6 +122,12 @@ class MDNMechanism(Mechanism):
         self._root_logits: nn.Parameter | None = None
         self._root_loc: nn.Parameter | None = None
         self._root_log_scale: nn.Parameter | None = None
+        # Parent standardization statistics — registered as buffers so they
+        # survive state_dict save/load.  Computed in fit_local from training
+        # data; applied in _params_from_parents at inference time.
+        # None for root nodes (no parents).
+        self.register_buffer('_pa_mean', None)
+        self.register_buffer('_pa_std', None)
 
     # ------------------------------------------------------------------
     # Fitting
@@ -155,6 +161,19 @@ class MDNMechanism(Mechanism):
             parents = ensure_2d(parents).to(device=device, dtype=x.dtype)
             d_pa = parents.shape[1]
             self._d_pa = d_pa
+            # Compute parent standardization statistics from training data.
+            # Extreme parent values (e.g. 3.3M in continuous_nongauss deep
+            # chains) cause log_scale overflow in the MLP forward pass:
+            # log_scale ≈ extreme_value * weight → exp(log_scale) = inf →
+            # loss ≈ 1e14 → backward overflows to NaN → NaN params →
+            # CUDA assert at LW inference (Bug B, issues #81 #24 #54).
+            # Standardizing parents maps them to O(1) scale, keeping
+            # log_scale finite throughout training and inference.
+            pa_mean = parents.mean(0, keepdim=True)
+            pa_std = parents.std(0, keepdim=True).clamp_min(1e-3)
+            self._pa_mean = pa_mean.detach()
+            self._pa_std = pa_std.detach()
+            parents = (parents - self._pa_mean) / self._pa_std
             out_dim = k + k * d_x + k * d_x  # logits + locs + log_scales
             self.net = _build_mlp(d_pa, self.hidden, out_dim, self.activation).to(device)
             opt = torch.optim.Adam(self.parameters(), lr=lr)
@@ -203,6 +222,10 @@ class MDNMechanism(Mechanism):
         # ``continuous_nongauss`` ancestral chains is tracked in
         # v0.7 issue #24.
         parents = _sanitise_parents(parents, mech_name="MDN._params_from_parents")
+        # Standardize to training distribution — prevents log_scale overflow
+        # from extreme parent values (Bug B fix; see fit_local comment).
+        if self._pa_mean is not None:
+            parents = (parents - self._pa_mean) / self._pa_std
 
         assert self.net is not None
         out = self.net(parents)  # [*, k + k*D_x + k*D_x]
