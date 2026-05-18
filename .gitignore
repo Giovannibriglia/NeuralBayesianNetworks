@@ -26,3 +26,5 @@ nbn/_version.py
 docs/_build/
 .ipynb_checkpoints/
 *.ipynb_checkpoints
+ScalabilityImages
+.idea/

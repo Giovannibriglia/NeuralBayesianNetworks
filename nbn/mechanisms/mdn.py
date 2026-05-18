@@ -128,6 +128,15 @@ class MDNMechanism(Mechanism):
         # None for root nodes (no parents).
         self.register_buffer('_pa_mean', None)
         self.register_buffer('_pa_std', None)
+        # Bug C (follow-up to Bug B / PR #90): deep-chain LW sampling at
+        # n≥100 can produce particles at 700σ+ after standardization.  MLP
+        # log_scale outputs at that scale overflow float32 → scale=Inf →
+        # sample=Inf → downstream Categorical(NaN) crash.  Clamping
+        # standardized parents to ±50σ keeps MLP inputs in a regime where
+        # exp(log_scale) stays finite for any learned weight < 1.76 after
+        # normal training, while 50σ is already wildly OOD — predictions
+        # there are noise regardless.  Tunable via _pa_clamp.
+        self._pa_clamp: float = 50.0
 
     # ------------------------------------------------------------------
     # Fitting
@@ -230,6 +239,7 @@ class MDNMechanism(Mechanism):
         # from extreme parent values (Bug B fix; see fit_local comment).
         if self._pa_mean is not None:
             parents = (parents - self._pa_mean) / self._pa_std
+            parents = parents.clamp(-self._pa_clamp, self._pa_clamp)
 
         assert self.net is not None
         out = self.net(parents)  # [*, k + k*D_x + k*D_x]
