@@ -163,18 +163,17 @@ _BASELINE_APPLICABILITY: dict[str, BaselineApplicability] = {
     "nbn-neuralcat-ve":        BaselineApplicability(frozenset({"discrete"})),
     "nbn-neuralcat-lw":        BaselineApplicability(frozenset({"discrete"})),
     "nbn-lg-lw":               BaselineApplicability(frozenset({"continuous_lg"})),
-    # nbn-mdn-lw on continuous_nongauss hits NaN-driven multinomial CUDA
-    # assert at n>=50 (issue #81 Bug B; upstream root cause #24 MDN gradient
-    # stability in deep ancestral chains).  Gated out until #24 lands.
-    # Pass-10 priority-1: hybrid added (verified WORKS on smoke n=5).
+    # Bug B (NaN-driven multinomial CUDA assert on continuous_nongauss) fixed
+    # by parent standardization in MDNMechanism.fit_local (issue #81, #24, #54).
+    # Extreme parent values (e.g. X21=3.3M from deep chain variance amplification)
+    # caused log_scale overflow → backward NaN → CUDA assert at LW inference.
+    # Standardizing parents to O(1) scale in fit_local + _params_from_parents
+    # keeps log_scale finite.  Validated: continuous_nongauss n=50 seed=3 PASS.
     "nbn-mdn-lw":              BaselineApplicability(
-        frozenset({"continuous_lg", "hybrid"})),
-    # nbn-flow-lw on continuous_nongauss uses MDN internally and hits the
-    # same NaN-driven multinomial CUDA assert as nbn-mdn-lw (issue #81 Bug B;
-    # root cause #24).  Gated out until #24 lands.
-    # Pass-10 priority-1: hybrid added (verified WORKS on smoke n=5).
+        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
+    # nbn-flow-lw uses MDN internally — same fix applies transitively.
     "nbn-flow-lw":             BaselineApplicability(
-        frozenset({"continuous_lg", "hybrid"})),
+        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
     "nbn-hybrid-router":       BaselineApplicability(frozenset({"hybrid"})),
 
     # --- Other libraries ---

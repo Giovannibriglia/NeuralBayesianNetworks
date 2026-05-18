@@ -118,18 +118,17 @@ def test_applicability_pgmpy_lg_predict_continuous_lg_only() -> None:
     assert not is_applicable("pgmpy-lg-predict", "hybrid")
 
 
-def test_applicability_nbn_mdn_lw_and_flow_lw_gated_off_continuous_nongauss() -> None:
-    # continuous_lg and hybrid: applicable (MDN stable on these families)
+def test_applicability_nbn_mdn_lw_continuous_and_hybrid() -> None:
+    # Bug B (issues #81 #24 #54) fixed by parent standardization in
+    # MDNMechanism.fit_local — continuous_nongauss is now applicable again.
     assert is_applicable("nbn-mdn-lw", "continuous_lg")
+    assert is_applicable("nbn-mdn-lw", "continuous_nongauss")
     assert is_applicable("nbn-mdn-lw", "hybrid")
-    assert is_applicable("nbn-flow-lw", "continuous_lg")
-    assert is_applicable("nbn-flow-lw", "hybrid")
-    # continuous_nongauss: gated out — NaN-driven MultinomialKernel CUDA
-    # assert during LW sampling (issue #81 Bug B; root cause tracked in #24)
-    assert not is_applicable("nbn-mdn-lw", "continuous_nongauss")
-    assert not is_applicable("nbn-flow-lw", "continuous_nongauss")
-    # discrete: never applicable
     assert not is_applicable("nbn-mdn-lw", "discrete")
+    # nbn-flow-lw uses MDN internally — same fix applies.
+    assert is_applicable("nbn-flow-lw", "continuous_lg")
+    assert is_applicable("nbn-flow-lw", "continuous_nongauss")
+    assert is_applicable("nbn-flow-lw", "hybrid")
     assert not is_applicable("nbn-flow-lw", "discrete")
 
 
