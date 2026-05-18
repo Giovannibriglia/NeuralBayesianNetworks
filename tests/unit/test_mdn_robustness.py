@@ -221,6 +221,39 @@ def test_mdn_training_inference_consistency() -> None:
     )
 
 
+def test_mdn_extreme_inference_parents_no_nan_bug_c() -> None:
+    """Bug C regression: inference-time parents at 1000σ must not produce
+    NaN/Inf outputs from a fitted MDN.
+
+    Root cause: deep-chain LW sampling at n≥100 produces particles at
+    700σ+ after standardization.  Without the ±_pa_clamp guard, MLP
+    log_scale outputs at that scale overflow float32 → scale=Inf →
+    sample=Inf → downstream Categorical(NaN) crash (follow-up to Bug B /
+    PR #90).
+    """
+    from nbn.mechanisms.mdn import MDNMechanism
+
+    torch.manual_seed(7)
+    N = 200
+    parents_train = torch.randn(N, 2)
+    x_train = 0.3 * parents_train[:, :1] + torch.randn(N, 1) * 0.2
+
+    mdn = MDNMechanism(num_components=3, hidden=(32,))
+    mdn.fit_local(x_train, parents_train, epochs=30, batch_size=64)
+
+    assert mdn._pa_std is not None
+    pa_std = mdn._pa_std  # [1, 2]
+
+    # Inject parents at 1000σ — wildly outside training distribution
+    pa_extreme = pa_std.expand(20, -1) * 1000.0
+    with torch.no_grad():
+        samp = mdn.sample(pa_extreme, n=10)
+        lp = mdn.log_prob(x_train[:20].unsqueeze(1), pa_extreme)
+
+    assert torch.isfinite(samp).all(), "sample() produced NaN/Inf at 1000σ parents"
+    assert torch.isfinite(lp).all(), "log_prob() produced NaN/Inf at 1000σ parents"
+
+
 def test_make_synthetic_bn_continuous_nongauss_n5000_seed0_runs() -> None:
     """Regression test for the exact paper-config failure case.
 
