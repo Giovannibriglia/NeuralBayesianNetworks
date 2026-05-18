@@ -173,7 +173,11 @@ class MDNMechanism(Mechanism):
             pa_std = parents.std(0, keepdim=True).clamp_min(1e-3)
             self._pa_mean = pa_mean.detach()
             self._pa_std = pa_std.detach()
-            parents = (parents - self._pa_mean) / self._pa_std
+            # Do NOT pre-standardize here: _params_from_parents applies
+            # standardization at every forward call (training and inference),
+            # so pre-standardizing would double-standardize during training
+            # (causing NaN for constant-parent columns) and produce a model
+            # trained on different inputs than it sees at inference time.
             out_dim = k + k * d_x + k * d_x  # logits + locs + log_scales
             self.net = _build_mlp(d_pa, self.hidden, out_dim, self.activation).to(device)
             opt = torch.optim.Adam(self.parameters(), lr=lr)

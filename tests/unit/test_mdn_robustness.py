@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 
+import pytest
 import torch
 
 from nbn.mechanisms.mdn import _sanitise_parents
@@ -131,6 +132,93 @@ def test_mdn_forward_handles_nan_in_parents() -> None:
     dist = mech.forward(parents)
     samp = dist.sample()
     assert torch.isfinite(samp).all()
+
+
+# ---------------------------------------------------------------------- #
+# Parent standardization tests (Bug B, issues #81 #24 #54)
+# ---------------------------------------------------------------------- #
+
+
+def test_mdn_extreme_parents_no_nan_after_fit() -> None:
+    """Bug B regression: extreme parent values (3.3M-scale) must not
+    produce NaN parameters after fit_local.  Pre-fix, the MLP's linear
+    projection turned extreme inputs into inf log_scale → loss=1e14 →
+    backward overflow → NaN grads → NaN params → CUDA assert at LW."""
+    from nbn.mechanisms.mdn import MDNMechanism
+    torch.manual_seed(0)
+    mdn = MDNMechanism(num_components=3)
+    N = 100
+    x = torch.randn(N, 1)
+    parents = torch.randn(N, 1) * 3_300_000.0  # simulate deep-chain extreme values
+    mdn.fit_local(x, parents, epochs=5, batch_size=32)
+    for name, p in mdn.named_parameters():
+        assert torch.isfinite(p).all(), f"{name} has NaN/Inf after fit with extreme parents"
+    # Inference must also be finite
+    test_pa = torch.randn(10, 1) * 3_300_000.0
+    samp = mdn.sample(test_pa, n=5)
+    assert torch.isfinite(samp).all()
+
+
+def test_mdn_constant_parent_column_no_crash() -> None:
+    """Constant parent column (std=0) must not crash fit_local or inference.
+
+    Pre-fix, the double-standardization bug caused: after clamping pa_std
+    to 1e-3, _params_from_parents received (0 - pa_mean) / 1e-3 = -5000
+    during the training forward pass, which overflowed to NaN in the MLP.
+    """
+    from nbn.mechanisms.mdn import MDNMechanism
+    mdn = MDNMechanism(num_components=3)
+    N = 80
+    x = torch.randn(N, 1)
+    parents = torch.full((N, 1), 7.0)  # constant → std=0 → clamped to 1e-3
+    mdn.fit_local(x, parents, epochs=5, batch_size=32)
+    assert mdn._pa_std is not None
+    assert mdn._pa_std.item() == pytest.approx(1e-3, rel=0.01)
+    test_pa = torch.full((5, 1), 7.0)
+    samp = mdn.sample(test_pa, n=4)
+    assert torch.isfinite(samp).all()
+    lp = mdn.log_prob(x[:5].unsqueeze(1), test_pa)
+    assert torch.isfinite(lp).all()
+
+
+def test_mdn_training_inference_consistency() -> None:
+    """Training and inference use the same standardization path.
+
+    Fit on moderately extreme parents; evaluate log_prob on held-out
+    parents from the same distribution.  A model trained with double-
+    standardization would evaluate at a completely different input range
+    and produce degenerate (constant) log_prob values.
+    """
+    from nbn.mechanisms.mdn import MDNMechanism
+    torch.manual_seed(42)
+    N = 300
+    # parents with large mean/std — training and inference must agree
+    pa_scale = 1000.0
+    parents_train = torch.randn(N, 1) * pa_scale
+    x_train = 0.5 * parents_train / pa_scale + torch.randn(N, 1) * 0.1
+
+    mdn = MDNMechanism(num_components=4, hidden=(32, 32))
+    mdn.fit_local(x_train, parents_train, epochs=50, batch_size=64)
+
+    # log_prob on training-distribution parents must be finite and vary
+    pa_test = torch.randn(50, 1) * pa_scale
+    x_test = 0.5 * pa_test / pa_scale + torch.randn(50, 1) * 0.1
+    with torch.no_grad():
+        lp = mdn.log_prob(x_test.unsqueeze(1), pa_test)
+    assert torch.isfinite(lp).all(), "log_prob has NaN/Inf"
+    # Verify the model isn't degenerate (constant output regardless of parents)
+    pa_hi = torch.full((50, 1), 3.0 * pa_scale)
+    pa_lo = torch.full((50, 1), -3.0 * pa_scale)
+    x_mid = torch.zeros(50, 1)
+    with torch.no_grad():
+        lp_hi = mdn.log_prob(x_mid.unsqueeze(1), pa_hi)
+        lp_lo = mdn.log_prob(x_mid.unsqueeze(1), pa_lo)
+    # A non-degenerate model should give different log-probs for x=0
+    # when parents are +3σ vs -3σ (since the true conditional shifts).
+    assert not torch.allclose(lp_hi, lp_lo, atol=0.1), (
+        "MDN appears degenerate: log_prob doesn't vary with parents "
+        "(possible training/inference standardization mismatch)"
+    )
 
 
 def test_make_synthetic_bn_continuous_nongauss_n5000_seed0_runs() -> None:
