@@ -125,13 +125,14 @@ _EXPECTED_APPLICABILITY: dict[tuple[str, str], bool] = {
     ("nbn-hybrid-router", "continuous_nongauss"): False,
     ("nbn-hybrid-router", "hybrid"): True,
     # Other libraries
+    # Gated out pending v0.8 BN-inference adapter (issue #96).
     ("gpytorch-gp", "discrete"): False,
-    ("gpytorch-gp", "continuous_lg"): True,
-    ("gpytorch-gp", "continuous_nongauss"): True,
+    ("gpytorch-gp", "continuous_lg"): False,
+    ("gpytorch-gp", "continuous_nongauss"): False,
     ("gpytorch-gp", "hybrid"): False,
     ("gpytorch-gp-predict", "discrete"): False,
-    ("gpytorch-gp-predict", "continuous_lg"): True,
-    ("gpytorch-gp-predict", "continuous_nongauss"): True,
+    ("gpytorch-gp-predict", "continuous_lg"): False,
+    ("gpytorch-gp-predict", "continuous_nongauss"): False,
     ("gpytorch-gp-predict", "hybrid"): False,
     ("pomegranate-discrete", "discrete"): True,
     ("pomegranate-discrete", "continuous_lg"): False,
@@ -175,12 +176,12 @@ _ADAPTER_TO_LABELS: dict[str, list[str]] = {
 }
 
 
-_FROZEN_GATE_C_PAIRS: list[tuple[str, str]] = [
-    ("continuous_lg", "gpytorch-gp"),
-    ("continuous_lg", "gpytorch-gp-predict"),
-    ("continuous_nongauss", "gpytorch-gp"),
-    ("continuous_nongauss", "gpytorch-gp-predict"),
-]
+# Gate C pairs were (continuous_lg/nongauss, gpytorch-gp/gp-predict).
+# gpytorch-gp and gpytorch-gp-predict are now gated out of all families
+# (issue #96), so is_applicable returns False — the Gate C
+# accuracy_supported precondition is no longer meaningful.  The snapshot
+# table above covers the False applicability; the Gate C test is removed.
+_FROZEN_GATE_C_PAIRS: list[tuple[str, str]] = []
 
 
 @pytest.mark.parametrize(
