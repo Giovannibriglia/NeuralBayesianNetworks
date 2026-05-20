@@ -137,6 +137,10 @@ class MDNMechanism(Mechanism):
         # normal training, while 50σ is already wildly OOD — predictions
         # there are noise regardless.  Tunable via _pa_clamp.
         self._pa_clamp: float = 50.0
+        # Issue #95: bounds log_scale output before exp() — exp(7) ≈ 1100,
+        # physically meaningful but prevents float32 overflow on pathological
+        # input combinations that slip past _pa_clamp.  Tunable via _log_scale_clamp.
+        self._log_scale_clamp: float = 7.0
 
     # ------------------------------------------------------------------
     # Fitting
@@ -247,6 +251,7 @@ class MDNMechanism(Mechanism):
         rest = out[..., k:].reshape(*out.shape[:-1], k, 2 * d_x)
         loc = rest[..., :d_x]
         log_scale = rest[..., d_x:]
+        log_scale = log_scale.clamp(max=self._log_scale_clamp)  # issue #95
         scale = torch.exp(log_scale).clamp_min(self.min_scale)
         return logits, loc, scale
 

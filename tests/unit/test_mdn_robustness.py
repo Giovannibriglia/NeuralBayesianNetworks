@@ -254,6 +254,48 @@ def test_mdn_extreme_inference_parents_no_nan_bug_c() -> None:
     assert torch.isfinite(lp).all(), "log_prob() produced NaN/Inf at 1000σ parents"
 
 
+def test_mdn_log_scale_output_clamp_issue_95() -> None:
+    """Issue #95 regression: scale returned by _params_from_parents must
+    never exceed exp(_log_scale_clamp) ≈ 1097, even when extreme parents
+    bypass the input-side _pa_clamp.
+
+    Strategy: disable the input clamp (set to inf) and inject adversarial
+    parents at 1000σ so the MLP operates far outside its training regime.
+    The output clamp on log_scale is then the only guard; the test verifies
+    it holds.
+    """
+    import math
+    from nbn.mechanisms.mdn import MDNMechanism
+
+    torch.manual_seed(13)
+    N = 200
+    parents_train = torch.randn(N, 2)
+    x_train = 0.3 * parents_train[:, :1] + torch.randn(N, 1) * 0.2
+
+    mdn = MDNMechanism(num_components=3, hidden=(32,))
+    mdn.fit_local(x_train, parents_train, epochs=50, batch_size=64)
+
+    assert mdn._pa_std is not None
+    pa_std = mdn._pa_std  # [1, 2]
+
+    # Disable the input clamp so the output clamp is the only guard.
+    saved_pa_clamp = mdn._pa_clamp
+    mdn._pa_clamp = float("inf")
+    try:
+        pa_extreme = pa_std.expand(50, -1) * 1000.0
+        with torch.no_grad():
+            _, _, scale = mdn._params_from_parents(pa_extreme, (50,))
+    finally:
+        mdn._pa_clamp = saved_pa_clamp
+
+    max_allowed = math.exp(mdn._log_scale_clamp)
+    assert scale.max().item() <= max_allowed + 1e-4, (
+        f"scale.max()={scale.max().item():.4f} > exp(7)≈{max_allowed:.4f}; "
+        "output clamp not effective"
+    )
+    assert torch.isfinite(scale).all(), "scale has Inf/NaN after output clamp"
+
+
 def test_make_synthetic_bn_continuous_nongauss_n5000_seed0_runs() -> None:
     """Regression test for the exact paper-config failure case.
 
