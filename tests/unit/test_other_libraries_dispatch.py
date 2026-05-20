@@ -6,8 +6,11 @@ registry.  No adapter code changes:
 * gpytorch: v1 adapter is already correctly vectorised (one SVGP per
   continuous node; ``pred.sample(torch.Size([n_samples]))`` gives the
   full ``[B, n_samples, 1]`` tensor in one GP call).  Labels:
-  ``gpytorch-gp`` (param-learning) and ``gpytorch-gp-predict`` (inference),
-  applicable to ``{continuous_lg, continuous_nongauss}``.
+  ``gpytorch-gp`` (param-learning) and ``gpytorch-gp-predict`` (inference).
+  Originally applicable to ``{continuous_lg, continuous_nongauss}`` but
+  gated out of all families by PR #97 (issue #96): the per-node SVGP
+  architecture cannot route BN evidence to a target's direct parents,
+  so posterior accuracy metrics are vacuous.
 
 * pomegranate: v1 adapter is empirical-CPT BayesianNetwork on torch
   backend, discrete-only.  Single canonical method (Laplace-smoothed
@@ -63,14 +66,20 @@ def _has_lib(name: str) -> bool:
 
 
 def test_gpytorch_labels_in_registry() -> None:
-    """gpytorch labels: ``gpytorch-gp`` (param-learning) and
-    ``gpytorch-gp-predict`` (inference), applicable to continuous-only
-    families."""
+    """gpytorch labels are registered but gated out of all families.
+
+    Originally applicable to ``{continuous_lg, continuous_nongauss}``.
+    PR #97 (issue #96) excluded gpytorch from all families pending a
+    v0.8 BN-inference adapter: the per-node SVGP architecture cannot
+    route evidence to a target's direct parents, so posterior accuracy
+    metrics are meaningless and the cells would inflate timing numbers.
+    """
     assert "gpytorch-gp" in known_labels()
     assert "gpytorch-gp-predict" in known_labels()
+    # Gated out of all families — issue #96, PR #97.
     for label in ("gpytorch-gp", "gpytorch-gp-predict"):
-        assert is_applicable(label, "continuous_lg")
-        assert is_applicable(label, "continuous_nongauss")
+        assert not is_applicable(label, "continuous_lg")
+        assert not is_applicable(label, "continuous_nongauss")
         assert not is_applicable(label, "discrete")
         assert not is_applicable(label, "hybrid")
 
@@ -170,10 +179,10 @@ def test_applicability_gate_rejects_other_library_cross_family() -> None:
     combination.  These assertions pin that the registry-based gate
     (now the canonical filter) handles all six new labels.
     """
-    # gpytorch on discrete / hybrid → not applicable.
+    # gpytorch gated out of all families (issue #96, PR #97).
     for label in ("gpytorch-gp", "gpytorch-gp-predict"):
-        assert not is_applicable(label, "discrete")
-        assert not is_applicable(label, "hybrid")
+        for fam in ("discrete", "continuous_lg", "continuous_nongauss", "hybrid"):
+            assert not is_applicable(label, fam)
     # pomegranate on continuous / hybrid → not applicable.
     for label in ("pomegranate-discrete", "pomegranate-discrete-ve"):
         for fam in ("continuous_lg", "continuous_nongauss", "hybrid"):
