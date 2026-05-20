@@ -197,12 +197,14 @@ _BASELINE_APPLICABILITY: dict[str, BaselineApplicability] = {
     # all n).  Fit time is ~96s at n=100 and scales linearly with n (not
     # counted in the benchmark timing column).  See issue #96 for the
     # full architectural analysis.
+    # Excluded from benchmark applicability pending v0.8 BN-inference
+    # adapter (issue #96).
     "gpytorch-gp": BaselineApplicability(
-        frozenset({"continuous_lg", "continuous_nongauss"}),
+        frozenset(),
         accuracy_supported=False,
     ),
     "gpytorch-gp-predict": BaselineApplicability(
-        frozenset({"continuous_lg", "continuous_nongauss"}),
+        frozenset(),
         accuracy_supported=False,
     ),
     "pomegranate-discrete":      BaselineApplicability(frozenset({"discrete"})),
