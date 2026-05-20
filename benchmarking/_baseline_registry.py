@@ -177,10 +177,26 @@ _BASELINE_APPLICABILITY: dict[str, BaselineApplicability] = {
     "nbn-hybrid-router":       BaselineApplicability(frozenset({"hybrid"})),
 
     # --- Other libraries ---
-    # GPyTorch: SVGP returns the prior marginal at the target,
-    # independent of evidence.  Speed timing is meaningful; accuracy
-    # is not.  ``accuracy_supported=False`` produces an honest
-    # not_supported row instead of a misleading flat W₁≈1.0 line.
+    # gpytorch-gp / gpytorch-gp-predict: per-node SVGP regression baseline.
+    # Fits one SVGP per non-root node modeling P(node | direct_parents).
+    # At query time, evaluates the target's SVGP at evidence-derived parent
+    # inputs via q.evidence.get(parent, 0.0).
+    #
+    # IMPORTANT: The benchmark's evidence is on descendants/laterals of the
+    # target, never on its direct parents.  Parent inputs therefore default
+    # to 0 and predictions are independent of the actual evidence values
+    # (std ≈ 0.05 across all B batch items at any evidence setting).
+    # Predictions are effectively the conditional mean at the prior parent
+    # value (0), not a Bayesian-inference output.
+    #
+    # accuracy_supported=False is therefore correct: distributional metrics
+    # (accuracy/jsd/tv/w1) cannot meaningfully compare these constant
+    # predictions to oracle-conditional posteriors.
+    #
+    # Note on total_time_s: this measures the query phase only (~1s at
+    # all n).  Fit time is ~96s at n=100 and scales linearly with n (not
+    # counted in the benchmark timing column).  See issue #96 for the
+    # full architectural analysis.
     "gpytorch-gp": BaselineApplicability(
         frozenset({"continuous_lg", "continuous_nongauss"}),
         accuracy_supported=False,
