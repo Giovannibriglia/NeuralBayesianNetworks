@@ -1464,6 +1464,41 @@ def _baseline_posterior_for_query(
         if samples.shape[0] == 0 or torch.isnan(samples).any():
             return None
         return samples.detach().cpu().float().reshape(-1)
+    if baseline == "pyro":
+        from benchmarking.baselines.pyro_adapter import PyroAdapter
+        from benchmarking.domains.base import BenchmarkProblem, Query
+        problem = BenchmarkProblem(
+            name=bn.name, dag=list(bn.dag.edges()),
+            variables=bn.variable_specs,
+            train_data=bn.train_data, test_data=bn.test_data, queries=[],
+            ground_truth=None,
+        )
+        adapter = PyroAdapter(n_samples=50)
+        adapter.fit(problem)
+        if target_kind == "discrete":
+            try:
+                out = adapter.query(
+                    Query(targets=(target,), evidence=ev_row, kind="marginal"),
+                )
+            except Exception:
+                return None
+            return out.detach().cpu().float().reshape(-1)
+        # Continuous / hybrid-continuous target: use query_batch_samples.
+        # ev_row values are per-row scalars; reshape to [1] for the batched API.
+        try:
+            samples = adapter.query_batch_samples(
+                Query(
+                    targets=(target,),
+                    evidence={k: v.reshape(1) for k, v in ev_row.items()},
+                    kind="marginal",
+                ),
+                n_samples=n_samples,
+            )
+        except Exception:
+            return None
+        if samples.shape[0] == 0 or torch.isnan(samples).any():
+            return None
+        return samples.detach().cpu().float().reshape(-1)
     return None
 
 

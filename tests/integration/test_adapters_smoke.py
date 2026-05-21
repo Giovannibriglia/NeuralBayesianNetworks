@@ -228,6 +228,50 @@ def test_pyro_adapter_default_n_samples_36() -> None:
     assert PyroAdapter().n_samples == 50
 
 
+@pytest.mark.skipif(not _has("pyro"), reason="needs pyro-ppl")
+def test_pyro_dispatch_in_runner_not_none() -> None:
+    """Regression for runner dispatch hole: _baseline_posterior_for_query must
+    return a tensor (not None) for the pyro legacy baseline on discrete and
+    continuous_lg.
+
+    ``_baseline_posterior_for_query`` receives the legacy adapter name
+    (``"pyro"``) as its ``baseline`` argument — not the method-keyed label.
+    Pre-fix, ``"pyro"`` fell through to ``return None`` (no dispatch branch),
+    causing every pyro accuracy cell to be no_result regardless of family.
+    """
+    from benchmarking.crash_test_runner import _baseline_posterior_for_query
+    from benchmarking.synthetic import make_synthetic_bn
+
+    for family, target_kind in (("discrete", "discrete"), ("continuous_lg", "continuous")):
+        bn = make_synthetic_bn(
+            family=family, n_nodes=5, n_train=200, n_test=50,
+            n_reference=200, seed=0, device="cpu",
+        )
+        target = next(
+            n for n in bn.train_data if bn.variable_specs[n][0] == target_kind
+        )
+        ev_row = {
+            n: bn.test_data[n][0]
+            for n in list(bn.train_data)[:2] if n != target
+        }
+        # "pyro" is the legacy baseline name that _legacy_adapter_for_spec returns
+        # for both pyro-empirical and pyro-empirical-importance specs.
+        out = _baseline_posterior_for_query(
+            bn, "pyro", target, ev_row, target_kind, n_samples=20,
+        )
+        assert out is not None, (
+            f"_baseline_posterior_for_query returned None for pyro "
+            f"on {family} — dispatch branch missing or broken"
+        )
+        assert isinstance(out, torch.Tensor)
+        assert out.ndim == 1
+        assert torch.isfinite(out).all()
+        if target_kind == "discrete":
+            k = bn.variable_specs[target][1]
+            assert out.shape[0] == k
+            assert abs(float(out.sum()) - 1.0) < 1e-3
+
+
 @pytest.mark.skipif(not _has("gpytorch"), reason="needs gpytorch")
 def test_gpytorch_adapter_skips_discrete_evidence() -> None:
     """GPyTorch is continuous-only — discrete evidence must raise NotImplementedError."""
