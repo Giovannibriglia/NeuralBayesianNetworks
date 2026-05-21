@@ -32,7 +32,12 @@ baselines:
   # v0.6c-C-2: paper-only — gpytorch / pomegranate / pyro param-learning.
   - {library: gpytorch,    mechanism: gp,       param_method: mle}
   - {library: pomegranate, mechanism: discrete, param_method: mle}
-  - {library: pyro,        mechanism: empirical, param_method: mle}
+  # device: cpu — precautionary, NOT based on measurement. The 11×
+  # inference slowdown (see docs/audits/v0.12-pyro-gpu-investigation.md)
+  # is specific to the Importance sampler's Python-loop kernel launches.
+  # pyro fit (lstsq, scatter/add) may behave differently on GPU but is
+  # currently untested. Preserves pre-PR-#102 CPU-only behavior until measured.
+  - {library: pyro, mechanism: empirical, param_method: mle, device: cpu}
 
 per_cell_timeout_s: 600
 output_dir: benchmarking/results
