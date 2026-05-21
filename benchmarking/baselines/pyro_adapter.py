@@ -60,7 +60,7 @@ class PyroAdapter(BaselineAdapter):
     name = "pyro"
     supports = {"discrete", "continuous", "hybrid"}
 
-    def __init__(self, n_samples: int = 50) -> None:
+    def __init__(self, n_samples: int = 50, device: str = "cpu") -> None:
         # n_samples=50 default: paper-config (n_nodes=10, B=1024) hits a
         # 600s per-cell timeout — at the prior 200 default, the per-row
         # ``[marg() for _ in range(n_samples)]`` loop in
@@ -72,6 +72,9 @@ class PyroAdapter(BaselineAdapter):
         # ~2× (sqrt(1/200)≈0.07 → sqrt(1/50)≈0.14), acceptable for
         # this baseline's role as a noisy importance-sampling reference.
         self.n_samples = int(n_samples)
+        if device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = device
         self.problem: BenchmarkProblem | None = None
         self._cpts: Dict[str, torch.Tensor] = {}
         # _gaussian[node] = (beta, sigma, cont_parents, disc_parents, disc_cards)
@@ -123,7 +126,7 @@ class PyroAdapter(BaselineAdapter):
                 self._fit_lg_leaf(node, problem)
 
     def _fit_discrete_cpt(self, node, k, problem):
-        x = problem.train_data[node].cpu().long().reshape(-1)
+        x = problem.train_data[node].to(self.device).long().reshape(-1)
         # In hybrid networks a discrete node may have continuous parents.
         # The CPT approach only handles discrete parents — filter to those.
         all_parents = self._parents[node]
@@ -134,7 +137,7 @@ class PyroAdapter(BaselineAdapter):
         self._cpt_parents[node] = disc_parents
 
         if not disc_parents:
-            counts = torch.zeros(k)
+            counts = torch.zeros(k, device=self.device)
             counts.scatter_add_(0, x, torch.ones_like(x, dtype=torch.float))
             self._cpts[node] = ((counts + 1.0) / (counts.sum() + k)).unsqueeze(0)
             return
@@ -147,9 +150,9 @@ class PyroAdapter(BaselineAdapter):
         n_pa = stride
         pa_idx = torch.zeros_like(x)
         for d, p in enumerate(disc_parents):
-            pa_idx = pa_idx + problem.train_data[p].cpu().long().reshape(-1) * strides[d]
+            pa_idx = pa_idx + problem.train_data[p].to(self.device).long().reshape(-1) * strides[d]
         flat = pa_idx * k + x
-        cnt = torch.zeros(n_pa * k)
+        cnt = torch.zeros(n_pa * k, device=self.device)
         cnt.scatter_add_(0, flat, torch.ones_like(flat, dtype=torch.float))
         cnt = cnt.reshape(n_pa, k) + 1.0
         self._cpts[node] = cnt / cnt.sum(-1, keepdim=True)
@@ -164,7 +167,7 @@ class PyroAdapter(BaselineAdapter):
 
         Root nodes (no parents of any kind) → marginal Normal(mean, std).
         """
-        y = problem.train_data[node].cpu().float().reshape(-1)
+        y = problem.train_data[node].to(self.device).float().reshape(-1)
         cont_parents = [
             p for p in self._parents[node]
             if problem.variables[p][0] == "continuous"
@@ -183,16 +186,18 @@ class PyroAdapter(BaselineAdapter):
 
         cols = [torch.ones_like(y)]
         for p in cont_parents:
-            cols.append(problem.train_data[p].cpu().float().reshape(-1))
+            cols.append(problem.train_data[p].to(self.device).float().reshape(-1))
         for p, k in zip(disc_parents, disc_cards):
-            x_disc = problem.train_data[p].cpu().long().reshape(-1).clamp(0, k - 1)
+            x_disc = problem.train_data[p].to(self.device).long().reshape(-1).clamp(0, k - 1)
             # one-hot, drop last column (k-1 indicator columns)
-            oh = torch.zeros(len(y), k)
+            oh = torch.zeros(len(y), k, device=self.device)
             oh.scatter_(1, x_disc.unsqueeze(1), 1.0)
             cols.append(oh[:, :-1])  # [N, k-1]
         X = torch.cat([c.reshape(len(y), -1) for c in cols], dim=1)
-        # gelsd handles rank-deficient X (e.g. n_train < num_parents+1).
-        beta = torch.linalg.lstsq(X, y, driver="gelsd").solution.reshape(-1)
+        # gelsd handles rank-deficient X on CPU; CUDA only supports gels
+        # (full-rank QR path), acceptable for paper-scale data.
+        driver = "gels" if self.device.startswith("cuda") else "gelsd"
+        beta = torch.linalg.lstsq(X, y, driver=driver).solution.reshape(-1)
         residuals = y - X @ beta
         sigma = residuals.std().clamp_min(1e-3)
         self._gaussian[node] = (beta, sigma, cont_parents, disc_parents, disc_cards)
@@ -256,12 +261,12 @@ class PyroAdapter(BaselineAdapter):
         marg = self._posterior_samples(q, n_samples=self.n_samples)
         if target in self._cards:
             k = self._cards[target]
-            counts = torch.zeros(k)
+            counts = torch.zeros(k, device=self.device)
             for v in marg.long().reshape(-1).tolist():
                 if 0 <= v < k:
                     counts[v] += 1
-            return counts / counts.sum().clamp_min(1e-12)
-        return marg.mean(0).reshape(1).float()
+            return (counts / counts.sum().clamp_min(1e-12)).cpu()
+        return marg.mean(0).reshape(1).float().cpu()
 
     # ------------------------------------------------------------------
     # Batched samples (v0.4)
@@ -279,12 +284,12 @@ class PyroAdapter(BaselineAdapter):
         """
         b = self._batch_size(q)
         target = q.targets[0]
-        out = torch.empty((b, n_samples, 1), dtype=torch.float)
+        out = torch.empty((b, n_samples, 1), dtype=torch.float, device=self.device)
         for i in range(b):
             row_q = self._row_query(q, i)
             samples = self._posterior_samples(row_q, n_samples=n_samples)
             out[i] = samples.float().reshape(n_samples, 1)
-        return out
+        return out.cpu()
 
     def _posterior_samples(
         self, q: Query, *, n_samples: int,
@@ -301,8 +306,8 @@ class PyroAdapter(BaselineAdapter):
         for k, v in q.evidence.items():
             val = v.item() if isinstance(v, torch.Tensor) else v
             evidence[k] = (
-                torch.tensor(int(val)) if k in self._cards
-                else torch.tensor(float(val))
+                torch.tensor(int(val), device=self.device) if k in self._cards
+                else torch.tensor(float(val), device=self.device)
             )
         model = self._pyro_model()
         conditioned = poutine.condition(model, data=evidence)

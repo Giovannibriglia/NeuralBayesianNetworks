@@ -248,7 +248,7 @@ def build_adapter_v2(
         v1 = get_adapter("pomegranate")
     elif spec.library == "pyro":
         from benchmarking.baselines import get_adapter
-        v1 = get_adapter("pyro")
+        v1 = get_adapter("pyro", device=device)
     else:
         raise NotImplementedError(
             f"build_adapter_v2: unknown library {spec.library!r}",

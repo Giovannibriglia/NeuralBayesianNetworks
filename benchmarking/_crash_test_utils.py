@@ -130,10 +130,23 @@ class CrashTestConfig:
         required = {"library", "mechanism", "param_method"}
         if mode == "inference":
             required |= {"inference_method"}
+        known = required | {"inference_method", "device"}
         missing = required - set(b.keys())
         if missing:
             raise ValueError(
                 f"baseline entry {b!r} missing fields: {sorted(missing)}",
+            )
+        unknown = set(b.keys()) - known
+        if unknown:
+            raise ValueError(
+                f"baseline entry {b!r} has unrecognised fields: "
+                f"{sorted(unknown)}.  Known optional fields: device.",
+            )
+        raw_device = b.get("device")
+        if raw_device is not None and raw_device not in {"cpu", "cuda", "auto"}:
+            raise ValueError(
+                f"baseline entry {b!r}: device={raw_device!r} is not one of "
+                f"'cpu', 'cuda', 'auto'.",
             )
         return {
             "library": str(b["library"]),
@@ -143,6 +156,7 @@ class CrashTestConfig:
                 str(b["inference_method"])
                 if b.get("inference_method") is not None else None
             ),
+            "device": str(raw_device) if raw_device is not None else None,
         }
 
     @classmethod

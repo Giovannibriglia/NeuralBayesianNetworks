@@ -61,6 +61,8 @@ class BaselineSpec:
     mechanism: str          # 'discrete' | 'lg' | 'cat' | 'neuralcat' | 'mdn' | 'flow' | 'hybrid' | 'gp'
     param_method: str       # 'mle' | 'bayes'
     inference_method: str | None = None  # 've' | 'lw' | 'predict' | 'router' | None
+    # Optional per-baseline device override.  None = inherit cfg.device.
+    device: str | None = None  # 'cpu' | 'cuda' | 'auto' | None
 
 
 def _label_from_spec(spec: BaselineSpec | Mapping[str, str | None]) -> str:

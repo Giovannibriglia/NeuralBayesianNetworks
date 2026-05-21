@@ -328,9 +328,15 @@ def run_inference(
                                     _sidecar.append(r)
                             continue
                         legacy = _legacy_adapter_for_spec(spec)
+                        spec_device = (
+                            spec.get("device") if isinstance(spec, dict)
+                            else getattr(spec, "device", None)
+                        )
+                        effective_device = spec_device or cfg.device
                         cell_rows = run_with_guard(
-                            lambda f=family, nn=n, ss=s, lg=legacy, lb=label:
-                                _inference_cell(cfg, f, nn, ss, lg, lb),
+                            lambda f=family, nn=n, ss=s, lg=legacy, lb=label,
+                                   dev=effective_device:
+                                _inference_cell(cfg, f, nn, ss, lg, lb, device=dev),
                             family=family, n_nodes=n, seed=s, baseline=label,
                             timeout_s=cfg.per_cell_timeout_s,
                         )
@@ -450,9 +456,12 @@ def _param_learning_cell(
 
 def _inference_cell(
     cfg: CrashTestConfig, family: str, n: int, seed: int, baseline: str,
-    label: str,
+    label: str, *, device: str | None = None,
 ) -> List[CellResult]:
     """Time `B` queries against the *true* model under the workload contract."""
+    # Per-baseline device override (from YAML `device:` field); falls back
+    # to cfg.device when the spec has no override.
+    eff_device = device if device is not None else cfg.device
     bn = _generate_bn(cfg, family, n, seed)
     # PR-B-round-2 §3 fix: discrete family has no ``ground_truth_samples``
     # by design; synthesise one reference pool per cell so the accuracy
@@ -485,7 +494,9 @@ def _inference_cell(
             bn, baseline, queries_batch, n_lw_samples=cfg.nbn_lw_n_samples,
         )
     elif baseline in {"pgmpy", "pomegranate", "gpytorch", "pyro"}:
-        total_time_s = _time_loop_inference(bn, baseline, queries_batch)
+        total_time_s = _time_loop_inference(
+            bn, baseline, queries_batch, device=eff_device,
+        )
     else:
         raise NotImplementedError(
             f"inference baseline {baseline!r} not registered",
@@ -526,7 +537,7 @@ def _inference_cell(
     # aggregator/plotter consumers; explicit rows are additive.
     metric_dict = _compute_inference_metrics(
         bn, baseline, queries_batch, family,
-        n_lw_samples=cfg.nbn_lw_n_samples,
+        n_lw_samples=cfg.nbn_lw_n_samples, device=eff_device,
     )
     target_kind = bn.variable_specs[queries_batch.targets[0]][0]
     accuracy_key = "tv_per_node" if target_kind == "discrete" else "w1_per_node"
@@ -985,7 +996,7 @@ def _time_nbn_inference(
     return statistics.median(times)
 
 
-def _time_loop_inference(bn: SyntheticBN, baseline: str, q) -> float:
+def _time_loop_inference(bn: SyntheticBN, baseline: str, q, *, device: str = "cpu") -> float:
     """Loop ``B`` times with per-row ``query``; report median total time."""
     from benchmarking.baselines import get_adapter
     from benchmarking.domains.base import BenchmarkProblem, Query
@@ -993,7 +1004,8 @@ def _time_loop_inference(bn: SyntheticBN, baseline: str, q) -> float:
         name=bn.name, dag=list(bn.dag.edges()), variables=bn.variable_specs,
         train_data=bn.train_data, test_data=bn.test_data, queries=[],
     )
-    adapter = get_adapter(baseline)
+    adapter_kw = {"device": device} if baseline == "pyro" else {}
+    adapter = get_adapter(baseline, **adapter_kw)
     adapter.fit(problem)
     if hasattr(adapter, "kind") and adapter.kind == "unsupported":
         raise NotImplementedError(
@@ -1128,7 +1140,7 @@ def _compute_inference_accuracy(
 def _compute_inference_metrics(
     bn: SyntheticBN, baseline: str, q, family: str,
     *, n_samples: int = 200, eps_factor: float = 0.50, n_eff_min: int = 10,
-    n_lw_samples: int = 512, n_oracle_samples: int = 2000,
+    n_lw_samples: int = 512, n_oracle_samples: int = 2000, device: str = "cpu",
 ) -> dict[str, float | None]:
     """Compute {tv, jsd, w1}_per_node for the inference query battery.
 
@@ -1173,7 +1185,7 @@ def _compute_inference_metrics(
         try:
             pred = _baseline_posterior_for_query(
                 bn, baseline, target, ev_row, target_kind,
-                n_samples=n_samples, n_lw_samples=n_lw_samples,
+                n_samples=n_samples, n_lw_samples=n_lw_samples, device=device,
             )
         except Exception:
             continue
@@ -1304,7 +1316,7 @@ def _filter_ground_truth(
 def _baseline_posterior_for_query(
     bn: SyntheticBN, baseline: str, target: str,
     ev_row: Dict[str, torch.Tensor], target_kind: str, *, n_samples: int,
-    n_lw_samples: int = 512,
+    n_lw_samples: int = 512, device: str = "cpu",
 ) -> torch.Tensor | None:
     """Return posterior samples (continuous) or probability vector (discrete)
     for a single query, per baseline."""
@@ -1473,7 +1485,7 @@ def _baseline_posterior_for_query(
             train_data=bn.train_data, test_data=bn.test_data, queries=[],
             ground_truth=None,
         )
-        adapter = PyroAdapter(n_samples=50)
+        adapter = PyroAdapter(n_samples=50, device=device)
         adapter.fit(problem)
         if target_kind == "discrete":
             try:
