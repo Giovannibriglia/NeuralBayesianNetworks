@@ -57,9 +57,9 @@ On continuous Linear Gaussian networks, NBN matches pgmpy quality
 ### Hybrid networks
 
 NBN-hybrid handles mixed continuous-discrete networks across all n_nodes
-in our benchmark (n ∈ {10, 50, 100, 500, 1000}). No other library in the
-suite (pgmpy, gpytorch, pomegranate, pyro) has applicable parameter-learning
-or inference baselines for hybrid family.
+in our benchmark (n ∈ {10, 50, 100, 500, 1000}). Among the external
+libraries, only pyro covers hybrid inference (Importance sampler); pgmpy,
+gpytorch, and pomegranate have no applicable hybrid baselines.
 
 ## Install
 
@@ -180,7 +180,9 @@ Each config is a YAML file with these fields:
     n_seeds:              number of seeds per cell (mean ± std reported)
     n_queries_per_cell:   number of queries per cell
     nbn_batch_size:       B for NBN's query_batch (inference mode only)
-    baselines:            list of baseline names
+    baselines:            list of baseline spec dicts, each with required
+                          fields {library, mechanism, param_method} plus
+                          optional inference_method and device (cpu|cuda|auto)
     per_cell_timeout_s:   wall-clock cap per (family, n_nodes, seed, baseline)
 
 See `benchmarking/configs/*.yaml` for all four shipped configs.
@@ -201,6 +203,7 @@ publishable empirical state.
 | Aggregator + tables (CSV/MD/parquet/TEX) | ✅ v0.6c-C-3 |
 | Paper-grade figures + paper-data anchor | ✅ v0.6c-d |
 | Multi-library baselines (pgmpy, gpytorch, pomegranate, pyro) | ✅ |
+| Per-baseline YAML device override | ✅ v0.12 |
 | README enrichment | ✅ v0.6d |
 
 Active backlog (v0.7, none paper-blocking):
@@ -209,7 +212,7 @@ Active backlog (v0.7, none paper-blocking):
 - Adapter audits: pgmpy-mle vs pgmpy-bayes / nbn-cat vs nbn-neuralcat fit-path distinctness (#43)
 - HybridRouter cuda assert at hybrid n ≥ 10 (#30)
 - NeuralCategorical-VE engine refactor (#26)
-- pyro paper-config timeout (#36)
+- pyro inference speedup (v0.8 candidate) — current Importance sampler is Python-bound and CPU-only; GPU is 11× slower at benchmark scale, so speedup requires `pyro.plate` vectorisation or alternative inference modes (SVI, NUTS). See `docs/audits/v0.12-pyro-gpu-investigation.md`.
 
 See the [open issues](https://github.com/Giovannibriglia/NeuralBayesianNetworks/issues) for the full v0.7 backlog.
 
