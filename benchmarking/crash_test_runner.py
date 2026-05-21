@@ -328,9 +328,15 @@ def run_inference(
                                     _sidecar.append(r)
                             continue
                         legacy = _legacy_adapter_for_spec(spec)
+                        spec_device = (
+                            spec.get("device") if isinstance(spec, dict)
+                            else getattr(spec, "device", None)
+                        )
+                        effective_device = spec_device or cfg.device
                         cell_rows = run_with_guard(
-                            lambda f=family, nn=n, ss=s, lg=legacy, lb=label:
-                                _inference_cell(cfg, f, nn, ss, lg, lb),
+                            lambda f=family, nn=n, ss=s, lg=legacy, lb=label,
+                                   dev=effective_device:
+                                _inference_cell(cfg, f, nn, ss, lg, lb, device=dev),
                             family=family, n_nodes=n, seed=s, baseline=label,
                             timeout_s=cfg.per_cell_timeout_s,
                         )
@@ -450,9 +456,12 @@ def _param_learning_cell(
 
 def _inference_cell(
     cfg: CrashTestConfig, family: str, n: int, seed: int, baseline: str,
-    label: str,
+    label: str, *, device: str | None = None,
 ) -> List[CellResult]:
     """Time `B` queries against the *true* model under the workload contract."""
+    # Per-baseline device override (from YAML `device:` field); falls back
+    # to cfg.device when the spec has no override.
+    eff_device = device if device is not None else cfg.device
     bn = _generate_bn(cfg, family, n, seed)
     # PR-B-round-2 §3 fix: discrete family has no ``ground_truth_samples``
     # by design; synthesise one reference pool per cell so the accuracy
@@ -486,7 +495,7 @@ def _inference_cell(
         )
     elif baseline in {"pgmpy", "pomegranate", "gpytorch", "pyro"}:
         total_time_s = _time_loop_inference(
-            bn, baseline, queries_batch, device=cfg.device,
+            bn, baseline, queries_batch, device=eff_device,
         )
     else:
         raise NotImplementedError(
@@ -528,7 +537,7 @@ def _inference_cell(
     # aggregator/plotter consumers; explicit rows are additive.
     metric_dict = _compute_inference_metrics(
         bn, baseline, queries_batch, family,
-        n_lw_samples=cfg.nbn_lw_n_samples, device=cfg.device,
+        n_lw_samples=cfg.nbn_lw_n_samples, device=eff_device,
     )
     target_kind = bn.variable_specs[queries_batch.targets[0]][0]
     accuracy_key = "tv_per_node" if target_kind == "discrete" else "w1_per_node"
