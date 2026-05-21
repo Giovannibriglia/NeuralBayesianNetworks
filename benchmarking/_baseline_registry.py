@@ -209,10 +209,12 @@ _BASELINE_APPLICABILITY: dict[str, BaselineApplicability] = {
     ),
     "pomegranate-discrete":      BaselineApplicability(frozenset({"discrete"})),
     "pomegranate-discrete-ve":   BaselineApplicability(frozenset({"discrete"})),
+    # hybrid added in issue #61: _fit_lg_leaf now one-hot encodes discrete
+    # parents and runs a single lstsq over the combined design matrix.
     "pyro-empirical":            BaselineApplicability(
-        frozenset({"discrete", "continuous_lg"})),
+        frozenset({"discrete", "continuous_lg", "hybrid"})),
     "pyro-empirical-importance": BaselineApplicability(
-        frozenset({"discrete", "continuous_lg"})),
+        frozenset({"discrete", "continuous_lg", "hybrid"})),
 }
 
 

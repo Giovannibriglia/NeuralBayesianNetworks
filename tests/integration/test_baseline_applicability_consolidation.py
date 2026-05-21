@@ -145,11 +145,12 @@ _EXPECTED_APPLICABILITY: dict[tuple[str, str], bool] = {
     ("pyro-empirical", "discrete"): True,
     ("pyro-empirical", "continuous_lg"): True,
     ("pyro-empirical", "continuous_nongauss"): False,
-    ("pyro-empirical", "hybrid"): False,
+    # hybrid added: one-hot regression for discrete parents (issue #61).
+    ("pyro-empirical", "hybrid"): True,
     ("pyro-empirical-importance", "discrete"): True,
     ("pyro-empirical-importance", "continuous_lg"): True,
     ("pyro-empirical-importance", "continuous_nongauss"): False,
-    ("pyro-empirical-importance", "hybrid"): False,
+    ("pyro-empirical-importance", "hybrid"): True,
 }
 
 

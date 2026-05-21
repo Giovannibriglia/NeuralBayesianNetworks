@@ -6,26 +6,31 @@ then run inference via ``pyro.infer.Importance`` (the canonical Pyro path
 for unconditional models) and read the empirical posterior marginal of the
 query target.
 
-For ``continuous_lg`` networks each continuous node is fit with a
-linear-Gaussian conditional ``Normal(beta_0 + sum_i beta_i * pa_i, sigma)``
-via least-squares regression on its continuous parents (see
-``_fit_lg_leaf``); ``_pyro_model`` then samples the conditional Normal
-ancestrally.
+For ``continuous_lg`` and ``hybrid`` networks each continuous node is fit
+with a linear-Gaussian conditional
+``Normal(beta_0 + sum_i beta_i * pa_i + sum_j gamma_j * oh_j, sigma)``
+via least-squares regression.  Continuous parents contribute directly;
+discrete parents are one-hot encoded (cardinality - 1 columns, dropping the
+last category to avoid collinearity with the intercept) and concatenated to
+the design matrix.  A single ``torch.linalg.lstsq`` call fits both
+contributions (``_fit_lg_leaf``); ``_pyro_model`` reconstructs ``mu`` from
+both the continuous and the one-hot discrete contributions.
+
+Edge cases handled:
+
+* Continuous-only parents — same as the previous ``continuous_lg`` path.
+* Discrete-only parents — one-hot regression only (no continuous columns).
+* No parents at all — marginal ``Normal(mean, std)`` (root node).
+* Mixed (continuous + discrete) parents — canonical hybrid case.
 
 .. note::
-    ``continuous_nongauss`` and ``hybrid`` are still out of scope.
-    ``continuous_nongauss`` is excluded because the sampling
+    ``continuous_nongauss`` is still out of scope.  The sampling
     distribution itself is the structural mismatch — the lstsq path
-    would still yield a linear mean fit, but ``Normal(mu, sigma)``
-    is the wrong family when residuals aren't Gaussian; correcting
-    this needs SVI with a parameterised guide, not a different
-    fit-path.  ``hybrid`` is excluded because the LG-conditional
-    path assumes continuous parents only — a continuous node with
-    discrete parents currently falls back to a marginal Gaussian
-    fit, which is structurally wrong.  ``_BASELINE_APPLICABILITY``
-    accordingly excludes both families for ``pyro-empirical`` and
-    ``pyro-empirical-importance``.  The mixed-parent (discrete-parent
-    / continuous-child) gap is tracked as a v0.8 follow-up.
+    yields a linear mean fit, but ``Normal(mu, sigma)`` is the wrong
+    family when residuals aren't Gaussian; correcting this needs SVI
+    with a parameterised guide, not a different fit-path.
+    ``_BASELINE_APPLICABILITY`` accordingly excludes ``continuous_nongauss``
+    for ``pyro-empirical`` and ``pyro-empirical-importance``.
 
 Notes
 -----
@@ -36,7 +41,7 @@ modular enough that an Importance-sampling baseline already exercises:
     - posterior inference via `pyro.infer.Importance`
     - empirical marginal extraction for a chosen target
 
-Upgrading to NUTS / amortised SVI for hybrid networks is tracked in v0.7
+Upgrading to NUTS / amortised SVI is tracked in v0.7
 (separate issue from the continuous-correctness one).
 """
 from __future__ import annotations
@@ -69,15 +74,27 @@ class PyroAdapter(BaselineAdapter):
         self.n_samples = int(n_samples)
         self.problem: BenchmarkProblem | None = None
         self._cpts: Dict[str, torch.Tensor] = {}
-        # _gaussian[node] = (beta, sigma, cont_parents) where beta is a
-        # 1-D tensor of length len(cont_parents)+1 (intercept first), and
-        # cont_parents is the ordered list of continuous parent names
-        # used to build the design matrix.  Empty cont_parents → beta is
-        # length-1 (just the marginal mean), recovering the prior
-        # marginal-Gaussian fit for continuous root nodes.
+        # _gaussian[node] = (beta, sigma, cont_parents, disc_parents, disc_cards)
+        #
+        # beta   — 1-D tensor of length 1 + len(cont_parents) + sum(k-1 for k in disc_cards)
+        #          layout: [intercept | cont coefficients | one-hot coefficients (card-1 per disc pa)]
+        # sigma  — scalar residual std, clamped ≥ 1e-3
+        # cont_parents — ordered list of continuous parent names
+        # disc_parents — ordered list of discrete parent names (may be empty)
+        # disc_cards   — list of int cardinalities matching disc_parents
+        #
+        # Root nodes (no parents) → beta length-1 (marginal mean), disc_parents=[].
         self._gaussian: Dict[
-            str, tuple[torch.Tensor, torch.Tensor, List[str]]
+            str, tuple[torch.Tensor, torch.Tensor, List[str], List[str], List[int]]
         ] = {}
+        # _cpt_parents[node] — the discrete-only parent list used to build
+        # the CPT for that node.  In hybrid networks a discrete node may
+        # have continuous parents; those are ignored in the CPT (we model
+        # P(node | discrete_parents) marginalising over continuous ones).
+        # _pyro_model uses this list instead of self._parents[node] for
+        # CPT row-index construction, ensuring fit and inference use the
+        # same cardinalities.
+        self._cpt_parents: Dict[str, List[str]] = {}
         self._parents: Dict[str, List[str]] = {}
         self._cards: Dict[str, int] = {}
         self._topo: List[str] = []
@@ -107,21 +124,29 @@ class PyroAdapter(BaselineAdapter):
 
     def _fit_discrete_cpt(self, node, k, problem):
         x = problem.train_data[node].cpu().long().reshape(-1)
-        parents = self._parents[node]
-        if not parents:
+        # In hybrid networks a discrete node may have continuous parents.
+        # The CPT approach only handles discrete parents — filter to those.
+        all_parents = self._parents[node]
+        disc_parents = [
+            p for p in all_parents
+            if problem.variables[p][0] == "discrete"
+        ]
+        self._cpt_parents[node] = disc_parents
+
+        if not disc_parents:
             counts = torch.zeros(k)
             counts.scatter_add_(0, x, torch.ones_like(x, dtype=torch.float))
             self._cpts[node] = ((counts + 1.0) / (counts.sum() + k)).unsqueeze(0)
             return
 
-        pa_cards = [self._cards.get(p, problem.variables[p][1]) for p in parents]
+        pa_cards = [self._cards[p] for p in disc_parents]
         strides, stride = [], 1
         for c in reversed(pa_cards):
             strides.append(stride); stride *= c
         strides = list(reversed(strides))
         n_pa = stride
         pa_idx = torch.zeros_like(x)
-        for d, p in enumerate(parents):
+        for d, p in enumerate(disc_parents):
             pa_idx = pa_idx + problem.train_data[p].cpu().long().reshape(-1) * strides[d]
         flat = pa_idx * k + x
         cnt = torch.zeros(n_pa * k)
@@ -132,33 +157,45 @@ class PyroAdapter(BaselineAdapter):
     def _fit_lg_leaf(self, node, problem):
         """Linear-Gaussian conditional fit for a continuous node.
 
-        Fits ``y = beta_0 + sum_i beta_i * pa_i + eps`` via least-squares
-        on the continuous parents.  Discrete parents (only present in
-        the hybrid family, which is gated out in
-        ``_BASELINE_APPLICABILITY``) are ignored — a continuous node
-        with no continuous parents falls back to the marginal-Gaussian
-        fit ``Normal(mean, std)``.
+        Fits ``y = beta_0 + Σ beta_i * cont_pa_i + Σ gamma_j * oh_j + eps``
+        via least-squares.  Discrete parents are one-hot encoded using
+        cardinality - 1 columns (last category dropped to avoid collinearity
+        with the intercept).  Continuous parents enter directly.
+
+        Root nodes (no parents of any kind) → marginal Normal(mean, std).
         """
         y = problem.train_data[node].cpu().float().reshape(-1)
         cont_parents = [
             p for p in self._parents[node]
             if problem.variables[p][0] == "continuous"
         ]
-        if not cont_parents:
+        disc_parents = [
+            p for p in self._parents[node]
+            if problem.variables[p][0] == "discrete"
+        ]
+        disc_cards = [problem.variables[p][1] for p in disc_parents]
+
+        if not cont_parents and not disc_parents:
             beta = y.mean().reshape(1)
             sigma = y.std().clamp_min(1e-3)
-            self._gaussian[node] = (beta, sigma, [])
+            self._gaussian[node] = (beta, sigma, [], [], [])
             return
 
         cols = [torch.ones_like(y)]
         for p in cont_parents:
             cols.append(problem.train_data[p].cpu().float().reshape(-1))
-        X = torch.stack(cols, dim=1)
+        for p, k in zip(disc_parents, disc_cards):
+            x_disc = problem.train_data[p].cpu().long().reshape(-1).clamp(0, k - 1)
+            # one-hot, drop last column (k-1 indicator columns)
+            oh = torch.zeros(len(y), k)
+            oh.scatter_(1, x_disc.unsqueeze(1), 1.0)
+            cols.append(oh[:, :-1])  # [N, k-1]
+        X = torch.cat([c.reshape(len(y), -1) for c in cols], dim=1)
         # gelsd handles rank-deficient X (e.g. n_train < num_parents+1).
         beta = torch.linalg.lstsq(X, y, driver="gelsd").solution.reshape(-1)
         residuals = y - X @ beta
         sigma = residuals.std().clamp_min(1e-3)
-        self._gaussian[node] = (beta, sigma, cont_parents)
+        self._gaussian[node] = (beta, sigma, cont_parents, disc_parents, disc_cards)
 
     # ------------------------------------------------------------------
     # Pyro model + Importance sampler
@@ -171,30 +208,45 @@ class PyroAdapter(BaselineAdapter):
 
         cpts = self._cpts
         gauss = self._gaussian
-        parents = self._parents
+        cpt_parents = self._cpt_parents  # discrete-only parent list per CPT node
         cards = self._cards
         topo = self._topo
 
         def model():
             s = {}
             for node in topo:
-                pa = parents[node]
                 if node in cpts:
-                    if pa:
+                    # Use the discrete-only parent list that was used during
+                    # CPT fitting — in hybrid networks a discrete node's
+                    # continuous parents are not in the CPT table.
+                    cpa = cpt_parents.get(node, [])
+                    if cpa:
                         row, stride = 0, 1
-                        for p in reversed(pa):
+                        for p in reversed(cpa):
                             v = s[p].long() if isinstance(s[p], torch.Tensor) else int(s[p])
                             row = row + v * stride
-                            stride *= cards.get(p, 2)
+                            stride *= cards[p]
                         probs = cpts[node][row]
                     else:
                         probs = cpts[node][0]
                     s[node] = pyro.sample(node, dist.Categorical(probs))
                 else:
-                    beta, sigma, cont_pa = gauss[node]
+                    beta, sigma, cont_pa, disc_pa, disc_cards = gauss[node]
                     mu = beta[0]
                     for i, p in enumerate(cont_pa):
                         mu = mu + beta[i + 1] * s[p]
+                    # Discrete-parent one-hot contribution.
+                    # beta layout after the cont block:
+                    #   positions [1 + len(cont_pa) : 1 + len(cont_pa) + k-1]
+                    #   are the one-hot coefficients for each discrete parent.
+                    offset = 1 + len(cont_pa)
+                    for p, k in zip(disc_pa, disc_cards):
+                        v = s[p].long() if isinstance(s[p], torch.Tensor) else int(s[p])
+                        v = max(0, min(int(v), k - 1))
+                        # last category → all indicators 0 (absorbed into intercept)
+                        if v < k - 1:
+                            mu = mu + beta[offset + v]
+                        offset += k - 1
                     s[node] = pyro.sample(node, dist.Normal(mu, sigma))
             return s
         return model
@@ -276,5 +328,6 @@ class PyroAdapter(BaselineAdapter):
 
     def teardown(self) -> None:
         self._cpts = {}
+        self._cpt_parents = {}
         self._gaussian = {}
         self.problem = None

@@ -272,6 +272,82 @@ def test_pyro_dispatch_in_runner_not_none() -> None:
             assert abs(float(out.sum()) - 1.0) < 1e-3
 
 
+@pytest.mark.skipif(not _has("pyro"), reason="needs pyro-ppl")
+def test_pyro_adapter_hybrid_one_hot_regression_61() -> None:
+    """Regression for issue #61: pyro must handle hybrid networks where
+    a continuous node has both continuous and discrete parents.
+
+    Fixture: 3-node network ``D -> B <- A`` where D is discrete (k=3)
+    and A is continuous.  B = 0.5*A + offset[D] + N(0, 0.1), where
+    offset = [0, 1, 2] per discrete category.
+
+    Two checks:
+    1. Beta coefficients for the discrete one-hot columns must be
+       non-degenerate (std of contributions > 0.3), confirming the
+       discrete-parent dimension is actually fitted.
+    2. Posterior samples of B conditioned on D=2 (offset=2) vs D=0
+       (offset=0) must differ in mean by approximately 2.0 (the
+       planted category gap), confirming the one-hot contribution
+       propagates correctly through _pyro_model.
+    """
+    import torch
+    from benchmarking.baselines.pyro_adapter import PyroAdapter
+    from benchmarking.domains.base import BenchmarkProblem, Query
+
+    torch.manual_seed(42)
+    n = 1000
+    d = torch.randint(0, 3, (n,))         # discrete parent, k=3
+    a = torch.randn(n)                     # continuous parent
+    offsets = torch.tensor([0.0, 1.0, 2.0])
+    b = 0.5 * a + offsets[d] + 0.1 * torch.randn(n)
+
+    problem = BenchmarkProblem(
+        name="pyro_hybrid_61",
+        dag=[("D", "B"), ("A", "B")],
+        variables={"D": ("discrete", 3), "A": ("continuous", 1), "B": ("continuous", 1)},
+        train_data={"D": d, "A": a, "B": b},
+        test_data={"D": d, "A": a, "B": b},
+        queries=[], ground_truth=None,
+    )
+    adapter = PyroAdapter(n_samples=200)
+    adapter.fit(problem)
+    try:
+        beta, sigma, cont_pa, disc_pa, disc_cards = adapter._gaussian["B"]
+        # Check 1: discrete parent is present in the fit
+        assert disc_pa == ["D"], f"expected disc_pa=['D'], got {disc_pa}"
+        assert disc_cards == [3], f"expected disc_cards=[3], got {disc_cards}"
+        # beta layout: [intercept, cont_coeff(A), oh_coeff_D0, oh_coeff_D1]
+        assert beta.shape[0] == 4, f"expected beta len 4, got {beta.shape[0]}"
+        # one-hot coefficients should be non-degenerate (planted gap is 1.0)
+        oh_coeffs = beta[2:]  # two one-hot columns for k=3
+        assert oh_coeffs.std() > 0.3, (
+            f"one-hot coefficients {oh_coeffs.tolist()} have near-zero std; "
+            "discrete-parent dimension was not fitted."
+        )
+
+        # Check 2: posterior mean of B shifts with discrete parent value
+        means = {}
+        for d_obs in (0, 2):
+            samples = adapter._posterior_samples(
+                Query(targets=("B",),
+                      evidence={"D": torch.tensor(d_obs),
+                                 "A": torch.tensor(0.0)},
+                      kind="marginal"),
+                n_samples=400,
+            )
+            means[d_obs] = float(samples.mean())
+
+        gap = means[2] - means[0]
+        assert abs(gap - 2.0) < 0.5, (
+            f"P(B|D=2,A=0) mean = {means[2]:+.3f}, P(B|D=0,A=0) mean = "
+            f"{means[0]:+.3f}, gap = {gap:+.3f} (expected ~2.0). "
+            f"A gap near 0 indicates the one-hot contribution is not "
+            f"propagating through _pyro_model."
+        )
+    finally:
+        adapter.teardown()
+
+
 @pytest.mark.skipif(not _has("gpytorch"), reason="needs gpytorch")
 def test_gpytorch_adapter_skips_discrete_evidence() -> None:
     """GPyTorch is continuous-only — discrete evidence must raise NotImplementedError."""
