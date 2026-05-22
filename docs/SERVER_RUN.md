@@ -49,7 +49,9 @@ will create output in the wrong location or fail.
 ```bash
 cd /path/to/NeuralBayesianNetworks   # always from repo root
 
-# Inference benchmark (~12 h on CUDA, longer on CPU-only server)
+# Inference benchmark: ~15-20 h on a CUDA server (NBN baselines on GPU,
+# pyro on CPU; pyro timeouts at n≥100 for discrete/continuous_lg/hybrid
+# add ~3-5 h regardless of CUDA). ~30-50 h on a CPU-only server.
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 nohup nbn-bench inference \
   --config benchmarking/configs/inference_paper.yaml \
@@ -186,6 +188,27 @@ pyro at large n (see §8). No `error` rows.
 
 If the run was for parameter learning, substitute
 `parameter_learning_paper_metrics.parquet`.
+
+### Investigating error rows
+
+If the status breakdown shows any `error` rows (not `oom`, `timeout`,
+or `not_supported`), these are unexpected — `run_with_guard` caught
+something the registry did not gate out. Inspect:
+
+```bash
+python3 -c "
+import pandas as pd
+df = pd.read_parquet('benchmarking/results/raw/inference_paper_metrics.parquet')
+errs = df[df.status == 'error']
+print(errs[['family', 'n_nodes', 'seed', 'baseline', 'metric', 'error_msg']].to_string())
+"
+```
+
+Common causes: a baseline that should have been registry-gated but
+wasn't, a config-loaded baseline that isn't installed, or a
+device-specific issue (e.g., CUDA-only lstsq driver on a CPU-only
+server). File an issue or check the run log before proceeding to
+figures.
 
 ## 8. Known caveats
 
