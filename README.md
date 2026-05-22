@@ -63,7 +63,12 @@ gpytorch, and pomegranate have no applicable hybrid baselines.
 
 ## Install
 
-    pip install -e ".[dev,bench,neural]"
+    pip install -e ".[dev,bench,neural,gp,mcmc]"
+
+The `gp` and `mcmc` extras install gpytorch and pyro respectively.
+Both are required for paper-grade benchmark runs (`inference_paper.yaml`,
+`parameter_learning_paper.yaml`). Without them the runner silently skips
+those baselines (cells emit `not_supported` rather than erroring).
 
 ## Quick start
 
