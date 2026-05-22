@@ -7,8 +7,8 @@ families: [discrete, continuous_lg, continuous_nongauss, hybrid]
 n_nodes: [5, 10]
 n_seeds: 1
 n_queries_per_cell: 2
-n_train: 2000
-n_test: 500
+n_train: 2048
+n_test: 512
 n_reference: 5000
 edge_density: 0.20
 max_in_degree: 2

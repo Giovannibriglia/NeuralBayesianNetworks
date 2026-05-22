@@ -15,7 +15,7 @@ config_schema_version: 2
 
 mode: inference
 families: [discrete, continuous_lg, continuous_nongauss, hybrid]
-n_nodes: [5, 10, 20, 50, 100, 200, 500, 1000, 2000]
+n_nodes: [5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 50000, 100000]
 n_seeds: 1
 n_queries_per_cell: 1
 nbn_batch_size: 0                     # 0 → use n_queries_per_cell (= 1)
@@ -27,7 +27,7 @@ edge_density: 0.20
 max_in_degree: 4
 cardinality: 4
 fraction_continuous: 0.5
-fit_epochs: 10                        # inference fit only; cuts NBN model.fit() cost
+fit_epochs: 2                        # inference fit only; cuts NBN model.fit() cost
 
 baselines:
   - {library: pgmpy, mechanism: discrete, param_method: mle,   inference_method: ve}
@@ -48,6 +48,6 @@ baselines:
   # makes GPU ~10x slower than CPU at benchmark scale.
   - {library: pyro, mechanism: empirical, param_method: mle, inference_method: importance, device: cpu}
 
-per_cell_timeout_s: 30
+per_cell_timeout_s: 60
 output_dir: benchmarking/results
 output_prefix: inference_scalability

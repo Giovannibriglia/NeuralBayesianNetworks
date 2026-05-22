@@ -17,10 +17,10 @@ n_nodes: [10, 50, 100, 500, 1000]   # 5000 dropped (cuda OOM at 7.6 GiB)
 n_seeds: 5
 n_queries_per_cell: 1024
 nbn_batch_size: 256                  # laptop variant: was 1024
-n_train: 10000
+n_train: 10240
 n_test: 1024                          # explicit per v0.6c-A audit (was silently 500)
 n_reference: 50000
-nbn_lw_n_samples: 4000
+nbn_lw_n_samples: 4096
 edge_density: 0.20
 max_in_degree: 4
 cardinality: 4
