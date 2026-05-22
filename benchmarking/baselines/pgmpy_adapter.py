@@ -45,7 +45,7 @@ class PgmpyAdapter(BaselineAdapter):
     # Fit
     # ------------------------------------------------------------------
 
-    def fit(self, problem: BenchmarkProblem) -> None:
+    def fit(self, problem: BenchmarkProblem, epochs: int = 20) -> None:
         try:
             from pgmpy.inference import VariableElimination
             from pgmpy.models import DiscreteBayesianNetwork
