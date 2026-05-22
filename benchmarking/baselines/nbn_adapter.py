@@ -95,7 +95,7 @@ class NBNAdapter(BaselineAdapter):
             return NormalizingFlowMechanism()
         return MDNMechanism(num_components=3, hidden=(32,))
 
-    def fit(self, problem: BenchmarkProblem) -> None:
+    def fit(self, problem: BenchmarkProblem, epochs: int = 20) -> None:
         import networkx as nx
         model = NeuralBayesianNetwork(
             problem.dag, variables=problem.variables, device=str(self.device),
@@ -115,7 +115,7 @@ class NBNAdapter(BaselineAdapter):
             else:
                 mech = self._make_mech(kind, k)
             model.set_mechanism(node, mech)
-        model.fit(problem.train_data, epochs=20, batch_size=512, lr=1e-3)
+        model.fit(problem.train_data, epochs=epochs, batch_size=512, lr=1e-3)
         self.model = model
 
         if self.engine_spec == "lw":

@@ -242,3 +242,47 @@ figures.
 
 - **`nbn-cat-ve` OOM at n ≥ 50 on discrete**: VE factor tables grow
   exponentially with n. Expected; cells emit `status=oom`.
+
+## 9. Optional: inference scalability run
+
+**Purpose:** different question from the paper benchmark. Instead of
+"how accurate at fixed scales?", this benchmark asks "what is the
+maximum n_nodes each baseline can handle under a 30s timeout for a
+single query?" The timeout point is the answer.
+
+**When to run:** after the paper benchmark, to characterise the
+practical n_nodes ceiling per baseline. Output is mostly `timeout`
+rows; the last `ok` row per baseline is the cliff.
+
+**Launch:**
+
+```bash
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+nohup nbn-bench inference \
+  --config benchmarking/configs/inference_scalability.yaml \
+  > benchmarking/results/raw/inference_scalability_${TIMESTAMP}.log 2>&1 &
+echo "PID $!"
+```
+
+**Expected output:** `benchmarking/results/raw/inference_scalability_metrics.jsonl`
+with rows spanning `status ∈ {ok, timeout, oom, not_supported}`. Most
+baselines will produce `ok` at n=5–100 and `timeout` from n=200–500.
+Empirical ceiling measured 2026-05-22 (issue #105):
+
+| Baseline | Last ok n (30s budget) |
+|---|---|
+| nbn-cat-lw | ~100–200 |
+| nbn-mdn-lw | ~200 |
+| pgmpy-mle-ve | ~100 |
+
+**Expected duration:** ~1–2 hours on a laptop CPU. With 9 n_nodes × 4
+families × 14 baselines × 1 seed = 504 cells max (many skipped via
+applicability), and a 30s timeout per cell, most cells resolve quickly
+once baselines hit their ceiling.
+
+**Config knobs used:**
+
+- `per_cell_timeout_s: 30` — tight timeout to find the cliff fast
+- `n_seeds: 1` — survival question is binary; second seed adds little
+- `n_queries_per_cell: 1` — scalability of one inference call
+- `fit_epochs: 10` — minimal NBN training; accuracy is not measured

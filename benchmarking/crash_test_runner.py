@@ -492,6 +492,7 @@ def _inference_cell(
     if baseline.startswith("nbn"):
         total_time_s = _time_nbn_inference(
             bn, baseline, queries_batch, n_lw_samples=cfg.nbn_lw_n_samples,
+            fit_epochs=cfg.fit_epochs,
         )
     elif baseline in {"pgmpy", "pomegranate", "gpytorch", "pyro"}:
         total_time_s = _time_loop_inference(
@@ -537,7 +538,7 @@ def _inference_cell(
     # aggregator/plotter consumers; explicit rows are additive.
     metric_dict = _compute_inference_metrics(
         bn, baseline, queries_batch, family,
-        n_lw_samples=cfg.nbn_lw_n_samples, device=eff_device,
+        n_lw_samples=cfg.nbn_lw_n_samples, device=eff_device, fit_epochs=cfg.fit_epochs,
     )
     target_kind = bn.variable_specs[queries_batch.targets[0]][0]
     accuracy_key = "tv_per_node" if target_kind == "discrete" else "w1_per_node"
@@ -927,7 +928,7 @@ def _build_query_batch(bn: SyntheticBN, *, B: int, seed: int):
 
 
 def _time_nbn_inference(
-    bn: SyntheticBN, baseline: str, q, *, n_lw_samples: int = 512,
+    bn: SyntheticBN, baseline: str, q, *, n_lw_samples: int = 512, fit_epochs: int = 20,
 ) -> float:
     """One batched call per timed run; report median total time.
 
@@ -974,7 +975,7 @@ def _time_nbn_inference(
                             param_method="mle", inference_method=inf_method)
 
     adapter = build_adapter_v2(spec, device=str(bn.true_model.device))
-    fitted = adapter.fit(bn.train_data, bn.dag, bn.variable_specs)
+    fitted = adapter.fit(bn.train_data, bn.dag, bn.variable_specs, epochs=fit_epochs)
 
     # v0.7-#35: warmup and timed loop now propagate exceptions so that
     # genuine engine failures land as ``status='error'`` via
@@ -1141,6 +1142,7 @@ def _compute_inference_metrics(
     bn: SyntheticBN, baseline: str, q, family: str,
     *, n_samples: int = 200, eps_factor: float = 0.50, n_eff_min: int = 10,
     n_lw_samples: int = 512, n_oracle_samples: int = 2000, device: str = "cpu",
+    fit_epochs: int = 20,
 ) -> dict[str, float | None]:
     """Compute {tv, jsd, w1}_per_node for the inference query battery.
 
@@ -1186,6 +1188,7 @@ def _compute_inference_metrics(
             pred = _baseline_posterior_for_query(
                 bn, baseline, target, ev_row, target_kind,
                 n_samples=n_samples, n_lw_samples=n_lw_samples, device=device,
+                fit_epochs=fit_epochs,
             )
         except Exception:
             continue
@@ -1316,7 +1319,7 @@ def _filter_ground_truth(
 def _baseline_posterior_for_query(
     bn: SyntheticBN, baseline: str, target: str,
     ev_row: Dict[str, torch.Tensor], target_kind: str, *, n_samples: int,
-    n_lw_samples: int = 512, device: str = "cpu",
+    n_lw_samples: int = 512, device: str = "cpu", fit_epochs: int = 20,
 ) -> torch.Tensor | None:
     """Return posterior samples (continuous) or probability vector (discrete)
     for a single query, per baseline."""
@@ -1352,7 +1355,7 @@ def _baseline_posterior_for_query(
                                 param_method="mle", inference_method=inf_method)
         try:
             adapter = build_adapter_v2(spec, device=str(bn.true_model.device))
-            fitted = adapter.fit(bn.train_data, bn.dag, bn.variable_specs)
+            fitted = adapter.fit(bn.train_data, bn.dag, bn.variable_specs, epochs=fit_epochs)
         except Exception:
             return None
         # Use the fitted adapter's query path.  The v1 NBNAdapter's

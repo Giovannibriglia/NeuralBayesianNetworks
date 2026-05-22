@@ -1,0 +1,53 @@
+# Scalability benchmark — measures the n_nodes ceiling per baseline under a
+# tight 30s timeout.  Different question from inference_paper.yaml: not
+# "how accurate at fixed scales?" but "how far can each baseline scale
+# before it times out on a single query?"
+#
+# Design choices (empirically validated 2026-05-22, issue #105):
+#   - Tight timeout (30s): we want the cliff, not full timing data.
+#   - Single seed: "does it finish under 30s?" is binary; more seeds add noise.
+#   - Single query per cell: scalability of one inference call, not throughput.
+#   - fit_epochs=10: minimize fit overhead; accuracy is not measured here.
+#   - n_nodes cap at 2000: empirical ceiling — all tested baselines timeout by
+#     n=500 at 30s; n=2000 confirms the flatline without wasting hours.
+#   - Small n_train (1024): training data size is not the variable under test.
+config_schema_version: 2
+
+mode: inference
+families: [discrete, continuous_lg, continuous_nongauss, hybrid]
+n_nodes: [5, 10, 20, 50, 100, 200, 500, 1000, 2000]
+n_seeds: 1
+n_queries_per_cell: 1
+nbn_batch_size: 0                     # 0 → use n_queries_per_cell (= 1)
+n_train: 1024
+n_test: 256
+n_reference: 5000
+nbn_lw_n_samples: 512
+edge_density: 0.20
+max_in_degree: 4
+cardinality: 4
+fraction_continuous: 0.5
+fit_epochs: 10                        # inference fit only; cuts NBN model.fit() cost
+
+baselines:
+  - {library: pgmpy, mechanism: discrete, param_method: mle,   inference_method: ve}
+  - {library: pgmpy, mechanism: discrete, param_method: bayes, inference_method: ve}
+  - {library: pgmpy, mechanism: lg,       param_method: mle,   inference_method: predict}
+  - {library: nbn,   mechanism: cat,      param_method: mle,   inference_method: ve}
+  - {library: nbn,   mechanism: cat,      param_method: mle,   inference_method: lw}
+  - {library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: ve}
+  - {library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: lw}
+  - {library: nbn,   mechanism: lg,       param_method: mle,   inference_method: lw}
+  - {library: nbn,   mechanism: mdn,      param_method: mle,   inference_method: lw}
+  - {library: nbn,   mechanism: flow,     param_method: mle,   inference_method: lw}
+  - {library: nbn,   mechanism: hybrid,   param_method: mle,   inference_method: router}
+  - {library: gpytorch,    mechanism: gp,       param_method: mle, inference_method: predict}
+  - {library: pomegranate, mechanism: discrete, param_method: mle, inference_method: ve}
+  # device: cpu — empirical finding (docs/audits/v0.12-pyro-gpu-investigation.md):
+  # pyro's Importance sampler is Python-bound; CUDA kernel launch overhead
+  # makes GPU ~10x slower than CPU at benchmark scale.
+  - {library: pyro, mechanism: empirical, param_method: mle, inference_method: importance, device: cpu}
+
+per_cell_timeout_s: 30
+output_dir: benchmarking/results
+output_prefix: inference_scalability

@@ -20,7 +20,7 @@ class GPyTorchAdapter(BaselineAdapter):
         self.gps: dict = {}
         self.problem: BenchmarkProblem | None = None
 
-    def fit(self, problem: BenchmarkProblem) -> None:
+    def fit(self, problem: BenchmarkProblem, epochs: int = 20) -> None:
         try:
             import gpytorch
         except ImportError as e:

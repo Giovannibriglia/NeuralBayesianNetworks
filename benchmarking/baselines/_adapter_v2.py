@@ -71,6 +71,7 @@ class BaselineAdapterV2(Protocol):
         train_data: Dict[str, torch.Tensor],
         dag: nx.DiGraph,
         variable_kinds: Dict[str, tuple],
+        epochs: int = 20,
     ) -> Any:
         """Fit on ``train_data`` and return an opaque ``fitted_model``."""
         ...
@@ -119,6 +120,7 @@ class BaselineAdapterV2Shim:
         train_data: Dict[str, torch.Tensor],
         dag: nx.DiGraph,
         variable_kinds: Dict[str, tuple],
+        epochs: int = 20,
     ) -> Any:
         """Build a BenchmarkProblem from train_data + DAG (no
         ``bn.true_model`` carried), call v1 ``fit(problem)``, return
@@ -137,7 +139,7 @@ class BaselineAdapterV2Shim:
             test_data=train_data,  # v1 adapters don't use test_data for fit
             queries=[],
         )
-        self._v1.fit(problem)
+        self._v1.fit(problem, epochs=epochs)
         return self._v1     # the v1 adapter IS the fitted-model handle
 
     def query_batch_samples(

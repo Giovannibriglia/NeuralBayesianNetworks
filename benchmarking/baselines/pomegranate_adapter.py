@@ -48,7 +48,7 @@ class PomegranateAdapter(BaselineAdapter):
         self._cards: Dict[str, int] = {}
         self._topo: List[str] = []
 
-    def fit(self, problem: BenchmarkProblem) -> None:
+    def fit(self, problem: BenchmarkProblem, epochs: int = 20) -> None:
         try:
             from pomegranate.bayesian_network import BayesianNetwork
             from pomegranate.distributions import Categorical, ConditionalCategorical

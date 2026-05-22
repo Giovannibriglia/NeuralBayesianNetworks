@@ -106,7 +106,7 @@ class PyroAdapter(BaselineAdapter):
     # Fitting — empirical CPTs / Gaussian leaves
     # ------------------------------------------------------------------
 
-    def fit(self, problem: BenchmarkProblem) -> None:
+    def fit(self, problem: BenchmarkProblem, epochs: int = 20) -> None:
         try:
             import pyro  # noqa: F401
         except ImportError as e:
