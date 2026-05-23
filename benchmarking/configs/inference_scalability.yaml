@@ -1,21 +1,31 @@
 # Scalability benchmark — measures the n_nodes ceiling per baseline under a
-# tight 30s timeout.  Different question from inference_paper.yaml: not
-# "how accurate at fixed scales?" but "how far can each baseline scale
-# before it times out on a single query?"
+# 60s timeout.  Different question from inference_paper.yaml: not
+# "how accurate at fixed scales?" but "at what n_nodes does the full cell
+# pipeline (BN setup + adapter fits + query + accuracy metrics) overflow the
+# budget?"
+#
+# IMPORTANT — what the cliff actually measures (issue #107, 2026-05-22):
+#   per_cell_timeout_s wraps the entire cell, including BN generation, the 1
+#   fit in _time_nbn_inference, the timed query(ies), AND up to 16 accuracy
+#   re-fits in _compute_inference_metrics via _baseline_posterior_for_query.
+#   At B=1, those 17 fits dominate the single query by 17–29× (measured at
+#   n=10–200).  The cliff therefore reflects "when do 17×fit + BN generation
+#   overflow 60s" — not pure per-query scalability.  Per-query inference is
+#   much faster than the cliff suggests.  Engineering fix deferred to v0.8.
 #
 # Design choices (empirically validated 2026-05-22, issue #105):
-#   - Tight timeout (30s): we want the cliff, not full timing data.
-#   - Single seed: "does it finish under 30s?" is binary; more seeds add noise.
-#   - Single query per cell: scalability of one inference call, not throughput.
-#   - fit_epochs=10: minimize fit overhead; accuracy is not measured here.
-#   - n_nodes cap at 2000: empirical ceiling — all tested baselines timeout by
-#     n=500 at 30s; n=2000 confirms the flatline without wasting hours.
+#   - 60s timeout: we want the cliff, not full timing data.
+#   - Single seed: "does it finish under 60s?" is binary; more seeds add noise.
+#   - Single query per cell (B=1): one inference call, not throughput.
+#   - fit_epochs=2: minimise NBN training time; accuracy is still computed
+#     (accuracy_supported() returns True for discrete/continuous families),
+#     so this also reduces the 16 accuracy-re-fit overhead.
 #   - Small n_train (1024): training data size is not the variable under test.
 config_schema_version: 2
 
 mode: inference
 families: [discrete, continuous_lg, continuous_nongauss, hybrid]
-n_nodes: [5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 50000, 100000]
+n_nodes: [5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]
 n_seeds: 1
 n_queries_per_cell: 1
 nbn_batch_size: 0                     # 0 → use n_queries_per_cell (= 1)
@@ -27,7 +37,10 @@ edge_density: 0.20
 max_in_degree: 4
 cardinality: 4
 fraction_continuous: 0.5
-fit_epochs: 2                        # inference fit only; cuts NBN model.fit() cost
+# fit_epochs=2 applies to _time_nbn_inference AND to the 16 accuracy re-fits
+# in _compute_inference_metrics (see issue #107).  Kept low to reduce total
+# per-cell fit overhead; accuracy quality is not the metric of interest here.
+fit_epochs: 2
 
 baselines:
   - {library: pgmpy, mechanism: discrete, param_method: mle,   inference_method: ve}

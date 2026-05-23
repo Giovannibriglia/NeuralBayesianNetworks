@@ -21,6 +21,13 @@ Clone the repo and install with all required extras:
 ```bash
 git clone https://github.com/Giovannibriglia/NeuralBayesianNetworks.git
 cd NeuralBayesianNetworks
+python -m venv .venv
+source .venv/bin/activate
+```
+
+Here, it would be better to install your torch correct version and after install all other things
+
+```bash
 pip install -e ".[dev,bench,neural,gp,mcmc]"
 ```
 
@@ -31,6 +38,10 @@ gpytorch and pyro — those cells emit `not_supported` rather than
 erroring, so the omission is easy to miss.
 
 ## 3. Quick sanity check
+
+```bash
+python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('CUDA version:', torch.version.cuda); print('GPU count:', torch.cuda.device_count()); print('GPU name:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'No GPU')"
+```
 
 ```bash
 python -c "import nbn, gpytorch, pyro, pgmpy, pomegranate; print('all imports ok')"
@@ -246,9 +257,15 @@ figures.
 ## 9. Optional: inference scalability run
 
 **Purpose:** different question from the paper benchmark. Instead of
-"how accurate at fixed scales?", this benchmark asks "what is the
-maximum n_nodes each baseline can handle under a 30s timeout for a
-single query?" The timeout point is the answer.
+"how accurate at fixed scales?", this benchmark asks "at what n_nodes
+does each baseline's full cell pipeline (BN setup + 17 adapter fits +
+queries + accuracy metrics) overflow the 60s budget?" The cliff is
+therefore a **wall-clock-per-cell** metric, not a pure per-query
+scalability metric — per-query inference is much faster than the cliff
+suggests (see issue #107 for the full investigation). At B=1 (one query
+per cell), the 17 adapter fits dominate the single timed query by
+17–29× across n=10–200, so the timeout gate fires on fit overhead more
+than on inference cost.
 
 **When to run:** after the paper benchmark, to characterise the
 practical n_nodes ceiling per baseline. Output is mostly `timeout`
@@ -269,20 +286,25 @@ with rows spanning `status ∈ {ok, timeout, oom, not_supported}`. Most
 baselines will produce `ok` at n=5–100 and `timeout` from n=200–500.
 Empirical ceiling measured 2026-05-22 (issue #105):
 
-| Baseline | Last ok n (30s budget) |
+| Baseline | Last ok n (60s budget) |
 |---|---|
 | nbn-cat-lw | ~100–200 |
 | nbn-mdn-lw | ~200 |
 | pgmpy-mle-ve | ~100 |
 
-**Expected duration:** ~1–2 hours on a laptop CPU. With 9 n_nodes × 4
-families × 14 baselines × 1 seed = 504 cells max (many skipped via
-applicability), and a 30s timeout per cell, most cells resolve quickly
+Note: these cliffs reflect cell-pipeline overflow (17 fits + BN
+generation), not pure inference cost (see issue #107).
+
+**Expected duration:** ~1–2 hours on a laptop CPU. With 11 n_nodes × 4
+families × 14 baselines × 1 seed = 616 cells max (many skipped via
+applicability), and a 60s timeout per cell, most cells resolve quickly
 once baselines hit their ceiling.
 
 **Config knobs used:**
 
-- `per_cell_timeout_s: 30` — tight timeout to find the cliff fast
+- `per_cell_timeout_s: 60` — timeout covers full cell pipeline (BN gen +
+  17 fits + query + accuracy); see issue #107 for breakdown
 - `n_seeds: 1` — survival question is binary; second seed adds little
-- `n_queries_per_cell: 1` — scalability of one inference call
-- `fit_epochs: 10` — minimal NBN training; accuracy is not measured
+- `n_queries_per_cell: 1` — one inference call per cell (B=1)
+- `fit_epochs: 2` — minimal NBN training; applies to all 17 fits per
+  cell (1 timing fit + 16 accuracy re-fits in `_compute_inference_metrics`)
