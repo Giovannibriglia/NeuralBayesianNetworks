@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Mapping
+from typing import Any, Mapping
 
 import torch
 
@@ -50,7 +50,34 @@ class Query:
 
 @dataclass
 class BenchmarkProblem:
-    """One concrete benchmark instance: DAG + data + queries + (optional) truth."""
+    """One concrete benchmark instance: DAG + data + queries + (optional) truth.
+
+    v0.13 additions (Phase 1b-iv, all additive with defaults — no existing code breaks):
+
+    ``true_model``
+        The data-generating model instance (typically a
+        ``NeuralBayesianNetwork``).  Required by ``AccuracyAndTiming`` for
+        continuous and hybrid oracle sampling via
+        ``true_model.sample(n=N, evidence=ev)``.  Set by
+        ``SyntheticProblemSource``; ``None`` for problem sources that do not
+        expose a ground-truth model (e.g. bnlearn — Phase 4).  When
+        ``true_model`` is ``None``, ``AccuracyAndTiming`` skips continuous
+        oracle rows and emits ``status="not_supported"``.
+
+    ``family``
+        BN family string matching the v0.13 parquet schema:
+        ``"discrete"`` | ``"continuous_lg"`` | ``"continuous_nongauss"`` |
+        ``"hybrid"``.  Populated by problem sources; empty string for
+        problems constructed without a source (e.g. unit-test fixtures).
+
+    ``problem_id``
+        Short identifier used as the ``problem_id`` column in the v0.13
+        parquet.  For synthetic problems: ``str(n_nodes)`` (e.g. ``"10"``).
+        For bnlearn problems: network name (e.g. ``"asia"``).  Populated by
+        problem sources; falls back to ``name`` when empty.
+
+    Reference: docs/v0.13-benchmark-redesign.md §4.1, §6.2
+    """
 
     name: str
     dag: list[tuple[str, str]]
@@ -59,6 +86,10 @@ class BenchmarkProblem:
     test_data: dict[str, torch.Tensor]
     queries: list[Query]
     ground_truth: GroundTruth | None = None
+    # v0.13 additions — all optional with safe defaults
+    true_model: Any | None = None
+    family: str = ""
+    problem_id: str = ""
 
 
 class BenchmarkDomain(ABC):
