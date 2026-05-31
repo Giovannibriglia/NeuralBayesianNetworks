@@ -15,6 +15,8 @@ import argparse
 import logging
 import sys
 
+logger = logging.getLogger(__name__)
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -68,9 +70,71 @@ def main(argv: list[str] | None = None) -> int:
 
         device = None if args.device == "auto" else args.device
         cfg = load_runner_config(args.config, device_override=device)
+
+        # ── cell loop ────────────────────────────────────────────────────────
         for _ in Runner().run(cfg):
             pass
-        return 0
+
+        # ── post-run pipeline ────────────────────────────────────────────────
+        # JSONL is already on disk from the runner.  Produce parquet + tables
+        # + figures so callers get the same output package as v0.12.
+        # Each step is independent: a failure logs the error and sets rc=1
+        # but does not prevent the remaining steps from running.
+        rc = 0
+        results_dir = cfg.jsonl_path.parent
+        config_name = cfg.config_name
+        parquet_path = results_dir / f"{config_name}_metrics.parquet"
+
+        # Step 1: JSONL → parquet
+        try:
+            from benchmarking.core.output import jsonl_to_parquet
+            jsonl_to_parquet(cfg.jsonl_path, parquet_path)
+            logger.info("Wrote parquet: %s", parquet_path)
+        except Exception as exc:
+            logger.error("Post-run step 1 (jsonl_to_parquet) failed: %s", exc)
+            rc = 1
+
+        # Step 2+3: aggregate → tables (independent of figures)
+        if parquet_path.exists():
+            try:
+                from benchmarking._aggregate import aggregate
+                from benchmarking._tables import write_all
+                aggregated = aggregate(parquet_path)
+                table_paths = write_all(
+                    aggregated,
+                    output_dir=results_dir,
+                    output_prefix=config_name,
+                )
+                logger.info(
+                    "Wrote %d table files to: %s",
+                    len(table_paths), results_dir / "tables",
+                )
+            except Exception as exc:
+                logger.error(
+                    "Post-run step 2 (aggregate/tables) failed: %s", exc,
+                )
+                rc = 1
+
+            # Step 4: figures
+            try:
+                from benchmarking._plot_v2 import render_figures
+                figure_paths = render_figures(
+                    parquet_path=parquet_path,
+                    output_dir=results_dir,
+                    output_prefix=config_name,
+                )
+                n_figs = sum(len(v) for v in figure_paths.values())
+                logger.info(
+                    "Wrote %d figure files to: %s",
+                    n_figs, results_dir / "figures",
+                )
+            except Exception as exc:
+                logger.error(
+                    "Post-run step 3 (render_figures) failed: %s", exc,
+                )
+                rc = 1
+
+        return rc
 
     raise AssertionError(f"unhandled subcommand {args.cmd!r}")  # pragma: no cover
 
