@@ -33,7 +33,7 @@ from benchmarking.adapters import NBNAdapter, PgmpyAdapter, PomegranateAdapter, 
 from benchmarking.core.config import BaselineSpec, RunnerConfig, build_adapter
 from benchmarking.core.output import JsonlWriter
 from benchmarking.core.results import CellResult, VALID_STATUSES
-from benchmarking.core.runner import Runner, _classify_exception
+from benchmarking.core.runner import Runner, _classify_exception, _is_structural_limit
 from benchmarking.domains.base import BenchmarkProblem, GroundTruth
 from benchmarking.measurements import AccuracyAndTiming, TimingOnly
 from benchmarking.problems.synthetic import SyntheticConfig, SyntheticProblemSource
@@ -327,8 +327,43 @@ class TestClassifyException:
     def test_not_implemented_error_is_not_supported(self):
         assert _classify_exception(NotImplementedError("not implemented")) == "not_supported"
 
-    def test_value_error_is_not_supported(self):
-        assert _classify_exception(ValueError("discrete-only adapter")) == "not_supported"
+    # -- ValueError: marker-based classification (#117) -----------------------
+
+    def test_value_error_with_structural_marker_is_not_supported(self):
+        """ValueError containing a structural-limit marker → not_supported."""
+        assert _classify_exception(ValueError("is discrete-only adapter")) == "not_supported"
+
+    def test_value_error_with_only_supports_marker_is_not_supported(self):
+        assert _classify_exception(ValueError("only supports discrete families")) == "not_supported"
+
+    def test_value_error_with_cannot_condition_marker_is_not_supported(self):
+        assert _classify_exception(ValueError("cannot condition on continuous evidence")) == "not_supported"
+
+    def test_value_error_with_not_applicable_marker_is_not_supported(self):
+        assert _classify_exception(ValueError("not applicable to continuous_nongauss")) == "not_supported"
+
+    def test_value_error_without_marker_is_error(self):
+        """ValueError without a structural-limit marker → error (real bug, #117)."""
+        assert _classify_exception(ValueError("invalid tensor shape [3, 4]")) == "error"
+
+    def test_value_error_index_out_of_range_is_error(self):
+        """Generic IndexError / ValueError without marker → error."""
+        assert _classify_exception(ValueError("index 5 out of bounds for axis 0")) == "error"
+
+    # -- _is_structural_limit helper ------------------------------------------
+
+    def test_is_structural_limit_true_for_not_implemented_error(self):
+        # _is_structural_limit only handles ValueError; NotImplementedError
+        # is caught separately — but the function must return False for it.
+        assert not _is_structural_limit(NotImplementedError("n/a"))
+
+    def test_is_structural_limit_true_for_marker_value_error(self):
+        assert _is_structural_limit(ValueError("is discrete-only"))
+        assert _is_structural_limit(ValueError("only supports discrete"))
+        assert _is_structural_limit(ValueError("refused"))
+
+    def test_is_structural_limit_false_for_generic_value_error(self):
+        assert not _is_structural_limit(ValueError("tensor shape mismatch"))
 
     def test_generic_exception_is_error(self):
         assert _classify_exception(Exception("generic")) == "error"

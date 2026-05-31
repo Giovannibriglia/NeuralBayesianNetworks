@@ -1,59 +1,42 @@
-# Paper-grade config for inference — RTX 4070 Laptop (8GB VRAM) variant.
-#
-# v0.6c-d: same baselines / families / n_nodes / seeds / metrics as the
-# canonical inference_paper.yaml; the only differences are memory-fitting
-# adjustments to make the run complete on 8GB hardware:
-#
-#   nbn_batch_size: 256   (was 1024; per-cell B = min(n_test, this))
-#
-# nbn_lw_n_samples=4000 preserved (the v0.6c-A correctness fix); n_test=1024
-# preserved (the v0.6c-A audit fix); n_seeds=5 preserved (paper-grade
-# mean ± std bands need 5).  Canonical inference_paper.yaml is unchanged.
-config_schema_version: 2
+# Paper-grade inference config — RTX 4070 Laptop (8 GB VRAM) variant.
+# Same baselines / families / n_nodes / seeds / metrics as inference_paper.yaml.
+# nbn_lw_n_samples preserved at 4096 (v0.6c-A correctness fix).
+version: "v0.13"
+benchmark: synthetic
+config_name: paper_laptop
+metrics: all
+selector: uniform_random
 
-mode: inference
-families: [discrete, continuous_lg, continuous_nongauss, hybrid]
-n_nodes: [10, 50, 100, 500, 1000]   # 5000 dropped (cuda OOM at 7.6 GiB)
-n_seeds: 5
-n_queries_per_cell: 1024
-nbn_batch_size: 256                  # laptop variant: was 1024
-n_train: 10240
-n_test: 1024                          # explicit per v0.6c-A audit (was silently 500)
-n_reference: 50000
-nbn_lw_n_samples: 4096
-edge_density: 0.20
-max_in_degree: 4
-cardinality: 4
-fraction_continuous: 0.5
+source:
+  families: [discrete, continuous_lg, continuous_nongauss, hybrid]
+  n_nodes_list: [10, 50, 100, 500, 1000]   # 5000 dropped (cuda OOM at 7.6 GiB)
+  seeds: [0, 1, 2, 3, 4]
+  n_train: 10240
+  n_test: 1024
+  n_reference: 50000
+  edge_density: 0.20
+  max_in_degree: 4
+  cardinality: 4
+  fraction_continuous: 0.5
 
-# v0.6c-C-1b — full per-method baseline set, matching smoke.
-# v0.8-#26 closes the deferral: nbn-neuralcat-ve included.
 baselines:
   - {library: pgmpy, mechanism: discrete, param_method: mle,   inference_method: ve}
   - {library: pgmpy, mechanism: discrete, param_method: bayes, inference_method: ve}
   - {library: pgmpy, mechanism: lg,       param_method: mle,   inference_method: predict}
   - {library: nbn,   mechanism: cat,      param_method: mle,   inference_method: ve}
-  - {library: nbn,   mechanism: cat,      param_method: mle,   inference_method: lw}
+  - {library: nbn,   mechanism: cat,      param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 4096}}
   - {library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: ve}
-  - {library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: lw}
-  - {library: nbn,   mechanism: lg,       param_method: mle,   inference_method: lw}
-  - {library: nbn,   mechanism: mdn,      param_method: mle,   inference_method: lw}
-  - {library: nbn,   mechanism: flow,     param_method: mle,   inference_method: lw}
+  - {library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: lw,      extra_kwargs: {n_samples: 4096}}
+  - {library: nbn,   mechanism: lg,       param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 4096}}
+  - {library: nbn,   mechanism: mdn,      param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 4096}}
+  - {library: nbn,   mechanism: flow,     param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 4096}}
   - {library: nbn,   mechanism: hybrid,   param_method: mle,   inference_method: router}
 
-  # v0.6c-C-2: paper-only — gpytorch / pomegranate / pyro inference.
-  # Smoke configs stay pgmpy + NBN per Giovanni's earlier decision;
-  # these libraries are paper-grade only.  Applicability matrix:
-  # gpytorch → continuous_lg + continuous_nongauss; pomegranate →
-  # discrete only; pyro → discrete + continuous_lg + hybrid.
-  # Non-applicable cells skip via the registry-based gate from C-1b.
-  - {library: gpytorch,    mechanism: gp,       param_method: mle, inference_method: predict}
-  - {library: pomegranate, mechanism: discrete, param_method: mle, inference_method: ve}
-  # device: cpu — empirical finding (docs/audits/v0.12-pyro-gpu-investigation.md):
-  # pyro's Importance sampler is Python-bound; CUDA kernel launch overhead
-  # makes GPU ~10x slower than CPU at benchmark scale.
+  # Paper-only libraries.
+  - {library: gpytorch,    mechanism: gp,       param_method: mle,   inference_method: predict}
+  - {library: pomegranate, mechanism: discrete, param_method: mle,   inference_method: ve}
   - {library: pyro, mechanism: empirical, param_method: mle, inference_method: importance, device: cpu}
 
-per_cell_timeout_s: 600
-output_dir: benchmarking/results
-output_prefix: inference_paper
+n_queries_per_cell: 1024
+per_cell_timeout_s: 600.0
+fit_timeout_s_multiplier: 10.0

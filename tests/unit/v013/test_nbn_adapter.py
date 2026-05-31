@@ -224,3 +224,47 @@ class TestBehavioral:
         problem = _make_small_discrete_problem(n_samples=200, seed=1)
         adapter.fit(problem, epochs=2)   # very short — just checking it runs
         assert adapter.model is not None
+
+
+# ---------------------------------------------------------------------------
+# Regression: NeuralCategoricalMechanism root-node empirical frequency
+# Ported from test_param_learning_dispatch.py assertion 4.
+# ---------------------------------------------------------------------------
+
+class TestNeuralCatRootNode:
+    """NeuralCategoricalMechanism root-node logits must reflect empirical
+    log-frequency, not uniform initialisation (issue #52 regression).
+
+    This test has no crash_test_runner dependency — it tests the mechanism
+    directly.  Extracted from test_param_learning_dispatch_triplet assertion 4.
+    """
+
+    def test_root_node_logits_reflect_empirical_frequency(self) -> None:
+        from nbn.mechanisms.neural_categorical import NeuralCategoricalMechanism
+
+        # Biased training data: 80% class 0, 15% class 1, 5% class 2.
+        biased_x = torch.cat([
+            torch.zeros(800, dtype=torch.long),
+            torch.ones(150, dtype=torch.long),
+            torch.full((50,), 2, dtype=torch.long),
+        ])
+        expected_freq = torch.tensor([0.8, 0.15, 0.05])
+        mech = NeuralCategoricalMechanism(n_classes=3)
+        mech.fit_local(biased_x, parents=None)
+        fitted_probs = torch.softmax(mech._root_logits.detach(), dim=-1)
+
+        max_diff_from_expected = (expected_freq - fitted_probs).abs().max().item()
+        max_diff_from_uniform = (
+            torch.full((3,), 1 / 3) - fitted_probs
+        ).abs().max().item()
+
+        assert max_diff_from_expected < 1e-4, (
+            f"Root-node logits must reflect empirical log-frequency (#52); "
+            f"got fitted={fitted_probs.tolist()} vs expected={expected_freq.tolist()} "
+            f"(max abs diff={max_diff_from_expected:.6e})"
+        )
+        assert max_diff_from_uniform > 0.1, (
+            f"Root-node logits must NOT be uniform (uniform-init was the "
+            f"v0.7-#43 audit's #52 finding); got fitted={fitted_probs.tolist()} "
+            f"(max diff from uniform={max_diff_from_uniform:.6e})"
+        )

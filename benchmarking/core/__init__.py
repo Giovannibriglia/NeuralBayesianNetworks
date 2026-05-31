@@ -5,11 +5,18 @@ the composition-based architecture.  Implementations live in
 benchmarking/problems/, benchmarking/selectors/,
 benchmarking/measurements/, and benchmarking/adapters/.
 
-Phase 1b-v status: runner orchestrator shipped.
+Phase 1c status: cutover from v0.12 complete.
 
 Reference: docs/v0.13-benchmark-redesign.md
 """
 
+from benchmarking.core.applicability import (
+    BASELINE_FAMILY_APPLICABILITY,
+    BaselineApplicability,
+    accuracy_supported,
+    is_applicable,
+    known_labels,
+)
 from benchmarking.core.config import BaselineSpec, RunnerConfig, build_adapter
 from benchmarking.core.interfaces import (
     BaselineAdapter,
@@ -33,6 +40,12 @@ __all__ = [
     "BaselineSpec",
     "RunnerConfig",
     "build_adapter",
+    # Applicability registry
+    "BASELINE_FAMILY_APPLICABILITY",
+    "BaselineApplicability",
+    "is_applicable",
+    "accuracy_supported",
+    "known_labels",
     # I/O
     "JsonlWriter",
     # Orchestrator

@@ -36,7 +36,7 @@ from typing import Dict, List, Sequence
 import numpy as np
 import pandas as pd
 
-from benchmarking._baseline_registry import is_applicable
+from benchmarking.core.applicability import is_applicable
 
 
 # ---------------------------------------------------------------------------

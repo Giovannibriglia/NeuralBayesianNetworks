@@ -1,23 +1,26 @@
-# Paper-grade config for parameter learning. Run locally; ~30 min on CPU,
-# faster on GPU.
-config_schema_version: 2
+# Paper-grade config for parameter learning.
+# NOTE: parameter-learning measurement is not yet implemented in v0.13.
+# This config is syntactically valid and will load cleanly, but the
+# param-learning CLI subcommand is stubbed pending a ParamLearningMeasurement.
+# See issue #109 for status.
+version: "v0.13"
+benchmark: synthetic
+config_name: param_learning_paper
+metrics: all
+selector: uniform_random
 
-mode: parameter_learning
-families: [discrete, continuous_lg, continuous_nongauss, hybrid]
-n_nodes: [10, 50, 100, 500, 1000]
-n_seeds: 5
-n_queries_per_cell: 1024
-n_train: 10240
-n_test: 1024
-n_reference: 50000
-edge_density: 0.20
-max_in_degree: 4
-cardinality: 4
-fraction_continuous: 0.5
-fit_epochs: 200
-batch_size: 4096
+source:
+  families: [discrete, continuous_lg, continuous_nongauss, hybrid]
+  n_nodes_list: [10, 50, 100, 500, 1000]
+  seeds: [0, 1, 2, 3, 4]
+  n_train: 10240
+  n_test: 1024
+  n_reference: 50000
+  edge_density: 0.20
+  max_in_degree: 4
+  cardinality: 4
+  fraction_continuous: 0.5
 
-# v0.6c-C-1b — full per-method baseline set.
 baselines:
   - {library: pgmpy, mechanism: discrete, param_method: mle}
   - {library: pgmpy, mechanism: discrete, param_method: bayes}
@@ -28,17 +31,10 @@ baselines:
   - {library: nbn,   mechanism: mdn,      param_method: mle}
   - {library: nbn,   mechanism: flow,     param_method: mle}
   - {library: nbn,   mechanism: hybrid,   param_method: mle}
-
-  # v0.6c-C-2: paper-only — gpytorch / pomegranate / pyro param-learning.
   - {library: gpytorch,    mechanism: gp,       param_method: mle}
   - {library: pomegranate, mechanism: discrete, param_method: mle}
-  # device: cpu — precautionary, NOT based on measurement. The 11×
-  # inference slowdown (see docs/audits/v0.12-pyro-gpu-investigation.md)
-  # is specific to the Importance sampler's Python-loop kernel launches.
-  # pyro fit (lstsq, scatter/add) may behave differently on GPU but is
-  # currently untested. Preserves pre-PR-#102 CPU-only behavior until measured.
   - {library: pyro, mechanism: empirical, param_method: mle, device: cpu}
 
-per_cell_timeout_s: 600
-output_dir: benchmarking/results
-output_prefix: parameter_learning_paper
+n_queries_per_cell: 1024
+per_cell_timeout_s: 600.0
+fit_timeout_s_multiplier: 10.0

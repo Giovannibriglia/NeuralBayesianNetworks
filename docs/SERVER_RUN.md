@@ -1,4 +1,4 @@
-# Server benchmark run procedure
+# Server benchmark run procedure (v0.13)
 
 Covers launching and managing full paper-grade benchmark runs on a
 remote server (or any machine that is not the development laptop).
@@ -11,8 +11,8 @@ remote server (or any machine that is not the development laptop).
   CPU-forced regardless (see §8).
 - **VRAM**: ≥ 8 GB. The configs cap `n_nodes` at 1000; n=5000 was
   dropped due to CUDA OOM at 7.6 GiB (noted in config comments).
-- **Disk**: `benchmarking/results/` accumulates parquets, JSONL
-  sidecars, figures, and tables. Allow ~500 MB per complete run.
+- **Disk**: `results/` accumulates parquets, JSONL sidecars, figures,
+  and tables. Allow ~500 MB per complete run.
 
 ## 2. Installation
 
@@ -25,7 +25,7 @@ python -m venv .venv
 source .venv/bin/activate
 ```
 
-Here, it would be better to install your torch correct version and after install all other things
+Install torch for your platform first, then the package:
 
 ```bash
 pip install -e ".[dev,bench,neural,gp,mcmc]"
@@ -52,10 +52,7 @@ before launching a multi-hour run.
 
 ## 4. Running the full paper benchmark
 
-**All commands must be run from the repository root.** The configs use
-`output_dir: benchmarking/results`, which is a relative path resolved
-from wherever `nbn-bench` is invoked. Running from a subdirectory
-will create output in the wrong location or fail.
+**All commands must be run from the repository root.**
 
 ```bash
 cd /path/to/NeuralBayesianNetworks   # always from repo root
@@ -63,59 +60,51 @@ cd /path/to/NeuralBayesianNetworks   # always from repo root
 # Inference benchmark: ~15-20 h on a CUDA server (NBN baselines on GPU,
 # pyro on CPU; pyro timeouts at n≥100 for discrete/continuous_lg/hybrid
 # add ~3-5 h regardless of CUDA). ~30-50 h on a CPU-only server.
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 nohup nbn-bench inference \
   --config benchmarking/configs/inference_paper.yaml \
-  > benchmarking/results/raw/inference_paper_${TIMESTAMP}.log 2>&1 &
-echo "PID=$!"
-
-# Parameter-learning benchmark (~6 h on CUDA)
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-nohup nbn-bench param-learning \
-  --config benchmarking/configs/parameter_learning_paper.yaml \
-  > benchmarking/results/raw/parameter_learning_paper_${TIMESTAMP}.log 2>&1 &
+  > /tmp/inference_paper.log 2>&1 &
 echo "PID=$!"
 ```
 
-Do not launch both simultaneously — they share VRAM and the combined
-memory pressure may cause OOM at large n.
+Do not launch both inference and parameter-learning simultaneously —
+they share VRAM and the combined memory pressure may cause OOM at large n.
+
+**Note:** `param-learning` is not yet implemented in v0.13. Use
+`nbn-bench inference` for now (see issue #109).
 
 ### Config selection
 
-| Hardware | Inference config | Param-learning config |
-|---|---|---|
-| Server (≥16 GB VRAM or CPU-only) | `inference_paper.yaml` | `parameter_learning_paper.yaml` |
-| Laptop (8 GB VRAM) | `inference_paper_laptop.yaml` | `parameter_learning_paper_laptop.yaml` |
+| Hardware | Inference config |
+|---|---|
+| Server (≥16 GB VRAM or CPU-only) | `inference_paper.yaml` |
+| Laptop (8 GB VRAM) | `inference_paper_laptop.yaml` |
 
-The laptop variants lower `nbn_batch_size` (256 vs 1024) and
-`batch_size` (1024 vs 4096) to fit 8 GB. Use the canonical
-(`_paper.yaml`) variants on the server unless VRAM is limited.
+### Output location
 
-**Output prefix collision:** both `inference_paper.yaml` and
-`inference_paper_laptop.yaml` share `output_prefix: inference_paper`
-and write to the same parquet. Only run one config per machine per run.
+v0.13 output goes to `results/benchmark_synthetic_<config_name>_<timestamp>/`.
+The directory is created automatically; `--config` does not need an
+`output_dir` field.
 
 ## 5. Monitoring progress
 
 ```bash
 # Is it still running?
-ps aux | grep "nbn-bench\|crash_test" | grep -v grep
+ps aux | grep "nbn-bench" | grep -v grep
 
 # How many cells have completed?
-wc -l benchmarking/results/raw/inference_paper_metrics.jsonl
+wc -l results/benchmark_synthetic_paper_*/metrics.jsonl
 
 # CUDA memory in use?
 nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader
-
-# Live log tail
-tail -f benchmarking/results/raw/inference_paper_<TIMESTAMP>.log
 
 # Current status breakdown from JSONL (works mid-run)
 python3 -c "
 import json
 from collections import Counter
+import glob
+jsonl = sorted(glob.glob('results/benchmark_synthetic_paper_*/metrics.jsonl'))[-1]
 c = Counter()
-with open('benchmarking/results/raw/inference_paper_metrics.jsonl') as f:
+with open(jsonl) as f:
     for line in f:
         try:
             r = json.loads(line)
@@ -127,50 +116,39 @@ print(c)
 
 ## 6. Interruption and recovery
 
-a. **The JSONL sidecar is the source of truth.** During a run, every
-   completed cell is appended to `inference_paper_metrics.jsonl`
-   immediately. The parquet is written only at natural completion.
+a. **The JSONL file is the source of truth.** During a run, every
+   completed cell is appended to `metrics.jsonl` immediately
+   (line-buffered). The parquet is written only at natural completion.
 
 b. **If the process is killed or crashes**, the JSONL is intact up to
    the last flushed cell. Reconstruct the parquet from it:
 
    ```python
    from pathlib import Path
-   from benchmarking._crash_test_utils import jsonl_to_parquet
+   from benchmarking.core.output import jsonl_to_parquet
    jsonl_to_parquet(
-       Path("benchmarking/results/raw/inference_paper_metrics.jsonl"),
-       Path("benchmarking/results/raw/inference_paper_metrics.parquet"),
+       Path("results/benchmark_synthetic_paper_<timestamp>/metrics.jsonl"),
+       Path("results/benchmark_synthetic_paper_<timestamp>/metrics.parquet"),
    )
    ```
 
-c. **Killing the process is safe for the parquet.** `write_parquet` is
-   called after the `try/finally` block; a SIGTERM does not reach it.
-   The existing parquet on disk is left untouched.
+c. **Restarting `nbn-bench` re-runs all cells from scratch**. There is
+   no skip/resume logic. A fresh run creates a new timestamped directory.
 
-d. **Restarting `nbn-bench` will re-run all cells from scratch**, NOT
-   resume from where it left off. There is no skip/resume logic. The
-   new run overwrites the parquet with only the current run's rows.
-
-e. **To avoid losing in-progress data when relaunching**: archive the
-   JSONL before restarting, then manually merge the JSONLs afterward:
+d. **To avoid losing in-progress data when relaunching**: copy the
+   JSONL before restarting, then manually merge:
 
    ```bash
-   # Before killing / before relaunch
-   cp benchmarking/results/raw/inference_paper_metrics.jsonl \
-      benchmarking/results/raw/_archive_$(date +%Y%m%d_%H%M%S).jsonl
+   cp results/benchmark_synthetic_paper_<ts1>/metrics.jsonl /tmp/run1.jsonl
 
    # After both runs finish, merge and rebuild parquet
-   cat benchmarking/results/raw/_archive_*.jsonl \
-       benchmarking/results/raw/inference_paper_metrics.jsonl \
-       > benchmarking/results/raw/_merged.jsonl
+   cat /tmp/run1.jsonl results/benchmark_synthetic_paper_<ts2>/metrics.jsonl \
+       > /tmp/merged.jsonl
 
    python3 -c "
    from pathlib import Path
-   from benchmarking._crash_test_utils import jsonl_to_parquet
-   jsonl_to_parquet(
-       Path('benchmarking/results/raw/_merged.jsonl'),
-       Path('benchmarking/results/raw/inference_paper_metrics.parquet'),
-   )
+   from benchmarking.core.output import jsonl_to_parquet
+   jsonl_to_parquet(Path('/tmp/merged.jsonl'), Path('/tmp/merged.parquet'))
    "
    ```
 
@@ -180,13 +158,14 @@ e. **To avoid losing in-progress data when relaunching**: archive the
 
 ## 7. Finalization
 
-When the run completes naturally, the parquet and figures are written
-automatically. Spot-check before committing results:
+When the run completes naturally, the parquet and aggregated figures are
+written automatically. Spot-check before committing results:
 
 ```bash
 python3 -c "
-import pandas as pd
-df = pd.read_parquet('benchmarking/results/raw/inference_paper_metrics.parquet')
+import pandas as pd, glob
+parquet = sorted(glob.glob('results/benchmark_synthetic_paper_*/metrics.parquet'))[-1]
+df = pd.read_parquet(parquet)
 print('Total rows:', len(df))
 print()
 print(df.groupby(['family', 'baseline', 'status']).size().to_string())
@@ -197,19 +176,16 @@ Expected: `ok` rows for all applicable (family, baseline) pairs,
 `not_supported` for non-applicable pairs, `timeout` acceptable for
 pyro at large n (see §8). No `error` rows.
 
-If the run was for parameter learning, substitute
-`parameter_learning_paper_metrics.parquet`.
-
 ### Investigating error rows
 
 If the status breakdown shows any `error` rows (not `oom`, `timeout`,
-or `not_supported`), these are unexpected — `run_with_guard` caught
-something the registry did not gate out. Inspect:
+or `not_supported`), inspect:
 
 ```bash
 python3 -c "
-import pandas as pd
-df = pd.read_parquet('benchmarking/results/raw/inference_paper_metrics.parquet')
+import pandas as pd, glob
+parquet = sorted(glob.glob('results/benchmark_synthetic_paper_*/metrics.parquet'))[-1]
+df = pd.read_parquet(parquet)
 errs = df[df.status == 'error']
 print(errs[['family', 'n_nodes', 'seed', 'baseline', 'metric', 'error_msg']].to_string())
 "
@@ -217,9 +193,7 @@ print(errs[['family', 'n_nodes', 'seed', 'baseline', 'metric', 'error_msg']].to_
 
 Common causes: a baseline that should have been registry-gated but
 wasn't, a config-loaded baseline that isn't installed, or a
-device-specific issue (e.g., CUDA-only lstsq driver on a CPU-only
-server). File an issue or check the run log before proceeding to
-figures.
+device-specific issue.
 
 ## 8. Known caveats
 
@@ -231,11 +205,7 @@ figures.
 - **pyro timeouts at large n**: on CPU, pyro-empirical-importance takes
   ~95 s at n=10 and scales linearly with n. Cells at n ≥ 100 on
   discrete and continuous_lg will hit the 600 s timeout and emit
-  `status=timeout` rows. This is expected and acceptable — it documents
-  pyro's scalability limit.
-
-- **pyro continuous_lg and hybrid at n=10/50**: ~95–360 s/cell on CPU,
-  5 seeds each ≈ 8–30 min per (family, n_nodes) slice.
+  `status=timeout` rows. This is expected and acceptable.
 
 - **`hybrid` family**: only pyro (inference) and NBN-hybrid have
   applicable baselines. pgmpy, gpytorch, and pomegranate have no hybrid
@@ -248,8 +218,7 @@ figures.
 - **gpytorch accuracy is not supported**: gpytorch-gp-predict emits
   speed rows only (`accuracy_supported=False` in the registry). This is
   architectural — the SVGP baseline evaluates the local conditional
-  at zero-parent values, not a posterior given evidence. Speed timing
-  is still useful for comparison.
+  at zero-parent values, not a posterior given evidence.
 
 - **`nbn-cat-ve` OOM at n ≥ 50 on discrete**: VE factor tables grow
   exponentially with n. Expected; cells emit `status=oom`.
@@ -258,53 +227,17 @@ figures.
 
 **Purpose:** different question from the paper benchmark. Instead of
 "how accurate at fixed scales?", this benchmark asks "at what n_nodes
-does each baseline's full cell pipeline (BN setup + 17 adapter fits +
-queries + accuracy metrics) overflow the 60s budget?" The cliff is
-therefore a **wall-clock-per-cell** metric, not a pure per-query
-scalability metric — per-query inference is much faster than the cliff
-suggests (see issue #107 for the full investigation). At B=1 (one query
-per cell), the 17 adapter fits dominate the single timed query by
-17–29× across n=10–200, so the timeout gate fires on fit overhead more
-than on inference cost.
-
-**When to run:** after the paper benchmark, to characterise the
-practical n_nodes ceiling per baseline. Output is mostly `timeout`
-rows; the last `ok` row per baseline is the cliff.
+does each baseline's full cell pipeline overflow the 60s budget?"
 
 **Launch:**
 
 ```bash
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 nohup nbn-bench inference \
   --config benchmarking/configs/inference_scalability.yaml \
-  > benchmarking/results/raw/inference_scalability_${TIMESTAMP}.log 2>&1 &
+  > /tmp/inference_scalability.log 2>&1 &
 echo "PID $!"
 ```
 
-**Expected output:** `benchmarking/results/raw/inference_scalability_metrics.jsonl`
-with rows spanning `status ∈ {ok, timeout, oom, not_supported}`. Most
-baselines will produce `ok` at n=5–100 and `timeout` from n=200–500.
-Empirical ceiling measured 2026-05-22 (issue #105):
-
-| Baseline | Last ok n (60s budget) |
-|---|---|
-| nbn-cat-lw | ~100–200 |
-| nbn-mdn-lw | ~200 |
-| pgmpy-mle-ve | ~100 |
-
-Note: these cliffs reflect cell-pipeline overflow (17 fits + BN
-generation), not pure inference cost (see issue #107).
-
-**Expected duration:** ~1–2 hours on a laptop CPU. With 11 n_nodes × 4
-families × 14 baselines × 1 seed = 616 cells max (many skipped via
-applicability), and a 60s timeout per cell, most cells resolve quickly
-once baselines hit their ceiling.
-
-**Config knobs used:**
-
-- `per_cell_timeout_s: 60` — timeout covers full cell pipeline (BN gen +
-  17 fits + query + accuracy); see issue #107 for breakdown
-- `n_seeds: 1` — survival question is binary; second seed adds little
-- `n_queries_per_cell: 1` — one inference call per cell (B=1)
-- `fit_epochs: 2` — minimal NBN training; applies to all 17 fits per
-  cell (1 timing fit + 16 accuracy re-fits in `_compute_inference_metrics`)
+**Expected output:** `results/benchmark_synthetic_scalability_<ts>/metrics.jsonl`
+with rows spanning `status ∈ {ok, timeout, oom, not_supported}`.
+Most baselines produce `ok` at n=5–100 and `timeout` from n=200–500.

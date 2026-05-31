@@ -24,7 +24,7 @@ from typing import Any
 
 import torch
 
-from benchmarking._baseline_registry import _BASELINE_APPLICABILITY
+from benchmarking.core.applicability import BASELINE_FAMILY_APPLICABILITY as _BASELINE_APPLICABILITY
 from benchmarking.domains.base import BenchmarkProblem, Query
 from benchmarking.domains.posterior import Posterior
 

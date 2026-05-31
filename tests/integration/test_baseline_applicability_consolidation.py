@@ -27,9 +27,9 @@ from __future__ import annotations
 
 import pytest
 
-from benchmarking._baseline_registry import (
-    BaselineApplicability, _BASELINE_APPLICABILITY, _label_from_spec,
-    accuracy_supported, is_applicable, known_labels, BaselineSpec,
+from benchmarking.core.applicability import (
+    BaselineApplicability, BASELINE_FAMILY_APPLICABILITY as _BASELINE_APPLICABILITY,
+    accuracy_supported, is_applicable, known_labels,
 )
 
 
