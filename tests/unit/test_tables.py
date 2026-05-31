@@ -21,7 +21,7 @@ from benchmarking._tables import (
 
 
 def _make_wide() -> pd.DataFrame:
-    """Tiny wide DataFrame for round-trip tests."""
+    """Tiny wide DataFrame for round-trip tests (v0.13 schema: problem_id str)."""
     return pd.DataFrame(
         {
             "nbn-cat-ve": ["0.0500", "0.0429", "n/a (not applicable)"],
@@ -29,24 +29,24 @@ def _make_wide() -> pd.DataFrame:
         },
         index=pd.MultiIndex.from_tuples(
             [
-                ("discrete", "accuracy", 5),
-                ("discrete", "accuracy", 10),
-                ("continuous_lg", "accuracy", 5),
+                ("discrete", "accuracy", "5"),
+                ("discrete", "accuracy", "10"),
+                ("continuous_lg", "accuracy", "5"),
             ],
-            names=["family", "metric", "n_nodes"],
+            names=["family", "metric", "problem_id"],
         ),
     )
 
 
 def _make_pareto() -> pd.DataFrame:
-    """Pareto DataFrame matching the wide above."""
+    """Pareto DataFrame matching the wide above (v0.13 schema: problem_id str)."""
     return pd.DataFrame([
         {"family": "discrete", "baseline": "nbn-cat-ve",
-         "n_nodes": 5, "is_pareto": True, "dominated_by": ()},
+         "problem_id": "5", "is_pareto": True, "dominated_by": ()},
         {"family": "discrete", "baseline": "nbn-cat-ve",
-         "n_nodes": 10, "is_pareto": False, "dominated_by": ("pgmpy-mle-ve",)},
+         "problem_id": "10", "is_pareto": False, "dominated_by": ("pgmpy-mle-ve",)},
         {"family": "discrete", "baseline": "pgmpy-mle-ve",
-         "n_nodes": 10, "is_pareto": True, "dominated_by": ()},
+         "problem_id": "10", "is_pareto": True, "dominated_by": ()},
     ])
 
 
@@ -157,7 +157,7 @@ def test_write_parquet_round_trips(tmp_path: Path) -> None:
     # are present along with the baseline columns.
     assert "family" in reloaded.columns
     assert "metric" in reloaded.columns
-    assert "n_nodes" in reloaded.columns
+    assert "problem_id" in reloaded.columns
     assert "nbn-cat-ve" in reloaded.columns
 
 

@@ -1,34 +1,27 @@
-"""v0.6c-C-3 — aggregator: parquet → 4 summary DataFrames.
+"""v0.13 aggregator: parquet → 4 summary DataFrames.
 
-Consumes the raw metrics parquet from a crash-test run (schema:
-``family, n_nodes, seed, baseline, metric, value, status, n_skipped,
-error_msg``) and produces:
+Consumes a v3-schema metrics parquet (columns: ``family``, ``problem_id``,
+``seed``, ``baseline``, ``metric``, ``value``, ``status``, ``fit_time_s``,
+``query_time_s``, ``metrics_time_s``, ``error_msg``) and produces:
 
-* ``wide``: pivot table indexed by ``(family, metric, n_nodes)`` with
+* ``wide``: pivot table indexed by ``(family, metric, problem_id)`` with
   baselines as columns.  Values are formatted strings ``"mean ± std"``
   (or ``"mean"`` if a single seed) for ok cells; ``"n/a (...)"`` for
   cells that are not applicable, errored, or where the runner failed
-  to emit the metric (issue #35 workaround).
+  to emit the metric.
 
-* ``long``: tidy long-format dataframe one row per
-  ``(family, baseline, n_nodes, metric)``, with columns ``mean``,
-  ``std``, ``n_ok``, ``n_seeds``, ``status_code``.
+* ``long``: tidy long-format DataFrame, one row per
+  ``(family, baseline, problem_id, metric)``, with columns ``mean``,
+  ``std``, ``n_ok``, ``n_seeds``, ``applicable``, ``formatted``.
 
 * ``status``: per-cell status counts (ok / not_supported / error /
-  timeout / oom / no_result), used for figure footnotes.
+  timeout / oom / no_result), used for figure footers.
 
-* ``pareto``: per ``(family, n_nodes)``, the (time, accuracy) Pareto
-  frontier — which baselines are non-dominated.  Used by the plotter
-  for highlighting and by the LaTeX writer for boldface.
+* ``pareto``: per ``(family, problem_id)``, the (time, accuracy) Pareto
+  frontier — which baselines are non-dominated.
 
-Issue references:
-* #35 — runner emits one metric per cell instead of two.  Aggregator
-  reports the missing metric as ``"n/a (metric missing)"``.  Workaround
-  only; runtime fix tracked separately.
-* #37 — pgmpy-lg-predict W₁ outlier on continuous_lg.  Aggregator
-  reports the value honestly; tables and plots show it as-is.
-* #30 — HybridRouter cuda assert at n≥10.  Cells with all-error
-  status get ``"n/a (cell errored)"``.
+Backward compatibility: v0.12 parquets that have ``n_nodes`` (int) instead
+of ``problem_id`` (str) are transparently up-cast at load time.
 """
 from __future__ import annotations
 
@@ -43,7 +36,13 @@ from benchmarking._baseline_registry import is_applicable
 
 _NA_NOT_APPLICABLE = "n/a (not applicable)"
 _NA_METRIC_MISSING = "n/a (metric missing)"
-_NA_CELL_ERRORED = "n/a (cell errored)"
+_NA_CELL_ERRORED   = "n/a (cell errored)"
+
+# Numeric sort key for problem_id values.
+# Synthetic problem_ids are always numeric strings ("5", "10", "100");
+# bnlearn problem_ids are names ("asia").  This key sorts numerically
+# when all values are digit strings, lexicographically otherwise.
+_NUMERIC_SORT_KEY = lambda x: (0, int(x)) if str(x).isdigit() else (1, x)  # noqa: E731
 
 
 def _fmt_value(mean: float, std: float, n_ok: int) -> str:
@@ -57,14 +56,13 @@ def _fmt_value(mean: float, std: float, n_ok: int) -> str:
 def _classify_cell(
     cell_rows: pd.DataFrame, n_seeds: int, applicable: bool,
 ) -> tuple[str, float, float, int]:
-    """Return ``(formatted_string, mean, std, n_ok)`` for a single
-    ``(family, baseline, n_nodes, metric)`` cell.
+    """Return ``(formatted_string, mean, std, n_ok)`` for one
+    ``(family, baseline, problem_id, metric)`` cell.
 
     Priority of "n/a" reasons (most informative first):
     1. Not applicable (registry says so).
     2. Cell errored on every seed.
-    3. Metric was missing (no rows at all for this metric — usually
-       issue #35).
+    3. Metric was missing (no rows at all for this metric).
     4. ok rows present → numeric value.
     """
     if not applicable:
@@ -75,18 +73,11 @@ def _classify_cell(
     if len(ok_rows) == 0:
         return _NA_CELL_ERRORED, np.nan, np.nan, 0
     values = ok_rows["value"].to_numpy(dtype=float)
-    # Issue #35: the runner sometimes emits status='ok' rows with NaN
-    # value (the metric was not populated for that baseline path).
-    # Treat as metric-missing rather than formatting "nan" into the
-    # output table.
     values = values[np.isfinite(values)]
     if len(values) == 0:
         return _NA_METRIC_MISSING, np.nan, np.nan, 0
     mean = float(np.mean(values))
-    if len(values) == 1:
-        std = 0.0
-    else:
-        std = float(np.std(values, ddof=1))
+    std = 0.0 if len(values) == 1 else float(np.std(values, ddof=1))
     return _fmt_value(mean, std, len(values)), mean, std, len(values)
 
 
@@ -97,13 +88,16 @@ def aggregate(parquet_path: str | Path) -> Dict[str, pd.DataFrame]:
     """
     df = pd.read_parquet(parquet_path)
 
+    # Backward-compat: v0.12 parquets use n_nodes (int); promote to problem_id (str).
+    if "n_nodes" in df.columns and "problem_id" not in df.columns:
+        df = df.rename(columns={"n_nodes": "problem_id"})
+        df["problem_id"] = df["problem_id"].astype(str)
+
     families = sorted(df["family"].unique())
     baselines = sorted(df["baseline"].unique())
-    n_nodes_list = sorted(df["n_nodes"].unique())
-    # ``status`` and value-bearing metric rows coexist in the parquet.
-    # The runner sometimes emits a synthetic ``metric='status'`` row for
-    # not_supported / error cells; we exclude these from the metric
-    # listing.
+    problem_id_list = sorted(df["problem_id"].unique(), key=_NUMERIC_SORT_KEY)
+    # Exclude the synthetic ``metric='status'`` sentinel rows from the
+    # metric listing — they are status markers, not measurement values.
     metrics = sorted(m for m in df["metric"].unique() if m != "status")
 
     n_seeds = int(df["seed"].nunique())
@@ -114,14 +108,14 @@ def aggregate(parquet_path: str | Path) -> Dict[str, pd.DataFrame]:
 
     for family in families:
         for metric in metrics:
-            for n in n_nodes_list:
-                wide_index.append((family, metric, n))
+            for pid in problem_id_list:
+                wide_index.append((family, metric, pid))
                 for baseline in baselines:
                     applicable = is_applicable(baseline, family)
                     cell_rows = df[
                         (df["family"] == family)
                         & (df["baseline"] == baseline)
-                        & (df["n_nodes"] == n)
+                        & (df["problem_id"] == pid)
                         & (df["metric"] == metric)
                     ]
                     formatted, mean, std, n_ok = _classify_cell(
@@ -131,7 +125,7 @@ def aggregate(parquet_path: str | Path) -> Dict[str, pd.DataFrame]:
                     long_rows.append({
                         "family": family,
                         "baseline": baseline,
-                        "n_nodes": n,
+                        "problem_id": pid,
                         "metric": metric,
                         "mean": mean,
                         "std": std,
@@ -144,85 +138,85 @@ def aggregate(parquet_path: str | Path) -> Dict[str, pd.DataFrame]:
     wide = pd.DataFrame(
         wide_data,
         index=pd.MultiIndex.from_tuples(
-            wide_index, names=["family", "metric", "n_nodes"],
+            wide_index, names=["family", "metric", "problem_id"],
         ),
     )
     long = pd.DataFrame(long_rows)
 
-    # Status counts: per (family, baseline, n_nodes), how many seeds
+    # Status counts: per (family, baseline, problem_id), how many seeds
     # each status code accumulated.
     status = (
-        df.groupby(["family", "baseline", "n_nodes", "status"])
+        df.groupby(["family", "baseline", "problem_id", "status"])
         .size()
         .unstack(fill_value=0)
         .reset_index()
     )
 
-    # Pareto frontier: per (family, n_nodes), find the speed/accuracy
-    # frontier across baselines.  Lower is better on both axes.
     pareto = _compute_pareto(long)
 
     return {"wide": wide, "long": long, "status": status, "pareto": pareto}
 
 
 def _compute_pareto(long: pd.DataFrame) -> pd.DataFrame:
-    """For each (family, n_nodes), determine which baselines lie on the
+    """For each (family, problem_id), determine which baselines lie on the
     (mean_time, mean_accuracy) Pareto frontier.
 
     A baseline ``b1`` dominates ``b2`` iff
     ``time(b1) <= time(b2) AND accuracy(b1) <= accuracy(b2)`` and at
     least one inequality is strict.  Pareto-optimal baselines are those
-    NOT dominated by any other.  Cells with NaN on either axis are
-    excluded from the frontier (no comparable point).
+    NOT dominated by any other.
     """
-    # Pivot to one row per (family, baseline, n_nodes) with two value
-    # columns: total_time_s mean and accuracy mean.
+    if long.empty:
+        return pd.DataFrame(columns=["family", "baseline", "problem_id",
+                                     "is_pareto", "dominated_by"])
+
     pivoted = long.pivot_table(
-        index=["family", "baseline", "n_nodes"],
+        index=["family", "baseline", "problem_id"],
         columns="metric",
         values="mean",
         aggfunc="first",
     ).reset_index()
-    # ``accuracy`` lives under several metric names depending on the
-    # crash test (``accuracy`` for inference; ``tv_per_node`` /
-    # ``w1_per_node`` for parameter-learning).  Coalesce to a single
-    # ``acc`` column so the Pareto logic is metric-agnostic.
-    pivoted["acc"] = pivoted.get(
-        "accuracy",
-        pivoted.get("tv_per_node", pivoted.get("w1_per_node")),
-    )
-    if "accuracy" not in pivoted.columns:
+
+    # Coalesce accuracy metrics into a single ``acc`` column.
+    acc_col = None
+    for cand in ("accuracy", "tv_per_node", "w1_per_node"):
+        if cand in pivoted.columns:
+            acc_col = cand
+            break
+    if acc_col is not None:
+        pivoted["acc"] = pivoted[acc_col]
         for col in ("tv_per_node", "w1_per_node"):
-            if col in pivoted.columns:
+            if col in pivoted.columns and col != acc_col:
                 pivoted["acc"] = pivoted["acc"].fillna(pivoted[col])
-    pivoted["time"] = pivoted.get("total_time_s")
+    else:
+        pivoted["acc"] = np.nan
+
+    time_col = "total_time_s" if "total_time_s" in pivoted.columns else "query_time_s"
+    pivoted["time"] = pivoted.get(time_col, pd.Series(np.nan, index=pivoted.index))
 
     out_rows: List[Dict] = []
-    for (family, n), grp in pivoted.groupby(["family", "n_nodes"]):
+    for (family, pid), grp in pivoted.groupby(["family", "problem_id"]):
         finite = grp.dropna(subset=["acc", "time"])
         for _, row in grp.iterrows():
             baseline = row["baseline"]
             t = row.get("time")
             a = row.get("acc")
             if pd.isna(t) or pd.isna(a):
-                is_pareto = False
-                dominated_by: List[str] = []
-            else:
-                dominated_by = []
-                for _, other in finite.iterrows():
-                    ot, oa = other["time"], other["acc"]
-                    if other["baseline"] == baseline:
-                        continue
-                    # ``other`` dominates if its time AND acc are <=
-                    # ours, with at least one strictly less.
-                    if ot <= t and oa <= a and (ot < t or oa < a):
-                        dominated_by.append(other["baseline"])
-                is_pareto = len(dominated_by) == 0
+                out_rows.append({
+                    "family": family, "baseline": baseline,
+                    "problem_id": pid, "is_pareto": False, "dominated_by": (),
+                })
+                continue
+            dominated_by = [
+                other["baseline"] for _, other in finite.iterrows()
+                if other["baseline"] != baseline
+                and other["time"] <= t and other["acc"] <= a
+                and (other["time"] < t or other["acc"] < a)
+            ]
             out_rows.append({
-                "family": family,
-                "baseline": baseline,
-                "n_nodes": n,
-                "is_pareto": is_pareto,
+                "family": family, "baseline": baseline,
+                "problem_id": pid,
+                "is_pareto": len(dominated_by) == 0,
                 "dominated_by": tuple(dominated_by),
             })
     return pd.DataFrame(out_rows)

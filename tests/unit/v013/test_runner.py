@@ -111,11 +111,13 @@ def _make_runner_cfg(
     per_cell_timeout_s: float = 120.0,
     measurement: Any = None,
     fit_timeout_s_multiplier: float = 10.0,
+    config_name: str = "test",
 ) -> RunnerConfig:
     if measurement is None:
         measurement = TimingOnly()
     return RunnerConfig(
         benchmark="synthetic",
+        config_name=config_name,
         problem_source=_FixedProblemSource(),
         source_config=problem,
         selector=UniformRandomSelector(),
@@ -171,6 +173,7 @@ class TestRunnerConfig:
         src, src_cfg = _make_source_cfg("discrete")
         cfg = RunnerConfig(
             benchmark="synthetic",
+            config_name="test",
             problem_source=src,
             source_config=src_cfg,
             selector=UniformRandomSelector(),
@@ -188,6 +191,7 @@ class TestRunnerConfig:
         src, src_cfg = _make_source_cfg("discrete")
         cfg = RunnerConfig(
             benchmark="synthetic",
+            config_name="test",
             problem_source=src,
             source_config=src_cfg,
             selector=UniformRandomSelector(),
@@ -204,6 +208,7 @@ class TestRunnerConfig:
         src, src_cfg = _make_source_cfg("discrete")
         cfg = RunnerConfig(
             benchmark="synthetic",
+            config_name="test",
             problem_source=src,
             source_config=src_cfg,
             selector=UniformRandomSelector(),
@@ -453,6 +458,7 @@ class TestNotSupportedPath:
         ]
         cfg = RunnerConfig(
             benchmark="synthetic",
+            config_name="test",
             problem_source=_FixedProblemSource(),
             source_config=problem,
             selector=UniformRandomSelector(),
@@ -580,6 +586,7 @@ def test_end_to_end_cell(adapter_id, family, spec, requires, tmp_path):
     measurement = AccuracyAndTiming(n_oracle_samples=100)
     cfg = RunnerConfig(
         benchmark="synthetic",
+        config_name="e2e_test",
         problem_source=src,
         source_config=src_cfg,
         selector=UniformRandomSelector(),
@@ -639,6 +646,7 @@ def test_zero_budget_forces_timeout_rows(tmp_path):
     spec = BaselineSpec("pomegranate", "discrete", "mle")
     cfg = RunnerConfig(
         benchmark="synthetic",
+        config_name="timeout_test",
         problem_source=src,
         source_config=src_cfg,
         selector=UniformRandomSelector(),
@@ -674,6 +682,7 @@ def test_multiple_baselines_iterate_correctly(tmp_path):
     ]
     cfg = RunnerConfig(
         benchmark="synthetic",
+        config_name="multi_test",
         problem_source=src,
         source_config=src_cfg,
         selector=UniformRandomSelector(),
@@ -702,6 +711,7 @@ def test_fit_time_s_identical_across_rows_in_cell(tmp_path):
     spec = BaselineSpec("nbn", "cat", "mle", "lw")
     cfg = RunnerConfig(
         benchmark="synthetic",
+        config_name="timing_test",
         problem_source=src,
         source_config=src_cfg,
         selector=UniformRandomSelector(),
@@ -726,6 +736,7 @@ def test_problem_seed_propagated_to_cell_result(tmp_path):
     spec = BaselineSpec("pgmpy", "discrete", "mle", "ve")
     cfg = RunnerConfig(
         benchmark="synthetic",
+        config_name="seed_test",
         problem_source=src,
         source_config=src_cfg,
         selector=UniformRandomSelector(),

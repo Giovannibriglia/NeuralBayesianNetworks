@@ -59,6 +59,10 @@ class RunnerConfig:
     ----------
     benchmark:
         Name for the v3 parquet schema ("synthetic" | "scalability" | "bnlearn").
+    config_name:
+        Human-readable label for this run configuration (e.g., "paper",
+        "smoke").  Used in the run output directory name produced by
+        ``make_results_dir(benchmark, config_name)``.
     problem_source:
         ProblemSource instance (e.g. SyntheticProblemSource).
     source_config:
@@ -91,6 +95,7 @@ class RunnerConfig:
     """
 
     benchmark: str
+    config_name: str
     problem_source: ProblemSource
     source_config: Any
     selector: QuerySelector
