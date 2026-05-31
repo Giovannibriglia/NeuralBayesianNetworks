@@ -29,7 +29,8 @@ docs/_build/
 ScalabilityImages
 .idea/
 
-# v0.13 benchmark run outputs — untracked by default; archive lives in results/v0.12_archive/
+# v0.13 benchmark run outputs — untracked by default; archive lives in benchmarking/results/v0.12_archive/
+benchmarking/results/benchmark_*/
 benchmarking/results/raw/
 benchmarking/results/figures/
 benchmarking/results/tables/
