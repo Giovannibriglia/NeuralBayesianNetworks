@@ -86,8 +86,8 @@ def test_cli_inference_produces_all_outputs(tmp_path: Path) -> None:
     )
 
     # Find the results directory (compact_datetime suffix makes name unpredictable).
-    results_root = tmp_path / "results"
-    assert results_root.exists(), "results/ directory was not created"
+    results_root = tmp_path / "benchmarking" / "results"
+    assert results_root.exists(), "benchmarking/results/ directory was not created"
 
     run_dirs = list(results_root.glob("benchmark_synthetic_cli_test_*"))
     assert len(run_dirs) == 1, (

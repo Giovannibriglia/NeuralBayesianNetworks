@@ -132,7 +132,7 @@ def _compact_datetime() -> str:
 def make_results_dir(
     benchmark: str,
     config_name: str,
-    base: Path = Path("results"),
+    base: Path = Path("benchmarking/results"),
 ) -> Path:
     """Create and return the run output directory.
 
@@ -142,7 +142,7 @@ def make_results_dir(
 
     Example::
 
-        results/benchmark_synthetic_paper_20260531_143045/
+        benchmarking/results/benchmark_synthetic_paper_20260531_143045/
 
     Parameters
     ----------
@@ -151,7 +151,8 @@ def make_results_dir(
     config_name:
         Human-readable config label (e.g., "paper", "smoke").
     base:
-        Base directory; defaults to ``Path("results")``.
+        Base directory; defaults to ``Path("benchmarking/results")``
+        so new runs land alongside the v0.12 archive.
 
     Returns
     -------
