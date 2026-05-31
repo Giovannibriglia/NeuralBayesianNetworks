@@ -1,7 +1,7 @@
-"""v0.6c-C-3 — table writers (CSV / markdown / LaTeX / parquet).
+"""v0.13 table writers (CSV / markdown / LaTeX / parquet).
 
 Consumes the ``aggregate(...)`` output from ``_aggregate.py`` and
-writes 4 file formats per crash-test run.  All four describe the same
+writes 4 file formats per benchmark run.  All four describe the same
 ``wide`` summary; format choice is a downstream-tooling preference.
 
 LaTeX output is paper-ready: uses ``booktabs`` (\\toprule, \\midrule,
@@ -9,7 +9,12 @@ LaTeX output is paper-ready: uses ``booktabs`` (\\toprule, \\midrule,
 LaTeX's tabular cells cannot accept literally.
 
 Output paths land under ``{output_dir}/tables/{output_prefix}_summary.{ext}``
-(per the v0.6c-B layout).
+(per the v0.6c-B layout, retained in v0.13).
+
+Note: ``_is_pareto_cell`` accepts ``problem_id`` as a string.  For
+synthetic benchmarks the value is always a numeric string (e.g., ``"10"``),
+so ``int(problem_id)`` is safe.  Phase 4 (bnlearn) must revisit this
+when problem_ids are network names.  # TODO Phase 4: handle non-numeric problem_ids
 """
 from __future__ import annotations
 
@@ -19,7 +24,7 @@ from typing import Dict
 import pandas as pd
 
 
-_BOLD_OPEN = "\\textbf{"
+_BOLD_OPEN  = "\\textbf{"
 _BOLD_CLOSE = "}"
 
 
@@ -28,8 +33,7 @@ def _escape_latex(s: str) -> str:
 
     ``±`` → ``$\\pm$`` (cell context expects math mode for \\pm).
     Underscores, ampersands, %, # → backslash-prefixed.  Backslashes
-    in already-escaped values (e.g., from a previous pass) are left
-    alone — we only run this on plain numeric cells.
+    in already-escaped values are left alone.
     """
     return (
         s.replace("\\", "\\textbackslash{}")
@@ -42,14 +46,19 @@ def _escape_latex(s: str) -> str:
 
 
 def _is_pareto_cell(
-    pareto_df: pd.DataFrame, family: str, baseline: str, n_nodes: int,
+    pareto_df: pd.DataFrame, family: str, baseline: str, problem_id: str,
 ) -> bool:
-    """Look up whether a (family, baseline, n_nodes) cell is Pareto-
-    optimal.  Returns False on missing rows (defensive)."""
+    """Look up whether a (family, baseline, problem_id) cell is Pareto-
+    optimal.  Returns False on missing rows (defensive).
+
+    Note: int() cast is safe for synthetic problem_ids ("10" → 10) but
+    would raise for bnlearn names like "asia".
+    # TODO Phase 4: handle non-numeric problem_ids in Pareto lookup
+    """
     rows = pareto_df[
         (pareto_df["family"] == family)
         & (pareto_df["baseline"] == baseline)
-        & (pareto_df["n_nodes"] == n_nodes)
+        & (pareto_df["problem_id"] == problem_id)
     ]
     if rows.empty:
         return False
@@ -57,9 +66,7 @@ def _is_pareto_cell(
 
 
 def write_csv(wide: pd.DataFrame, path: str | Path) -> None:
-    """Standard CSV with ``na_rep='n/a'`` (the wide DataFrame already
-    embeds explicit n/a strings; this guards against any residual
-    NaN that slips through)."""
+    """Standard CSV with ``na_rep='n/a'``."""
     wide.to_csv(path, na_rep="n/a")
 
 
@@ -67,12 +74,6 @@ def _df_to_markdown(df: pd.DataFrame) -> str:
     """Hand-rolled markdown renderer (avoids the optional ``tabulate``
     dependency).  Renders ``df`` with its index name as the leftmost
     column and column labels as the headers.
-
-    Output is a github-flavoured-markdown table:
-
-        | n_nodes | nbn-cat-ve | pgmpy-mle-ve |
-        | --- | --- | --- |
-        | 5 | 0.0429 | 0.0501 |
     """
     cols = [str(df.index.name or "index")] + [str(c) for c in df.columns]
     header = "| " + " | ".join(cols) + " |"
@@ -88,17 +89,19 @@ def write_markdown(wide: pd.DataFrame, path: str | Path) -> None:
     """Pretty markdown: one table per (family, metric) combination.
 
     Renders the wide DataFrame as a sequence of small markdown tables
-    with H2 headers.  Suitable for embedding in README or for quick
-    eyeballing.
+    with H2 headers.
     """
     lines: list[str] = []
     metric_descriptions = {
-        "accuracy": "(W₁ for continuous / TV for discrete, lower is better)",
-        "tv_per_node": "(per-node total variation, lower is better)",
-        "jsd_per_node": "(per-node Jensen-Shannon divergence / log 2, lower is better)",
-        "w1_per_node": "(per-node Wasserstein-1, lower is better)",
-        "total_time_s": "(wall-clock query battery time, seconds)",
-        "cpd_accuracy": "(per-CPD accuracy)",
+        "accuracy":         "(W₁ for continuous / TV for discrete, lower is better)",
+        "tv_per_node":      "(per-node total variation, lower is better)",
+        "jsd_per_node":     "(per-node Jensen-Shannon divergence / log 2, lower is better)",
+        "w1_per_node":      "(per-node Wasserstein-1, lower is better)",
+        "total_time_s":     "(wall-clock query battery time, seconds)",
+        "cpd_accuracy":     "(per-CPD accuracy)",
+        "fit_time_s":       "(adapter.fit() wall-clock, seconds)",
+        "query_time_s":     "(adapter.query() wall-clock per query, seconds)",
+        "metrics_time_s":   "(accuracy scoring time, seconds)",
     }
     for (family, metric), block in wide.groupby(level=["family", "metric"]):
         desc = metric_descriptions.get(metric, "")
@@ -107,7 +110,7 @@ def write_markdown(wide: pd.DataFrame, path: str | Path) -> None:
         lines.append("")
         sub = block.copy()
         sub.index = sub.index.droplevel(["family", "metric"])
-        sub.index.name = "n_nodes"
+        sub.index.name = "problem_id"
         lines.append(_df_to_markdown(sub))
         lines.append("")
     Path(path).write_text("\n".join(lines))
@@ -131,10 +134,10 @@ def write_latex(
     for (family, metric), block in wide.groupby(level=["family", "metric"]):
         sub = block.copy()
         sub.index = sub.index.droplevel(["family", "metric"])
-        n_nodes_list = list(sub.index)
+        problem_ids = list(sub.index)
         baselines = list(sub.columns)
 
-        col_spec = "l" + "c" * len(n_nodes_list)
+        col_spec = "l" + "c" * len(problem_ids)
         caption = (
             f"{family.replace('_', ' ')} — {metric.replace('_', ' ')} "
             f"per baseline."
@@ -147,21 +150,19 @@ def write_latex(
         lines.append(f"\\begin{{tabular}}{{{col_spec}}}")
         lines.append("\\toprule")
         header = " & ".join(
-            ["baseline"] + [f"$n={n}$" for n in n_nodes_list]
+            ["baseline"] + [f"$n={pid}$" for pid in problem_ids]
         ) + " \\\\"
         lines.append(header)
         lines.append("\\midrule")
         for baseline in baselines:
             row = [_escape_latex(baseline)]
-            for n in n_nodes_list:
-                cell = str(sub.loc[n, baseline])
+            for pid in problem_ids:
+                cell = str(sub.loc[pid, baseline])
                 escaped = _escape_latex(cell)
-                # Bold Pareto-optimal cells (only when the value is
-                # numeric, not "n/a").
                 if (
                     pareto_df is not None
                     and not cell.startswith("n/a")
-                    and _is_pareto_cell(pareto_df, family, baseline, int(n))
+                    and _is_pareto_cell(pareto_df, family, baseline, str(pid))
                 ):
                     escaped = f"{_BOLD_OPEN}{escaped}{_BOLD_CLOSE}"
                 row.append(escaped)
@@ -175,8 +176,6 @@ def write_latex(
 
 def write_parquet(wide: pd.DataFrame, path: str | Path) -> None:
     """Parquet snapshot of the wide DataFrame for downstream tooling."""
-    # The wide DataFrame has a MultiIndex; reset for a clean parquet
-    # schema (all columns flat strings/values).
     wide.reset_index().to_parquet(path)
 
 
@@ -193,9 +192,9 @@ def write_all(
     base = Path(output_dir) / "tables"
     base.mkdir(parents=True, exist_ok=True)
     paths = {
-        "csv": base / f"{output_prefix}_summary.csv",
-        "md": base / f"{output_prefix}_summary.md",
-        "tex": base / f"{output_prefix}_summary.tex",
+        "csv":     base / f"{output_prefix}_summary.csv",
+        "md":      base / f"{output_prefix}_summary.md",
+        "tex":     base / f"{output_prefix}_summary.tex",
         "parquet": base / f"{output_prefix}_summary.parquet",
     }
     write_csv(aggregated["wide"], paths["csv"])

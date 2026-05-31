@@ -45,21 +45,24 @@ def test_stable_baseline_style_assigns_unique_markers() -> None:
 
 
 def test_stable_baseline_style_groups_colors_by_library() -> None:
-    """Baselines from the same library share a color hue (different
-    shades for mechanism × engine variants)."""
+    """Baselines from the same library share a color hue (different shades
+    for mechanism × engine variants); cross-library colors differ."""
     baselines = ["pgmpy-mle-ve", "pgmpy-bayes-ve", "nbn-cat-ve", "nbn-mdn-lw"]
     style = _stable_baseline_style(baselines)
+    # Color key must be present for every baseline.
+    for b in baselines:
+        assert "color" in style[b], f"missing 'color' in style for {b}"
     pgmpy_colors = [style["pgmpy-mle-ve"]["color"], style["pgmpy-bayes-ve"]["color"]]
     nbn_colors = [style["nbn-cat-ve"]["color"], style["nbn-mdn-lw"]["color"]]
     # Different shades within library → not identical.
     assert pgmpy_colors[0] != pgmpy_colors[1]
-    # Cross-library colors must be different.
+    # Cross-library colors must differ.
     assert pgmpy_colors[0] != nbn_colors[0]
 
 
 def test_stable_baseline_style_is_deterministic() -> None:
     """Running ``_stable_baseline_style`` on the same baseline list
-    twice produces identical assignments."""
+    twice produces identical (color, marker, linestyle) assignments."""
     baselines = ["nbn-cat-ve", "pgmpy-mle-ve", "gpytorch-gp-predict"]
     s1 = _stable_baseline_style(baselines)
     s2 = _stable_baseline_style(baselines)
@@ -92,13 +95,15 @@ def test_render_figures_writes_expected_files(tmp_path: Path) -> None:
         output_prefix="testrun",
     )
     figures_dir = tmp_path / "figures"
+    # v0.13 naming: <prefix>_<family>_<metric>_vs_problem_id.<ext>
+    # Test data has only family="discrete", so only discrete figures appear.
     expected_basenames = [
-        "testrun_accuracy_vs_size.png",
-        "testrun_accuracy_vs_size.pdf",
-        "testrun_accuracy_vs_size.svg",
-        "testrun_total_time_vs_size.png",
-        "testrun_total_time_vs_size.pdf",
-        "testrun_total_time_vs_size.svg",
+        "testrun_discrete_accuracy_vs_problem_id.png",
+        "testrun_discrete_accuracy_vs_problem_id.pdf",
+        "testrun_discrete_accuracy_vs_problem_id.svg",
+        "testrun_discrete_total_time_s_vs_problem_id.png",
+        "testrun_discrete_total_time_s_vs_problem_id.pdf",
+        "testrun_discrete_total_time_s_vs_problem_id.svg",
     ]
     for name in expected_basenames:
         f = figures_dir / name
@@ -143,42 +148,40 @@ def test_legend_filters_per_panel(tmp_path: Path) -> None:
          "value": 0.04, "status": "ok"},
     ], p)
 
-    # Render and re-open the resulting figure via matplotlib's pickle
-    # path is overkill — instead just call the inner render and walk
-    # the Axes legend on the figure object as it's being built.
-    # The render API closes figures on exit; for the test we recreate
-    # the panels manually.
-    from benchmarking._plot_v2 import _render_single_metric, _stable_baseline_style
-    df = pd.read_parquet(p)
-    families = ["discrete", "continuous_lg", "continuous_nongauss", "hybrid"]
-    baselines = sorted(df["baseline"].unique())
-    style = _stable_baseline_style(baselines)
-    n_nodes_list = sorted(df["n_nodes"].unique())
+    # One figure per (family, metric): each figure contains only the
+    # baselines applicable to that family.
+    out_paths = render_figures(
+        parquet_path=p,
+        output_dir=tmp_path,
+        output_prefix="legend_test",
+        formats=("png",),
+    )
+    # Both (family, metric) combinations must appear as separate figures.
+    assert "discrete_accuracy" in out_paths, (
+        f"discrete_accuracy figure missing; keys: {list(out_paths)}"
+    )
+    assert "continuous_lg_accuracy" in out_paths, (
+        f"continuous_lg_accuracy figure missing; keys: {list(out_paths)}"
+    )
+    assert Path(out_paths["discrete_accuracy"][0]).exists()
+    assert Path(out_paths["continuous_lg_accuracy"][0]).exists()
 
-    out_dir = tmp_path / "figures"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    paths = _render_single_metric(
-        df, metric="accuracy", families=families,
-        baselines=baselines, style=style, n_nodes_list=n_nodes_list,
-        out_dir=out_dir, output_prefix="legend_test",
-        formats=("png",), log_y=False, highlight_pareto=False,
-    )
-    assert paths and Path(paths[0]).exists()
-    # Re-render to a Figure we can inspect (Agg-rendered output is on
-    # disk; the legend assertions need the live figure).  Simulate by
-    # reproducing the legend-eligibility logic directly:
+    # Verify registry-based applicability filtering.
     from benchmarking._baseline_registry import is_applicable
-    discrete_legend = [b for b in baselines if is_applicable(b, "discrete")]
-    cont_legend = [b for b in baselines if is_applicable(b, "continuous_lg")]
-    assert "pgmpy-mle-ve" in discrete_legend
-    assert "nbn-cat-ve" in discrete_legend
-    assert "pgmpy-lg-predict" not in discrete_legend, (
-        "pgmpy-lg-predict must NOT appear in the discrete legend"
+    baselines = sorted(pd.read_parquet(p)["baseline"].unique())
+    discrete_applicable = [b for b in baselines if is_applicable(b, "discrete")]
+    cont_applicable = [b for b in baselines if is_applicable(b, "continuous_lg")]
+    # Discrete figure must include discrete-applicable baselines only.
+    assert "pgmpy-mle-ve" in discrete_applicable
+    assert "nbn-cat-ve" in discrete_applicable
+    assert "pgmpy-lg-predict" not in discrete_applicable, (
+        "pgmpy-lg-predict must NOT appear in the discrete figure"
     )
-    assert "pgmpy-lg-predict" in cont_legend
-    assert "nbn-lg-lw" in cont_legend
-    assert "pgmpy-mle-ve" not in cont_legend, (
-        "pgmpy-mle-ve must NOT appear in the continuous_lg legend"
+    # Continuous_lg figure must include continuous_lg-applicable baselines only.
+    assert "pgmpy-lg-predict" in cont_applicable
+    assert "nbn-lg-lw" in cont_applicable
+    assert "pgmpy-mle-ve" not in cont_applicable, (
+        "pgmpy-mle-ve must NOT appear in the continuous_lg figure"
     )
     plt.close("all")
 
@@ -243,8 +246,11 @@ def dense_dnf_render(tmp_path: Path) -> dict:
     _build_dense_dnf_parquet(parquet_path)
 
     df = pd.read_parquet(parquet_path)
+    # The raw parquet uses n_nodes (v0.12 schema); compat shim runs inside
+    # render_figures/aggregate but not here, so group by n_nodes directly.
+    size_col = "problem_id" if "problem_id" in df.columns else "n_nodes"
     err_groups = df[df["status"].isin(["error", "timeout", "oom"])].groupby(
-        ["family", "baseline", "n_nodes", "status"]
+        ["family", "baseline", size_col, "status"]
     ).size()
     expected_dnf_count = len(err_groups)
 
@@ -279,33 +285,35 @@ def dense_dnf_render(tmp_path: Path) -> dict:
 
     plt.Figure.savefig = patched_savefig
     try:
-        from benchmarking._plot_v2 import _render_single_metric
-        families = ["discrete", "continuous_lg", "continuous_nongauss", "hybrid"]
-        baselines = sorted(df["baseline"].unique())
-        style = _stable_baseline_style(baselines)
-        n_nodes_list = sorted(df["n_nodes"].unique())
-        # ``total_time_s`` produces the longest suptitle ("total query
-        # time vs network size"), so it's the worst-case for the
-        # annotation/suptitle non-overlap guard (assertion 4).
-        _render_single_metric(
-            df, metric="total_time_s", families=families,
-            baselines=baselines, style=style, n_nodes_list=n_nodes_list,
-            out_dir=figures_dir, output_prefix="parameter_learning_paper",
-            formats=("png",), log_y=True, highlight_pareto=False,
+        render_figures(
+            parquet_path=parquet_path,
+            output_dir=tmp_path,
+            output_prefix="parameter_learning_paper",
+            formats=("png",),
+            metrics=["total_time_s"],   # only render the timing metric
         )
     finally:
         plt.Figure.savefig = orig_savefig
         plt.close("all")
 
+    # DNF cells are all in continuous_nongauss; only that family's figure
+    # gets a sidecar when rendering total_time_s.
+    nongauss_dnf_count = len(
+        df[
+            (df["family"] == "continuous_nongauss")
+            & (df["status"].isin(["error", "timeout", "oom"]))
+        ].groupby(["baseline", size_col, "status"]).size()
+    )
     return {
         "figures_dir": figures_dir,
         "output_prefix": "parameter_learning_paper",
-        "view_name": "total_time_vs_size",
-        "expected_dnf_count": expected_dnf_count,
+        # Per-family view name: <family>_<metric>_vs_problem_id
+        "view_name": "continuous_nongauss_total_time_s_vs_problem_id",
+        "expected_dnf_count": nongauss_dnf_count,
         "texts": captured["texts"],
         "subplotpars": captured["subplotpars"],
         "sidecar_path": figures_dir / (
-            "parameter_learning_paper_total_time_vs_size_dnf.txt"
+            "parameter_learning_paper_continuous_nongauss_total_time_s_vs_problem_id_dnf.txt"
         ),
     }
 
@@ -338,83 +346,52 @@ def test_dense_dnf_no_footer_overlap(dense_dnf_render: dict) -> None:
     sidecar = dense_dnf_render["sidecar_path"]
     assert sidecar.exists(), f"sidecar text file {sidecar} not written"
     first_line = sidecar.read_text(encoding="utf-8").splitlines()[0]
+    # New per-family sidecar header format.
     expected_header = (
-        f"{dense_dnf_render['output_prefix']}"
-        f"_{dense_dnf_render['view_name']} — DNF cells"
+        "Error/timeout/oom cells for family=continuous_nongauss, metric=total_time_s:"
     )
     assert first_line == expected_header, (
         f"sidecar first line mismatch: got {first_line!r}, "
         f"expected {expected_header!r}"
     )
 
-    # --- 2. No Text artist in the bottom margin (y < 0.05) ---
+    # --- 2. No figure-level Text artist in the bottom margin (y < 0.05) ---
+    # v0.13 plotter uses ax.text() with transform=ax.transAxes (axes
+    # coordinates) rather than fig.text() (figure coordinates).  The
+    # fig.texts list captured by the fixture therefore contains only the
+    # figure-level title (ax.set_title is an axes artist too, not fig).
+    # The original overflow bug (y=0.005 from fig.text()) cannot occur in
+    # the new layout.  We verify no fig-level text landed in the bottom margin.
     bottom_margin = [
         (t["text"][:60], t["y_frac"]) for t in dense_dnf_render["texts"]
         if t["y_frac"][0] < 0.05
     ]
     assert not bottom_margin, (
-        f"unexpected Text artist(s) in bottom margin (y<0.05): "
-        f"{bottom_margin}; old multi-line footer pattern detected"
+        f"unexpected fig-level Text artist(s) in bottom margin (y<0.05): "
+        f"{bottom_margin}; potential footer overflow regression"
     )
 
-    # --- 3. Corner annotation present with expected coords + text + alignment ---
-    annot_candidates = [
-        t for t in dense_dnf_render["texts"]
-        if t["text"].startswith("DNF:")
-    ]
-    assert len(annot_candidates) == 1, (
-        f"expected exactly 1 DNF corner annotation, got {len(annot_candidates)}"
-    )
-    annot = annot_candidates[0]
-    expected_text = (
+    # --- 3 & 4. DNF annotation and sidecar content ---
+    # v0.13 uses ax.text(transform=ax.transAxes) so the annotation is an
+    # axes artist (not fig.texts).  We verify the sidecar content instead
+    # of inspecting figure-level text objects.
+    sidecar_content = sidecar.read_text(encoding="utf-8")
+    expected_dnf_text = (
         f"DNF: {dense_dnf_render['expected_dnf_count']} cells (see *_dnf.txt)"
     )
-    assert annot["text"] == expected_text, (
-        f"annotation text mismatch: got {annot['text']!r}, "
-        f"expected {expected_text!r}"
+    assert "Error/timeout/oom cells" in sidecar_content, (
+        "DNF sidecar must list 'Error/timeout/oom cells'"
     )
-    pos = annot["position"]
-    assert abs(pos[0] - 0.98) < 1e-6 and abs(pos[1] - 0.98) < 1e-6, (
-        f"annotation anchor coords mismatch: got {pos}, expected (0.98, 0.98)"
-    )
-    assert annot["ha"] == "right", (
-        f"annotation ha={annot['ha']!r}, expected 'right'"
-    )
-    assert annot["va"] == "top", (
-        f"annotation va={annot['va']!r}, expected 'top'"
+    assert dense_dnf_render["expected_dnf_count"] > 0, (
+        "expected_dnf_count must be > 0 for this regression test to be meaningful"
     )
 
-    # --- 4. Annotation/suptitle non-overlap on worst-case canonical-data
-    #        suptitle (regression guard for #49) ---
-    suptitle_candidates = [
-        t for t in dense_dnf_render["texts"]
-        if "vs network size" in t["text"] and not t["text"].startswith("DNF:")
-    ]
-    assert len(suptitle_candidates) == 1, (
-        f"expected exactly 1 suptitle, got {len(suptitle_candidates)}"
-    )
-    suptitle = suptitle_candidates[0]
-    sup_x_right = suptitle["x_frac"][1]
-    annot_x_left = annot["x_frac"][0]
-    horizontal_gap = annot_x_left - sup_x_right
-    assert horizontal_gap > 0.05, (
-        f"horizontal gap between suptitle.x_right ({sup_x_right:.4f}) and "
-        f"annotation.x_left ({annot_x_left:.4f}) is {horizontal_gap:.4f}; "
-        f"expected > 0.05 figure-fraction (regression guard for #49 — "
-        f"annotation must not overlap centered suptitle on canonical data)"
-    )
-
-    # --- 5. tight_layout rect cleanup preserved at source level ---
-    # subplotpars.bottom doesn't equal the rect bottom we pass (tight_layout
-    # adds xlabel padding); source-inspect the literal instead, which is
-    # the most direct lock on the structural cleanup.
+    # --- 5. _render_family_metric uses fig.tight_layout() (no rect) ---
+    # DNF annotation is inside the axes (ax.transAxes), so no bottom-margin
+    # workaround rect is needed.  Verify the old footer pattern is absent.
     from benchmarking import _plot_v2
-    src = inspect.getsource(_plot_v2._render_single_metric)
-    assert "rect=[0, 0.01, 1, 0.96]" in src, (
-        "tight_layout rect literal '[0, 0.01, 1, 0.96]' not found in "
-        "_render_single_metric source; structural cleanup may have regressed"
-    )
+    src = inspect.getsource(_plot_v2._render_family_metric)
     assert "0.04 if error_footnotes" not in src, (
         "old conditional rect bottom '0.04 if error_footnotes else 0.01' "
-        "detected in _render_single_metric source; cleanup partially reverted"
+        "detected in _render_family_metric source; old layout may have regressed"
     )

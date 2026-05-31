@@ -70,7 +70,7 @@ def test_aggregate_not_applicable_cell(tmp_path: Path) -> None:
          "value": 0.05, "status": "ok"},
     ], tmp_path)
     out = aggregate(p)
-    cell = out["wide"].loc[("continuous_lg", "accuracy", 5), "pgmpy-mle-ve"]
+    cell = out["wide"].loc[("continuous_lg", "accuracy", "5"), "pgmpy-mle-ve"]
     assert cell == _NA_NOT_APPLICABLE, (
         f"expected {_NA_NOT_APPLICABLE!r}, got {cell!r}"
     )
@@ -88,7 +88,7 @@ def test_aggregate_cell_errored(tmp_path: Path) -> None:
          "value": float("nan"), "status": "error"},
     ], tmp_path)
     out = aggregate(p)
-    cell = out["wide"].loc[("discrete", "accuracy", 5), "pgmpy-mle-ve"]
+    cell = out["wide"].loc[("discrete", "accuracy", "5"), "pgmpy-mle-ve"]
     assert cell == _NA_CELL_ERRORED
 
 
@@ -116,10 +116,10 @@ def test_aggregate_metric_missing(tmp_path: Path) -> None:
          "value": 0.001, "status": "ok"},
     ], tmp_path)
     out = aggregate(p)
-    cell = out["wide"].loc[("discrete", "total_time_s", 5), "nbn-cat-ve"]
+    cell = out["wide"].loc[("discrete", "total_time_s", "5"), "nbn-cat-ve"]
     assert cell == _NA_METRIC_MISSING
     # And accuracy is the formatted numeric value.
-    acc = out["wide"].loc[("discrete", "accuracy", 5), "nbn-cat-ve"]
+    acc = out["wide"].loc[("discrete", "accuracy", "5"), "nbn-cat-ve"]
     assert acc == "0.0700"
 
 
@@ -142,7 +142,7 @@ def test_aggregate_ok_rows_with_nan_value_treated_as_missing(tmp_path: Path) -> 
          "value": 0.001, "status": "ok"},
     ], tmp_path)
     out = aggregate(p)
-    cell = out["wide"].loc[("discrete", "total_time_s", 5), "nbn-cat-ve"]
+    cell = out["wide"].loc[("discrete", "total_time_s", "5"), "nbn-cat-ve"]
     assert cell == _NA_METRIC_MISSING, (
         f"expected {_NA_METRIC_MISSING!r}, got {cell!r}"
     )
@@ -162,7 +162,7 @@ def test_aggregate_multi_seed_mean_std(tmp_path: Path) -> None:
         for s, v in enumerate([0.04, 0.05, 0.06])
     ], tmp_path)
     out = aggregate(p)
-    cell = out["wide"].loc[("discrete", "accuracy", 5), "nbn-cat-ve"]
+    cell = out["wide"].loc[("discrete", "accuracy", "5"), "nbn-cat-ve"]
     # mean=0.05, sample-std (ddof=1) of {0.04, 0.05, 0.06} = 0.01
     assert cell.startswith("0.0500"), f"unexpected mean format: {cell!r}"
     assert "± 0.0100" in cell, f"expected ± 0.0100, got {cell!r}"
@@ -177,7 +177,7 @@ def test_aggregate_single_seed_no_std_suffix(tmp_path: Path) -> None:
          "value": 0.0429, "status": "ok"},
     ], tmp_path)
     out = aggregate(p)
-    cell = out["wide"].loc[("discrete", "accuracy", 5), "nbn-cat-ve"]
+    cell = out["wide"].loc[("discrete", "accuracy", "5"), "nbn-cat-ve"]
     assert cell == "0.0429"
     assert "±" not in cell
 
@@ -207,14 +207,14 @@ def test_aggregate_pareto_frontier(tmp_path: Path) -> None:
     dom = pareto[
         (pareto["family"] == "discrete")
         & (pareto["baseline"] == "nbn-cat-ve")
-        & (pareto["n_nodes"] == 5)
+        & (pareto["problem_id"] == "5")
     ].iloc[0]
     assert bool(dom["is_pareto"]) is True
 
     dominated = pareto[
         (pareto["family"] == "discrete")
         & (pareto["baseline"] == "nbn-cat-lw")
-        & (pareto["n_nodes"] == 5)
+        & (pareto["problem_id"] == "5")
     ].iloc[0]
     assert bool(dominated["is_pareto"]) is False
     assert "nbn-cat-ve" in dominated["dominated_by"]
@@ -235,7 +235,7 @@ def test_aggregate_status_counts(tmp_path: Path) -> None:
     row = status[
         (status["family"] == "discrete")
         & (status["baseline"] == "nbn-cat-ve")
-        & (status["n_nodes"] == 5)
+        & (status["problem_id"] == "5")
     ].iloc[0]
     # ok and error each appear once.
     assert int(row.get("ok", 0)) == 1
@@ -252,7 +252,7 @@ def test_aggregate_long_dataframe_schema(tmp_path: Path) -> None:
     out = aggregate(p)
     long = out["long"]
     expected_cols = {
-        "family", "baseline", "n_nodes", "metric",
+        "family", "baseline", "problem_id", "metric",
         "mean", "std", "n_ok", "n_seeds",
         "applicable", "formatted",
     }

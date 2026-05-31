@@ -28,3 +28,11 @@ docs/_build/
 *.ipynb_checkpoints
 ScalabilityImages
 .idea/
+
+# v0.13 benchmark run outputs — untracked by default; archive lives in results/v0.12_archive/
+benchmarking/results/raw/
+benchmarking/results/figures/
+benchmarking/results/tables/
+benchmarking/results/_v0.10*/
+benchmarking/results/_v0.11*/
+/results/
