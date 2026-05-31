@@ -177,6 +177,7 @@ class SyntheticProblemSource:
             true_model=sbn.true_model,
             family=family,
             problem_id=str(n_nodes),
+            seed=seed,
         )
 
 

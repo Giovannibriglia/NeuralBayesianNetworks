@@ -77,8 +77,17 @@ class Measurement(Protocol):
         problem: BenchmarkProblem,
         adapter: BaselineAdapter,
         queries: list[Query],
+        *,
+        query_budget_s: float = float("inf"),
     ) -> list[CellResult]:
-        """Return one CellResult per query, with timing and (optionally) accuracy."""
+        """Return one CellResult per query, with timing and (optionally) accuracy.
+
+        ``query_budget_s`` is a soft cumulative timeout on query_time_s. When
+        the cumulative total of adapter.query() wall-clock exceeds this budget,
+        remaining unstarted queries receive status="timeout" rows with
+        query_time_s=NaN. Fit and metrics time are NOT gated by this budget.
+        Default float("inf") disables the timeout (existing behaviour).
+        """
         ...
 
 

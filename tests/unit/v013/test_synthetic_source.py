@@ -195,3 +195,21 @@ class TestSyntheticProblemSourceBehavioral:
     def test_name_encodes_family_and_size(self, discrete_problem):
         assert "discrete" in discrete_problem.name
         assert "n5" in discrete_problem.name
+
+    def test_seed_populated_from_config(self, discrete_problem):
+        """problem.seed must match the seed passed in SyntheticConfig.seeds."""
+        assert discrete_problem.seed == 0
+
+    def test_seed_propagated_correctly_for_different_seeds(self):
+        src = SyntheticProblemSource()
+        cfg = SyntheticConfig(
+            families=["discrete"],
+            n_nodes_list=[4],
+            seeds=[0, 1, 2],
+            n_train=100,
+            n_test=50,
+            n_reference=200,
+        )
+        problems = list(src.iter_problems(cfg))
+        seeds_seen = [p.seed for p in problems]
+        assert seeds_seen == [0, 1, 2]

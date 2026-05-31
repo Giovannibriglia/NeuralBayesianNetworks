@@ -90,6 +90,7 @@ class BenchmarkProblem:
     true_model: Any | None = None
     family: str = ""
     problem_id: str = ""
+    seed: int = 0
 
 
 class BenchmarkDomain(ABC):
