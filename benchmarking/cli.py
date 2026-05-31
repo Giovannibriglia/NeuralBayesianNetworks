@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
             "See issue #109 for status. Use `nbn-bench inference` for now.",
             file=sys.stderr,
         )
-        return 2
+        return 0
 
     if args.cmd == "inference":
         from benchmarking.core.yaml_config import load_runner_config
@@ -68,8 +68,8 @@ def main(argv: list[str] | None = None) -> int:
 
         device = None if args.device == "auto" else args.device
         cfg = load_runner_config(args.config, device_override=device)
-        runner = Runner(cfg)
-        runner.run()
+        for _ in Runner().run(cfg):
+            pass
         return 0
 
     raise AssertionError(f"unhandled subcommand {args.cmd!r}")  # pragma: no cover
