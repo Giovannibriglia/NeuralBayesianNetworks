@@ -1,16 +1,34 @@
-"""NBN benchmarking suite.
+"""NBN benchmarking suite — v0.13.
 
-v0.5 surface (post-restructure):
-    - Synthetic BN  : ``benchmarking.synthetic.make_synthetic_bn(family=..., n_nodes=...)``
-    - Baselines     : ``benchmarking.baselines.get_adapter('nbn'|'pgmpy'|...)``
-    - Crash test    : ``benchmarking.crash_test_runner.{run_parameter_learning, run_inference}``
-    - Metrics       : ``benchmarking.metrics.{kl, js, tv, wasserstein, …}``
+v0.13 surface (post-Phase 1c cutover):
+    - Runner           : ``benchmarking.core.Runner``
+    - RunnerConfig     : ``benchmarking.core.RunnerConfig``
+    - BaselineSpec     : ``benchmarking.core.BaselineSpec``
+    - build_adapter    : ``benchmarking.core.build_adapter``
+    - Protocols        : ``benchmarking.core.{BaselineAdapter, Measurement, …}``
+    - Applicability    : ``benchmarking.core.{is_applicable, BASELINE_FAMILY_APPLICABILITY}``
+    - Synthetic        : ``benchmarking.synthetic.make_synthetic_bn``
+    - Metrics          : ``benchmarking.metrics.{wasserstein_1d, …}``
 
-CLI entry: ``nbn-bench {param-learning, inference} --config <yaml>``.
+CLI entry: ``nbn-bench {inference, param-learning} --config <yaml>``.
+``param-learning`` is stubbed pending a ParamLearningMeasurement (see #109).
 """
-from benchmarking.crash_test_runner import (
-    run_inference,
-    run_parameter_learning,
+from benchmarking.core import (
+    BASELINE_FAMILY_APPLICABILITY,
+    BaselineAdapter,
+    BaselineApplicability,
+    BaselineSpec,
+    CellResult,
+    JsonlWriter,
+    Measurement,
+    ProblemSource,
+    QuerySelector,
+    Runner,
+    RunnerConfig,
+    accuracy_supported,
+    build_adapter,
+    is_applicable,
+    known_labels,
 )
 from benchmarking.domains import (
     BenchmarkDomain,
@@ -32,9 +50,25 @@ from benchmarking.synthetic import (
 )
 
 __all__ = [
-    # Crash-test runners (CLI entry points)
-    "run_parameter_learning",
-    "run_inference",
+    # v0.13 runner
+    "Runner",
+    "RunnerConfig",
+    "BaselineSpec",
+    "build_adapter",
+    # v0.13 protocols
+    "BaselineAdapter",
+    "Measurement",
+    "ProblemSource",
+    "QuerySelector",
+    # v0.13 schema
+    "CellResult",
+    "JsonlWriter",
+    # Applicability registry
+    "BASELINE_FAMILY_APPLICABILITY",
+    "BaselineApplicability",
+    "is_applicable",
+    "accuracy_supported",
+    "known_labels",
     # Synthetic generator
     "make_synthetic_bn",
     "SyntheticBN",

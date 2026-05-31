@@ -167,7 +167,7 @@ def test_legend_filters_per_panel(tmp_path: Path) -> None:
     assert Path(out_paths["continuous_lg_accuracy"][0]).exists()
 
     # Verify registry-based applicability filtering.
-    from benchmarking._baseline_registry import is_applicable
+    from benchmarking.core.applicability import is_applicable
     baselines = sorted(pd.read_parquet(p)["baseline"].unique())
     discrete_applicable = [b for b in baselines if is_applicable(b, "discrete")]
     cont_applicable = [b for b in baselines if is_applicable(b, "continuous_lg")]

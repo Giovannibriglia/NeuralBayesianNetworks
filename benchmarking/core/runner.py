@@ -43,6 +43,31 @@ _OOM_RUNTIME_MARKERS = (
     "can't allocate memory",
 )
 
+# ---------------------------------------------------------------------------
+# Structural-limit markers for ValueError classification (#117).
+# A ValueError whose message contains one of these substrings is a deliberate
+# "I don't support this combination" signal from an adapter.  Any other
+# ValueError is a genuine programming error → "error" status.
+# Ported from benchmarking/_crash_test_utils.py::_STRUCTURAL_LIMIT_MARKERS.
+# ---------------------------------------------------------------------------
+_STRUCTURAL_LIMIT_MARKERS = (
+    "only supports",
+    "is discrete-only",
+    "cannot condition on",
+    "not yet wired",
+    "non-Gaussian",
+    "not applicable to",
+    "refused",
+)
+
+
+def _is_structural_limit(exc: Exception) -> bool:
+    """True iff exc is a ValueError raised for structural (not-supported) reasons."""
+    if not isinstance(exc, ValueError):
+        return False
+    msg = str(exc)
+    return any(marker in msg for marker in _STRUCTURAL_LIMIT_MARKERS)
+
 
 # ---------------------------------------------------------------------------
 # Exception → status classifier
@@ -61,8 +86,9 @@ def _classify_exception(exc: Exception) -> str:
     Structural-limit detection covers:
       - ImportError (optional dependency missing)
       - NotImplementedError (adapter refuses the combination)
-      - ValueError (adapter raises for structural reasons)
+      - ValueError whose message matches _STRUCTURAL_LIMIT_MARKERS (#117)
 
+    ValueError without a structural-limit marker → "error" (real bug).
     All other exceptions → "error".
     """
     try:
@@ -75,8 +101,11 @@ def _classify_exception(exc: Exception) -> str:
     if isinstance(exc, MemoryError):
         return "oom"
 
-    if isinstance(exc, (ImportError, NotImplementedError, ValueError)):
+    if isinstance(exc, (ImportError, NotImplementedError)):
         return "not_supported"
+
+    if isinstance(exc, ValueError):
+        return "not_supported" if _is_structural_limit(exc) else "error"
 
     if isinstance(exc, RuntimeError):
         msg = str(exc).lower()

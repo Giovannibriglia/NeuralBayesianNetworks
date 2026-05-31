@@ -61,16 +61,25 @@ def mae_marginals(p: torch.Tensor, q: torch.Tensor) -> MetricResult:
 # ── continuous metrics ──────────────────────────────────────────────────────
 
 def wasserstein_1d(x: torch.Tensor, y: torch.Tensor) -> MetricResult:
-    """Sliced 1-D Wasserstein-1 between two empirical 1-D samples (sorted CDF)."""
-    x_sorted, _ = torch.sort(x.reshape(-1))
-    y_sorted, _ = torch.sort(y.reshape(-1))
-    n = min(x_sorted.shape[0], y_sorted.shape[0])
+    """1-D Wasserstein-1 between two empirical 1-D samples.
+
+    Uses quantile-interpolation at a grid of length ``max(len(x), len(y))``
+    so neither series is downsampled when inputs have unequal length (issue
+    #37 fix: the previous ``min`` approach compared mismatched quantiles and
+    inflated W₁ by ≈10× for unequal-budget inputs).
+
+    Both inputs are moved to CPU before computation for device safety (PR-B
+    §A.1 fix: mixed-device subtraction raised ``RuntimeError`` when one
+    tensor was on CUDA and the other on CPU).
+    """
+    x_cpu = x.reshape(-1).float().cpu()
+    y_cpu = y.reshape(-1).float().cpu()
+    n = max(x_cpu.shape[0], y_cpu.shape[0])
     if n == 0:
         return MetricResult("wasserstein_1d", float("nan"))
-    # Resample to common length using quantile interpolation
-    qs = torch.linspace(0, 1, n, device=x.device)
-    x_q = torch.quantile(x_sorted, qs)
-    y_q = torch.quantile(y_sorted, qs)
+    qs = torch.linspace(0.0, 1.0, n)
+    x_q = torch.quantile(x_cpu, qs)
+    y_q = torch.quantile(y_cpu, qs)
     return MetricResult("wasserstein_1d", float((x_q - y_q).abs().mean()))
 
 

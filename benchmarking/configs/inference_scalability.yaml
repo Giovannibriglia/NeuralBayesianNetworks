@@ -1,66 +1,52 @@
 # Scalability benchmark — measures the n_nodes ceiling per baseline under a
-# 60s timeout.  Different question from inference_paper.yaml: not
-# "how accurate at fixed scales?" but "at what n_nodes does the full cell
-# pipeline (BN setup + adapter fits + query + accuracy metrics) overflow the
-# budget?"
+# 60s timeout.  Question: "at what n_nodes does the full cell pipeline
+# overflow the per-cell budget?"
 #
-# IMPORTANT — what the cliff actually measures (issue #107, 2026-05-22):
-#   per_cell_timeout_s wraps the entire cell, including BN generation, the 1
-#   fit in _time_nbn_inference, the timed query(ies), AND up to 16 accuracy
-#   re-fits in _compute_inference_metrics via _baseline_posterior_for_query.
-#   At B=1, those 17 fits dominate the single query by 17–29× (measured at
-#   n=10–200).  The cliff therefore reflects "when do 17×fit + BN generation
-#   overflow 60s" — not pure per-query scalability.  Per-query inference is
-#   much faster than the cliff suggests.  Engineering fix deferred to v0.8.
+# IMPORTANT — what the cliff measures (issue #107, 2026-05-22):
+#   per_cell_timeout_s wraps fit + queries + accuracy metrics.
+#   The cliff therefore reflects "when do fit + BN generation overflow 60s",
+#   not pure per-query scalability.  Per-query inference is much faster than
+#   the cliff suggests.
 #
 # Design choices (empirically validated 2026-05-22, issue #105):
 #   - 60s timeout: we want the cliff, not full timing data.
-#   - Single seed: "does it finish under 60s?" is binary; more seeds add noise.
-#   - Single query per cell (B=1): one inference call, not throughput.
-#   - fit_epochs=2: minimise NBN training time; accuracy is still computed
-#     (accuracy_supported() returns True for discrete/continuous families),
-#     so this also reduces the 16 accuracy-re-fit overhead.
-#   - Small n_train (1024): training data size is not the variable under test.
-config_schema_version: 2
+#   - Single seed: pass/fail is binary; more seeds add noise.
+#   - Single query per cell: one inference call, not throughput.
+#   - Small n_train (1024): training data is not the variable under test.
+version: "v0.13"
+benchmark: synthetic
+config_name: scalability
+metrics: timing
+selector: uniform_random
 
-mode: inference
-families: [discrete, continuous_lg, continuous_nongauss, hybrid]
-n_nodes: [5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]
-n_seeds: 1
-n_queries_per_cell: 1
-nbn_batch_size: 0                     # 0 → use n_queries_per_cell (= 1)
-n_train: 1024
-n_test: 256
-n_reference: 5000
-nbn_lw_n_samples: 512
-edge_density: 0.20
-max_in_degree: 4
-cardinality: 4
-fraction_continuous: 0.5
-# fit_epochs=2 applies to _time_nbn_inference AND to the 16 accuracy re-fits
-# in _compute_inference_metrics (see issue #107).  Kept low to reduce total
-# per-cell fit overhead; accuracy quality is not the metric of interest here.
-fit_epochs: 2
+source:
+  families: [discrete, continuous_lg, continuous_nongauss, hybrid]
+  n_nodes_list: [5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]
+  seeds: [0]
+  n_train: 1024
+  n_test: 256
+  n_reference: 5000
+  edge_density: 0.20
+  max_in_degree: 4
+  cardinality: 4
+  fraction_continuous: 0.5
 
 baselines:
   - {library: pgmpy, mechanism: discrete, param_method: mle,   inference_method: ve}
   - {library: pgmpy, mechanism: discrete, param_method: bayes, inference_method: ve}
   - {library: pgmpy, mechanism: lg,       param_method: mle,   inference_method: predict}
   - {library: nbn,   mechanism: cat,      param_method: mle,   inference_method: ve}
-  - {library: nbn,   mechanism: cat,      param_method: mle,   inference_method: lw}
+  - {library: nbn,   mechanism: cat,      param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 512}}
   - {library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: ve}
-  - {library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: lw}
-  - {library: nbn,   mechanism: lg,       param_method: mle,   inference_method: lw}
-  - {library: nbn,   mechanism: mdn,      param_method: mle,   inference_method: lw}
-  - {library: nbn,   mechanism: flow,     param_method: mle,   inference_method: lw}
+  - {library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: lw,      extra_kwargs: {n_samples: 512}}
+  - {library: nbn,   mechanism: lg,       param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 512}}
+  - {library: nbn,   mechanism: mdn,      param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 512}}
+  - {library: nbn,   mechanism: flow,     param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 512}}
   - {library: nbn,   mechanism: hybrid,   param_method: mle,   inference_method: router}
   - {library: gpytorch,    mechanism: gp,       param_method: mle, inference_method: predict}
   - {library: pomegranate, mechanism: discrete, param_method: mle, inference_method: ve}
-  # device: cpu — empirical finding (docs/audits/v0.12-pyro-gpu-investigation.md):
-  # pyro's Importance sampler is Python-bound; CUDA kernel launch overhead
-  # makes GPU ~10x slower than CPU at benchmark scale.
   - {library: pyro, mechanism: empirical, param_method: mle, inference_method: importance, device: cpu}
 
-per_cell_timeout_s: 60
-output_dir: benchmarking/results
-output_prefix: inference_scalability
+n_queries_per_cell: 1
+per_cell_timeout_s: 60.0
+fit_timeout_s_multiplier: 10.0

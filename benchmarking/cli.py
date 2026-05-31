@@ -1,12 +1,13 @@
-"""``nbn-bench`` CLI dispatcher (v0.5).
+"""``nbn-bench`` CLI dispatcher (v0.13).
 
 Two subcommands, both consume a YAML config:
 
+    nbn-bench inference     --config benchmarking/configs/inference_smoke.yaml
     nbn-bench param-learning --config benchmarking/configs/parameter_learning_smoke.yaml
-    nbn-bench inference      --config benchmarking/configs/inference_smoke.yaml
 
-The previous ``nbn-bench run`` subcommand and its YAML-driven legacy
-runner were removed in v0.5a.
+``param-learning`` is structurally preserved but stubbed — the
+ParamLearningMeasurement is deferred to a later v0.13 phase.
+See issue #109 for status.
 """
 from __future__ import annotations
 
@@ -18,13 +19,13 @@ import sys
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="nbn-bench",
-        description="NBN benchmarking entry point — parameter-learning and inference crash tests.",
+        description="NBN benchmarking entry point — inference and parameter-learning.",
     )
     sub = parser.add_subparsers(dest="cmd", required=True, metavar="<command>")
 
     pl = sub.add_parser(
         "param-learning",
-        help="Crash test for per-node CPD-learning accuracy.",
+        help="Parameter-learning benchmark (stubbed in v0.13; use inference).",
     )
     pl.add_argument("--config", required=True,
                     help="Path to a parameter-learning YAML config.")
@@ -34,11 +35,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     inf = sub.add_parser(
         "inference",
-        help="Crash test for inference total-time + accuracy at fixed B.",
+        help="Inference benchmark: accuracy + timing across baselines and families.",
     )
     inf.add_argument("--config", required=True,
                      help="Path to an inference YAML config.")
-    inf.add_argument("--device", default="auto")
+    inf.add_argument("--device", default="auto",
+                     help="'auto' (default), 'cpu', or 'cuda[:i]'.")
     inf.add_argument("-v", "--verbose", action="store_true")
 
     return parser
@@ -50,16 +52,26 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
+
     if args.cmd == "param-learning":
-        from benchmarking.crash_test_runner import run_parameter_learning
-        return run_parameter_learning(
-            args.config, device=args.device, verbose=args.verbose,
+        print(
+            "param-learning is not yet implemented in v0.13.\n"
+            "The parameter-learning Measurement is deferred to a later phase.\n"
+            "See issue #109 for status. Use `nbn-bench inference` for now.",
+            file=sys.stderr,
         )
+        return 0
+
     if args.cmd == "inference":
-        from benchmarking.crash_test_runner import run_inference
-        return run_inference(
-            args.config, device=args.device, verbose=args.verbose,
-        )
+        from benchmarking.core.yaml_config import load_runner_config
+        from benchmarking.core.runner import Runner
+
+        device = None if args.device == "auto" else args.device
+        cfg = load_runner_config(args.config, device_override=device)
+        for _ in Runner().run(cfg):
+            pass
+        return 0
+
     raise AssertionError(f"unhandled subcommand {args.cmd!r}")  # pragma: no cover
 
 

@@ -395,3 +395,133 @@ class TestBehavioral:
         problem = _make_small_discrete_problem(n_samples=200, seed=1)
         adapter.fit(problem, epochs=5)   # should not raise
         assert adapter._fitted
+
+
+# ---------------------------------------------------------------------------
+# Regression tests — ported from tests/integration/test_adapters_smoke.py
+# ---------------------------------------------------------------------------
+
+@pytest.mark.slow
+class TestRegressions:
+    """Regression tests for bugs fixed in v0.5-#32 and v0.7-#61.
+
+    Ported from the v0.12 test_adapters_smoke.py integration tests to use
+    the v0.13 PyroAdapter API.
+    """
+
+    def test_lg_conditional_32(self) -> None:
+        """Issue #32 regression: pyro must condition on parents, not marginal.
+
+        Pre-fix, _fit_gaussian_leaf stored per-node marginals and _pyro_model
+        sampled Normal(mean, std) independent of parent values.  Post-fix,
+        _fit_lg_leaf regresses each continuous node on its continuous parents.
+
+        Fixture: 2-node chain A → B with B = 2A + N(0, 0.1).
+        P(B|A=+2) mean must cluster near +4, P(B|A=-2) near -4.
+        Gap must be ~8; a gap near 0 means regression to the marginal path.
+        """
+        pytest.importorskip("pyro")
+        torch.manual_seed(0)
+        n = 2000
+        a = torch.randn(n)
+        b = 2.0 * a + 0.1 * torch.randn(n)
+        problem = BenchmarkProblem(
+            name="pyro_lg_conditional_32",
+            dag=[("A", "B")],
+            variables={"A": ("continuous", 1), "B": ("continuous", 1)},
+            train_data={"A": a, "B": b},
+            test_data={"A": a[:100], "B": b[:100]},
+            queries=[],
+            ground_truth=None,
+        )
+        adapter = PyroAdapter(
+            mechanism="empirical", inference_method="importance", n_samples=400,
+        )
+        adapter.fit(problem)
+
+        means = {}
+        for a_obs in (2.0, -2.0):
+            post = adapter._posterior_samples(
+                Query(targets=("B",),
+                      evidence={"A": torch.tensor(a_obs)},
+                      kind="marginal"),
+                n_samples=400,
+            )
+            means[a_obs] = float(post.mean())
+
+        gap = means[2.0] - means[-2.0]
+        assert abs(gap - 8.0) < 1.0, (
+            f"P(B|A=+2) mean = {means[2.0]:+.3f}, P(B|A=-2) mean = "
+            f"{means[-2.0]:+.3f}, gap = {gap:+.3f} (expected ~8.0). "
+            f"A gap near 0 indicates regression to the pre-#32 marginal path."
+        )
+        assert abs(means[2.0] - 4.0) < 0.5
+        assert abs(means[-2.0] - (-4.0)) < 0.5
+
+    def test_hybrid_one_hot_regression_61(self) -> None:
+        """Issue #61 regression: discrete parents are one-hot encoded.
+
+        Fixture: 3-node network D → B ← A where D is discrete (k=3) and A is
+        continuous.  B = 0.5*A + offset[D] + N(0, 0.1), offset = [0, 1, 2].
+
+        Two checks:
+        1. Beta coefficients for the discrete one-hot columns have std > 0.3,
+           confirming the discrete-parent dimension was fitted.
+        2. Posterior mean of B conditioned on D=2 (offset=2) vs D=0 (offset=0)
+           differs by approximately 2.0 (planted category gap).
+        """
+        pytest.importorskip("pyro")
+        torch.manual_seed(42)
+        n = 1000
+        d = torch.randint(0, 3, (n,))
+        a = torch.randn(n)
+        offsets = torch.tensor([0.0, 1.0, 2.0])
+        b = 0.5 * a + offsets[d] + 0.1 * torch.randn(n)
+
+        problem = BenchmarkProblem(
+            name="pyro_hybrid_61",
+            dag=[("D", "B"), ("A", "B")],
+            variables={
+                "D": ("discrete", 3),
+                "A": ("continuous", 1),
+                "B": ("continuous", 1),
+            },
+            train_data={"D": d, "A": a, "B": b},
+            test_data={"D": d[:100], "A": a[:100], "B": b[:100]},
+            queries=[],
+            ground_truth=None,
+        )
+        adapter = PyroAdapter(
+            mechanism="empirical", inference_method="importance", n_samples=200,
+        )
+        adapter.fit(problem)
+
+        # Check 1: discrete parent in _gaussian fit
+        beta, sigma, cont_pa, disc_pa, disc_cards = adapter._gaussian["B"]
+        assert disc_pa == ["D"], f"expected disc_pa=['D'], got {disc_pa}"
+        assert disc_cards == [3], f"expected disc_cards=[3], got {disc_cards}"
+        # beta layout: [intercept, cont_coeff(A), oh_coeff_D0, oh_coeff_D1]
+        assert beta.shape[0] == 4, f"expected beta len 4, got {beta.shape[0]}"
+        oh_coeffs = beta[2:]
+        assert oh_coeffs.std() > 0.3, (
+            f"one-hot coefficients {oh_coeffs.tolist()} have near-zero std; "
+            "discrete-parent dimension was not fitted."
+        )
+
+        # Check 2: posterior mean shifts with discrete parent value
+        means = {}
+        for d_obs in (0, 2):
+            post = adapter._posterior_samples(
+                Query(targets=("B",),
+                      evidence={"D": torch.tensor(d_obs),
+                                 "A": torch.tensor(0.0)},
+                      kind="marginal"),
+                n_samples=400,
+            )
+            means[d_obs] = float(post.mean())
+
+        gap = means[2] - means[0]
+        assert abs(gap - 2.0) < 0.5, (
+            f"P(B|D=2,A=0) mean = {means[2]:+.3f}, P(B|D=0,A=0) mean = "
+            f"{means[0]:+.3f}, gap = {gap:+.3f} (expected ~2.0)."
+        )
