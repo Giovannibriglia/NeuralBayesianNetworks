@@ -106,6 +106,7 @@ class AccuracyAndTiming:
         benchmark: str = "synthetic",
         seed: int = 0,
         query_roles: list[str] | None = None,
+        query_budget_s: float = float("inf"),
     ) -> list[CellResult]:
         """Run timing + accuracy measurement for all queries.
 
@@ -137,7 +138,10 @@ class AccuracyAndTiming:
         list[CellResult]
             One row per (query, metric).  Length is at most
             ``len(queries) * 3`` (tv + jsd + w1); fewer if some metrics
-            are not applicable for the family.
+            are not applicable for the family.  Queries whose cumulative
+            ``query_time_s`` exceeds ``query_budget_s`` receive
+            ``status="timeout"`` rows with ``query_time_s=NaN`` and
+            ``metrics_time_s=NaN``; fit_time_s is real (fit completed).
 
         Note: query_time_s varies per row (one timer per adapter.query
         call).  fit_time_s and metrics_time_s are recorded identically
@@ -160,8 +164,13 @@ class AccuracyAndTiming:
         # ---- Phase 1: query loop (timed individually) ----
         posteriors: list[Any] = []
         query_times: list[float] = []
+        cumulative_query_time_s = 0.0
+        timed_out_at: int | None = None
 
-        for q in queries:
+        for i, q in enumerate(queries):
+            if cumulative_query_time_s >= query_budget_s:
+                timed_out_at = i
+                break
             t0 = time.perf_counter()
             try:
                 posterior = adapter.query(q)
@@ -169,7 +178,9 @@ class AccuracyAndTiming:
             except Exception as exc:
                 posterior = None
                 err_msg = str(exc)
-            query_times.append(time.perf_counter() - t0)
+            elapsed = time.perf_counter() - t0
+            cumulative_query_time_s += elapsed
+            query_times.append(elapsed)
             posteriors.append((posterior, err_msg))
 
         # ---- Phase 2: accuracy scoring (metrics_time_s) ----
@@ -239,6 +250,26 @@ class AccuracyAndTiming:
                     metrics_time_s=metrics_time_s,
                     error_msg=None,
                 ))
+
+        # ---- Timeout rows for queries that never started ----
+        if timed_out_at is not None:
+            for role in query_roles[timed_out_at:]:
+                for mk in _METRIC_KEYS:
+                    rows.append(CellResult(
+                        benchmark=benchmark,
+                        family=family,
+                        problem_id=problem_id,
+                        seed=seed,
+                        baseline=baseline,
+                        query_role=role,
+                        metric=mk,
+                        value=float("nan"),
+                        status="timeout",
+                        fit_time_s=fit_time_s,
+                        query_time_s=float("nan"),
+                        metrics_time_s=float("nan"),
+                        error_msg="query budget exceeded",
+                    ))
 
         return rows
 

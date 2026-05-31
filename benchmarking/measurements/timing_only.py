@@ -53,6 +53,7 @@ class TimingOnly:
         benchmark: str = "scalability",
         seed: int = 0,
         query_roles: list[str] | None = None,
+        query_budget_s: float = float("inf"),
     ) -> list[CellResult]:
         """Time each query individually; return one row per query.
 
@@ -81,7 +82,9 @@ class TimingOnly:
         -------
         list[CellResult]
             One row per query.  ``metric = "query_time_s"``,
-            ``value = query_time_s``.
+            ``value = query_time_s``.  Queries whose cumulative
+            ``query_time_s`` exceeds ``query_budget_s`` receive
+            ``status="timeout"`` rows with ``query_time_s=NaN``.
 
         Note: query_time_s varies per row (one timer per adapter.query
         call).  fit_time_s and metrics_time_s are recorded identically
@@ -102,7 +105,13 @@ class TimingOnly:
         baseline = adapter.name
 
         rows: list[CellResult] = []
-        for q, role in zip(queries, query_roles):
+        cumulative_query_time_s = 0.0
+        timed_out_at: int | None = None
+
+        for i, (q, role) in enumerate(zip(queries, query_roles)):
+            if cumulative_query_time_s >= query_budget_s:
+                timed_out_at = i
+                break
             t0 = time.perf_counter()
             try:
                 adapter.query(q)
@@ -114,6 +123,7 @@ class TimingOnly:
                 status = "error"
                 err_msg = str(exc)
 
+            cumulative_query_time_s += q_time
             rows.append(CellResult(
                 benchmark=benchmark,
                 family=family,
@@ -129,4 +139,24 @@ class TimingOnly:
                 metrics_time_s=0.0,
                 error_msg=err_msg,
             ))
+
+        # Timeout rows for queries that never started.
+        if timed_out_at is not None:
+            for role in query_roles[timed_out_at:]:
+                rows.append(CellResult(
+                    benchmark=benchmark,
+                    family=family,
+                    problem_id=problem_id,
+                    seed=seed,
+                    baseline=baseline,
+                    query_role=role,
+                    metric="query_time_s",
+                    value=float("nan"),
+                    status="timeout",
+                    fit_time_s=fit_time_s,
+                    query_time_s=float("nan"),
+                    metrics_time_s=0.0,
+                    error_msg="query budget exceeded",
+                ))
+
         return rows

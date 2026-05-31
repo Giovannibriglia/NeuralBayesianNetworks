@@ -1,0 +1,278 @@
+"""v0.13 runner orchestrator.
+
+Wires ProblemSource × QuerySelector × Measurement × BaselineAdapter into a
+runnable cell loop.  Single-process, no subprocess isolation.  Soft cumulative
+timeout on query_time_s (per the v0.13 doc §3); fit and metrics are excluded
+from the timeout budget.
+
+Cell lifecycle per (problem, baseline):
+  1. ``build_adapter(spec)``
+  2. ``adapter.is_applicable(problem)``   → not_supported sentinel if False
+  3. ``selector.select(problem, n_queries, problem.seed)``
+  4. ``adapter.fit(problem, **spec.extra_kwargs)``
+     → error/oom/timeout sentinel rows on failure or safety-net breach
+  5. ``measurement.measure(..., query_budget_s=per_cell_timeout_s)``
+     → rows including timeout rows for over-budget queries
+
+JSONL output is written row-by-row (streaming, crash-resilient) via
+``JsonlWriter``.
+
+Reference: docs/v0.13-benchmark-redesign.md §3, §4.1, §6
+"""
+from __future__ import annotations
+
+from time import perf_counter
+from typing import Any, Iterator
+
+from benchmarking.core.config import BaselineSpec, RunnerConfig, build_adapter
+from benchmarking.core.output import JsonlWriter
+from benchmarking.core.results import CellResult
+
+_NAN = float("nan")
+
+# ---------------------------------------------------------------------------
+# OOM detection: RuntimeError message substrings from torch's CPU allocator
+# and various CUDA allocator error paths.
+# ---------------------------------------------------------------------------
+_OOM_RUNTIME_MARKERS = (
+    "out of memory",
+    "cuda oom",
+    "alloc_cpu",
+    "defaultcpuallocator",
+    "cannot allocate memory",
+    "can't allocate memory",
+)
+
+
+# ---------------------------------------------------------------------------
+# Exception → status classifier
+# ---------------------------------------------------------------------------
+
+def _classify_exception(exc: Exception) -> str:
+    """Map an exception to a CellResult status string.
+
+    Returns one of: "oom", "not_supported", "error".
+
+    OOM detection covers:
+      - torch.cuda.OutOfMemoryError (explicit CUDA OOM)
+      - MemoryError (Python / OS CPU OOM)
+      - RuntimeError with OOM-marker substrings (torch CPU allocator)
+
+    Structural-limit detection covers:
+      - ImportError (optional dependency missing)
+      - NotImplementedError (adapter refuses the combination)
+      - ValueError (adapter raises for structural reasons)
+
+    All other exceptions → "error".
+    """
+    try:
+        import torch
+        if isinstance(exc, torch.cuda.OutOfMemoryError):
+            return "oom"
+    except (ImportError, AttributeError):
+        pass
+
+    if isinstance(exc, MemoryError):
+        return "oom"
+
+    if isinstance(exc, (ImportError, NotImplementedError, ValueError)):
+        return "not_supported"
+
+    if isinstance(exc, RuntimeError):
+        msg = str(exc).lower()
+        if any(m in msg for m in _OOM_RUNTIME_MARKERS):
+            return "oom"
+
+    return "error"
+
+
+# ---------------------------------------------------------------------------
+# Sentinel row helpers
+# ---------------------------------------------------------------------------
+
+def _not_supported_sentinel(
+    problem: Any, adapter: Any, benchmark: str,
+) -> CellResult:
+    """Single sentinel row when ``adapter.is_applicable()`` returns False."""
+    return CellResult(
+        benchmark=benchmark,
+        family=problem.family,
+        problem_id=problem.problem_id,
+        seed=problem.seed,
+        baseline=adapter.name,
+        query_role="random",
+        metric="status",
+        value=_NAN,
+        status="not_supported",
+        fit_time_s=0.0,
+        query_time_s=0.0,
+        metrics_time_s=0.0,
+        error_msg=f"{adapter.name} not applicable to {problem.family}",
+    )
+
+
+def _fit_failure_rows(
+    problem: Any,
+    adapter: Any,
+    queries: list,
+    query_roles: list[str],
+    benchmark: str,
+    *,
+    fit_time_s: float,
+    status: str,
+    error_msg: str,
+) -> Iterator[CellResult]:
+    """Emit one sentinel row per selected query when fit() fails or breaches
+    the safety budget.
+
+    ``fit_time_s`` is NaN if fit raised an exception before completing, or the
+    real wall-clock if fit completed but exceeded the multiplier ceiling.
+    ``query_time_s`` and ``metrics_time_s`` are always NaN (no queries ran).
+    """
+    if not queries:
+        yield CellResult(
+            benchmark=benchmark,
+            family=problem.family,
+            problem_id=problem.problem_id,
+            seed=problem.seed,
+            baseline=adapter.name,
+            query_role="random",
+            metric="status",
+            value=_NAN,
+            status=status,
+            fit_time_s=fit_time_s,
+            query_time_s=_NAN,
+            metrics_time_s=_NAN,
+            error_msg=error_msg,
+        )
+        return
+
+    for role in query_roles:
+        yield CellResult(
+            benchmark=benchmark,
+            family=problem.family,
+            problem_id=problem.problem_id,
+            seed=problem.seed,
+            baseline=adapter.name,
+            query_role=role,
+            metric="status",
+            value=_NAN,
+            status=status,
+            fit_time_s=fit_time_s,
+            query_time_s=_NAN,
+            metrics_time_s=_NAN,
+            error_msg=error_msg,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Runner
+# ---------------------------------------------------------------------------
+
+class Runner:
+    """Orchestrate the v0.13 cell loop.
+
+    Usage::
+
+        rows = list(Runner().run(cfg))
+
+    Yields ``CellResult`` rows as they are produced.  Simultaneously writes
+    each row to ``cfg.jsonl_path`` for crash resilience.
+
+    The runner is stateless; a single ``Runner`` instance can be reused
+    across multiple configs.
+    """
+
+    def run(self, cfg: RunnerConfig) -> Iterator[CellResult]:
+        """Run the full cell loop, yielding CellResult rows as produced.
+
+        Also writes each row to ``cfg.jsonl_path`` immediately (streaming).
+
+        Parameters
+        ----------
+        cfg:
+            A fully-constructed ``RunnerConfig``.
+
+        Yields
+        ------
+        CellResult
+            One per (problem, baseline, query, metric).  Includes
+            not_supported, timeout, error, and oom sentinel rows.
+        """
+        fit_budget_s = (
+            cfg.fit_timeout_s
+            if cfg.fit_timeout_s is not None
+            else cfg.fit_timeout_s_multiplier * cfg.per_cell_timeout_s
+        )
+        default_role = getattr(cfg.selector, "query_role", "random")
+
+        with JsonlWriter(cfg.jsonl_path) as writer:
+            for problem in cfg.problem_source.iter_problems(cfg.source_config):
+                for spec in cfg.baselines:
+                    yield from self._run_cell(
+                        cfg, problem, spec, writer,
+                        fit_budget_s=fit_budget_s,
+                        default_role=default_role,
+                    )
+
+    def _run_cell(
+        self,
+        cfg: RunnerConfig,
+        problem: Any,
+        spec: BaselineSpec,
+        writer: JsonlWriter,
+        *,
+        fit_budget_s: float,
+        default_role: str,
+    ) -> Iterator[CellResult]:
+        adapter = build_adapter(spec)
+
+        # --- Applicability gate ---
+        if not adapter.is_applicable(problem):
+            row = _not_supported_sentinel(problem, adapter, cfg.benchmark)
+            writer.write(row)
+            yield row
+            return
+
+        # --- Query selection (before fit; seed from problem generation) ---
+        queries = cfg.selector.select(problem, cfg.n_queries_per_cell, problem.seed)
+        query_roles = [default_role] * len(queries)
+
+        # --- Fit ---
+        try:
+            t0 = perf_counter()
+            adapter.fit(problem, **spec.extra_kwargs)
+            fit_time_s = perf_counter() - t0
+        except Exception as exc:
+            status = _classify_exception(exc)
+            for row in _fit_failure_rows(
+                problem, adapter, queries, query_roles, cfg.benchmark,
+                fit_time_s=_NAN, status=status, error_msg=repr(exc),
+            ):
+                writer.write(row)
+                yield row
+            return
+
+        # --- Fit safety net ---
+        if fit_time_s > fit_budget_s:
+            for row in _fit_failure_rows(
+                problem, adapter, queries, query_roles, cfg.benchmark,
+                fit_time_s=fit_time_s, status="timeout",
+                error_msg=f"fit exceeded {fit_budget_s:.0f}s safety budget",
+            ):
+                writer.write(row)
+                yield row
+            return
+
+        # --- Measurement (handles per-query cumulative timeout internally) ---
+        rows = cfg.measurement.measure(
+            problem, adapter, queries,
+            fit_time_s=fit_time_s,
+            benchmark=cfg.benchmark,
+            seed=problem.seed,
+            query_roles=query_roles,
+            query_budget_s=cfg.per_cell_timeout_s,
+        )
+        for row in rows:
+            writer.write(row)
+            yield row

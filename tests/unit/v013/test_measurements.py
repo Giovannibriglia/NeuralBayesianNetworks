@@ -23,6 +23,7 @@ Reference: docs/v0.13-benchmark-redesign.md §3, §4.1
 """
 from __future__ import annotations
 
+import math
 import time
 
 import pytest
@@ -475,6 +476,115 @@ class TestAccuracyAndTimingBehavioral:
         result = m.measure(problem, adapter, queries)
         w1_rows = [r for r in result if r.metric == "w1_per_node"]
         assert all(r.status == "not_supported" for r in w1_rows)
+
+
+class TestQueryBudget:
+    """Tests for the query_budget_s timeout mechanism in both measurements."""
+
+    def test_accuracy_timing_inf_budget_preserves_all_rows(self):
+        """budget=inf (default) → all queries complete, no timeout rows."""
+        problem, queries = _get_discrete_problem_and_queries()
+        m = AccuracyAndTiming()
+        result = m.measure(problem, _StubAdapter(), queries, query_budget_s=float("inf"))
+        timeout_rows = [r for r in result if r.status == "timeout"]
+        assert len(timeout_rows) == 0
+        assert len(result) == len(queries) * 3  # tv, jsd, w1 per query
+
+    def test_accuracy_timing_zero_budget_times_out_all_queries(self):
+        """budget=0.0: cumulative 0.0 >= 0.0 before query 0 → all timeout."""
+        problem, queries = _get_discrete_problem_and_queries()
+        m = AccuracyAndTiming()
+        result = m.measure(problem, _StubAdapter(), queries, query_budget_s=0.0)
+        timeout_rows = [r for r in result if r.status == "timeout"]
+        assert len(timeout_rows) == len(queries) * 3
+
+    def test_accuracy_timing_timeout_rows_have_nan_query_time(self):
+        problem, queries = _get_discrete_problem_and_queries()
+        m = AccuracyAndTiming()
+        result = m.measure(problem, _StubAdapter(), queries,
+                           query_budget_s=0.0, fit_time_s=1.5)
+        for r in result:
+            assert r.status == "timeout"
+            assert math.isnan(r.query_time_s)
+            assert math.isnan(r.metrics_time_s)
+
+    def test_accuracy_timing_timeout_rows_have_real_fit_time(self):
+        problem, queries = _get_discrete_problem_and_queries()
+        m = AccuracyAndTiming()
+        result = m.measure(problem, _StubAdapter(), queries,
+                           query_budget_s=0.0, fit_time_s=1.5)
+        for r in result:
+            assert not math.isnan(r.fit_time_s)
+            assert r.fit_time_s == pytest.approx(1.5)
+
+    def test_accuracy_timing_timeout_rows_have_status_timeout(self):
+        problem, queries = _get_discrete_problem_and_queries()
+        m = AccuracyAndTiming()
+        result = m.measure(problem, _StubAdapter(), queries, query_budget_s=0.0)
+        for r in result:
+            assert r.status == "timeout"
+
+    def test_timing_only_inf_budget_preserves_all_rows(self):
+        """budget=inf (default) → all queries complete, no timeout rows."""
+        problem, queries = _get_discrete_problem_and_queries()
+        m = TimingOnly()
+        result = m.measure(problem, _StubAdapter(), queries, query_budget_s=float("inf"))
+        timeout_rows = [r for r in result if r.status == "timeout"]
+        assert len(timeout_rows) == 0
+        assert len(result) == len(queries)
+
+    def test_timing_only_zero_budget_times_out_all_queries(self):
+        """budget=0.0: cumulative 0.0 >= 0.0 before query 0 → all timeout."""
+        problem, queries = _get_discrete_problem_and_queries()
+        m = TimingOnly()
+        result = m.measure(problem, _StubAdapter(), queries, query_budget_s=0.0)
+        timeout_rows = [r for r in result if r.status == "timeout"]
+        assert len(timeout_rows) == len(queries)
+
+    def test_timing_only_timeout_rows_have_nan_query_time(self):
+        problem, queries = _get_discrete_problem_and_queries()
+        m = TimingOnly()
+        result = m.measure(problem, _StubAdapter(), queries, query_budget_s=0.0)
+        for r in result:
+            assert math.isnan(r.query_time_s)
+
+    def test_timing_only_timeout_rows_have_real_fit_time(self):
+        problem, queries = _get_discrete_problem_and_queries()
+        m = TimingOnly()
+        result = m.measure(problem, _StubAdapter(), queries,
+                           query_budget_s=0.0, fit_time_s=2.0)
+        for r in result:
+            assert not math.isnan(r.fit_time_s)
+            assert r.fit_time_s == pytest.approx(2.0)
+
+    def test_timing_only_timeout_rows_metrics_time_s_zero(self):
+        """TimingOnly has no accuracy phase; metrics_time_s is always 0.0."""
+        problem, queries = _get_discrete_problem_and_queries()
+        m = TimingOnly()
+        result = m.measure(problem, _StubAdapter(), queries, query_budget_s=0.0)
+        for r in result:
+            assert r.metrics_time_s == 0.0
+
+    def test_accuracy_timing_completed_queries_have_real_query_time(self):
+        """Queries that completed before timeout still have real query_time_s."""
+        problem, queries = _get_discrete_problem_and_queries()
+        assert len(queries) >= 2, "need at least 2 queries for this test"
+        m = AccuracyAndTiming()
+        # Use a budget just large enough for the stub (which is near-instant)
+        # by setting a generous budget — all complete. Then verify no timeouts.
+        result = m.measure(problem, _StubAdapter(), queries, query_budget_s=60.0)
+        ok_rows = [r for r in result if r.status in ("ok", "not_supported", "no_result")]
+        assert len(ok_rows) > 0
+        for r in ok_rows:
+            assert not math.isnan(r.query_time_s)
+
+    def test_timing_only_completed_queries_have_ok_status(self):
+        """Queries that completed before timeout have status ok."""
+        problem, queries = _get_discrete_problem_and_queries()
+        m = TimingOnly()
+        result = m.measure(problem, _StubAdapter(), queries, query_budget_s=60.0)
+        for r in result:
+            assert r.status == "ok"
 
 
 @pytest.mark.slow
