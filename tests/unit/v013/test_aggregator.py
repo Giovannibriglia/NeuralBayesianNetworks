@@ -157,6 +157,32 @@ class TestAggregate:
         assert result["long"].empty
         assert result["wide"].empty
 
+    def test_aggregator_handles_timing_metrics(self, tmp_path):
+        """Aggregator correctly surfaces timing metric rows as metric entries."""
+        rows = [
+            {"benchmark": "synthetic", "family": "discrete", "problem_id": "4",
+             "seed": 0, "baseline": "nbn-cat-lw", "query_role": "random",
+             "metric": "fit_time_s", "value": 1.5, "status": "ok",
+             "fit_time_s": 1.5, "query_time_s": 0.01, "metrics_time_s": 0.05,
+             "error_msg": None},
+            {"benchmark": "synthetic", "family": "discrete", "problem_id": "4",
+             "seed": 0, "baseline": "nbn-cat-lw", "query_role": "random",
+             "metric": "query_time_s", "value": 0.01, "status": "ok",
+             "fit_time_s": 1.5, "query_time_s": 0.01, "metrics_time_s": 0.05,
+             "error_msg": None},
+            {"benchmark": "synthetic", "family": "discrete", "problem_id": "4",
+             "seed": 0, "baseline": "nbn-cat-lw", "query_role": "random",
+             "metric": "metrics_time_s", "value": 0.05, "status": "ok",
+             "fit_time_s": 1.5, "query_time_s": 0.01, "metrics_time_s": 0.05,
+             "error_msg": None},
+        ]
+        path = _make_v3_parquet(tmp_path, rows)
+        result = aggregate(path)
+        found_metrics = set(result["long"]["metric"].unique())
+        assert "fit_time_s" in found_metrics
+        assert "query_time_s" in found_metrics
+        assert "metrics_time_s" in found_metrics
+
 
 # ---------------------------------------------------------------------------
 # TestBackwardCompat

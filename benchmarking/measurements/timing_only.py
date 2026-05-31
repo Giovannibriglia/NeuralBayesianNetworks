@@ -124,25 +124,11 @@ class TimingOnly:
                 err_msg = str(exc)
 
             cumulative_query_time_s += q_time
-            rows.append(CellResult(
-                benchmark=benchmark,
-                family=family,
-                problem_id=problem_id,
-                seed=seed,
-                baseline=baseline,
-                query_role=role,
-                metric="query_time_s",
-                value=q_time,
-                status=status,
-                fit_time_s=fit_time_s,
-                query_time_s=q_time,
-                metrics_time_s=0.0,
-                error_msg=err_msg,
-            ))
-
-        # Timeout rows for queries that never started.
-        if timed_out_at is not None:
-            for role in query_roles[timed_out_at:]:
+            for tk, tv in [
+                ("fit_time_s", fit_time_s),
+                ("query_time_s", q_time if status == "ok" else float("nan")),
+                ("metrics_time_s", 0.0),
+            ]:
                 rows.append(CellResult(
                     benchmark=benchmark,
                     family=family,
@@ -150,13 +136,37 @@ class TimingOnly:
                     seed=seed,
                     baseline=baseline,
                     query_role=role,
-                    metric="query_time_s",
-                    value=float("nan"),
-                    status="timeout",
+                    metric=tk,
+                    value=tv,
+                    status=status,
                     fit_time_s=fit_time_s,
-                    query_time_s=float("nan"),
+                    query_time_s=q_time,
                     metrics_time_s=0.0,
-                    error_msg="query budget exceeded",
+                    error_msg=err_msg,
                 ))
+
+        # Timeout rows for queries that never started.
+        if timed_out_at is not None:
+            for role in query_roles[timed_out_at:]:
+                for tk, tv in [
+                    ("fit_time_s", fit_time_s),
+                    ("query_time_s", float("nan")),
+                    ("metrics_time_s", 0.0),
+                ]:
+                    rows.append(CellResult(
+                        benchmark=benchmark,
+                        family=family,
+                        problem_id=problem_id,
+                        seed=seed,
+                        baseline=baseline,
+                        query_role=role,
+                        metric=tk,
+                        value=tv,
+                        status="timeout",
+                        fit_time_s=fit_time_s,
+                        query_time_s=float("nan"),
+                        metrics_time_s=0.0,
+                        error_msg="query budget exceeded",
+                    ))
 
         return rows

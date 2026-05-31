@@ -181,24 +181,25 @@ class TestTimingOnlyProtocol:
         result = m.measure(problem, _StubAdapter(), [])
         assert result == []
 
-    def test_one_row_per_query(self):
+    def test_three_rows_per_query(self):
         problem, queries = _get_discrete_problem_and_queries()
         m = TimingOnly()
         result = m.measure(problem, _StubAdapter(), queries)
-        assert len(result) == len(queries)
+        assert len(result) == 3 * len(queries)
 
-    def test_metric_is_query_time_s(self):
+    def test_query_time_s_rows_present(self):
         problem, queries = _get_discrete_problem_and_queries()
         m = TimingOnly()
         result = m.measure(problem, _StubAdapter(), queries)
-        for row in result:
-            assert row.metric == "query_time_s"
+        qt_rows = [r for r in result if r.metric == "query_time_s"]
+        assert len(qt_rows) == len(queries)
 
-    def test_value_equals_query_time_s(self):
+    def test_query_time_s_row_value_equals_wide_column(self):
         problem, queries = _get_discrete_problem_and_queries()
         m = TimingOnly()
         result = m.measure(problem, _StubAdapter(), queries)
-        for row in result:
+        qt_rows = [r for r in result if r.metric == "query_time_s"]
+        for row in qt_rows:
             assert row.value == pytest.approx(row.query_time_s, abs=1e-9)
 
     def test_metrics_time_s_is_zero(self):
@@ -340,14 +341,15 @@ class TestAccuracyAndTimingBehavioral:
 
     def _validate_rows(self, result: list, n_queries: int) -> None:
         """Assert basic structural contracts on a measure() result."""
-        # Three metric rows per query (tv, jsd, w1).
-        assert len(result) == n_queries * 3
+        # Six rows per query: 3 accuracy (tv, jsd, w1) + 3 timing.
+        assert len(result) == n_queries * 6
+        accuracy_metrics = {"tv_per_node", "jsd_per_node", "w1_per_node"}
+        timing_metrics = {"fit_time_s", "query_time_s", "metrics_time_s"}
         for row in result:
             assert isinstance(row, CellResult)
             assert row.status in VALID_STATUSES
-            assert row.metric in {"tv_per_node", "jsd_per_node", "w1_per_node"}
+            assert row.metric in accuracy_metrics | timing_metrics
             assert row.fit_time_s >= 0.0
-            assert row.query_time_s >= 0.0
             assert row.metrics_time_s >= 0.0
 
     # ---- NBN discrete ----
@@ -449,23 +451,24 @@ class TestAccuracyAndTimingBehavioral:
 
     # ---- Row count ----
 
-    def test_row_count_is_n_queries_times_3(self, discrete_data):
-        """AccuracyAndTiming emits 3 metric rows per query (tv + jsd + w1)."""
+    def test_row_count_is_n_queries_times_6(self, discrete_data):
+        """AccuracyAndTiming emits 6 rows per query (tv + jsd + w1 + 3 timing)."""
         problem, queries = discrete_data
         adapter = NBNAdapter(mechanism="cat", engine="lw")
         adapter.fit(problem, epochs=_FIT_EPOCHS)
         m = AccuracyAndTiming()
         result = m.measure(problem, adapter, queries)
-        assert len(result) == len(queries) * 3
+        assert len(result) == len(queries) * 6
 
-    def test_metrics_covered_are_tv_jsd_w1(self, discrete_data):
+    def test_metrics_covered_are_accuracy_and_timing(self, discrete_data):
         problem, queries = discrete_data
         adapter = NBNAdapter(mechanism="cat", engine="lw")
         adapter.fit(problem, epochs=_FIT_EPOCHS)
         m = AccuracyAndTiming()
         result = m.measure(problem, adapter, queries)
         metrics = {row.metric for row in result}
-        assert metrics == {"tv_per_node", "jsd_per_node", "w1_per_node"}
+        assert {"tv_per_node", "jsd_per_node", "w1_per_node"} <= metrics
+        assert {"fit_time_s", "query_time_s", "metrics_time_s"} <= metrics
 
     def test_w1_not_supported_for_discrete(self, discrete_data):
         """W1 is not meaningful on unordered discrete categories."""
@@ -488,7 +491,7 @@ class TestQueryBudget:
         result = m.measure(problem, _StubAdapter(), queries, query_budget_s=float("inf"))
         timeout_rows = [r for r in result if r.status == "timeout"]
         assert len(timeout_rows) == 0
-        assert len(result) == len(queries) * 3  # tv, jsd, w1 per query
+        assert len(result) == len(queries) * 6  # 3 accuracy + 3 timing per query
 
     def test_accuracy_timing_zero_budget_times_out_all_queries(self):
         """budget=0.0: cumulative 0.0 >= 0.0 before query 0 → all timeout."""
@@ -496,7 +499,7 @@ class TestQueryBudget:
         m = AccuracyAndTiming()
         result = m.measure(problem, _StubAdapter(), queries, query_budget_s=0.0)
         timeout_rows = [r for r in result if r.status == "timeout"]
-        assert len(timeout_rows) == len(queries) * 3
+        assert len(timeout_rows) == len(queries) * 6
 
     def test_accuracy_timing_timeout_rows_have_nan_query_time(self):
         problem, queries = _get_discrete_problem_and_queries()
@@ -531,7 +534,7 @@ class TestQueryBudget:
         result = m.measure(problem, _StubAdapter(), queries, query_budget_s=float("inf"))
         timeout_rows = [r for r in result if r.status == "timeout"]
         assert len(timeout_rows) == 0
-        assert len(result) == len(queries)
+        assert len(result) == 3 * len(queries)
 
     def test_timing_only_zero_budget_times_out_all_queries(self):
         """budget=0.0: cumulative 0.0 >= 0.0 before query 0 → all timeout."""
@@ -539,7 +542,7 @@ class TestQueryBudget:
         m = TimingOnly()
         result = m.measure(problem, _StubAdapter(), queries, query_budget_s=0.0)
         timeout_rows = [r for r in result if r.status == "timeout"]
-        assert len(timeout_rows) == len(queries)
+        assert len(timeout_rows) == 3 * len(queries)
 
     def test_timing_only_timeout_rows_have_nan_query_time(self):
         problem, queries = _get_discrete_problem_and_queries()
@@ -601,13 +604,15 @@ class TestTimingOnlyBehavioral:
         m = TimingOnly()
         result = m.measure(problem, adapter, queries, fit_time_s=fit_time_s)
 
-        assert len(result) == len(queries)
+        assert len(result) == 3 * len(queries)
         for row in result:
-            assert row.metric == "query_time_s"
-            assert row.query_time_s > 0.0
             assert row.metrics_time_s == 0.0
             assert row.fit_time_s == pytest.approx(fit_time_s)
             assert row.status == "ok"
+        qt_rows = [r for r in result if r.metric == "query_time_s"]
+        assert len(qt_rows) == len(queries)
+        for row in qt_rows:
+            assert row.query_time_s > 0.0
 
     def test_nbn_mdn_lw_continuous(self):
         problem, queries = _get_continuous_problem_and_queries()
@@ -619,7 +624,81 @@ class TestTimingOnlyBehavioral:
         m = TimingOnly()
         result = m.measure(problem, adapter, queries, fit_time_s=fit_time_s)
 
-        assert len(result) == len(queries)
+        assert len(result) == 3 * len(queries)
         for row in result:
             assert row.status == "ok"
+        qt_rows = [r for r in result if r.metric == "query_time_s"]
+        for row in qt_rows:
             assert row.query_time_s > 0.0
+
+
+# ---------------------------------------------------------------------------
+# TestTimingMetricRows — verify timing rows are emitted as metric rows
+# ---------------------------------------------------------------------------
+
+class TestTimingMetricRows:
+    """Both measurements emit fit_time_s/query_time_s/metrics_time_s as metric rows."""
+
+    def test_accuracy_timing_emits_fit_time_s_row(self):
+        problem, queries = _get_discrete_problem_and_queries()
+        m = AccuracyAndTiming()
+        result = m.measure(problem, _StubAdapter(), queries, fit_time_s=1.5)
+        ft_rows = [r for r in result if r.metric == "fit_time_s"]
+        assert len(ft_rows) == len(queries)
+        for row in ft_rows:
+            assert row.value == pytest.approx(1.5)
+            assert row.status == "ok"
+
+    def test_accuracy_timing_emits_query_time_s_row(self):
+        problem, queries = _get_discrete_problem_and_queries()
+        m = AccuracyAndTiming()
+        result = m.measure(problem, _StubAdapter(), queries)
+        qt_rows = [r for r in result if r.metric == "query_time_s"]
+        assert len(qt_rows) == len(queries)
+        for row in qt_rows:
+            assert row.value >= 0.0
+            assert row.status == "ok"
+
+    def test_accuracy_timing_emits_metrics_time_s_row(self):
+        problem, queries = _get_discrete_problem_and_queries()
+        m = AccuracyAndTiming()
+        result = m.measure(problem, _StubAdapter(), queries)
+        mt_rows = [r for r in result if r.metric == "metrics_time_s"]
+        assert len(mt_rows) == len(queries)
+        for row in mt_rows:
+            assert row.value >= 0.0
+            assert row.status == "ok"
+
+    def test_timing_only_emits_fit_and_metrics_time_rows(self):
+        problem, queries = _get_discrete_problem_and_queries()
+        m = TimingOnly()
+        result = m.measure(problem, _StubAdapter(), queries, fit_time_s=2.0)
+        ft_rows = [r for r in result if r.metric == "fit_time_s"]
+        mt_rows = [r for r in result if r.metric == "metrics_time_s"]
+        assert len(ft_rows) == len(queries)
+        assert len(mt_rows) == len(queries)
+        for row in ft_rows:
+            assert row.value == pytest.approx(2.0)
+        for row in mt_rows:
+            assert row.value == pytest.approx(0.0)
+
+    def test_timing_rows_have_status_timeout_when_query_timed_out(self):
+        problem, queries = _get_discrete_problem_and_queries()
+        m = AccuracyAndTiming()
+        result = m.measure(problem, _StubAdapter(), queries, query_budget_s=0.0)
+        timing_metrics = {"fit_time_s", "query_time_s", "metrics_time_s"}
+        timing_rows = [r for r in result if r.metric in timing_metrics]
+        assert len(timing_rows) == len(queries) * 3
+        for row in timing_rows:
+            assert row.status == "timeout"
+
+    def test_timing_rows_status_ok_when_accuracy_metric_not_applicable(self):
+        """Timing rows for a query are ok even when some accuracy metrics are not_supported."""
+        problem, queries = _get_discrete_problem_and_queries()
+        m = AccuracyAndTiming()
+        result = m.measure(problem, _StubAdapter(), queries)
+        timing_rows = [r for r in result
+                       if r.metric in {"fit_time_s", "query_time_s", "metrics_time_s"}]
+        assert len(timing_rows) > 0
+        for row in timing_rows:
+            assert row.status == "ok"
