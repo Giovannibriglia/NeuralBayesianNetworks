@@ -58,6 +58,7 @@ from benchmarking.metrics import _compute_metrics_per_node
 
 _METRICS: tuple[str, ...] = ("tv", "jsd", "w1")
 _METRIC_KEYS: tuple[str, ...] = ("tv_per_node", "jsd_per_node", "w1_per_node")
+_TIMING_KEYS: tuple[str, ...] = ("fit_time_s", "query_time_s", "metrics_time_s")
 
 
 class AccuracyAndTiming:
@@ -221,6 +222,27 @@ class AccuracyAndTiming:
                         metrics_time_s=metrics_time_s,
                         error_msg=err_msg or "query failed",
                     ))
+                # Timing rows: query_time_s value is NaN (query did not succeed).
+                for tk, tv in [
+                    ("fit_time_s", fit_time_s),
+                    ("query_time_s", float("nan")),
+                    ("metrics_time_s", metrics_time_s),
+                ]:
+                    rows.append(CellResult(
+                        benchmark=benchmark,
+                        family=family,
+                        problem_id=problem_id,
+                        seed=seed,
+                        baseline=baseline,
+                        query_role=role,
+                        metric=tk,
+                        value=tv,
+                        status="error",
+                        fit_time_s=fit_time_s,
+                        query_time_s=q_time,
+                        metrics_time_s=metrics_time_s,
+                        error_msg=err_msg or "query failed",
+                    ))
                 continue
 
             # Success: one row per metric.
@@ -250,6 +272,28 @@ class AccuracyAndTiming:
                     metrics_time_s=metrics_time_s,
                     error_msg=None,
                 ))
+            # Timing rows: one per timing metric; status always "ok" since the
+            # query itself succeeded (accuracy metric applicability doesn't affect timing).
+            for tk, tv in [
+                ("fit_time_s", fit_time_s),
+                ("query_time_s", q_time),
+                ("metrics_time_s", metrics_time_s),
+            ]:
+                rows.append(CellResult(
+                    benchmark=benchmark,
+                    family=family,
+                    problem_id=problem_id,
+                    seed=seed,
+                    baseline=baseline,
+                    query_role=role,
+                    metric=tk,
+                    value=tv,
+                    status="ok",
+                    fit_time_s=fit_time_s,
+                    query_time_s=q_time,
+                    metrics_time_s=metrics_time_s,
+                    error_msg=None,
+                ))
 
         # ---- Timeout rows for queries that never started ----
         if timed_out_at is not None:
@@ -264,6 +308,26 @@ class AccuracyAndTiming:
                         query_role=role,
                         metric=mk,
                         value=float("nan"),
+                        status="timeout",
+                        fit_time_s=fit_time_s,
+                        query_time_s=float("nan"),
+                        metrics_time_s=float("nan"),
+                        error_msg="query budget exceeded",
+                    ))
+                for tk, tv in [
+                    ("fit_time_s", fit_time_s),
+                    ("query_time_s", float("nan")),
+                    ("metrics_time_s", float("nan")),
+                ]:
+                    rows.append(CellResult(
+                        benchmark=benchmark,
+                        family=family,
+                        problem_id=problem_id,
+                        seed=seed,
+                        baseline=baseline,
+                        query_role=role,
+                        metric=tk,
+                        value=tv,
                         status="timeout",
                         fit_time_s=fit_time_s,
                         query_time_s=float("nan"),

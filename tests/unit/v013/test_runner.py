@@ -697,7 +697,7 @@ def test_zero_budget_forces_timeout_rows(tmp_path):
 
     # All rows are timeout (budget=0.0 fires before query 0 starts)
     timeout_rows = [r for r in rows if r.status == "timeout"]
-    assert len(timeout_rows) == _N_QUERIES * 3  # 4 queries × 3 metrics (tv, jsd, w1)
+    assert len(timeout_rows) == _N_QUERIES * 6  # 4 queries × 6 metrics (3 accuracy + 3 timing)
 
     for r in timeout_rows:
         assert math.isnan(r.query_time_s)
