@@ -69,6 +69,8 @@ _INFERENCE_CONFIGS = [
     "inference_paper.yaml",
     "inference_paper_laptop.yaml",
     "inference_scalability.yaml",
+    "inference_smoke_topological.yaml",
+    "inference_smoke_random_only.yaml",
 ]
 _PARAM_CONFIGS = [
     "parameter_learning_smoke.yaml",
@@ -233,3 +235,74 @@ def test_extra_kwargs_parsed_into_baseline_spec(tmp_path: Path) -> None:
     p = _write_yaml(tmp_path, d)
     cfg = load_runner_config(p, jsonl_path=tmp_path / "out.jsonl")
     assert cfg.baselines[0].extra_kwargs == {"n_samples": 512}
+
+
+# ---------------------------------------------------------------------------
+# Selector dispatch (Phase 2 — string + dict forms)
+# ---------------------------------------------------------------------------
+
+def test_yaml_dispatch_uniform_string_still_works(tmp_path: Path) -> None:
+    """Backward-compat: string selector resolves to UniformRandomSelector."""
+    from benchmarking.selectors.uniform import UniformRandomSelector
+
+    d = _minimal_valid()
+    d["selector"] = "uniform_random"
+    p = _write_yaml(tmp_path, d)
+    cfg = load_runner_config(p, jsonl_path=tmp_path / "out.jsonl")
+    assert isinstance(cfg.selector, UniformRandomSelector)
+
+
+def test_yaml_dispatch_selector_omitted_defaults_uniform(tmp_path: Path) -> None:
+    """No selector field → UniformRandomSelector (legacy default)."""
+    from benchmarking.selectors.uniform import UniformRandomSelector
+
+    d = _minimal_valid()
+    d.pop("selector", None)
+    p = _write_yaml(tmp_path, d)
+    cfg = load_runner_config(p, jsonl_path=tmp_path / "out.jsonl")
+    assert isinstance(cfg.selector, UniformRandomSelector)
+
+
+def test_yaml_dispatch_topological_dict(tmp_path: Path) -> None:
+    """Phase 2: dict selector with type='topological' builds TopologicalAllocator."""
+    from benchmarking.selectors.topological import TopologicalAllocator
+
+    d = _minimal_valid()
+    d["selector"] = {
+        "type": "topological",
+        "target_allocation": {"hub": 0.30, "cut": 0.25, "terminal": 0.25, "random": 0.20},
+    }
+    p = _write_yaml(tmp_path, d)
+    cfg = load_runner_config(p, jsonl_path=tmp_path / "out.jsonl")
+    assert isinstance(cfg.selector, TopologicalAllocator)
+    assert cfg.selector.target_allocation["hub"] == 0.30
+
+
+def test_yaml_dispatch_topological_string(tmp_path: Path) -> None:
+    """String 'topological' builds TopologicalAllocator with defaults."""
+    from benchmarking.selectors.topological import TopologicalAllocator
+
+    d = _minimal_valid()
+    d["selector"] = "topological"
+    p = _write_yaml(tmp_path, d)
+    cfg = load_runner_config(p, jsonl_path=tmp_path / "out.jsonl")
+    assert isinstance(cfg.selector, TopologicalAllocator)
+    assert cfg.selector.target_allocation["hub"] == 0.30  # default
+
+
+def test_yaml_dispatch_unknown_selector_raises(tmp_path: Path) -> None:
+    """Unknown selector name raises ValueError, not silent fall-through."""
+    d = _minimal_valid()
+    d["selector"] = "not_a_real_selector"
+    p = _write_yaml(tmp_path, d)
+    with pytest.raises(ValueError, match="selector"):
+        load_runner_config(p, jsonl_path=tmp_path / "out.jsonl")
+
+
+def test_yaml_dispatch_unknown_dict_type_raises(tmp_path: Path) -> None:
+    """Unknown selector dict 'type' raises ValueError."""
+    d = _minimal_valid()
+    d["selector"] = {"type": "bogus"}
+    p = _write_yaml(tmp_path, d)
+    with pytest.raises(ValueError, match="selector"):
+        load_runner_config(p, jsonl_path=tmp_path / "out.jsonl")

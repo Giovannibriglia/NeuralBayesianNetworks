@@ -41,11 +41,23 @@ class Query:
         Observed values (may be batched: ``[B]``).
     kind:
         ``'marginal'`` | ``'conditional'`` | ``'map'`` | ``'sample'`` | ``'do'``.
+    query_role:
+        Phase 2 target bucket: ``'hub'`` | ``'cut'`` | ``'terminal'`` | ``'random'``.
+        Defaults to ``'random'`` so selectors that do not set it (e.g.
+        ``UniformRandomSelector``) stay backward-compatible.
+    query_kind:
+        Phase 2 inferential direction: ``'prediction'`` | ``'diagnosis'``.
+    evidence_strategy:
+        Phase 2 evidence sub-bucket: ``'longest_path'`` | ``'mb_neighbors'`` |
+        ``'random'``.
     """
 
     targets: tuple[str, ...]
     evidence: Mapping[str, int | float | torch.Tensor]
     kind: str = "marginal"
+    query_role: str = "random"              # hub | cut | terminal | random
+    query_kind: str = "prediction"          # prediction | diagnosis
+    evidence_strategy: str = "random"       # longest_path | mb_neighbors | random
 
 
 @dataclass

@@ -48,6 +48,10 @@ class CellResult:
     # Error context
     error_msg: str | None = None
 
+    # Phase 2 per-query metadata (defaults keep pre-Phase-2 selectors working)
+    query_kind: str = "prediction"          # "prediction" | "diagnosis"
+    evidence_strategy: str = "random"       # "longest_path" | "mb_neighbors" | "random"
+
 
 # Valid status values (for validation in implementations)
 VALID_STATUSES = frozenset({"ok", "timeout", "oom", "error", "not_supported"})

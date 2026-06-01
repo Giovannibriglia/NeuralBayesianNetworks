@@ -53,6 +53,8 @@ class TimingOnly:
         benchmark: str = "scalability",
         seed: int = 0,
         query_roles: list[str] | None = None,
+        query_kinds: list[str] | None = None,
+        evidence_strategies: list[str] | None = None,
         query_budget_s: float = float("inf"),
     ) -> list[CellResult]:
         """Time each query individually; return one row per query.
@@ -99,6 +101,19 @@ class TimingOnly:
             raise ValueError(
                 f"query_roles length {len(query_roles)} != queries length {len(queries)}"
             )
+        if query_kinds is None:
+            query_kinds = ["prediction"] * len(queries)
+        if len(query_kinds) != len(queries):
+            raise ValueError(
+                f"query_kinds length {len(query_kinds)} != queries length {len(queries)}"
+            )
+        if evidence_strategies is None:
+            evidence_strategies = ["random"] * len(queries)
+        if len(evidence_strategies) != len(queries):
+            raise ValueError(
+                f"evidence_strategies length {len(evidence_strategies)} "
+                f"!= queries length {len(queries)}"
+            )
 
         family = problem.family or _infer_family(problem)
         problem_id = problem.problem_id or problem.name
@@ -108,7 +123,9 @@ class TimingOnly:
         cumulative_query_time_s = 0.0
         timed_out_at: int | None = None
 
-        for i, (q, role) in enumerate(zip(queries, query_roles)):
+        for i, (q, role, qkind, estrat) in enumerate(
+            zip(queries, query_roles, query_kinds, evidence_strategies)
+        ):
             if cumulative_query_time_s >= query_budget_s:
                 timed_out_at = i
                 break
@@ -136,6 +153,8 @@ class TimingOnly:
                     seed=seed,
                     baseline=baseline,
                     query_role=role,
+                    query_kind=qkind,
+                    evidence_strategy=estrat,
                     metric=tk,
                     value=tv,
                     status=status,
@@ -147,7 +166,11 @@ class TimingOnly:
 
         # Timeout rows for queries that never started.
         if timed_out_at is not None:
-            for role in query_roles[timed_out_at:]:
+            for role, qkind, estrat in zip(
+                query_roles[timed_out_at:],
+                query_kinds[timed_out_at:],
+                evidence_strategies[timed_out_at:],
+            ):
                 for tk, tv in [
                     ("fit_time_s", fit_time_s),
                     ("query_time_s", float("nan")),
@@ -160,6 +183,8 @@ class TimingOnly:
                         seed=seed,
                         baseline=baseline,
                         query_role=role,
+                        query_kind=qkind,
+                        evidence_strategy=estrat,
                         metric=tk,
                         value=tv,
                         status="timeout",

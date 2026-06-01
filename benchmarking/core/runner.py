@@ -176,7 +176,7 @@ def _fit_failure_rows(
         )
         return
 
-    for role in query_roles:
+    for q, role in zip(queries, query_roles):
         yield CellResult(
             benchmark=benchmark,
             family=problem.family,
@@ -184,6 +184,8 @@ def _fit_failure_rows(
             seed=problem.seed,
             baseline=adapter.name,
             query_role=role,
+            query_kind=getattr(q, "query_kind", "prediction"),
+            evidence_strategy=getattr(q, "evidence_strategy", "random"),
             metric="status",
             value=_NAN,
             status=status,
@@ -265,7 +267,14 @@ class Runner:
 
         # --- Query selection (before fit; seed from problem generation) ---
         queries = cfg.selector.select(problem, cfg.n_queries_per_cell, problem.seed)
-        query_roles = [default_role] * len(queries)
+        # Per-query metadata travels on the Query objects (Phase 2). Selectors
+        # that don't set these fields fall back to the dataclass defaults; the
+        # selector class-level query_role remains the fallback for query_role.
+        query_roles = [getattr(q, "query_role", default_role) for q in queries]
+        query_kinds = [getattr(q, "query_kind", "prediction") for q in queries]
+        evidence_strategies = [
+            getattr(q, "evidence_strategy", "random") for q in queries
+        ]
 
         # --- Fit ---
         try:
@@ -300,6 +309,8 @@ class Runner:
             benchmark=cfg.benchmark,
             seed=problem.seed,
             query_roles=query_roles,
+            query_kinds=query_kinds,
+            evidence_strategies=evidence_strategies,
             query_budget_s=cfg.per_cell_timeout_s,
         )
         for row in rows:

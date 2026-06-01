@@ -436,7 +436,7 @@ class NodeRoles:
     # Ranked lists (for target selection — Step 1)
     hubs:      list[str]          # sorted desc by |MB(v)|
     cuts:      list[str]          # sorted desc by degree centrality
-    terminals: list[str]          # sorted desc by depth(v) - |desc(v)|
+    terminals: list[str]          # sorted desc by depth(v) − |desc(v)|
 
     # Per-node scalar maps (for scoring)
     mb_size:           dict[str, int]
