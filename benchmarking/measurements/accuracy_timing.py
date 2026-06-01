@@ -107,6 +107,8 @@ class AccuracyAndTiming:
         benchmark: str = "synthetic",
         seed: int = 0,
         query_roles: list[str] | None = None,
+        query_kinds: list[str] | None = None,
+        evidence_strategies: list[str] | None = None,
         query_budget_s: float = float("inf"),
     ) -> list[CellResult]:
         """Run timing + accuracy measurement for all queries.
@@ -157,6 +159,19 @@ class AccuracyAndTiming:
             raise ValueError(
                 f"query_roles length {len(query_roles)} != queries length {len(queries)}"
             )
+        if query_kinds is None:
+            query_kinds = ["prediction"] * len(queries)
+        if len(query_kinds) != len(queries):
+            raise ValueError(
+                f"query_kinds length {len(query_kinds)} != queries length {len(queries)}"
+            )
+        if evidence_strategies is None:
+            evidence_strategies = ["random"] * len(queries)
+        if len(evidence_strategies) != len(queries):
+            raise ValueError(
+                f"evidence_strategies length {len(evidence_strategies)} "
+                f"!= queries length {len(queries)}"
+            )
 
         family = problem.family or _infer_family(problem)
         problem_id = problem.problem_id or problem.name
@@ -199,8 +214,11 @@ class AccuracyAndTiming:
 
         # ---- Phase 3: emit CellResult rows ----
         rows: list[CellResult] = []
-        for i, (q, (posterior, err_msg), mdict, role) in enumerate(
-            zip(queries, posteriors, per_query_metric_dicts, query_roles)
+        for i, (q, (posterior, err_msg), mdict, role, qkind, estrat) in enumerate(
+            zip(
+                queries, posteriors, per_query_metric_dicts,
+                query_roles, query_kinds, evidence_strategies,
+            )
         ):
             q_time = query_times[i]
 
@@ -214,6 +232,8 @@ class AccuracyAndTiming:
                         seed=seed,
                         baseline=baseline,
                         query_role=role,
+                        query_kind=qkind,
+                        evidence_strategy=estrat,
                         metric=mk,
                         value=float("nan"),
                         status="error",
@@ -235,6 +255,8 @@ class AccuracyAndTiming:
                         seed=seed,
                         baseline=baseline,
                         query_role=role,
+                        query_kind=qkind,
+                        evidence_strategy=estrat,
                         metric=tk,
                         value=tv,
                         status="error",
@@ -264,6 +286,8 @@ class AccuracyAndTiming:
                     seed=seed,
                     baseline=baseline,
                     query_role=role,
+                    query_kind=qkind,
+                    evidence_strategy=estrat,
                     metric=mk,
                     value=value,
                     status=status,
@@ -286,6 +310,8 @@ class AccuracyAndTiming:
                     seed=seed,
                     baseline=baseline,
                     query_role=role,
+                    query_kind=qkind,
+                    evidence_strategy=estrat,
                     metric=tk,
                     value=tv,
                     status="ok",
@@ -297,7 +323,11 @@ class AccuracyAndTiming:
 
         # ---- Timeout rows for queries that never started ----
         if timed_out_at is not None:
-            for role in query_roles[timed_out_at:]:
+            for role, qkind, estrat in zip(
+                query_roles[timed_out_at:],
+                query_kinds[timed_out_at:],
+                evidence_strategies[timed_out_at:],
+            ):
                 for mk in _METRIC_KEYS:
                     rows.append(CellResult(
                         benchmark=benchmark,
@@ -306,6 +336,8 @@ class AccuracyAndTiming:
                         seed=seed,
                         baseline=baseline,
                         query_role=role,
+                        query_kind=qkind,
+                        evidence_strategy=estrat,
                         metric=mk,
                         value=float("nan"),
                         status="timeout",
@@ -326,6 +358,8 @@ class AccuracyAndTiming:
                         seed=seed,
                         baseline=baseline,
                         query_role=role,
+                        query_kind=qkind,
+                        evidence_strategy=estrat,
                         metric=tk,
                         value=tv,
                         status="timeout",
