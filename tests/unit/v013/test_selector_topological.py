@@ -14,6 +14,7 @@ import networkx as nx
 import pytest
 
 from benchmarking.selectors.topological import (
+    _KindEvidenceAllocator,
     _TargetAllocator,
     compute_node_roles,
 )
@@ -238,3 +239,185 @@ class TestEdgeCases:
         roles = compute_node_roles(G)
         # B is the articulation point in the chain
         assert roles.cuts == ["B"]
+
+
+# --- Stage 2 tests ---
+
+class TestKindEvidenceAllocator:
+    """Spec §3.3, §3.4: kind assignment + evidence-set selection."""
+
+    DEFAULT_KIND_ALLOC = {
+        "hub":      {"prediction": 0.5, "diagnosis": 0.5},
+        "cut":      {"prediction": 0.5, "diagnosis": 0.5},
+        "terminal": {"prediction": 1.0, "diagnosis": 0.0},
+        "random":   {"prediction": 0.5, "diagnosis": 0.5},
+    }
+    DEFAULT_EV_ALLOC = {
+        "prediction": {"longest_path": 0.4, "mb_neighbors": 0.4, "random": 0.2},
+        "diagnosis":  {"longest_path": 0.4, "mb_neighbors": 0.4, "random": 0.2},
+    }
+    N_EVIDENCE = {"prediction": 3, "diagnosis": 3}
+
+    def test_terminal_bucket_always_prediction(self, asia_dag):
+        """K1: terminal bucket has kind_alloc[terminal] = {prediction: 1.0}.
+        Every terminal query must have query_kind='prediction'."""
+        roles = compute_node_roles(asia_dag)
+        allocator = _KindEvidenceAllocator()
+
+        # Sample 50 terminal-bucket queries
+        kinds = []
+        for i in range(50):
+            result = allocator.assign(
+                target="xray",  # a known terminal
+                bucket="terminal",
+                roles=roles,
+                kind_alloc=self.DEFAULT_KIND_ALLOC,
+                evidence_alloc=self.DEFAULT_EV_ALLOC,
+                n_evidence=self.N_EVIDENCE,
+                rng=random.Random(i),
+            )
+            if result is not None:
+                kinds.append(result[0])
+
+        # All should be prediction
+        assert all(k == "prediction" for k in kinds), f"unexpected kinds: {set(kinds)}"
+
+    def test_hub_bucket_balanced_50_50(self, asia_dag):
+        """K1: hub bucket has 50/50 prediction/diagnosis. Verify statistically."""
+        roles = compute_node_roles(asia_dag)
+        allocator = _KindEvidenceAllocator()
+
+        # Sample 200 hub-bucket queries with different seeds
+        kinds = []
+        for i in range(200):
+            result = allocator.assign(
+                target="either",  # a known hub
+                bucket="hub",
+                roles=roles,
+                kind_alloc=self.DEFAULT_KIND_ALLOC,
+                evidence_alloc=self.DEFAULT_EV_ALLOC,
+                n_evidence=self.N_EVIDENCE,
+                rng=random.Random(i),
+            )
+            if result is not None:
+                kinds.append(result[0])
+
+        # Should be roughly 50/50 with reasonable tolerance
+        prediction_count = sum(1 for k in kinds if k == "prediction")
+        fraction = prediction_count / len(kinds)
+        assert 0.35 < fraction < 0.65, f"hub kind imbalance: {fraction:.2f}"
+
+    def test_evidence_pool_prediction_longest_path(self, asia_dag):
+        """Prediction + longest_path: pool is ancestors, sorted by depth distance desc."""
+        roles = compute_node_roles(asia_dag)
+        allocator = _KindEvidenceAllocator()
+
+        # Force prediction + longest_path with overwhelming allocation
+        ev_alloc = {"prediction": {"longest_path": 1.0}}
+
+        # Target 'either' has ancestors {asia, tub, smoke, lung}
+        # depth(either)=2; depth(asia)=0, depth(tub)=1, depth(smoke)=0, depth(lung)=1
+        # Distance: asia=2, tub=1, smoke=2, lung=1
+        # Top by distance descending: asia and smoke tied at 2
+        result = allocator.assign(
+            target="either",
+            bucket="hub",
+            roles=roles,
+            kind_alloc={"hub": {"prediction": 1.0}},  # force prediction
+            evidence_alloc=ev_alloc,
+            n_evidence={"prediction": 2},
+            rng=random.Random(0),
+        )
+        assert result is not None
+        query_kind, ev_strategy, ev_nodes = result
+        assert query_kind == "prediction"
+        assert ev_strategy == "longest_path"
+        # Top 2 by depth distance should include the deepest ancestors
+        assert set(ev_nodes).issubset({"asia", "tub", "smoke", "lung"})
+        assert len(ev_nodes) == 2
+
+    def test_evidence_pool_prediction_mb_neighbors(self, asia_dag):
+        """Prediction + mb_neighbors: pool is parents ∪ co_parents (spec §3.4)."""
+        roles = compute_node_roles(asia_dag)
+        allocator = _KindEvidenceAllocator()
+
+        # 'either' has parents={tub, lung}. co_parents(either)={bronc}: bronc
+        # shares child 'dysp' with either (dysp's parents are {either, bronc}).
+        # Pool = parents ∪ co_parents = {tub, lung, bronc}.
+        result = allocator.assign(
+            target="either",
+            bucket="hub",
+            roles=roles,
+            kind_alloc={"hub": {"prediction": 1.0}},
+            evidence_alloc={"prediction": {"mb_neighbors": 1.0}},
+            n_evidence={"prediction": 5},  # ask for more than pool has
+            rng=random.Random(0),
+        )
+        assert result is not None
+        _, _, ev_nodes = result
+        # Should get the full pool (3 nodes), not crash on shortfall
+        assert set(ev_nodes) == {"tub", "lung", "bronc"}
+
+    def test_evidence_pool_diagnosis_children(self, asia_dag):
+        """Diagnosis + mb_neighbors: pool is children + co_parents (semantic co_children)."""
+        roles = compute_node_roles(asia_dag)
+        allocator = _KindEvidenceAllocator()
+
+        # 'either' has children={xray, dysp}. co_parents(either) = nodes sharing
+        # a child with either: dysp's other parent is bronc → co_parents={bronc}.
+        result = allocator.assign(
+            target="either",
+            bucket="hub",
+            roles=roles,
+            kind_alloc={"hub": {"diagnosis": 1.0}},  # force diagnosis
+            evidence_alloc={"diagnosis": {"mb_neighbors": 1.0}},
+            n_evidence={"diagnosis": 5},
+            rng=random.Random(0),
+        )
+        assert result is not None
+        query_kind, _, ev_nodes = result
+        assert query_kind == "diagnosis"
+        # Pool = children(either) | co_parents(either) = {xray, dysp} | {bronc}
+        assert set(ev_nodes).issubset({"xray", "dysp", "bronc"})
+
+    def test_empty_pool_returns_none(self, asia_dag):
+        """Root node with prediction kind has no ancestors → None."""
+        roles = compute_node_roles(asia_dag)
+        allocator = _KindEvidenceAllocator()
+
+        # 'asia' is a root (no ancestors). prediction + longest_path → empty pool.
+        result = allocator.assign(
+            target="asia",
+            bucket="random",
+            roles=roles,
+            kind_alloc={"random": {"prediction": 1.0}},
+            evidence_alloc={"prediction": {"longest_path": 1.0}},
+            n_evidence={"prediction": 3},
+            rng=random.Random(0),
+        )
+        assert result is None
+
+    def test_deterministic_with_seed(self, asia_dag):
+        """Same rng state → same output."""
+        roles = compute_node_roles(asia_dag)
+        allocator = _KindEvidenceAllocator()
+
+        result1 = allocator.assign(
+            target="either",
+            bucket="hub",
+            roles=roles,
+            kind_alloc=self.DEFAULT_KIND_ALLOC,
+            evidence_alloc=self.DEFAULT_EV_ALLOC,
+            n_evidence=self.N_EVIDENCE,
+            rng=random.Random(42),
+        )
+        result2 = allocator.assign(
+            target="either",
+            bucket="hub",
+            roles=roles,
+            kind_alloc=self.DEFAULT_KIND_ALLOC,
+            evidence_alloc=self.DEFAULT_EV_ALLOC,
+            n_evidence=self.N_EVIDENCE,
+            rng=random.Random(42),
+        )
+        assert result1 == result2

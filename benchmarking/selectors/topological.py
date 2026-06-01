@@ -35,7 +35,6 @@ class NodeRoles:
     parents:           dict[str, frozenset[str]]
     children:          dict[str, frozenset[str]]
     co_parents:        dict[str, frozenset[str]]
-    co_children:       dict[str, frozenset[str]]
     ancestors:         dict[str, frozenset[str]]
     descendants:       dict[str, frozenset[str]]
 
@@ -58,22 +57,19 @@ def compute_node_roles(G: nx.DiGraph) -> NodeRoles:
         cp.discard(v)
         co_parents[v] = frozenset(cp)
 
-    # 3) Co-children. Per spec §5 Q3, the diagnosis evidence pool is
-    #    children(target) ∪ co_children(target), where
-    #        co_children = {n for child in children[v]
-    #                       for n in parents[child] if n != v}
-    #    i.e. nodes that share at least one child with v. That set is
-    #    identical to co_parents (same formula); the distinct name marks
-    #    its diagnostic-direction semantic role, not a different set.
-    co_children = co_parents
+    # Note: the diagnosis evidence pool (spec §3.4/§5 Q3) is
+    # children(target) ∪ co_children(target). co_children — nodes sharing
+    # ≥1 child with v — is structurally identical to co_parents (same
+    # formula), so _KindEvidenceAllocator reuses co_parents directly rather
+    # than storing a duplicate set.
 
-    # 4) MB size: |parents ∪ children ∪ co_parents|
+    # 3) MB size: |parents ∪ children ∪ co_parents|
     mb_size = {
         v: len(parents[v] | children[v] | co_parents[v])
         for v in G.nodes()
     }
 
-    # 5) Depth (longest path from a root, via topological order)
+    # 4) Depth (longest path from a root, via topological order)
     depth: dict[str, int] = {}
     for v in nx.topological_sort(G):
         if not parents[v]:
@@ -81,15 +77,15 @@ def compute_node_roles(G: nx.DiGraph) -> NodeRoles:
         else:
             depth[v] = max(depth[p] for p in parents[v]) + 1
 
-    # 6) Ancestors + descendants
+    # 5) Ancestors + descendants
     ancestors = {v: frozenset(nx.ancestors(G, v)) for v in G.nodes()}
     descendants = {v: frozenset(nx.descendants(G, v)) for v in G.nodes()}
     descendant_count = {v: len(descendants[v]) for v in G.nodes()}
 
-    # 7) Hub ranking
+    # 6) Hub ranking
     hubs = sorted(G.nodes(), key=lambda v: -mb_size[v])
 
-    # 8) Cut ranking — articulation points of the moralized undirected
+    # 7) Cut ranking — articulation points of the moralized undirected
     #    graph, sub-ranked by degree centrality (spec §5 Q1 recommendation).
     G_moral_und = nx.moral_graph(G)  # already undirected per nx convention
     try:
@@ -104,7 +100,7 @@ def compute_node_roles(G: nx.DiGraph) -> NodeRoles:
     else:
         cuts = []
 
-    # 9) Terminal ranking by depth(v) − |descendants(v)| (spec §1, §3.2, §3.8):
+    # 8) Terminal ranking by depth(v) − |descendants(v)| (spec §1, §3.2, §3.8):
     #    deep nodes with few descendants rank highest (leaf-like, long paths).
     terminals = sorted(
         G.nodes(),
@@ -121,7 +117,6 @@ def compute_node_roles(G: nx.DiGraph) -> NodeRoles:
         parents=parents,
         children=children,
         co_parents=co_parents,
-        co_children=co_children,
         ancestors=ancestors,
         descendants=descendants,
     )
@@ -197,3 +192,155 @@ class _TargetAllocator:
         # surplus exceeds the remaining node pool can still leave us short
         # (never over). Slice is a no-op in the common case.
         return result[:budget]
+
+
+class _KindEvidenceAllocator:
+    """Steps 2 + 3 of Phase 2 pipeline: kind assignment + evidence-set selection.
+
+    Spec §3.3, §3.4, §4.2.
+    """
+
+    def assign(
+        self,
+        target: str,
+        bucket: str,
+        roles: NodeRoles,
+        kind_alloc: Mapping[str, Mapping[str, float]],
+        evidence_alloc: Mapping[str, Mapping[str, float]],
+        n_evidence: Mapping[str, int],
+        rng: random.Random,
+    ) -> tuple[str, str, list[str]] | None:
+        """Return ``(query_kind, evidence_strategy, evidence_nodes)`` or None
+        if the evidence pool has zero candidates.
+
+        - query_kind: prediction | diagnosis
+        - evidence_strategy: longest_path | mb_neighbors | random
+        - evidence_nodes: list of node names, length <= n_evidence[query_kind]
+        """
+        # Step 2: kind assignment (per spec §3.3)
+        bucket_kind_probs = kind_alloc.get(
+            bucket, {"prediction": 0.5, "diagnosis": 0.5}
+        )
+        query_kind = self._weighted_choice(bucket_kind_probs, rng)
+
+        # Step 3: evidence-set selection (per spec §3.4)
+        # 3a. Sub-bucket assignment
+        ev_strategy_probs = evidence_alloc.get(query_kind, {})
+        if not ev_strategy_probs:
+            # Defensive: no allocation defined for this kind
+            return None
+        evidence_strategy = self._weighted_choice(ev_strategy_probs, rng)
+
+        # 3b. Build candidate pool based on (kind, strategy)
+        pool = self._evidence_pool(target, query_kind, evidence_strategy, roles)
+        if not pool:
+            # Empty pool (e.g. root node with prediction kind has no ancestors)
+            return None
+
+        # 3c. Pick n_evidence nodes from pool with hardness ordering
+        n = n_evidence.get(query_kind, 3)
+        chosen = self._pick_evidence(pool, evidence_strategy, n, target, roles, rng)
+
+        return (query_kind, evidence_strategy, chosen)
+
+    def _weighted_choice(
+        self,
+        probs: Mapping[str, float],
+        rng: random.Random,
+    ) -> str:
+        """Draw a key from a {key: probability} dict using rng."""
+        items = sorted(probs.items())  # deterministic order
+        total = sum(p for _, p in items)
+        if total <= 0:
+            # All zero probabilities — degenerate; pick first key
+            return items[0][0]
+        r = rng.random() * total
+        cumulative = 0.0
+        for key, p in items:
+            cumulative += p
+            if r < cumulative:
+                return key
+        return items[-1][0]  # numerical floor case
+
+    def _evidence_pool(
+        self,
+        target: str,
+        query_kind: str,
+        strategy: str,
+        roles: NodeRoles,
+    ) -> list[str]:
+        """Build the candidate pool for evidence nodes.
+
+        Spec §3.4 evidence pools table:
+        - prediction + longest_path: ancestors of target, sorted by depth
+          distance desc
+        - prediction + mb_neighbors: parents(target) ∪ co_parents(target)
+        - prediction + random: ancestors of target (uniform)
+        - diagnosis + longest_path: descendants of target, sorted by depth
+          distance desc
+        - diagnosis + mb_neighbors: children(target) ∪ co_parents(target)
+          (co_parents = co_children semantically; same structural set per
+          spec §5 Q3)
+        - diagnosis + random: all non-target, non-descendant nodes
+        """
+        if query_kind == "prediction":
+            if strategy == "longest_path":
+                ancestors = roles.ancestors.get(target, frozenset())
+                # Deepest ancestors are farthest in topological depth from target.
+                return sorted(
+                    ancestors,
+                    key=lambda v: -(roles.depth.get(target, 0) - roles.depth.get(v, 0)),
+                )
+            elif strategy == "mb_neighbors":
+                parents = roles.parents.get(target, frozenset())
+                co_parents = roles.co_parents.get(target, frozenset())
+                pool = list(parents | co_parents)
+                return sorted(pool, key=lambda v: -roles.mb_size.get(v, 0))
+            elif strategy == "random":
+                return list(roles.ancestors.get(target, frozenset()))
+            else:
+                return []
+        elif query_kind == "diagnosis":
+            if strategy == "longest_path":
+                descendants = roles.descendants.get(target, frozenset())
+                return sorted(
+                    descendants,
+                    key=lambda v: -(roles.depth.get(v, 0) - roles.depth.get(target, 0)),
+                )
+            elif strategy == "mb_neighbors":
+                children = roles.children.get(target, frozenset())
+                # Per spec §5 Q3: co_children = co_parents (same structural set)
+                co_children = roles.co_parents.get(target, frozenset())
+                pool = list(children | co_children)
+                return sorted(pool, key=lambda v: -roles.mb_size.get(v, 0))
+            elif strategy == "random":
+                descendants = roles.descendants.get(target, frozenset())
+                all_nodes = set(roles.mb_size.keys())
+                return list(all_nodes - {target} - descendants)
+            else:
+                return []
+        else:
+            return []
+
+    def _pick_evidence(
+        self,
+        pool: list[str],
+        strategy: str,
+        n: int,
+        target: str,
+        roles: NodeRoles,
+        rng: random.Random,
+    ) -> list[str]:
+        """Pick up to n evidence nodes from the pool.
+
+        For structured strategies (longest_path, mb_neighbors): take top-n
+        by hardness ordering (descending). Pool is already sorted.
+        For random strategy: uniform shuffle, then take first n.
+        """
+        if strategy == "random":
+            pool_copy = list(pool)
+            rng.shuffle(pool_copy)
+            return pool_copy[:n]
+        else:
+            # longest_path or mb_neighbors: pool already sorted by hardness
+            return pool[:n]
