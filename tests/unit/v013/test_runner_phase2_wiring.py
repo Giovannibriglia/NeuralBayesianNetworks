@@ -109,12 +109,14 @@ class _RecordingMeasurement:
         query_roles: list[str] | None = None,
         query_kinds: list[str] | None = None,
         evidence_strategies: list[str] | None = None,
+        evidence_modes: list[str] | None = None,
         query_budget_s: float = float("inf"),
     ) -> list[CellResult]:
         self.received = {
             "query_roles": query_roles,
             "query_kinds": query_kinds,
             "evidence_strategies": evidence_strategies,
+            "evidence_modes": evidence_modes,
             "queries": queries,
         }
         return []

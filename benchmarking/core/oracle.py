@@ -113,6 +113,8 @@ def filter_ground_truth(
     mask = torch.ones(samples.shape[0], dtype=torch.bool, device=samples.device)
 
     for node, val in evidence_row.items():
+        if val is None:
+            continue  # empty-mode evidence: marginalize, don't filter (Phase 3)
         if node not in col_idx:
             continue  # node not in column map — skip safely
         idx = col_idx[node]
@@ -181,9 +183,12 @@ def forward_with_clamp_posterior_samples(
         return None
 
     # Normalise 0-dim tensors to [1]-shaped for the engine contract.
+    # Empty-mode evidence (None values, Phase 3) is skipped so the engine
+    # marginalizes over those variables rather than conditioning on them.
     ev = {
         k: (v.reshape(1) if isinstance(v, torch.Tensor) and v.dim() == 0 else v)
         for k, v in evidence.items()
+        if v is not None
     }
     with torch.no_grad():
         try:

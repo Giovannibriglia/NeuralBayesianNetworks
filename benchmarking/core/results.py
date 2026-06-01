@@ -52,12 +52,19 @@ class CellResult:
     query_kind: str = "prediction"          # "prediction" | "diagnosis"
     evidence_strategy: str = "random"       # "longest_path" | "mb_neighbors" | "random"
 
+    # Phase 3 per-query metadata (default "full" keeps pre-Phase-3 selectors working)
+    evidence_mode: str = "full"             # "full" | "empty"
+
 
 # Valid status values (for validation in implementations)
 VALID_STATUSES = frozenset({"ok", "timeout", "oom", "error", "not_supported"})
 
 # Valid benchmark names (for validation)
 VALID_BENCHMARKS = frozenset({"synthetic", "scalability", "bnlearn"})
+
+# Valid evidence modes (Phase 3): "full" = concrete evidence values (V1);
+# "empty" = evidence variables marginalized over None values (V2).
+VALID_EVIDENCE_MODES = frozenset({"full", "empty"})
 
 # Valid query roles (for validation; future-extensible)
 VALID_QUERY_ROLES_SYNTHETIC = frozenset({"hub", "cut", "terminal", "random"})

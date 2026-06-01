@@ -38,7 +38,12 @@ class Query:
     targets:
         Target node names.
     evidence:
-        Observed values (may be batched: ``[B]``).
+        Observed values (may be batched: ``[B]``).  A ``None`` value
+        means the evidence variable is structurally specified but
+        *unobserved*: the adapter marginalizes over it rather than
+        conditioning on it (Phase 3 "empty" evidence mode).  A query
+        whose evidence values are all concrete is "full" mode; one whose
+        values are all ``None`` is "empty" mode.
     kind:
         ``'marginal'`` | ``'conditional'`` | ``'map'`` | ``'sample'`` | ``'do'``.
     query_role:
@@ -53,7 +58,7 @@ class Query:
     """
 
     targets: tuple[str, ...]
-    evidence: Mapping[str, int | float | torch.Tensor]
+    evidence: Mapping[str, int | float | torch.Tensor | None]
     kind: str = "marginal"
     query_role: str = "random"              # hub | cut | terminal | random
     query_kind: str = "prediction"          # prediction | diagnosis
