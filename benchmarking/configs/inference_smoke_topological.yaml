@@ -1,0 +1,47 @@
+# Smoke config for inference with the Phase 2 TopologicalAllocator.
+# Mirrors inference_smoke.yaml but selects queries by topological role.
+# Wall-clock budget: < 90 seconds on CPU.
+version: "v0.13"
+benchmark: synthetic
+config_name: smoke
+metrics: all
+
+selector:
+  type: topological
+  target_allocation:
+    hub: 0.30
+    cut: 0.25
+    terminal: 0.25
+    random: 0.20
+  # kind_allocation, evidence_allocation, n_evidence: use TopologicalAllocator defaults
+
+source:
+  families: [discrete, continuous_lg, continuous_nongauss, hybrid]
+  n_nodes_list: [5, 10]
+  seeds: [0]
+  n_train: 2048
+  n_test: 512
+  n_reference: 5000
+  edge_density: 0.20
+  max_in_degree: 2
+  cardinality: 4
+  fraction_continuous: 0.5
+
+baselines:
+  - {library: pgmpy, mechanism: discrete, param_method: mle,   inference_method: ve}
+  - {library: pgmpy, mechanism: discrete, param_method: bayes, inference_method: ve}
+  - {library: pgmpy, mechanism: lg,       param_method: mle,   inference_method: predict}
+  - {library: nbn,   mechanism: cat,      param_method: mle,   inference_method: ve}
+  - {library: nbn,   mechanism: cat,      param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 1024}}
+  - {library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: ve}
+  - {library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: lw,      extra_kwargs: {n_samples: 1024}}
+  - {library: nbn,   mechanism: lg,       param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 1024}}
+  - {library: nbn,   mechanism: mdn,      param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 1024}}
+  - {library: nbn,   mechanism: flow,     param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 1024}}
+  - {library: nbn,   mechanism: hybrid,   param_method: mle,   inference_method: router}
+
+# Larger than inference_smoke.yaml (2) so the topological buckets and
+# evidence strategies are well-exercised across the run.
+n_queries_per_cell: 16
+per_cell_timeout_s: 60.0
+fit_timeout_s_multiplier: 10.0

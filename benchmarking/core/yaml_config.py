@@ -88,6 +88,7 @@ def load_runner_config(
     from benchmarking.measurements import AccuracyAndTiming, TimingOnly
     from benchmarking.problems import SyntheticProblemSource
     from benchmarking.selectors import UniformRandomSelector
+    from benchmarking.selectors.topological import TopologicalAllocator
 
     text = Path(path).read_text()
     d: dict[str, Any] = yaml.safe_load(text)
@@ -142,13 +143,37 @@ def load_runner_config(
         )
 
     # ── selector dispatch ────────────────────────────────────────────────────
-    selector_name = d.get("selector", "uniform_random")
-    if selector_name == "uniform_random":
-        selector = UniformRandomSelector()
+    # Accepts both the legacy string form (``selector: uniform_random``) and
+    # the Phase 2 dict form (``selector: {type: topological, ...}``).
+    selector_cfg = d.get("selector", "uniform_random")
+
+    def _build_selector(stype: str, block: dict[str, Any]):
+        if stype == "uniform_random":
+            return UniformRandomSelector()
+        if stype == "topological":
+            return TopologicalAllocator(
+                target_allocation=block.get("target_allocation"),
+                kind_allocation=block.get("kind_allocation"),
+                evidence_allocation=block.get("evidence_allocation"),
+                n_evidence=block.get("n_evidence"),
+                n_evidence_values=block.get("n_evidence_values"),
+                max_retry=block.get("max_retry"),
+            )
+        raise ValueError(
+            f"Config {str(path)!r}: unknown selector type {stype!r}. "
+            f"Supported: 'uniform_random', 'topological'."
+        )
+
+    if isinstance(selector_cfg, str):
+        selector = _build_selector(selector_cfg, {})
+    elif isinstance(selector_cfg, dict):
+        selector = _build_selector(
+            selector_cfg.get("type", "uniform_random"), selector_cfg
+        )
     else:
         raise ValueError(
-            f"Config {str(path)!r}: unknown selector={selector_name!r}. "
-            f"Supported: 'uniform_random'."
+            f"Config {str(path)!r}: selector must be a string or mapping, "
+            f"got {type(selector_cfg).__name__}."
         )
 
     # ── baselines ────────────────────────────────────────────────────────────
