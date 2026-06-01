@@ -66,10 +66,11 @@ class TestNodeRolesAsia:
 
     def test_terminal_ranking(self, asia_dag):
         roles = compute_node_roles(asia_dag)
-        # dysp and xray are tied at depth=3, desc=0 (no descendants)
-        # but their score is 3*0 = 0. Top score by depth*descendants:
-        # bronc: 1*1 = 1; either: 2*2 = 4
-        assert roles.terminals[0] == "either"
+        # Spec: depth − |descendants|. xray and dysp tie at 3 - 0 = 3.
+        # The next best is either at 2 - 2 = 0.
+        assert roles.terminals[0] in {"xray", "dysp"}
+        # Specifically, both xray and dysp should be in the top 2
+        assert set(roles.terminals[:2]) == {"xray", "dysp"}
 
     def test_direct_neighbors(self, asia_dag):
         roles = compute_node_roles(asia_dag)
@@ -138,10 +139,12 @@ class TestTargetAllocator:
         for _, bucket in result:
             by_bucket[bucket] += 1
 
-        assert by_bucket["cut"] == 2  # only 2 APs available
-        # The other 3 buckets should hit their quota of 4 each (8 nodes available for each)
-        # Total result must be <= 16
-        assert len(result) <= 16
+        # Cut had 2 surplus (quota 4 - 2 actual APs). Surplus goes to random.
+        # Random's base quota is 4; +2 surplus = 6 expected.
+        assert by_bucket["cut"] == 2
+        assert by_bucket["random"] >= 4  # at least its base quota
+        # Total should match the requested budget (largest-remainder apportionment).
+        assert len(result) == 16
 
     def test_returns_at_most_budget(self, synthetic_n1000):
         roles = compute_node_roles(synthetic_n1000)
@@ -173,3 +176,65 @@ class TestTargetAllocator:
             rng=random.Random(42), all_nodes=all_nodes,
         )
         assert result1 == result2
+
+    def test_quota_distribution(self, synthetic_n1000):
+        """Per-bucket counts approximately match requested fractions."""
+        roles = compute_node_roles(synthetic_n1000)
+        allocator = _TargetAllocator()
+        budget = 1000
+        result = allocator.allocate(
+            roles=roles,
+            budget=budget,
+            allocation={"hub": 0.30, "cut": 0.25, "terminal": 0.25, "random": 0.20},
+            rng=random.Random(0),
+            all_nodes=list(synthetic_n1000.nodes()),
+        )
+
+        by_bucket = dict.fromkeys(("hub", "cut", "terminal", "random"), 0)
+        for _, b in result:
+            by_bucket[b] += 1
+
+        # Total must exactly equal budget (largest-remainder guarantees this).
+        assert sum(by_bucket.values()) == budget
+
+        # Cut may be 0 (synthetic n=1000 has 0 APs); surplus goes to random.
+        # Verify total budget is exact, and that hub/terminal got their share.
+        assert by_bucket["hub"] >= 300 - 10  # 30% ± rounding
+        assert by_bucket["terminal"] >= 250 - 10  # 25% ± rounding
+        # Random gets its 20% + any cut surplus (250):
+        assert by_bucket["random"] >= 200
+
+
+# --- Edge-case tests (PR #124 review probes) ---
+
+class TestEdgeCases:
+    """Edge-case fixtures verified in PR #124 review probes."""
+
+    def test_empty_dag(self):
+        G = nx.DiGraph()
+        roles = compute_node_roles(G)
+        assert roles.hubs == []
+        assert roles.cuts == []
+        assert roles.terminals == []
+
+    def test_single_node_dag(self):
+        G = nx.DiGraph()
+        G.add_node("X")
+        roles = compute_node_roles(G)
+        assert roles.hubs == ["X"]
+        assert roles.cuts == []
+        assert roles.mb_size["X"] == 0
+
+    def test_disconnected_dag(self):
+        G = nx.DiGraph()
+        G.add_nodes_from(["A", "B", "C"])
+        roles = compute_node_roles(G)
+        # All isolated; no APs; no MB
+        assert roles.cuts == []
+        assert all(roles.mb_size[v] == 0 for v in ["A", "B", "C"])
+
+    def test_chain_dag_articulation(self):
+        G = nx.DiGraph([("A", "B"), ("B", "C")])
+        roles = compute_node_roles(G)
+        # B is the articulation point in the chain
+        assert roles.cuts == ["B"]

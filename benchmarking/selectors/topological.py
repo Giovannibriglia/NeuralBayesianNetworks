@@ -10,7 +10,6 @@ See docs/phase2-design-draft.md for the full design.
 """
 from __future__ import annotations
 
-import math
 import random
 from dataclasses import dataclass
 from typing import Mapping
@@ -25,7 +24,7 @@ class NodeRoles:
     # Ranked lists (Step 1: target selection)
     hubs:      list[str]          # sorted desc by |MB(v)|
     cuts:      list[str]          # sorted desc by degree centrality
-    terminals: list[str]          # sorted desc by depth(v) × |desc(v)|
+    terminals: list[str]          # sorted desc by depth(v) − |desc(v)|
 
     # Per-node scalar maps
     mb_size:           dict[str, int]
@@ -105,10 +104,11 @@ def compute_node_roles(G: nx.DiGraph) -> NodeRoles:
     else:
         cuts = []
 
-    # 9) Terminal ranking by depth × |descendants|
+    # 9) Terminal ranking by depth(v) − |descendants(v)| (spec §1, §3.2, §3.8):
+    #    deep nodes with few descendants rank highest (leaf-like, long paths).
     terminals = sorted(
         G.nodes(),
-        key=lambda v: -(depth[v] * descendant_count[v]),
+        key=lambda v: -(depth[v] - descendant_count[v]),
     )
 
     return NodeRoles(
@@ -147,10 +147,21 @@ class _TargetAllocator:
         quota, cap at min(quota, available) and redistribute the surplus
         to the random bucket.
         """
-        quotas = {
-            bucket: math.ceil(budget * frac)
-            for bucket, frac in allocation.items()
-        }
+        # Largest-remainder method (Hamilton): quotas sum exactly to budget.
+        # Each bucket gets floor(budget × frac); the remaining seats go to the
+        # buckets with the largest fractional remainder. Avoids the ceil-per-
+        # bucket overshoot that previously biased truncation against random.
+        raw = {bucket: budget * frac for bucket, frac in allocation.items()}
+        floors = {bucket: int(r) for bucket, r in raw.items()}
+        remainders = {bucket: raw[bucket] - floors[bucket] for bucket in raw}
+        seats_remaining = budget - sum(floors.values())
+        ordered_buckets = sorted(
+            remainders.items(),
+            key=lambda x: (-x[1], x[0]),  # secondary sort by name for determinism
+        )
+        quotas = dict(floors)
+        for bucket, _ in ordered_buckets[:seats_remaining]:
+            quotas[bucket] += 1
 
         available = {
             "hub": roles.hubs,
@@ -161,7 +172,6 @@ class _TargetAllocator:
 
         result: list[tuple[str, str]] = []
         surplus = 0
-        used: set[str] = set()  # random-bucket dedup against structured buckets
 
         # Process structural buckets first; accumulate shortfall as surplus.
         for bucket in ("hub", "cut", "terminal"):
@@ -171,15 +181,19 @@ class _TargetAllocator:
             surplus += quota - len(picks)
             for node in picks:
                 result.append((node, bucket))
-                used.add(node)
 
         # Random bucket: original quota + accumulated surplus.
+        # Spec §3.2: cross-bucket repetition is allowed; dedup is enforced at
+        # Step 4 by the full (target, evidence_nodes, evidence_values) triple.
+        # The random bucket may include nodes already in structural buckets.
         random_quota = quotas.get("random", 0) + surplus
-        random_candidates = [n for n in all_nodes if n not in used]
+        random_candidates = list(all_nodes)
         rng.shuffle(random_candidates)
         random_picks = random_candidates[: min(random_quota, len(random_candidates))]
         for node in random_picks:
             result.append((node, "random"))
 
-        # Truncate to budget (ceil rounding may overshoot).
+        # Defensive: quotas sum to budget, but a structural shortfall whose
+        # surplus exceeds the remaining node pool can still leave us short
+        # (never over). Slice is a no-op in the common case.
         return result[:budget]
