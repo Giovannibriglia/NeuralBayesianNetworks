@@ -346,6 +346,10 @@ class PyroAdapter:
         target = q.targets[0]
         evidence: dict = {}
         for k, v in q.evidence.items():
+            if v is None:
+                # Phase 3 empty mode: leave this site unconditioned so
+                # importance sampling marginalizes over it.
+                continue
             val = v.item() if isinstance(v, torch.Tensor) else v
             # Discrete evidence → long tensor; continuous → float tensor
             evidence[k] = (

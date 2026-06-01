@@ -218,6 +218,10 @@ class NBNAdapter:
         """
         out = {}
         for k, v in ev.items():
+            if v is None:
+                # Phase 3 empty mode: drop unobserved evidence so the engine
+                # marginalizes over it.
+                continue
             t = v if isinstance(v, torch.Tensor) else torch.tensor(v)
             if t.dim() == 0:
                 t = t.unsqueeze(0)

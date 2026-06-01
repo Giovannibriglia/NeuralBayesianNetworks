@@ -256,9 +256,12 @@ class PgmpyAdapter:
 
     def _query_discrete(self, q: Query) -> Posterior:
         assert self._infer is not None
+        # Skip None-valued evidence (Phase 3 empty mode): pgmpy auto-
+        # marginalizes any variable absent from the evidence dict.
         ev = {
             k: int(v.item() if isinstance(v, torch.Tensor) else v)
             for k, v in q.evidence.items()
+            if v is not None
         }
         result = self._infer.query(
             variables=list(q.targets), evidence=ev, show_progress=False,
@@ -318,8 +321,16 @@ class PgmpyAdapter:
         Sigma = IA_inv @ torch.diag(d) @ IA_inv.T
 
         target_idx = node_idx[q.targets[0]]
-        ev_idx = [node_idx[k] for k in q.evidence]
-        ev_vals = torch.tensor([float(v) for v in q.evidence.values()])
+        # Skip None-valued evidence (Phase 3 empty mode): an empty ev_idx
+        # falls through to the unconditional marginal branch below, which is
+        # exactly P(target) with the evidence variables marginalized out.
+        observed = [
+            (node_idx[k], float(v))
+            for k, v in q.evidence.items()
+            if v is not None
+        ]
+        ev_idx = [i for i, _ in observed]
+        ev_vals = torch.tensor([val for _, val in observed])
 
         if not ev_idx:
             return (
