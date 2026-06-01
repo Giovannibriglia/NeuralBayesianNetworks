@@ -209,8 +209,8 @@ selector:
 
 **Shortfall rule:** if a bucket has fewer available nodes than its quota, cap
 at `min(quota, available)` and redistribute the surplus to the random bucket.
-Example: ASIA (n=8) has 1 articulation point; a cut quota of 4 becomes
-1 cut + 3 random.
+Example: ASIA (n=8) has 2 articulation points (`either`, `tub`); a cut
+quota of 4 becomes 2 cut + 2 random.
 
 **Repetition:** the same target node may appear in multiple query slots with
 different kind and evidence assignments. Dedup is enforced at Step 4 by the
@@ -324,19 +324,21 @@ class Query:
     targets:           tuple[str, ...]
     evidence:          Mapping[str, int | float | torch.Tensor]
     kind:              str = "marginal"       # existing — Bayesian query type
-    target_bucket:     str = "random"         # NEW — hub | cut | terminal | random
+    query_role:        str = "random"         # EXISTING — was UniformRandomSelector's class attr
     query_kind:        str = "prediction"     # NEW — prediction | diagnosis
     evidence_strategy: str = "random"         # NEW — longest_path | mb_neighbors | random
 ```
 
+`query_role` is reused as `target_bucket` (hub/cut/terminal/random) for Phase 2;
+existing field name preserved for v0.12 archive compatibility.
 `query_kind` is named to avoid collision with the existing `kind` field
 ("marginal" / "conditional" / "do" etc.), which is an orthogonal dimension.
-All three new fields default to their "least structured" values so that
+All three fields default to their "least structured" values so that
 `UniformRandomSelector` — which never sets them — remains unchanged.
 
-The runner propagates all three to `CellResult` (replacing the current single
-`query_role` field). The parquet gains three categorical columns:
-`target_bucket`, `query_kind`, `evidence_strategy`. Plotter and aggregator
+The runner propagates all three to `CellResult`. The parquet gains two new
+categorical columns (`query_kind`, `evidence_strategy`); `query_role` already
+exists and is repurposed as the target-bucket column. Plotter and aggregator
 can group by any combination.
 
 ---
@@ -391,9 +393,13 @@ benchmarking/
     uniform.py           (existing, unchanged)
     topological.py       (NEW — all Phase 2 code)
   core/
-    interfaces.py        (3 new fields on Query)
-    runner.py            (read per-query metadata, 4 lines)
+    interfaces.py        (2 new fields on Query; query_role reused)
+    runner.py            (read per-query metadata; update sentinel rows)
+    results.py           (2 new optional fields on CellResult)
     config.py            (selector factory, ~25 LOC)
+  measurements/
+    accuracy_timing.py   (propagate query_kind + evidence_strategy lists)
+    timing_only.py       (same)
 tests/
   unit/v013/
     test_selector_topological.py  (NEW, ~200–250 LOC)
@@ -402,21 +408,52 @@ benchmarking/configs/
   synthetic_smoke.yaml   (add selector: block, ~8 lines)
 ```
 
+Wiring touches 5 files, ~30 LOC total (substantially more than the
+original "4 lines in runner.py" estimate):
+
+| File | Change | LOC |
+|---|---|---|
+| `benchmarking/domains/base.py` | Add 2 fields to `Query` dataclass (`query_kind`, `evidence_strategy`); keep existing `query_role` | +3 |
+| `benchmarking/core/runner.py` | Read per-query metadata; update sentinel rows at lines 132 and 168 | +12 |
+| `benchmarking/core/results.py` | Add 2 new optional fields to `CellResult` (`query_kind`, `evidence_strategy`); keep `query_role` | +6 |
+| `benchmarking/measurements/accuracy_timing.py` | Propagate `query_kind` and `evidence_strategy` lists through `measure()` | +10 |
+| `benchmarking/measurements/timing_only.py` | Same propagation | +10 |
+
+Backward-compat decision: keep `query_role` (still populated with
+`target_bucket` value: hub/cut/terminal/random). Add `query_kind`
+(prediction/diagnosis) and `evidence_strategy` (longest_path/mb_neighbors/random)
+as new optional CellResult fields. v0.12 archived parquets continue
+to work with the v0.13 plotter; v0.13 parquets gain two new categorical
+columns.
+
 ### 4.2 Internal class structure
 
 ```python
 # benchmarking/selectors/topological.py
 
-@dataclass
+@dataclass(frozen=True)
 class NodeRoles:
-    hubs:      list[str]          # sorted by |MB(v)| desc
-    cuts:      list[str]          # sorted by importance desc
-    terminals: list[str]          # sorted by depth-descendants desc
-    mb_size:   dict[str, int]
-    depth:     dict[str, int]
-    descendant_count: dict[str, int]
-    ancestors: dict[str, frozenset[str]]
-    descendants: dict[str, frozenset[str]]
+    # Ranked lists (for target selection — Step 1)
+    hubs:      list[str]          # sorted desc by |MB(v)|
+    cuts:      list[str]          # sorted desc by degree centrality
+    terminals: list[str]          # sorted desc by depth(v) - |desc(v)|
+
+    # Per-node scalar maps (for scoring)
+    mb_size:           dict[str, int]
+    depth:             dict[str, int]
+    descendant_count:  dict[str, int]
+
+    # Per-node set maps (for Step 3 evidence pools)
+    parents:           dict[str, frozenset[str]]   # direct parents
+    children:          dict[str, frozenset[str]]   # direct children
+    co_parents:        dict[str, frozenset[str]]   # nodes sharing ≥1 child with v (excl. v)
+    co_children:       dict[str, frozenset[str]]   # nodes sharing ≥1 parent-with-child (excl. v)
+    ancestors:         dict[str, frozenset[str]]   # for longest_path pool
+    descendants:       dict[str, frozenset[str]]   # for diagnosis.random exclusion
+
+# Direct-neighbor sets (parents, children, co_parents, co_children) are computed
+# at zero extra cost during MB cardinality calculation. They are needed by
+# _KindEvidenceAllocator.assign to build mb_neighbors evidence pools.
 
 def compute_node_roles(G: nx.DiGraph) -> NodeRoles: ...   # <1s at n=1000
 
