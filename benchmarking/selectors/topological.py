@@ -1,12 +1,13 @@
-"""Topology-aware query selector — Stage 1 (NodeRoles + _TargetAllocator).
+"""Topology-aware query selector (Phase 2 of v0.13, issue #74).
 
-Phase 2 of v0.13 (issue #74). Implements four-step query construction:
-  Step 1 — Target selection (THIS STAGE)
-  Step 2 — Kind assignment (Stage 2)
-  Step 3 — Evidence-set selection (Stage 2)
-  Step 4 — Value assignment (Stage 3)
+Implements four-step query construction:
+  Step 1 — Target selection      (_TargetAllocator)
+  Step 2 — Kind assignment       (_KindEvidenceAllocator)
+  Step 3 — Evidence-set selection (_KindEvidenceAllocator)
+  Step 4 — Value assignment      (_ValueAllocator)
 
-See docs/phase2-design-draft.md for the full design.
+``TopologicalAllocator`` is the public ``QuerySelector`` that orchestrates
+all four steps. See docs/phase2-design-draft.md for the full design.
 """
 from __future__ import annotations
 
@@ -15,6 +16,9 @@ from dataclasses import dataclass
 from typing import Mapping
 
 import networkx as nx
+import torch
+
+from benchmarking.domains.base import BenchmarkProblem, Query
 
 
 @dataclass(frozen=True)
@@ -344,3 +348,201 @@ class _KindEvidenceAllocator:
         else:
             # longest_path or mb_neighbors: pool already sorted by hardness
             return pool[:n]
+
+
+class _ValueAllocator:
+    """Step 4 of Phase 2 pipeline: evidence value assignment (inference only).
+
+    Spec §3.5.
+    """
+
+    def __init__(self, max_retry: int = 10) -> None:
+        self.max_retry = max_retry
+
+    def assign_values(
+        self,
+        target: str,
+        evidence_nodes: list[str],
+        test_data: Mapping[str, torch.Tensor],
+        seen: set[tuple],
+        problem_seed: int,
+        query_idx: int,
+        max_retry: int | None = None,
+    ) -> dict[str, torch.Tensor] | None:
+        """Return ``{node: value_tensor}`` or None if dedup is exhausted.
+
+        Mutates ``seen`` in-place: adds the chosen
+        ``(target, frozenset(evidence_nodes), row_idx)`` triple. The caller
+        passes the same ``seen`` across all calls for one cell so values are
+        deduped cell-wide.
+
+        Determinism: same ``problem_seed`` + ``query_idx`` + ``seen`` state →
+        same return. Each retry draws a row index from a fresh
+        ``random.Random(problem_seed * 997 + query_idx + retry)`` (spec §3.5).
+        The dedup key uses ``row_idx`` rather than the value tensor to avoid
+        tensor hashability issues (spec §5 Q4).
+        """
+        if not test_data:
+            return None
+        n_rows = next(iter(test_data.values())).shape[0]
+        if n_rows <= 0:
+            return None
+
+        retries = self.max_retry if max_retry is None else max_retry
+        key_nodes = frozenset(evidence_nodes)
+        for retry in range(retries):
+            local = random.Random(problem_seed * 997 + query_idx + retry)
+            row_idx = local.randrange(n_rows)
+            key = (target, key_nodes, row_idx)
+            if key in seen:
+                continue
+            seen.add(key)
+            return {
+                node: test_data[node][row_idx].reshape(()).float()
+                for node in evidence_nodes
+            }
+        return None
+
+
+class TopologicalAllocator:
+    """Phase 2 query selector. Orchestrates Steps 1-4 per spec §3.
+
+    Drop-in ``QuerySelector`` replacement for ``UniformRandomSelector``.
+    Backward-compat: ``target_allocation={"random": 1.0}`` reproduces
+    ``UniformRandomSelector`` behaviour within noise (acceptance criterion 5
+    from #74).
+    """
+
+    query_role: str = "random"  # class-level fallback for runner.py:236
+
+    _DEFAULT_TARGET_ALLOC = {"hub": 0.30, "cut": 0.25, "terminal": 0.25, "random": 0.20}
+    _DEFAULT_KIND_ALLOC = {
+        "hub":      {"prediction": 0.5, "diagnosis": 0.5},
+        "cut":      {"prediction": 0.5, "diagnosis": 0.5},
+        "terminal": {"prediction": 1.0, "diagnosis": 0.0},
+        "random":   {"prediction": 0.5, "diagnosis": 0.5},
+    }
+    _DEFAULT_EV_ALLOC = {
+        "prediction": {"longest_path": 0.4, "mb_neighbors": 0.4, "random": 0.2},
+        "diagnosis":  {"longest_path": 0.4, "mb_neighbors": 0.4, "random": 0.2},
+    }
+    _DEFAULT_N_EVIDENCE = {"prediction": 3, "diagnosis": 3}
+    _DEFAULT_N_EVIDENCE_VALUES = 16
+    _DEFAULT_MAX_RETRY = 10
+
+    def __init__(
+        self,
+        target_allocation: Mapping[str, float] | None = None,
+        kind_allocation: Mapping[str, Mapping[str, float]] | None = None,
+        evidence_allocation: Mapping[str, Mapping[str, float]] | None = None,
+        n_evidence: Mapping[str, int] | None = None,
+        n_evidence_values: int | None = None,
+        max_retry: int | None = None,
+    ) -> None:
+        self.target_allocation = dict(target_allocation or self._DEFAULT_TARGET_ALLOC)
+        self.kind_allocation = dict(kind_allocation or self._DEFAULT_KIND_ALLOC)
+        self.evidence_allocation = dict(evidence_allocation or self._DEFAULT_EV_ALLOC)
+        self.n_evidence = dict(n_evidence or self._DEFAULT_N_EVIDENCE)
+        # n_evidence_values is reserved for multi-value sampling per slot in a
+        # later stage; the current pipeline emits one value sample per slot.
+        self.n_evidence_values = (
+            n_evidence_values
+            if n_evidence_values is not None
+            else self._DEFAULT_N_EVIDENCE_VALUES
+        )
+        self.max_retry = (
+            max_retry if max_retry is not None else self._DEFAULT_MAX_RETRY
+        )
+
+        self._target_allocator = _TargetAllocator()
+        self._kind_evidence_allocator = _KindEvidenceAllocator()
+        self._value_allocator = _ValueAllocator()
+        self._cache: dict[tuple[str, str], NodeRoles] = {}
+
+    def _get_roles(self, problem: BenchmarkProblem, G: nx.DiGraph) -> NodeRoles:
+        """Get-or-compute NodeRoles, cached by (family, problem_id)."""
+        key = (problem.family, problem.problem_id)
+        roles = self._cache.get(key)
+        if roles is None:
+            roles = compute_node_roles(G)
+            self._cache[key] = roles
+        return roles
+
+    def select(
+        self,
+        problem: BenchmarkProblem,
+        n_queries: int,
+        seed: int,
+    ) -> list[Query]:
+        """Return up to ``n_queries`` Query objects (spec §3.1, §3.7).
+
+        Deterministic given ``seed``. Slots whose evidence pool is empty
+        (Step 3) or whose value triples are all duplicates (Step 4) are
+        discarded, so the returned count may be < ``n_queries``.
+        """
+        if not problem.test_data:
+            # Parameter-learning mode (no value sampling) is deferred to a
+            # later phase; the inference pipeline requires test_data.
+            raise ValueError(
+                "TopologicalAllocator.select requires problem.test_data "
+                "(parameter-learning mode is not yet supported)."
+            )
+
+        G = nx.DiGraph(problem.dag)
+        G.add_nodes_from(problem.variables.keys())  # include isolated nodes
+        roles = self._get_roles(problem, G)
+
+        all_nodes = list(G.nodes())
+        rng = random.Random(seed)
+
+        # Step 1: target selection.
+        targets = self._target_allocator.allocate(
+            roles=roles,
+            budget=n_queries,
+            allocation=self.target_allocation,
+            rng=rng,
+            all_nodes=all_nodes,
+        )
+
+        seen: set[tuple] = set()
+        queries: list[Query] = []
+        for query_idx, (target, bucket) in enumerate(targets):
+            # Steps 2 + 3: kind assignment + evidence-set selection.
+            assigned = self._kind_evidence_allocator.assign(
+                target=target,
+                bucket=bucket,
+                roles=roles,
+                kind_alloc=self.kind_allocation,
+                evidence_alloc=self.evidence_allocation,
+                n_evidence=self.n_evidence,
+                rng=rng,
+            )
+            if assigned is None:
+                continue  # empty evidence pool — discard slot (spec §3.7)
+            query_kind, evidence_strategy, evidence_nodes = assigned
+
+            # Step 4: value assignment.
+            evidence = self._value_allocator.assign_values(
+                target=target,
+                evidence_nodes=evidence_nodes,
+                test_data=problem.test_data,
+                seen=seen,
+                problem_seed=seed,
+                query_idx=query_idx,
+                max_retry=self.max_retry,
+            )
+            if evidence is None:
+                continue  # dedup exhausted — discard slot (spec §3.7)
+
+            queries.append(
+                Query(
+                    targets=(target,),
+                    evidence=evidence,
+                    kind="marginal",
+                    query_role=bucket,
+                    query_kind=query_kind,
+                    evidence_strategy=evidence_strategy,
+                )
+            )
+
+        return queries

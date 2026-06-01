@@ -13,9 +13,14 @@ import time
 import networkx as nx
 import pytest
 
+import torch
+
+from benchmarking.domains.base import BenchmarkProblem
 from benchmarking.selectors.topological import (
+    TopologicalAllocator,
     _KindEvidenceAllocator,
     _TargetAllocator,
+    _ValueAllocator,
     compute_node_roles,
 )
 
@@ -421,3 +426,195 @@ class TestKindEvidenceAllocator:
             rng=random.Random(42),
         )
         assert result1 == result2
+
+
+# --- Stage 3 tests ---
+
+class TestValueAllocator:
+    """Step 4 contract: dedup, retry, parametrized determinism."""
+
+    def _make_test_data(self, nodes: list[str], n_rows: int) -> dict:
+        """Build a small test_data dict with integer tensors."""
+        return {n: torch.arange(n_rows) for n in nodes}
+
+    def test_returns_evidence_dict(self):
+        """Successful sample returns dict keyed by evidence_nodes."""
+        allocator = _ValueAllocator()
+        test_data = self._make_test_data(["A", "B", "C"], n_rows=20)
+        seen = set()
+        result = allocator.assign_values(
+            target="T",
+            evidence_nodes=["A", "B"],
+            test_data=test_data,
+            seen=seen,
+            problem_seed=0,
+            query_idx=0,
+        )
+        assert result is not None
+        assert set(result.keys()) == {"A", "B"}
+
+    def test_dedup_by_triple(self):
+        """Calling twice with same (target, evidence_nodes, query_idx)
+        uses retries; eventually picks different row_idx."""
+        allocator = _ValueAllocator()
+        test_data = self._make_test_data(["A"], n_rows=20)
+        seen = set()
+
+        r1 = allocator.assign_values(
+            target="T", evidence_nodes=["A"], test_data=test_data,
+            seen=seen, problem_seed=0, query_idx=0,
+        )
+        assert r1 is not None
+        assert len(seen) == 1
+
+        # Same query_idx but seen is now populated — should still succeed
+        # by trying next retry (different row_idx)
+        r2 = allocator.assign_values(
+            target="T", evidence_nodes=["A"], test_data=test_data,
+            seen=seen, problem_seed=0, query_idx=0,
+        )
+        assert r2 is not None
+        assert len(seen) == 2
+
+    def test_dedup_exhaustion_returns_none(self):
+        """When all retries hit duplicates, return None."""
+        allocator = _ValueAllocator(max_retry=2)
+        test_data = self._make_test_data(["A"], n_rows=2)
+        # Pre-populate seen with all possible triples
+        seen = {
+            ("T", frozenset({"A"}), 0),
+            ("T", frozenset({"A"}), 1),
+        }
+        result = allocator.assign_values(
+            target="T", evidence_nodes=["A"], test_data=test_data,
+            seen=seen, problem_seed=0, query_idx=0,
+            max_retry=2,
+        )
+        # All row indices already in seen → None
+        assert result is None
+
+    def test_deterministic(self):
+        """Same inputs and seen state → same output."""
+        allocator = _ValueAllocator()
+        test_data = self._make_test_data(["A", "B"], n_rows=20)
+
+        r1 = allocator.assign_values(
+            target="T", evidence_nodes=["A", "B"], test_data=test_data,
+            seen=set(), problem_seed=42, query_idx=5,
+        )
+        r2 = allocator.assign_values(
+            target="T", evidence_nodes=["A", "B"], test_data=test_data,
+            seen=set(), problem_seed=42, query_idx=5,
+        )
+        assert r1 is not None and r2 is not None
+        # Same row → same tensor values
+        assert torch.equal(r1["A"], r2["A"])
+        assert torch.equal(r1["B"], r2["B"])
+
+
+class TestTopologicalAllocator:
+    """Public class contract: end-to-end query construction."""
+
+    def _make_benchmark_problem(self, asia_dag):
+        """Build a minimal BenchmarkProblem from the ASIA fixture."""
+        # ASIA-shaped synthetic test_data: 50 rows per node, integer values 0-1
+        rng = random.Random(0)
+        n_rows = 50
+        test_data = {
+            node: torch.tensor([rng.randint(0, 1) for _ in range(n_rows)])
+            for node in asia_dag.nodes()
+        }
+        dag_edges = list(asia_dag.edges())
+        variables = dict.fromkeys(asia_dag.nodes(), ("discrete", 2))
+        return BenchmarkProblem(
+            name="asia",
+            dag=dag_edges,
+            variables=variables,
+            train_data={},  # not used by selector
+            test_data=test_data,
+            queries=[],
+            seed=0,
+            family="discrete",
+            problem_id="asia_test",
+            true_model=None,
+        )
+
+    def test_returns_queries_with_metadata(self, asia_dag):
+        """All returned Query objects have populated metadata fields."""
+        problem = self._make_benchmark_problem(asia_dag)
+        selector = TopologicalAllocator()
+        queries = selector.select(problem, n_queries=20, seed=0)
+
+        assert len(queries) > 0
+        for q in queries:
+            assert q.query_role in {"hub", "cut", "terminal", "random"}
+            assert q.query_kind in {"prediction", "diagnosis"}
+            assert q.evidence_strategy in {"longest_path", "mb_neighbors", "random"}
+            # Query targets/evidence must be populated
+            assert len(q.targets) == 1
+            assert isinstance(q.evidence, dict)
+            assert len(q.evidence) > 0  # evidence_nodes was non-empty
+
+    def test_returns_at_most_budget(self, asia_dag):
+        """Query count ≤ budget per spec §3.7."""
+        problem = self._make_benchmark_problem(asia_dag)
+        selector = TopologicalAllocator()
+        queries = selector.select(problem, n_queries=50, seed=0)
+        assert len(queries) <= 50
+
+    def test_deterministic(self, asia_dag):
+        """Same seed → same query list."""
+        problem = self._make_benchmark_problem(asia_dag)
+        selector1 = TopologicalAllocator()
+        selector2 = TopologicalAllocator()
+
+        q1 = selector1.select(problem, n_queries=30, seed=0)
+        q2 = selector2.select(problem, n_queries=30, seed=0)
+
+        assert len(q1) == len(q2)
+        for a, b in zip(q1, q2):
+            assert a.targets == b.targets
+            assert a.query_role == b.query_role
+            assert a.query_kind == b.query_kind
+            assert a.evidence_strategy == b.evidence_strategy
+
+    def test_cache_reused_across_calls(self, asia_dag):
+        """NodeRoles is computed once per (family, problem_id)."""
+        problem = self._make_benchmark_problem(asia_dag)
+        selector = TopologicalAllocator()
+
+        # First call populates cache
+        selector.select(problem, n_queries=10, seed=0)
+        assert len(selector._cache) == 1
+        cache_key = next(iter(selector._cache))
+        assert cache_key == ("discrete", "asia_test")
+
+        # Second call hits cache (cache size unchanged)
+        selector.select(problem, n_queries=10, seed=1)
+        assert len(selector._cache) == 1
+
+    def test_backward_compat_random_only(self, asia_dag):
+        """allocation={'random': 1.0} → all queries have query_role='random'
+        (acceptance criterion 5 from #74)."""
+        problem = self._make_benchmark_problem(asia_dag)
+        selector = TopologicalAllocator(target_allocation={"random": 1.0})
+        queries = selector.select(problem, n_queries=20, seed=0)
+
+        assert all(q.query_role == "random" for q in queries)
+
+    def test_no_evidence_no_query(self, asia_dag):
+        """Targets with empty evidence pools produce no queries (spec §3.7)."""
+        # Force prediction kind everywhere; root nodes (asia, smoke) have no ancestors
+        problem = self._make_benchmark_problem(asia_dag)
+        selector = TopologicalAllocator(
+            target_allocation={"random": 1.0},
+            kind_allocation={"random": {"prediction": 1.0}},
+            evidence_allocation={"prediction": {"longest_path": 1.0}},
+        )
+        queries = selector.select(problem, n_queries=10, seed=0)
+
+        # No query should target a root node (asia or smoke)
+        for q in queries:
+            assert q.targets[0] not in {"asia", "smoke"}
+            # Evidence must be non-empty (we never construct queries with empty evidence)
+            assert len(q.evidence) > 0
