@@ -60,6 +60,7 @@ class CategoricalTableMechanism(Mechanism):
         x: torch.Tensor,
         parents: torch.Tensor | None,
         parent_cards: List[int] | None = None,
+        n_classes: int | None = None,
         **kwargs,
     ) -> dict:
         """Vectorized count-based MLE with Dirichlet(alpha) smoothing.
@@ -68,15 +69,31 @@ class CategoricalTableMechanism(Mechanism):
         ----------
         x: shape ``[N]`` or ``[N, 1]`` — integer class labels.
         parents: shape ``[N, P]`` — integer parent class labels, or ``None``.
-        parent_cards: cardinalities of each parent; inferred from data if None.
+        parent_cards: declared cardinalities of each parent; inferred from
+            observed data (max + 1) if None.
+        n_classes: the variable's declared cardinality (Bug 1a, #127). When
+            provided, the CPT spans the full declared range rather than only
+            the classes observed in training — observed-distinct truncation
+            was the source of the query-time factor-axis mismatches and
+            ``select() index out of range`` errors. Falls back to
+            observed-max + 1 when None (legacy behaviour for callers that
+            don't have the declared cardinality).
         """
         x = x.long().reshape(-1)
         n = x.shape[0]
         device = x.device
 
-        class_values = torch.unique(x, sorted=True)
-        k = int(class_values.shape[0])
+        # Bug 1a (#127): span the *declared* cardinality, defending against
+        # observed values that exceed it (shouldn't happen, but a truncated
+        # CPT is far worse than an over-wide one).
+        observed_k = int(x.max().item()) + 1 if n > 0 else 1
+        k = observed_k if n_classes is None else max(int(n_classes), observed_k)
         self._n_classes = k
+        # Categorical data is label-encoded to contiguous indices 0..K-1, so
+        # the class values are simply ``arange(K)``. Storing the full declared
+        # range (not just observed values) keeps the CPT axis aligned with the
+        # cardinality the oracle and evidence indices assume.
+        class_values = torch.arange(k, device=device)
         self._class_values = class_values
 
         if parents is None or parents.shape[-1] == 0:
@@ -88,8 +105,15 @@ class CategoricalTableMechanism(Mechanism):
         else:
             parents = parents.long().reshape(n, -1)
             p = parents.shape[1]
+            observed_pc = [int(parents[:, d].max()) + 1 for d in range(p)]
             if parent_cards is None:
-                parent_cards = [int(parents[:, d].max()) + 1 for d in range(p)]
+                parent_cards = observed_pc
+            else:
+                # Honor declared parent cardinality (Bug 1a); never below what
+                # we actually observed in this cell's training data.
+                parent_cards = [
+                    max(int(parent_cards[d]), observed_pc[d]) for d in range(p)
+                ]
             self._parent_cards = list(parent_cards)
             strides = []
             stride = 1
@@ -112,17 +136,25 @@ class CategoricalTableMechanism(Mechanism):
                 stacklevel=2,
             )
 
-        # Map class labels to contiguous 0..K-1 indices
-        cls_to_idx = torch.zeros(
-            int(class_values.max()) + 1, dtype=torch.long, device=device
-        )
-        cls_to_idx[class_values] = torch.arange(k, device=device)
-        x_idx = cls_to_idx[x]  # [N]
+        # class_values is the contiguous range 0..K-1, so labels are already
+        # their own indices.
+        x_idx = x  # [N]
 
         flat_idx = parent_idx * k + x_idx  # [N]
         counts = torch.zeros(n_parent_states * k, device=device, dtype=torch.float)
         counts.scatter_add_(0, flat_idx, torch.ones(n, device=device))
         counts = counts.reshape(n_parent_states, k)
+
+        # Bug 1a (#127): a declared class that never appears anywhere in
+        # training would otherwise be a structural zero (probability 0 for
+        # every parent configuration). Give such classes a Laplace
+        # pseudo-count of 1.0 so every declared class keeps nonzero
+        # probability. This is a no-op when every declared class is observed,
+        # preserving the pgmpy-MLE parity that ``alpha=0`` provides on
+        # fully-observed networks.
+        unobserved_classes = counts.sum(dim=0) == 0  # [k]
+        if bool(unobserved_classes.any()):
+            counts[:, unobserved_classes] += 1.0
 
         # Dirichlet smoothing
         counts = counts + self.alpha
