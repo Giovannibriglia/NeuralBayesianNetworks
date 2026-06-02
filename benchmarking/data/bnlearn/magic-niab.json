@@ -1,0 +1,842 @@
+{
+  "name": "magic-niab",
+  "kind": "gaussian",
+  "nodes": [
+    "YR.GLASS",
+    "HT",
+    "YR.FIELD",
+    "MIL",
+    "FT",
+    "G418",
+    "G311",
+    "G1217",
+    "G800",
+    "G866",
+    "G795",
+    "G2570",
+    "G260",
+    "G2920",
+    "G832",
+    "G1896",
+    "G2953",
+    "G266",
+    "G847",
+    "G942",
+    "G200",
+    "G257",
+    "G2208",
+    "G1373",
+    "G599",
+    "G261",
+    "G383",
+    "G1853",
+    "G1033",
+    "G1945",
+    "G1338",
+    "G1276",
+    "G1263",
+    "G1789",
+    "G2318",
+    "G1294",
+    "G1800",
+    "YLD",
+    "FUS",
+    "G1750",
+    "G524",
+    "G775",
+    "G2835",
+    "G43"
+  ],
+  "edges": [
+    {
+      "from": "YR.GLASS",
+      "to": "YR.FIELD"
+    },
+    {
+      "from": "YR.GLASS",
+      "to": "YLD"
+    },
+    {
+      "from": "HT",
+      "to": "YLD"
+    },
+    {
+      "from": "HT",
+      "to": "FUS"
+    },
+    {
+      "from": "MIL",
+      "to": "YR.GLASS"
+    },
+    {
+      "from": "FT",
+      "to": "YR.FIELD"
+    },
+    {
+      "from": "FT",
+      "to": "YLD"
+    },
+    {
+      "from": "G418",
+      "to": "YR.GLASS"
+    },
+    {
+      "from": "G418",
+      "to": "YR.FIELD"
+    },
+    {
+      "from": "G418",
+      "to": "G1294"
+    },
+    {
+      "from": "G418",
+      "to": "G2835"
+    },
+    {
+      "from": "G311",
+      "to": "YR.GLASS"
+    },
+    {
+      "from": "G311",
+      "to": "G43"
+    },
+    {
+      "from": "G1217",
+      "to": "YR.GLASS"
+    },
+    {
+      "from": "G1217",
+      "to": "MIL"
+    },
+    {
+      "from": "G1217",
+      "to": "G257"
+    },
+    {
+      "from": "G1217",
+      "to": "G1800"
+    },
+    {
+      "from": "G800",
+      "to": "YR.GLASS"
+    },
+    {
+      "from": "G800",
+      "to": "G383"
+    },
+    {
+      "from": "G866",
+      "to": "YR.GLASS"
+    },
+    {
+      "from": "G795",
+      "to": "YR.GLASS"
+    },
+    {
+      "from": "G2570",
+      "to": "YLD"
+    },
+    {
+      "from": "G260",
+      "to": "YLD"
+    },
+    {
+      "from": "G2920",
+      "to": "YLD"
+    },
+    {
+      "from": "G832",
+      "to": "HT"
+    },
+    {
+      "from": "G832",
+      "to": "YLD"
+    },
+    {
+      "from": "G832",
+      "to": "FUS"
+    },
+    {
+      "from": "G1896",
+      "to": "HT"
+    },
+    {
+      "from": "G1896",
+      "to": "FUS"
+    },
+    {
+      "from": "G2953",
+      "to": "HT"
+    },
+    {
+      "from": "G2953",
+      "to": "G1896"
+    },
+    {
+      "from": "G2953",
+      "to": "G1800"
+    },
+    {
+      "from": "G266",
+      "to": "HT"
+    },
+    {
+      "from": "G266",
+      "to": "FT"
+    },
+    {
+      "from": "G266",
+      "to": "G1789"
+    },
+    {
+      "from": "G847",
+      "to": "HT"
+    },
+    {
+      "from": "G942",
+      "to": "HT"
+    },
+    {
+      "from": "G200",
+      "to": "YR.FIELD"
+    },
+    {
+      "from": "G257",
+      "to": "YR.FIELD"
+    },
+    {
+      "from": "G257",
+      "to": "G2208"
+    },
+    {
+      "from": "G257",
+      "to": "G1800"
+    },
+    {
+      "from": "G2208",
+      "to": "YR.FIELD"
+    },
+    {
+      "from": "G2208",
+      "to": "MIL"
+    },
+    {
+      "from": "G1373",
+      "to": "YR.FIELD"
+    },
+    {
+      "from": "G599",
+      "to": "YR.FIELD"
+    },
+    {
+      "from": "G599",
+      "to": "G1276"
+    },
+    {
+      "from": "G261",
+      "to": "YR.FIELD"
+    },
+    {
+      "from": "G383",
+      "to": "FUS"
+    },
+    {
+      "from": "G1853",
+      "to": "G311"
+    },
+    {
+      "from": "G1853",
+      "to": "FUS"
+    },
+    {
+      "from": "G1033",
+      "to": "FUS"
+    },
+    {
+      "from": "G1945",
+      "to": "MIL"
+    },
+    {
+      "from": "G1338",
+      "to": "MIL"
+    },
+    {
+      "from": "G1338",
+      "to": "G266"
+    },
+    {
+      "from": "G1276",
+      "to": "FT"
+    },
+    {
+      "from": "G1276",
+      "to": "G266"
+    },
+    {
+      "from": "G1263",
+      "to": "FT"
+    },
+    {
+      "from": "G2318",
+      "to": "FT"
+    },
+    {
+      "from": "G1294",
+      "to": "FT"
+    },
+    {
+      "from": "G1800",
+      "to": "FT"
+    },
+    {
+      "from": "G1750",
+      "to": "YR.GLASS"
+    },
+    {
+      "from": "G1750",
+      "to": "G1373"
+    },
+    {
+      "from": "G524",
+      "to": "MIL"
+    },
+    {
+      "from": "G775",
+      "to": "FT"
+    },
+    {
+      "from": "G2835",
+      "to": "HT"
+    },
+    {
+      "from": "G2835",
+      "to": "G1800"
+    }
+  ],
+  "cpds": [
+    {
+      "name": "YR.GLASS",
+      "type": "gaussian",
+      "parents": [
+        "MIL",
+        "G418",
+        "G311",
+        "G1217",
+        "G800",
+        "G866",
+        "G795",
+        "G1750"
+      ],
+      "intercept": 1.5484430227,
+      "coefficients": {
+        "MIL": 0.071760096085,
+        "G418": 0.27004183616,
+        "G311": 0.10415281766,
+        "G1217": 0.079195298255,
+        "G800": 0.057539751316,
+        "G866": 0.046065034199,
+        "G795": 0.047380495492,
+        "G1750": -0.07482120165
+      },
+      "sd": 0.33285678497
+    },
+    {
+      "name": "HT",
+      "type": "gaussian",
+      "parents": [
+        "G832",
+        "G1896",
+        "G2953",
+        "G266",
+        "G847",
+        "G942",
+        "G2835"
+      ],
+      "intercept": 76.6512071933,
+      "coefficients": {
+        "G832": -0.50707480738,
+        "G1896": 1.7493373512,
+        "G2953": -1.3487895168,
+        "G266": -0.78269283511,
+        "G847": 0.57666479859,
+        "G942": -0.66507419752,
+        "G2835": -1.3969607368
+      },
+      "sd": 3.313186192
+    },
+    {
+      "name": "YR.FIELD",
+      "type": "gaussian",
+      "parents": [
+        "YR.GLASS",
+        "FT",
+        "G418",
+        "G200",
+        "G257",
+        "G2208",
+        "G1373",
+        "G599",
+        "G261"
+      ],
+      "intercept": 2.3229570818,
+      "coefficients": {
+        "YR.GLASS": 0.27133544698,
+        "FT": -0.024303765078,
+        "G418": 0.088965563342,
+        "G200": -0.16550982911,
+        "G257": -0.069916852048,
+        "G2208": 0.20996037292,
+        "G1373": -0.062943200025,
+        "G599": 0.083581321538,
+        "G261": 0.080354317755
+      },
+      "sd": 0.40223327819
+    },
+    {
+      "name": "MIL",
+      "type": "gaussian",
+      "parents": [
+        "G1217",
+        "G2208",
+        "G1945",
+        "G1338",
+        "G524"
+      ],
+      "intercept": 2.0462649912,
+      "coefficients": {
+        "G1217": 0.13501372034,
+        "G2208": 0.4237586447,
+        "G1945": -0.11052275291,
+        "G1338": 0.10784550517,
+        "G524": 0.11270803793
+      },
+      "sd": 0.68782325076
+    },
+    {
+      "name": "FT",
+      "type": "gaussian",
+      "parents": [
+        "G266",
+        "G1276",
+        "G1263",
+        "G2318",
+        "G1294",
+        "G1800",
+        "G775"
+      ],
+      "intercept": 32.0404937278,
+      "coefficients": {
+        "G266": -1.1312906953,
+        "G1276": -0.4554106874,
+        "G1263": 0.81550956809,
+        "G2318": -0.43225644996,
+        "G1294": -0.43645906875,
+        "G1800": 1.6105806554,
+        "G775": -0.81367104311
+      },
+      "sd": 2.8228643503
+    },
+    {
+      "name": "G418",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 1.4633333333,
+      "coefficients": {},
+      "sd": 0.86597078351
+    },
+    {
+      "name": "G311",
+      "type": "gaussian",
+      "parents": [
+        "G1853"
+      ],
+      "intercept": 1.2533333333,
+      "coefficients": {
+        "G1853": 0.15428571429
+      },
+      "sd": 0.83147204144
+    },
+    {
+      "name": "G1217",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 1.43,
+      "coefficients": {},
+      "sd": 0.89055515315
+    },
+    {
+      "name": "G800",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 0.745,
+      "coefficients": {},
+      "sd": 0.94770172748
+    },
+    {
+      "name": "G866",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 1.245,
+      "coefficients": {},
+      "sd": 0.95209548349
+    },
+    {
+      "name": "G795",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 0.74666666667,
+      "coefficients": {},
+      "sd": 0.94019261811
+    },
+    {
+      "name": "G2570",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 1.7966666667,
+      "coefficients": {},
+      "sd": 0.5937815393
+    },
+    {
+      "name": "G260",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 0.24,
+      "coefficients": {},
+      "sd": 0.65046535288
+    },
+    {
+      "name": "G2920",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 1.5333333333,
+      "coefficients": {},
+      "sd": 0.83669328209
+    },
+    {
+      "name": "G832",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 1.4383333333,
+      "coefficients": {},
+      "sd": 0.88175566001
+    },
+    {
+      "name": "G1896",
+      "type": "gaussian",
+      "parents": [
+        "G2953"
+      ],
+      "intercept": 0.66138898884,
+      "coefficients": {
+        "G2953": 0.18437974248
+      },
+      "sd": 0.93318638486
+    },
+    {
+      "name": "G2953",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 0.345,
+      "coefficients": {},
+      "sd": 0.73043198507
+    },
+    {
+      "name": "G266",
+      "type": "gaussian",
+      "parents": [
+        "G1338",
+        "G1276"
+      ],
+      "intercept": 0.020866281744,
+      "coefficients": {
+        "G1338": 0.082091913696,
+        "G1276": 0.15271663841
+      },
+      "sd": 0.66310058968
+    },
+    {
+      "name": "G847",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 1.345,
+      "coefficients": {},
+      "sd": 0.92776231053
+    },
+    {
+      "name": "G942",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 0.27666666667,
+      "coefficients": {},
+      "sd": 0.67888907256
+    },
+    {
+      "name": "G200",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 0.22166666667,
+      "coefficients": {},
+      "sd": 0.61358892959
+    },
+    {
+      "name": "G257",
+      "type": "gaussian",
+      "parents": [
+        "G1217"
+      ],
+      "intercept": 1.7468740791,
+      "coefficients": {
+        "G1217": -0.45935250284
+      },
+      "sd": 0.88361156211
+    },
+    {
+      "name": "G2208",
+      "type": "gaussian",
+      "parents": [
+        "G257"
+      ],
+      "intercept": 0.082672120934,
+      "coefficients": {
+        "G257": -0.04067778679
+      },
+      "sd": 0.25596527511
+    },
+    {
+      "name": "G1373",
+      "type": "gaussian",
+      "parents": [
+        "G1750"
+      ],
+      "intercept": 1.3143939394,
+      "coefficients": {
+        "G1750": 0.19696969697
+      },
+      "sd": 0.84470177008
+    },
+    {
+      "name": "G599",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 1.7283333333,
+      "coefficients": {},
+      "sd": 0.66728755172
+    },
+    {
+      "name": "G261",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 1.56,
+      "coefficients": {},
+      "sd": 0.81496847958
+    },
+    {
+      "name": "G383",
+      "type": "gaussian",
+      "parents": [
+        "G800"
+      ],
+      "intercept": 1.9080302735,
+      "coefficients": {
+        "G800": -0.16290417019
+      },
+      "sd": 0.5875184646
+    },
+    {
+      "name": "G1853",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 1.75,
+      "coefficients": {},
+      "sd": 0.66198971591
+    },
+    {
+      "name": "G1033",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 0.30166666667,
+      "coefficients": {},
+      "sd": 0.70580508896
+    },
+    {
+      "name": "G1945",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 0.94666666667,
+      "coefficients": {},
+      "sd": 0.9876476947
+    },
+    {
+      "name": "G1338",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 0.80333333333,
+      "coefficients": {},
+      "sd": 0.97445959797
+    },
+    {
+      "name": "G1276",
+      "type": "gaussian",
+      "parents": [
+        "G599"
+      ],
+      "intercept": 0.63517693447,
+      "coefficients": {
+        "G599": 0.36441064544
+      },
+      "sd": 0.91754189147
+    },
+    {
+      "name": "G1263",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 1.655,
+      "coefficients": {},
+      "sd": 0.74625945351
+    },
+    {
+      "name": "G1789",
+      "type": "gaussian",
+      "parents": [
+        "G266"
+      ],
+      "intercept": 0.21267087277,
+      "coefficients": {
+        "G266": 0.2523659306
+      },
+      "sd": 0.67202431153
+    },
+    {
+      "name": "G2318",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 1.3083333333,
+      "coefficients": {},
+      "sd": 0.94237856042
+    },
+    {
+      "name": "G1294",
+      "type": "gaussian",
+      "parents": [
+        "G418"
+      ],
+      "intercept": 0.31891984149,
+      "coefficients": {
+        "G418": 0.33217322905
+      },
+      "sd": 0.91679008923
+    },
+    {
+      "name": "G1800",
+      "type": "gaussian",
+      "parents": [
+        "G1217",
+        "G2953",
+        "G257",
+        "G2835"
+      ],
+      "intercept": -0.15565723227,
+      "coefficients": {
+        "G1217": 0.076032582024,
+        "G2953": 0.04372213969,
+        "G257": 0.073991179455,
+        "G2835": 0.12429716747
+      },
+      "sd": 0.22562482048
+    },
+    {
+      "name": "YLD",
+      "type": "gaussian",
+      "parents": [
+        "YR.GLASS",
+        "HT",
+        "FT",
+        "G2570",
+        "G260",
+        "G2920",
+        "G832"
+      ],
+      "intercept": 6.5341940229,
+      "coefficients": {
+        "YR.GLASS": 0.14083041319,
+        "HT": 0.021196228804,
+        "FT": -0.048776912742,
+        "G2570": 0.11980550569,
+        "G260": 0.1085558465,
+        "G2920": 0.067130496814,
+        "G832": 0.082843562835
+      },
+      "sd": 0.43937387189
+    },
+    {
+      "name": "FUS",
+      "type": "gaussian",
+      "parents": [
+        "HT",
+        "G832",
+        "G1896",
+        "G383",
+        "G1853",
+        "G1033"
+      ],
+      "intercept": 8.20617744,
+      "coefficients": {
+        "HT": -0.053744664044,
+        "G832": -0.12718634922,
+        "G1896": -0.14801346152,
+        "G383": 0.25657768548,
+        "G1853": -0.16262608034,
+        "G1033": 0.16664649632
+      },
+      "sd": 0.77559849398
+    },
+    {
+      "name": "G1750",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 0.24,
+      "coefficients": {},
+      "sd": 0.65046535288
+    },
+    {
+      "name": "G524",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 0.46666666667,
+      "coefficients": {},
+      "sd": 0.8306858334
+    },
+    {
+      "name": "G775",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 0.22,
+      "coefficients": {},
+      "sd": 0.61009865373
+    },
+    {
+      "name": "G2835",
+      "type": "gaussian",
+      "parents": [
+        "G418"
+      ],
+      "intercept": 0.012533578711,
+      "coefficients": {
+        "G418": 0.043826711587
+      },
+      "sd": 0.27005056962
+    },
+    {
+      "name": "G43",
+      "type": "gaussian",
+      "parents": [
+        "G311"
+      ],
+      "intercept": 0.53524963861,
+      "coefficients": {
+        "G311": -0.25508729011
+      },
+      "sd": 0.45863216117
+    }
+  ]
+}

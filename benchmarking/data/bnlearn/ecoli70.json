@@ -1,0 +1,930 @@
+{
+  "name": "ecoli70",
+  "kind": "gaussian",
+  "nodes": [
+    "aceB",
+    "asnA",
+    "atpD",
+    "atpG",
+    "b1191",
+    "b1583",
+    "b1963",
+    "cchB",
+    "cspA",
+    "cspG",
+    "dnaG",
+    "dnaJ",
+    "dnaK",
+    "eutG",
+    "fixC",
+    "flgD",
+    "folK",
+    "ftsJ",
+    "gltA",
+    "hupB",
+    "ibpB",
+    "icdA",
+    "lacA",
+    "lacY",
+    "lacZ",
+    "lpdA",
+    "mopB",
+    "nmpC",
+    "nuoM",
+    "pspA",
+    "pspB",
+    "sucA",
+    "sucD",
+    "tnaA",
+    "yaeM",
+    "yceP",
+    "ycgX",
+    "yecO",
+    "yedE",
+    "yfaD",
+    "yfiA",
+    "ygbD",
+    "ygcE",
+    "yhdM",
+    "yheI",
+    "yjbO"
+  ],
+  "edges": [
+    {
+      "from": "asnA",
+      "to": "icdA"
+    },
+    {
+      "from": "asnA",
+      "to": "lacA"
+    },
+    {
+      "from": "asnA",
+      "to": "lacY"
+    },
+    {
+      "from": "asnA",
+      "to": "lacZ"
+    },
+    {
+      "from": "atpD",
+      "to": "yheI"
+    },
+    {
+      "from": "b1191",
+      "to": "fixC"
+    },
+    {
+      "from": "b1191",
+      "to": "tnaA"
+    },
+    {
+      "from": "b1191",
+      "to": "ygcE"
+    },
+    {
+      "from": "cspA",
+      "to": "hupB"
+    },
+    {
+      "from": "cspA",
+      "to": "yfiA"
+    },
+    {
+      "from": "cspG",
+      "to": "cspA"
+    },
+    {
+      "from": "cspG",
+      "to": "lacA"
+    },
+    {
+      "from": "cspG",
+      "to": "lacY"
+    },
+    {
+      "from": "cspG",
+      "to": "pspA"
+    },
+    {
+      "from": "cspG",
+      "to": "pspB"
+    },
+    {
+      "from": "cspG",
+      "to": "yaeM"
+    },
+    {
+      "from": "cspG",
+      "to": "yecO"
+    },
+    {
+      "from": "cspG",
+      "to": "yedE"
+    },
+    {
+      "from": "dnaK",
+      "to": "mopB"
+    },
+    {
+      "from": "eutG",
+      "to": "ibpB"
+    },
+    {
+      "from": "eutG",
+      "to": "lacY"
+    },
+    {
+      "from": "eutG",
+      "to": "sucA"
+    },
+    {
+      "from": "eutG",
+      "to": "yceP"
+    },
+    {
+      "from": "eutG",
+      "to": "yfaD"
+    },
+    {
+      "from": "fixC",
+      "to": "cchB"
+    },
+    {
+      "from": "fixC",
+      "to": "tnaA"
+    },
+    {
+      "from": "fixC",
+      "to": "yceP"
+    },
+    {
+      "from": "fixC",
+      "to": "ycgX"
+    },
+    {
+      "from": "fixC",
+      "to": "ygbD"
+    },
+    {
+      "from": "fixC",
+      "to": "yjbO"
+    },
+    {
+      "from": "icdA",
+      "to": "aceB"
+    },
+    {
+      "from": "lacA",
+      "to": "b1583"
+    },
+    {
+      "from": "lacA",
+      "to": "lacY"
+    },
+    {
+      "from": "lacA",
+      "to": "lacZ"
+    },
+    {
+      "from": "lacA",
+      "to": "yaeM"
+    },
+    {
+      "from": "lacY",
+      "to": "lacZ"
+    },
+    {
+      "from": "lacY",
+      "to": "nuoM"
+    },
+    {
+      "from": "lacZ",
+      "to": "b1583"
+    },
+    {
+      "from": "lacZ",
+      "to": "mopB"
+    },
+    {
+      "from": "lacZ",
+      "to": "yaeM"
+    },
+    {
+      "from": "mopB",
+      "to": "ftsJ"
+    },
+    {
+      "from": "pspA",
+      "to": "nmpC"
+    },
+    {
+      "from": "pspB",
+      "to": "pspA"
+    },
+    {
+      "from": "sucA",
+      "to": "atpD"
+    },
+    {
+      "from": "sucA",
+      "to": "atpG"
+    },
+    {
+      "from": "sucA",
+      "to": "dnaJ"
+    },
+    {
+      "from": "sucA",
+      "to": "flgD"
+    },
+    {
+      "from": "sucA",
+      "to": "gltA"
+    },
+    {
+      "from": "sucA",
+      "to": "sucD"
+    },
+    {
+      "from": "sucA",
+      "to": "tnaA"
+    },
+    {
+      "from": "sucA",
+      "to": "yfaD"
+    },
+    {
+      "from": "sucA",
+      "to": "ygcE"
+    },
+    {
+      "from": "sucA",
+      "to": "yhdM"
+    },
+    {
+      "from": "yceP",
+      "to": "b1583"
+    },
+    {
+      "from": "yceP",
+      "to": "ibpB"
+    },
+    {
+      "from": "yceP",
+      "to": "yfaD"
+    },
+    {
+      "from": "ycgX",
+      "to": "dnaG"
+    },
+    {
+      "from": "yedE",
+      "to": "lpdA"
+    },
+    {
+      "from": "yedE",
+      "to": "pspA"
+    },
+    {
+      "from": "yedE",
+      "to": "pspB"
+    },
+    {
+      "from": "yedE",
+      "to": "yheI"
+    },
+    {
+      "from": "yfiA",
+      "to": "hupB"
+    },
+    {
+      "from": "ygcE",
+      "to": "asnA"
+    },
+    {
+      "from": "ygcE",
+      "to": "atpD"
+    },
+    {
+      "from": "ygcE",
+      "to": "icdA"
+    },
+    {
+      "from": "yheI",
+      "to": "b1963"
+    },
+    {
+      "from": "yheI",
+      "to": "dnaG"
+    },
+    {
+      "from": "yheI",
+      "to": "dnaK"
+    },
+    {
+      "from": "yheI",
+      "to": "folK"
+    },
+    {
+      "from": "yheI",
+      "to": "ycgX"
+    }
+  ],
+  "cpds": [
+    {
+      "name": "aceB",
+      "type": "gaussian",
+      "parents": [
+        "icdA"
+      ],
+      "intercept": 0.13242569261,
+      "coefficients": {
+        "icdA": 1.0463575763
+      },
+      "sd": 0.2921168368
+    },
+    {
+      "name": "asnA",
+      "type": "gaussian",
+      "parents": [
+        "ygcE"
+      ],
+      "intercept": 0.34941500987,
+      "coefficients": {
+        "ygcE": 0.79745405186
+      },
+      "sd": 0.3022863615
+    },
+    {
+      "name": "atpD",
+      "type": "gaussian",
+      "parents": [
+        "sucA",
+        "ygcE"
+      ],
+      "intercept": -0.040250169493,
+      "coefficients": {
+        "sucA": 0.26029355411,
+        "ygcE": -0.72522014441
+      },
+      "sd": 0.64271108458
+    },
+    {
+      "name": "atpG",
+      "type": "gaussian",
+      "parents": [
+        "sucA"
+      ],
+      "intercept": -0.89079138843,
+      "coefficients": {
+        "sucA": 0.61799753074
+      },
+      "sd": 0.62791106892
+    },
+    {
+      "name": "b1191",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 1.2729888889,
+      "coefficients": {},
+      "sd": 0.78010257249
+    },
+    {
+      "name": "b1583",
+      "type": "gaussian",
+      "parents": [
+        "lacA",
+        "lacZ",
+        "yceP"
+      ],
+      "intercept": 1.3819548526,
+      "coefficients": {
+        "lacA": -0.24566869414,
+        "lacZ": 0.34218048703,
+        "yceP": 0.24070192492
+      },
+      "sd": 1.0528613321
+    },
+    {
+      "name": "b1963",
+      "type": "gaussian",
+      "parents": [
+        "yheI"
+      ],
+      "intercept": 0.96491252447,
+      "coefficients": {
+        "yheI": 1.0375753462
+      },
+      "sd": 0.61387912334
+    },
+    {
+      "name": "cchB",
+      "type": "gaussian",
+      "parents": [
+        "fixC"
+      ],
+      "intercept": 1.0695227191,
+      "coefficients": {
+        "fixC": 0.6179875908
+      },
+      "sd": 0.80038990531
+    },
+    {
+      "name": "cspA",
+      "type": "gaussian",
+      "parents": [
+        "cspG"
+      ],
+      "intercept": -0.42648533043,
+      "coefficients": {
+        "cspG": 0.2887115211
+      },
+      "sd": 1.2396230308
+    },
+    {
+      "name": "cspG",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 2.0260777778,
+      "coefficients": {},
+      "sd": 1.0370810826
+    },
+    {
+      "name": "dnaG",
+      "type": "gaussian",
+      "parents": [
+        "ycgX",
+        "yheI"
+      ],
+      "intercept": 0.11701317372,
+      "coefficients": {
+        "ycgX": 0.59921792797,
+        "yheI": 0.19548023833
+      },
+      "sd": 0.36082026531
+    },
+    {
+      "name": "dnaJ",
+      "type": "gaussian",
+      "parents": [
+        "sucA"
+      ],
+      "intercept": 0.12097704494,
+      "coefficients": {
+        "sucA": -0.80848743831
+      },
+      "sd": 0.7585577314
+    },
+    {
+      "name": "dnaK",
+      "type": "gaussian",
+      "parents": [
+        "yheI"
+      ],
+      "intercept": -0.2469326394,
+      "coefficients": {
+        "yheI": 1.0797222005
+      },
+      "sd": 0.53924085178
+    },
+    {
+      "name": "eutG",
+      "type": "gaussian",
+      "parents": [],
+      "intercept": 1.2654,
+      "coefficients": {},
+      "sd": 0.83135352288
+    },
+    {
+      "name": "fixC",
+      "type": "gaussian",
+      "parents": [
+        "b1191"
+      ],
+      "intercept": 0.31647562535,
+      "coefficients": {
+        "b1191": 0.94060516997
+      },
+      "sd": 1.0634484324
+    },
+    {
+      "name": "flgD",
+      "type": "gaussian",
+      "parents": [
+        "sucA"
+      ],
+      "intercept": -0.51667049665,
+      "coefficients": {
+        "sucA": 0.63619447746
+      },
+      "sd": 0.62682549385
+    },
+    {
+      "name": "folK",
+      "type": "gaussian",
+      "parents": [
+        "yheI"
+      ],
+      "intercept": 0.56408171267,
+      "coefficients": {
+        "yheI": 0.81805283384
+      },
+      "sd": 0.36666154181
+    },
+    {
+      "name": "ftsJ",
+      "type": "gaussian",
+      "parents": [
+        "mopB"
+      ],
+      "intercept": 0.67375507561,
+      "coefficients": {
+        "mopB": 0.924118625
+      },
+      "sd": 0.39547488428
+    },
+    {
+      "name": "gltA",
+      "type": "gaussian",
+      "parents": [
+        "sucA"
+      ],
+      "intercept": -0.95721302041,
+      "coefficients": {
+        "sucA": 0.37899630924
+      },
+      "sd": 0.83034675847
+    },
+    {
+      "name": "hupB",
+      "type": "gaussian",
+      "parents": [
+        "cspA",
+        "yfiA"
+      ],
+      "intercept": -0.18205723278,
+      "coefficients": {
+        "cspA": -0.29842083135,
+        "yfiA": 1.3866871074
+      },
+      "sd": 0.34037164202
+    },
+    {
+      "name": "ibpB",
+      "type": "gaussian",
+      "parents": [
+        "eutG",
+        "yceP"
+      ],
+      "intercept": -0.42268134498,
+      "coefficients": {
+        "eutG": 1.4471465185,
+        "yceP": 0.12492850769
+      },
+      "sd": 0.67890902952
+    },
+    {
+      "name": "icdA",
+      "type": "gaussian",
+      "parents": [
+        "asnA",
+        "ygcE"
+      ],
+      "intercept": -0.41547914107,
+      "coefficients": {
+        "asnA": 0.522839342,
+        "ygcE": -1.0584813845
+      },
+      "sd": 0.56384646424
+    },
+    {
+      "name": "lacA",
+      "type": "gaussian",
+      "parents": [
+        "asnA",
+        "cspG"
+      ],
+      "intercept": 0.44686993698,
+      "coefficients": {
+        "asnA": 0.2723903753,
+        "cspG": 0.25390592739
+      },
+      "sd": 1.6991228537
+    },
+    {
+      "name": "lacY",
+      "type": "gaussian",
+      "parents": [
+        "asnA",
+        "cspG",
+        "eutG",
+        "lacA"
+      ],
+      "intercept": -0.11487507239,
+      "coefficients": {
+        "asnA": -0.20397352399,
+        "cspG": -0.22408167939,
+        "eutG": 0.35365484935,
+        "lacA": 1.0462074792
+      },
+      "sd": 0.24534646298
+    },
+    {
+      "name": "lacZ",
+      "type": "gaussian",
+      "parents": [
+        "asnA",
+        "lacA",
+        "lacY"
+      ],
+      "intercept": 0.19996028795,
+      "coefficients": {
+        "asnA": -0.016116008157,
+        "lacA": 1.368384389,
+        "lacY": -0.43756790693
+      },
+      "sd": 0.58381683237
+    },
+    {
+      "name": "lpdA",
+      "type": "gaussian",
+      "parents": [
+        "yedE"
+      ],
+      "intercept": -0.10074882417,
+      "coefficients": {
+        "yedE": 0.96094768962
+      },
+      "sd": 0.37403233552
+    },
+    {
+      "name": "mopB",
+      "type": "gaussian",
+      "parents": [
+        "dnaK",
+        "lacZ"
+      ],
+      "intercept": 0.035684367341,
+      "coefficients": {
+        "dnaK": 0.89579537009,
+        "lacZ": -0.059028828491
+      },
+      "sd": 0.56023696903
+    },
+    {
+      "name": "nmpC",
+      "type": "gaussian",
+      "parents": [
+        "pspA"
+      ],
+      "intercept": 0.16881454083,
+      "coefficients": {
+        "pspA": -0.76904838813
+      },
+      "sd": 0.56852099539
+    },
+    {
+      "name": "nuoM",
+      "type": "gaussian",
+      "parents": [
+        "lacY"
+      ],
+      "intercept": -2.0175693695,
+      "coefficients": {
+        "lacY": 0.40826146309
+      },
+      "sd": 0.90185750099
+    },
+    {
+      "name": "pspA",
+      "type": "gaussian",
+      "parents": [
+        "cspG",
+        "pspB",
+        "yedE"
+      ],
+      "intercept": -0.19005094876,
+      "coefficients": {
+        "cspG": 0.1079257748,
+        "pspB": 0.13990030506,
+        "yedE": -0.74556914873
+      },
+      "sd": 0.41515378233
+    },
+    {
+      "name": "pspB",
+      "type": "gaussian",
+      "parents": [
+        "cspG",
+        "yedE"
+      ],
+      "intercept": -0.24902567422,
+      "coefficients": {
+        "cspG": 0.27586568417,
+        "yedE": -0.98861085084
+      },
+      "sd": 0.52016568662
+    },
+    {
+      "name": "sucA",
+      "type": "gaussian",
+      "parents": [
+        "eutG"
+      ],
+      "intercept": 0.024288399535,
+      "coefficients": {
+        "eutG": -1.0894048079
+      },
+      "sd": 0.81152502086
+    },
+    {
+      "name": "sucD",
+      "type": "gaussian",
+      "parents": [
+        "sucA"
+      ],
+      "intercept": -0.59071525083,
+      "coefficients": {
+        "sucA": 0.68299361206
+      },
+      "sd": 0.66001587521
+    },
+    {
+      "name": "tnaA",
+      "type": "gaussian",
+      "parents": [
+        "b1191",
+        "fixC",
+        "sucA"
+      ],
+      "intercept": -0.38614361158,
+      "coefficients": {
+        "b1191": -0.59261335941,
+        "fixC": -0.24419125112,
+        "sucA": 0.11057932748
+      },
+      "sd": 0.31021846553
+    },
+    {
+      "name": "yaeM",
+      "type": "gaussian",
+      "parents": [
+        "cspG",
+        "lacA",
+        "lacZ"
+      ],
+      "intercept": 0.36651198226,
+      "coefficients": {
+        "cspG": 1.4721822428,
+        "lacA": -0.71729449009,
+        "lacZ": 0.72038604634
+      },
+      "sd": 0.81002313121
+    },
+    {
+      "name": "yceP",
+      "type": "gaussian",
+      "parents": [
+        "eutG",
+        "fixC"
+      ],
+      "intercept": -0.12804486327,
+      "coefficients": {
+        "eutG": 1.1408675169,
+        "fixC": -0.32674334364
+      },
+      "sd": 0.40909364918
+    },
+    {
+      "name": "ycgX",
+      "type": "gaussian",
+      "parents": [
+        "fixC",
+        "yheI"
+      ],
+      "intercept": 0.15838320937,
+      "coefficients": {
+        "fixC": -0.27162389281,
+        "yheI": 1.2448324819
+      },
+      "sd": 0.50546215937
+    },
+    {
+      "name": "yecO",
+      "type": "gaussian",
+      "parents": [
+        "cspG"
+      ],
+      "intercept": 0.27191681537,
+      "coefficients": {
+        "cspG": 0.79486630773
+      },
+      "sd": 0.47422098744
+    },
+    {
+      "name": "yedE",
+      "type": "gaussian",
+      "parents": [
+        "cspG"
+      ],
+      "intercept": -0.16060391384,
+      "coefficients": {
+        "cspG": -0.64202672791
+      },
+      "sd": 0.52644199553
+    },
+    {
+      "name": "yfaD",
+      "type": "gaussian",
+      "parents": [
+        "eutG",
+        "sucA",
+        "yceP"
+      ],
+      "intercept": 0.16282525897,
+      "coefficients": {
+        "eutG": 0.28757566613,
+        "sucA": -0.24374098601,
+        "yceP": 0.31777234863
+      },
+      "sd": 0.43240958591
+    },
+    {
+      "name": "yfiA",
+      "type": "gaussian",
+      "parents": [
+        "cspA"
+      ],
+      "intercept": -1.1928195537,
+      "coefficients": {
+        "cspA": 0.85722618401
+      },
+      "sd": 0.56179828259
+    },
+    {
+      "name": "ygbD",
+      "type": "gaussian",
+      "parents": [
+        "fixC"
+      ],
+      "intercept": 1.350435857,
+      "coefficients": {
+        "fixC": 0.66068810964
+      },
+      "sd": 0.86024406571
+    },
+    {
+      "name": "ygcE",
+      "type": "gaussian",
+      "parents": [
+        "b1191",
+        "sucA"
+      ],
+      "intercept": 0.52395078778,
+      "coefficients": {
+        "b1191": 1.8815080687,
+        "sucA": 0.63265345846
+      },
+      "sd": 0.58561366775
+    },
+    {
+      "name": "yhdM",
+      "type": "gaussian",
+      "parents": [
+        "sucA"
+      ],
+      "intercept": 0.2084979718,
+      "coefficients": {
+        "sucA": -0.77702353537
+      },
+      "sd": 0.76691675361
+    },
+    {
+      "name": "yheI",
+      "type": "gaussian",
+      "parents": [
+        "atpD",
+        "yedE"
+      ],
+      "intercept": -0.21374432792,
+      "coefficients": {
+        "atpD": -0.96332281721,
+        "yedE": 0.33815017477
+      },
+      "sd": 0.37499677424
+    },
+    {
+      "name": "yjbO",
+      "type": "gaussian",
+      "parents": [
+        "fixC"
+      ],
+      "intercept": 1.5910172596,
+      "coefficients": {
+        "fixC": -0.070640479158
+      },
+      "sd": 1.3605891051
+    }
+  ]
+}

@@ -125,10 +125,15 @@ def load_runner_config(
     if benchmark == "synthetic":
         problem_source = SyntheticProblemSource()
         source_config = _parse_synthetic_config(d["source"], path)
+    elif benchmark == "bnlearn":
+        from benchmarking.problems import BnlearnProblemSource
+
+        problem_source = BnlearnProblemSource()
+        source_config = _parse_bnlearn_config(d["source"], path)
     else:
         raise ValueError(
             f"Config {str(path)!r}: unknown benchmark={benchmark!r}. "
-            f"Supported: 'synthetic'."
+            f"Supported: 'synthetic', 'bnlearn'."
         )
 
     # ── metrics dispatch ─────────────────────────────────────────────────────
@@ -273,6 +278,41 @@ def _parse_synthetic_config(src: Any, path: Any) -> SyntheticConfig:
         cardinality=int(src["cardinality"]),
         fraction_continuous=float(src["fraction_continuous"]),
         device=str(src.get("device", "cpu")),
+    )
+
+
+_BNLEARN_SOURCE_KEYS = frozenset({
+    "networks", "seeds", "n_train", "n_test", "n_reference",
+})
+_BNLEARN_SOURCE_REQUIRED = frozenset({"networks", "seeds"})
+
+
+def _parse_bnlearn_config(src: Any, path: Any):
+    from benchmarking.problems import BnlearnConfig
+
+    if not isinstance(src, dict):
+        raise ValueError(
+            f"Config {str(path)!r}: 'source' must be a mapping, "
+            f"got {type(src).__name__}."
+        )
+    unknown = set(src.keys()) - _BNLEARN_SOURCE_KEYS
+    if unknown:
+        raise ValueError(
+            f"Config {str(path)!r}: unknown source fields: "
+            f"{sorted(unknown)}. Known: {sorted(_BNLEARN_SOURCE_KEYS)}."
+        )
+    missing = _BNLEARN_SOURCE_REQUIRED - set(src.keys())
+    if missing:
+        raise ValueError(
+            f"Config {str(path)!r}: source missing required fields: "
+            f"{sorted(missing)}."
+        )
+    return BnlearnConfig(
+        networks=[str(n) for n in src["networks"]],
+        seeds=[int(s) for s in src["seeds"]],
+        n_train=int(src.get("n_train", 5000)),
+        n_test=int(src.get("n_test", 1000)),
+        n_reference=int(src.get("n_reference", 5000)),
     )
 
 

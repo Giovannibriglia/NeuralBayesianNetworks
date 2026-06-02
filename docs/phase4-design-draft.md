@@ -78,7 +78,7 @@ Users do not need R for normal use — they just need the bundled JSON files.
 
 Network names match bnlearn's canonical naming (lowercase, no spaces).
 
-Total: 22 discrete + 4 Gaussian + 3 CLG = 29 networks.
+Total: 24 discrete + 4 Gaussian + 3 CLG = 31 networks.
 
 The full list is enumerated in `BnlearnProblemSource._NETWORKS` as a
 mapping `{name → metadata}` where metadata includes:
@@ -150,28 +150,70 @@ write_json(result, paste0("benchmarking/data/bnlearn/", network_name, ".json"),
 
 ### 5.2 JSON schema (CLG continuous node)
 
+bnlearn stores CLG continuous parameters natively as a `[coef × config]`
+matrix plus a per-config `sd` vector — **not** a list of explicit
+`{discrete_config, ...}` records (the original draft assumption). We keep
+that compact native layout: parallel arrays indexed by a flat config id.
+
 ```json
 {
   "name": "<node_name>",
   "type": "clg_continuous",
-  "discrete_parents": ["<dp>", ...],
-  "continuous_parents": ["<cp>", ...],
-  "configurations": [
-    {
-      "discrete_config": {"<dp>": <state>, ...},
-      "intercept": <float>,
-      "coefficients": {"<cp>": <float>, ...},
-      "sd": <float>
-    },
-    ...
-  ]
+  "discrete_parents": ["<dp1>", "<dp2>", ...],
+  "continuous_parents": ["<cp1>", ...],
+  "dlevels": {"<dp1>": [<state1>, <state2>, ...], "<dp2>": [...], ...},
+  "intercepts": [<float>, ...],
+  "coefficients": {"<cp1>": [<float>, ...], "<cp2>": [...], ...},
+  "sds": [<float>, ...]
 }
 ```
 
+All array fields (`intercepts`, each list in `coefficients`, `sds`) have
+length `K = product of |dlevels[dp]|` over all discrete parents. The
+config index `i ∈ [0, K)` decodes to a discrete-parent state assignment
+by:
+
+```python
+def decode_config(i, discrete_parents, dlevels):
+    cfg = {}
+    for dp in discrete_parents:
+        n_states = len(dlevels[dp])
+        cfg[dp] = dlevels[dp][i % n_states]
+        i //= n_states
+    return cfg
+```
+
+This matches bnlearn's native encoding — the **first discrete parent
+varies fastest**, exactly as `expand.grid(dlevels)` enumerates (verified
+on mehra's `t2m`: Year × Month × Hour = 5760 configs). The compact form
+is far smaller than explicit per-config records (mehra's `wd` node alone
+has K = 66,960; ~5.8 MB compact vs ~35.7 MB explicit) and faithful to the
+native R structure.
+
+Pure Gaussian nodes inside CLG networks (e.g. healthcare has one) use the
+§5.1 schema. Discrete nodes inside CLG networks use the §5.3 schema.
+
 ### 5.3 JSON schema (discrete CPD in CLG networks)
 
-Standard pgmpy DiscreteCPD schema: states, parent states, conditional
-probability table values.
+A discrete node's `bn.fit$prob` is a multidimensional `table`: axis 1 is
+the node's own states, axes 2.. are its parents in `parents` order. We
+serialize it column-major (R's native flatten) plus enough metadata to
+reconstruct the array in Python:
+
+```json
+{
+  "name": "<node_name>",
+  "type": "discrete",
+  "parents": ["<parent1>", ...],
+  "states": [<own_state1>, ...],
+  "prob_dim": [<n_own_states>, <n_parent1_states>, ...],
+  "prob_dimnames": {"<node>": [...], "<parent1>": [...], ...},
+  "prob": [<float>, ...]
+}
+```
+
+Python reconstructs with `np.array(prob).reshape(prob_dim, order="F")`,
+where axis 0 indexes the node's own states.
 
 ## 6. YAML surface
 
@@ -232,17 +274,32 @@ since each `(network, seed)` is a distinct entry.
 
 ## 8. Oracle compatibility
 
-The existing oracle (`benchmarking/core/oracle.py`) computes ground
-truth from `problem.true_model`. For bnlearn problems, `true_model` is
-the pgmpy model loaded from the bnlearn file — the same kind of object
-the oracle already handles for synthetic problems.
+The existing oracle (`benchmarking/core/oracle.py`) dispatches on the
+**target node's kind**, not the network's family (confirmed in Stages 2-3):
 
-**Stage 2 verification step**: confirm `filter_ground_truth` and
-per-family ground-truth functions accept a pgmpy model with the same
-interface as synthetic-source ones. If any code path is synthetic-only,
-surface and extend.
+- **Discrete target**: `filter_ground_truth` does exact-match rejection
+  on `problem.ground_truth.samples` (a pre-sampled reference pool). Used
+  for discrete queries in both discrete and CLG networks.
+- **Continuous target**: `forward_with_clamp_posterior_samples` calls
+  `problem.true_model.sample(n, evidence)` for evidence-clamped ancestral
+  sampling. Used for continuous queries in both Gaussian and CLG networks.
 
-Expected outcome: oracle is generic, no changes needed.
+Implications for `BnlearnProblemSource`:
+
+- **Discrete networks**: populate `ground_truth.samples` by
+  forward-sampling `n_reference` rows in topological column order (mirrors
+  `SyntheticProblemSource._ensure_gt_samples`). `true_model` is the loaded
+  pgmpy `DiscreteBayesianNetwork`.
+- **Gaussian / CLG networks**: build a `_BnlearnContinuousModel` whose
+  `.sample(n, evidence)` does ancestral sampling with evidence-clamping.
+  This object doubles as both the data generator (no evidence) and
+  `problem.true_model` (with evidence), so continuous targets get accurate
+  ground truth with **zero oracle changes**. CLG networks additionally
+  populate `ground_truth.samples` for their discrete-target queries.
+
+Stage 3 verified this end-to-end: `forward_with_clamp` returns finite
+samples for both marginal and evidence-clamped queries on ecoli70
+(Gaussian) and sangiovese (CLG).
 
 ## 9. Family naming
 
@@ -256,8 +313,15 @@ network, but parameter generation differs from bnlearn's. Keep names
 distinct so the parquet shows source clearly. Readers can distinguish
 "synthetic LG at n=100" from "ECOLI70 with 46 nodes" downstream.
 
-The applicability machinery (`benchmarking/core/applicability.py`)
-gains two new family values.
+`continuous_gauss` and `clg` are **reporting** family values — they appear
+on `problem.family` and in the parquet's `family` column. They do **not**
+need to be added to `applicability.py`: adapters' `is_applicable` infer the
+gating family from the per-node variable *kinds*
+(`all continuous → continuous_lg`, `mixed → hybrid`), not from
+`problem.family`. So a Gaussian network gates as `continuous_lg` and a CLG
+network gates as `hybrid` (verified in Stage 4's smoke). The per-node type
+must therefore be the literal `"continuous"` (not `"continuous_lg"`), or the
+inference falls through to `hybrid` and the LG baselines never run.
 
 ## 10. Implementation plan (4 stages)
 
