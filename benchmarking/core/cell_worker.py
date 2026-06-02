@@ -26,6 +26,11 @@ def main(input_path: str, output_path: str) -> int:
     Non-zero exit code combined with no output rows = synthetic error
     row in the parent.
     """
+    # Bug 4 (#127): apply the per-cell memory cap before any heavy
+    # work. The cap is set by cell_runner via NBN_CELL_MEMORY_LIMIT_BYTES;
+    # if absent (e.g., direct test invocation), proceed unbounded.
+    _apply_memory_limit()
+
     try:
         with open(input_path, "rb") as f:
             ctx = pickle.load(f)
@@ -56,6 +61,37 @@ def main(input_path: str, output_path: str) -> int:
             }) + "\n")
             out.flush()
             return 1
+
+
+def _apply_memory_limit() -> None:
+    """Apply the per-cell virtual memory cap from the parent.
+
+    Reads NBN_CELL_MEMORY_LIMIT_BYTES (set by cell_runner) and calls
+    resource.setrlimit(RLIMIT_AS, ...). Failures are swallowed:
+    this is a defense-in-depth measure, not a correctness requirement.
+    """
+    import os
+
+    raw = os.environ.get("NBN_CELL_MEMORY_LIMIT_BYTES")
+    if not raw:
+        return
+
+    try:
+        limit_bytes = int(raw)
+    except ValueError:
+        return
+
+    try:
+        import resource
+        # Both soft and hard limit. Hard limit prevents the subprocess
+        # from raising its own cap via setrlimit.
+        resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
+    except (ImportError, OSError, ValueError):
+        # ImportError: not on POSIX (Windows lacks `resource`)
+        # OSError: existing limit is already lower, or insufficient
+        #   privilege — proceed without raising
+        # ValueError: limit is invalid
+        return
 
 
 def _run_cell(ctx: dict) -> list[dict]:

@@ -29,6 +29,30 @@ from pathlib import Path
 _SIGTERM_GRACE_S = 3.0
 
 
+# Per-cell memory cap (Bug 4 #127). The subprocess sets RLIMIT_AS on
+# itself at startup to this value. Anchored to currently-available
+# system memory rather than total, so concurrent processes (the
+# parent runner, editor, browser, OS) keep their headroom — SIGKILL
+# fires on the runaway subprocess at a threshold survivable for
+# the rest of the system, not at OS-distress.
+_MEMORY_LIMIT_FRACTION = 0.80
+_MEMORY_LIMIT_FLOOR_BYTES = 2 * 1024**3  # 2 GB
+
+
+def _compute_cell_memory_limit_bytes() -> int:
+    """Return the per-cell virtual memory cap for the next subprocess.
+
+    Computed fresh per-call so it adapts to current system state
+    (other processes, accumulated runner state). Anchored to
+    psutil.virtual_memory().available rather than .total so the
+    cap respects what's actually allocatable right now.
+    """
+    import psutil
+    available = psutil.virtual_memory().available
+    return max(_MEMORY_LIMIT_FLOOR_BYTES,
+               int(available * _MEMORY_LIMIT_FRACTION))
+
+
 @dataclass
 class CellRunResult:
     """Outcome of running one cell in a subprocess.
@@ -78,6 +102,14 @@ def run_cell_in_subprocess(
     output_path = input_path.replace(".pkl", ".jsonl")
     Path(output_path).touch()  # ensure exists for partial-read on death
 
+    # Compute and pass the per-cell memory cap to the subprocess. The
+    # worker applies RLIMIT_AS to itself on startup. The env-var name
+    # NBN_CELL_MEMORY_LIMIT_BYTES is the contract between parent and
+    # worker (see cell_worker._apply_memory_limit).
+    memory_limit_bytes = _compute_cell_memory_limit_bytes()
+    env = os.environ.copy()
+    env["NBN_CELL_MEMORY_LIMIT_BYTES"] = str(memory_limit_bytes)
+
     try:
         # Launch the subprocess
         proc = subprocess.Popen(
@@ -87,6 +119,7 @@ def run_cell_in_subprocess(
             stderr=subprocess.PIPE,
             # New process group so we can SIGTERM the whole group
             start_new_session=True,
+            env=env,
         )
 
         classification = "completed"

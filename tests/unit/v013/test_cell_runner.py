@@ -275,3 +275,78 @@ class TestFailureModes:
         assert _classification_to_status(classification, exit_code) == "oom"
         # Partial output (flushed before the kill) survives.
         assert any(r.get("stage") == "preamble" for r in rows)
+
+    def test_memory_limit_enforced(self):
+        """RLIMIT_AS in the worker bounds subprocess allocation.
+
+        Sets a low per-cell limit (300 MB) via the env var contract and
+        launches a worker that attempts to allocate well beyond it.
+        The kernel must SIGKILL the subprocess; the parent classifies
+        it as killed → oom (K3 convention).
+
+        This is the safety guarantee that lets benchmark runs not
+        destabilize the host system when a baseline misbehaves.
+        """
+        import os
+        import pickle
+        import subprocess
+        import sys
+        import tempfile
+        from pathlib import Path
+
+        # Pickle a minimal but valid ctx — won't matter, we'll OOM before
+        # building the adapter
+        ctx = {"deliberate": "memory test"}
+
+        with tempfile.NamedTemporaryFile(
+            mode="wb", suffix=".pkl", delete=False,
+        ) as f:
+            pickle.dump(ctx, f)
+            input_path = f.name
+        output_path = input_path.replace(".pkl", ".jsonl")
+        Path(output_path).touch()
+
+        # Test worker that tries to allocate way more than the limit
+        worker_script = Path(tempfile.mkdtemp()) / "mem_test_worker.py"
+        worker_script.write_text(
+            "import sys\n"
+            "from benchmarking.core.cell_worker import _apply_memory_limit\n"
+            "_apply_memory_limit()\n"
+            "# Now attempt 1 GB allocation. With a 300 MB cap, this OOMs.\n"
+            "import ctypes\n"
+            "buf = ctypes.create_string_buffer(1024 * 1024 * 1024)\n"
+            "print('REACHED END — cap not enforced')\n"
+        )
+
+        env = os.environ.copy()
+        env["NBN_CELL_MEMORY_LIMIT_BYTES"] = str(300 * 1024 * 1024)
+
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, str(worker_script)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+                env=env,
+            )
+            proc.wait(timeout=10)
+            exit_code = proc.returncode
+
+            # Expected: signal death (negative returncode or 137)
+            # OR MemoryError exit (non-zero) — either is acceptable; the
+            # point is that the cap was enforced, the subprocess did not
+            # consume 1 GB on this system.
+            # Use the classification helper to confirm interpretation:
+            if exit_code < 0 or exit_code == 137:
+                # Signal kill — K3 → oom
+                assert _classification_to_status("killed", exit_code) == "oom"
+            else:
+                # Python caught MemoryError before alloc — also valid
+                # (cap was enforced, just earlier in the call chain)
+                assert exit_code != 0
+        finally:
+            for p in (input_path, output_path, str(worker_script)):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
