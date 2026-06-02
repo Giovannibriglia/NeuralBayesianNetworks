@@ -87,11 +87,8 @@ class TestSubprocessLaunch:
         assert len(result.rows) == 1
         assert result.rows[0]["status"] == "error"
 
-    def test_timeout_kills_subprocess(self):
-        """A subprocess that takes too long is SIGTERMed → marked timeout."""
-        # Needs a deliberately-hanging worker; added in Stage 3 alongside
-        # the deliberate-OOM and deliberate-exception failure-mode tests.
-        pytest.skip("Timeout-killing tested in Stage 3 (needs sleepy worker)")
+    # Note: deliberate timeout / OOM / exception failure modes are covered
+    # by TestFailureModes (Stage 3) below.
 
     @pytest.mark.slow
     def test_real_cell_completes_ok(self):
@@ -146,3 +143,135 @@ class TestSubprocessLaunch:
             assert row["baseline"] == "nbn-cat-ve"
             assert row["status"] in {"ok", "error", "timeout", "oom", "not_supported"}
         assert any(r["status"] == "ok" for r in result.rows)
+
+
+@pytest.mark.slow
+class TestFailureModes:
+    """Stage 3: empirical proof that the runner survives each failure mode.
+
+    Each test launches a subprocess (the dedicated ``_failing_cell_worker``)
+    that fails in a specific way, then drives it through the *same*
+    lifecycle the production parent uses — SIGTERM→grace→SIGKILL escalation
+    on timeout, and the real ``cell_runner`` classification/parsing helpers
+    (``_classification_to_status``, ``_read_output_jsonl``). This is the
+    empirical verification of the PR's architectural claim: an exception,
+    a hang, or an uncatchable kill in a cell is contained — the parent
+    records a status and survives.
+
+    See docs/v0.13-runner-subprocess-isolation.md §6.2.
+    """
+
+    @staticmethod
+    def _launch_failing_worker(mode: str, *, timeout_s: float = 10.0):
+        """Run _failing_cell_worker in ``mode`` and classify the outcome.
+
+        Returns (classification, exit_code, rows). The process-lifecycle
+        management mirrors run_cell_in_subprocess; classification and
+        output parsing reuse the production cell_runner helpers.
+        """
+        import os
+        import pickle
+        import signal
+        import subprocess
+        import sys
+        import tempfile
+        from pathlib import Path
+
+        worker = Path(__file__).parent / "_failing_cell_worker.py"
+        assert worker.exists()
+
+        with tempfile.NamedTemporaryFile(
+            mode="wb", suffix=".pkl", delete=False
+        ) as f:
+            pickle.dump({"test": True}, f)
+            input_path = f.name
+        output_path = input_path.replace(".pkl", ".jsonl")
+        Path(output_path).touch()
+
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, str(worker), input_path, output_path, mode],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+
+            classification = "completed"
+            try:
+                proc.wait(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                classification = "timeout"
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    proc.wait(timeout=3.0)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    proc.wait(timeout=2.0)
+
+            exit_code = proc.returncode if proc.returncode is not None else -1
+            # Signal death (negative returncode, or 128+sig) → killed.
+            if classification == "completed" and (
+                exit_code < 0 or exit_code in (137, 139)
+            ):
+                classification = "killed"
+
+            rows = _read_output_jsonl(output_path)
+            return classification, exit_code, rows
+        finally:
+            import os as _os
+            for p in (input_path, output_path):
+                try:
+                    _os.unlink(p)
+                except OSError:
+                    pass
+
+    def test_ok_mode_completes_normally(self):
+        classification, exit_code, rows = self._launch_failing_worker("ok")
+        assert classification == "completed"
+        assert exit_code == 0
+        assert any(r.get("status") == "ok" for r in rows)
+
+    def test_raise_mode_produces_nonzero_exit(self):
+        """An exception in the cell → non-zero exit, runner not crashed."""
+        classification, exit_code, rows = self._launch_failing_worker("raise")
+        assert classification == "completed"
+        assert exit_code != 0
+        # No rows were written before the exception fired; the parent maps
+        # a completed-but-no-output subprocess to a synthesized error row.
+        assert _classification_to_status(classification, exit_code) == "error"
+
+    def test_sleep_mode_killed_via_timeout(self):
+        """A hanging cell is SIGTERMed by the parent → timeout, partial data kept."""
+        classification, exit_code, rows = self._launch_failing_worker(
+            "sleep", timeout_s=2.0,
+        )
+        assert classification == "timeout"
+        assert _classification_to_status(classification, exit_code) == "timeout"
+        # The preamble row written+flushed before the sleep must survive.
+        assert any(r.get("stage") == "preamble" for r in rows)
+
+    def test_oom_mode_uncatchable_kill(self):
+        """An uncatchable SIGKILL (models the OS OOM-killer) → oom, runner survives.
+
+        This is the architecturally critical case: the production 612 GB
+        OOM tripped the kernel OOM-killer, whose SIGKILL no in-process
+        handler can catch. The worker SIGKILLs itself; the parent must
+        detect the signal death, classify it as oom, preserve the
+        already-flushed preamble row, and (critically) keep running.
+        """
+        classification, exit_code, rows = self._launch_failing_worker("oom")
+        assert classification == "killed", (
+            f"expected signal death; got classification={classification}, "
+            f"exit_code={exit_code}, rows={rows}"
+        )
+        assert exit_code < 0 or exit_code == 137
+        # K3 convention: any SIGKILL → oom.
+        assert _classification_to_status(classification, exit_code) == "oom"
+        # Partial output (flushed before the kill) survives.
+        assert any(r.get("stage") == "preamble" for r in rows)
