@@ -21,7 +21,7 @@ Reference: docs/v0.13-benchmark-redesign.md §3, §4.1, §6
 """
 from __future__ import annotations
 
-from time import perf_counter
+import dataclasses
 from typing import Any, Iterator
 
 from benchmarking.core.config import BaselineSpec, RunnerConfig, build_adapter
@@ -29,6 +29,17 @@ from benchmarking.core.output import JsonlWriter
 from benchmarking.core.results import CellResult
 
 _NAN = float("nan")
+
+# Bug 4 (#127) Stage 2: fixed buffer (seconds) added on top of the
+# fit + query budgets to derive the cell-level subprocess hard timeout.
+# Absorbs unbounded metrics time so legitimate cells are never killed;
+# only genuine hangs (far beyond the internal budgets) trip the backstop.
+_CELL_TIMEOUT_BUFFER_S = 120.0
+
+# Field names of CellResult, used to distinguish a fully-formed result row
+# (reconstructable into a CellResult) from a synthesized cell_runner row
+# (subprocess kill/timeout/no-output: only status/error_msg present).
+_CELLRESULT_FIELDS = frozenset(f.name for f in dataclasses.fields(CellResult))
 
 # ---------------------------------------------------------------------------
 # OOM detection: RuntimeError message substrings from torch's CPU allocator
@@ -213,6 +224,50 @@ def _fit_failure_rows(
 
 
 # ---------------------------------------------------------------------------
+# Subprocess result reconstruction (Bug 4 Stage 2)
+# ---------------------------------------------------------------------------
+
+def _rows_to_cellresults(
+    row_dicts: list[dict],
+    problem: Any,
+    spec: BaselineSpec,
+    benchmark: str,
+) -> Iterator[CellResult]:
+    """Reconstruct CellResult objects from the subprocess's row dicts.
+
+    A fully-formed row (the worker's ``dataclasses.asdict`` of a
+    CellResult) is rebuilt directly.  A synthesized row from
+    ``cell_runner`` (subprocess SIGKILL/timeout/no-output — only
+    ``status``/``error_msg`` present) is turned into a sentinel
+    CellResult carrying the cell's identity so downstream tooling sees a
+    well-formed ``oom``/``timeout``/``error`` row.
+    """
+    baseline_name: str | None = None
+    for d in row_dicts:
+        if _CELLRESULT_FIELDS.issubset(d.keys()):
+            yield CellResult(**{k: d[k] for k in _CELLRESULT_FIELDS})
+        else:
+            # Synthesized row — fill in the cell identity the parent knows.
+            if baseline_name is None:
+                baseline_name = build_adapter(spec).name
+            yield CellResult(
+                benchmark=benchmark,
+                family=getattr(problem, "family", "unknown"),
+                problem_id=getattr(problem, "problem_id", "unknown"),
+                seed=getattr(problem, "seed", 0),
+                baseline=baseline_name,
+                query_role="random",
+                metric="status",
+                value=_NAN,
+                status=d.get("status", "error"),
+                fit_time_s=_NAN,
+                query_time_s=_NAN,
+                metrics_time_s=_NAN,
+                error_msg=d.get("error_msg"),
+            )
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -272,65 +327,37 @@ class Runner:
         fit_budget_s: float,
         default_role: str,
     ) -> Iterator[CellResult]:
-        adapter = build_adapter(spec)
+        # Bug 4 (#127) Stage 2: the per-cell work (build_adapter →
+        # applicability → select → fit → measure) now runs inside a
+        # subprocess via cell_worker._run_cell.  A SIGKILL (e.g. the
+        # barley 612 GB OOM) therefore takes down only the worker; the
+        # parent records a status row and continues.  Same code paths,
+        # same row semantics — just isolated.  See
+        # docs/v0.13-runner-subprocess-isolation.md §5.
+        from benchmarking.core.cell_runner import run_cell_in_subprocess
 
-        # --- Applicability gate ---
-        if not adapter.is_applicable(problem):
-            row = _not_supported_sentinel(problem, adapter, cfg.benchmark)
-            writer.write(row)
-            yield row
-            return
+        ctx = {
+            "problem": problem,
+            "baseline_spec": spec,
+            "seed": problem.seed,
+            "selector": cfg.selector,
+            "measurement": cfg.measurement,
+            "benchmark": cfg.benchmark,
+            "n_queries_per_cell": cfg.n_queries_per_cell,
+            "per_cell_timeout_s": cfg.per_cell_timeout_s,
+            "fit_budget_s": fit_budget_s,
+            "default_role": default_role,
+        }
 
-        # --- Query selection (before fit; seed from problem generation) ---
-        queries = cfg.selector.select(problem, cfg.n_queries_per_cell, problem.seed)
-        # Per-query metadata travels on the Query objects (Phase 2). Selectors
-        # that don't set these fields fall back to the dataclass defaults; the
-        # selector class-level query_role remains the fallback for query_role.
-        query_roles = [getattr(q, "query_role", default_role) for q in queries]
-        query_kinds = [getattr(q, "query_kind", "prediction") for q in queries]
-        evidence_strategies = [
-            getattr(q, "evidence_strategy", "random") for q in queries
-        ]
-        evidence_modes = [_evidence_mode_for(q) for q in queries]
+        # Cell-level hard timeout is a backstop for hangs the worker
+        # cannot self-limit (C-level loop, allocator thrash).  It must be
+        # generous enough not to fire on legitimate cells, whose internal
+        # budgets are fit_budget_s (fit) + per_cell_timeout_s (queries)
+        # plus unbounded metrics time — so we add a fixed buffer on top.
+        cell_timeout_s = fit_budget_s + cfg.per_cell_timeout_s + _CELL_TIMEOUT_BUFFER_S
 
-        # --- Fit ---
-        try:
-            t0 = perf_counter()
-            adapter.fit(problem, **spec.extra_kwargs)
-            fit_time_s = perf_counter() - t0
-        except Exception as exc:
-            status = _classify_exception(exc)
-            for row in _fit_failure_rows(
-                problem, adapter, queries, query_roles, cfg.benchmark,
-                fit_time_s=_NAN, status=status, error_msg=repr(exc),
-            ):
-                writer.write(row)
-                yield row
-            return
+        result = run_cell_in_subprocess(ctx, timeout_s=cell_timeout_s)
 
-        # --- Fit safety net ---
-        if fit_time_s > fit_budget_s:
-            for row in _fit_failure_rows(
-                problem, adapter, queries, query_roles, cfg.benchmark,
-                fit_time_s=fit_time_s, status="timeout",
-                error_msg=f"fit exceeded {fit_budget_s:.0f}s safety budget",
-            ):
-                writer.write(row)
-                yield row
-            return
-
-        # --- Measurement (handles per-query cumulative timeout internally) ---
-        rows = cfg.measurement.measure(
-            problem, adapter, queries,
-            fit_time_s=fit_time_s,
-            benchmark=cfg.benchmark,
-            seed=problem.seed,
-            query_roles=query_roles,
-            query_kinds=query_kinds,
-            evidence_strategies=evidence_strategies,
-            evidence_modes=evidence_modes,
-            query_budget_s=cfg.per_cell_timeout_s,
-        )
-        for row in rows:
+        for row in _rows_to_cellresults(result.rows, problem, spec, cfg.benchmark):
             writer.write(row)
             yield row

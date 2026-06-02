@@ -130,6 +130,40 @@ def _make_runner_cfg(
     )
 
 
+def _build_test_ctx(
+    problem: BenchmarkProblem,
+    spec: BaselineSpec,
+    *,
+    selector: Any = None,
+    measurement: Any = None,
+    benchmark: str = "synthetic",
+    n_queries_per_cell: int = _N_QUERIES,
+    per_cell_timeout_s: float = 120.0,
+    fit_budget_s: float = 1200.0,
+    default_role: str = "random",
+) -> dict:
+    """Build the ctx dict that Runner._run_cell passes to the subprocess.
+
+    Bug 4 Stage 2: the per-cell work now runs in cell_worker._run_cell.
+    Tests that monkeypatch cell internals (adapter.fit, build_adapter, a
+    spy measurement) call _run_cell directly in-process — where the
+    patches/spies apply — instead of going through Runner().run(), which
+    would execute the cell in a subprocess that never sees them.
+    """
+    return {
+        "problem": problem,
+        "baseline_spec": spec,
+        "seed": problem.seed,
+        "selector": selector or UniformRandomSelector(),
+        "measurement": measurement or TimingOnly(),
+        "benchmark": benchmark,
+        "n_queries_per_cell": n_queries_per_cell,
+        "per_cell_timeout_s": per_cell_timeout_s,
+        "fit_budget_s": fit_budget_s,
+        "default_role": default_role,
+    }
+
+
 # ---------------------------------------------------------------------------
 # TestBaselineSpec
 # ---------------------------------------------------------------------------
@@ -320,6 +354,22 @@ class TestClassifyException:
 
     def test_runtime_error_other_is_error(self):
         assert _classify_exception(RuntimeError("some other failure")) == "error"
+
+    def test_runtime_error_full_torch_cpu_allocator_msg_is_oom(self):
+        """The verbatim torch CPU allocator message from the Bug 4 torture
+        smoke classifies as oom (#127 Stage 4).
+
+        The markers already covered this string; the actual Stage 4 gap was
+        that query-time exceptions were never routed through this classifier
+        (fixed in the measurement layer). This pins the exact message so a
+        future markers edit can't silently regress the classification.
+        """
+        exc = RuntimeError(
+            "[enforce fail at alloc_cpu.cpp:127] err == 0. DefaultCPUAllocator: "
+            "can't allocate memory: you tried to allocate 614515507200 bytes. "
+            "Error code 12 (Cannot allocate memory)"
+        )
+        assert _classify_exception(exc) == "oom"
 
     def test_import_error_is_not_supported(self):
         assert _classify_exception(ImportError("zuko not installed")) == "not_supported"
@@ -514,8 +564,17 @@ class TestNotSupportedPath:
 # ---------------------------------------------------------------------------
 
 class TestFitFailurePath:
-    def test_fit_runtime_error_emits_error_rows(self, tmp_path, monkeypatch):
+    # Bug 4 Stage 2: these tests monkeypatch PgmpyAdapter.fit, which now
+    # runs inside the cell subprocess.  An in-process patch can't reach a
+    # subprocess, so they call cell_worker._run_cell(ctx) directly (the
+    # same per-cell logic, in-process).  _run_cell returns a list of dicts
+    # (dataclasses.asdict of each CellResult), so assertions use row[...]
+    # rather than attribute access.  Behaviour/intent unchanged.
+
+    def test_fit_runtime_error_emits_error_rows(self, monkeypatch):
         """RuntimeError in fit() → error rows for all selected queries."""
+        from benchmarking.core.cell_worker import _run_cell
+
         problem = _minimal_discrete_problem()
         spec = BaselineSpec("pgmpy", "discrete", "mle", "ve")
 
@@ -524,19 +583,20 @@ class TestFitFailurePath:
 
         monkeypatch.setattr(PgmpyAdapter, "fit", bad_fit)
 
-        cfg = _make_runner_cfg(problem, spec, tmp_path)
-        rows = list(Runner().run(cfg))
+        rows = _run_cell(_build_test_ctx(problem, spec))
 
         assert len(rows) == _N_QUERIES
         for r in rows:
-            assert r.status == "error"
-            assert math.isnan(r.fit_time_s)
-            assert math.isnan(r.query_time_s)
-            assert r.error_msg is not None
-            assert "simulated fit failure" in r.error_msg
+            assert r["status"] == "error"
+            assert math.isnan(r["fit_time_s"])
+            assert math.isnan(r["query_time_s"])
+            assert r["error_msg"] is not None
+            assert "simulated fit failure" in r["error_msg"]
 
-    def test_fit_memory_error_emits_oom_rows(self, tmp_path, monkeypatch):
+    def test_fit_memory_error_emits_oom_rows(self, monkeypatch):
         """MemoryError in fit() → oom rows."""
+        from benchmarking.core.cell_worker import _run_cell
+
         problem = _minimal_discrete_problem()
         spec = BaselineSpec("pgmpy", "discrete", "mle", "ve")
 
@@ -545,12 +605,11 @@ class TestFitFailurePath:
 
         monkeypatch.setattr(PgmpyAdapter, "fit", oom_fit)
 
-        cfg = _make_runner_cfg(problem, spec, tmp_path)
-        rows = list(Runner().run(cfg))
+        rows = _run_cell(_build_test_ctx(problem, spec))
 
         assert len(rows) == _N_QUERIES
         for r in rows:
-            assert r.status == "oom"
+            assert r["status"] == "oom"
 
     def test_fit_failure_rows_written_to_jsonl(self, tmp_path, monkeypatch):
         problem = _minimal_discrete_problem()
@@ -565,15 +624,16 @@ class TestFitFailurePath:
         lines = cfg.jsonl_path.read_text().strip().splitlines()
         assert len(lines) == len(rows)
 
-    def test_fit_failure_fit_time_s_is_nan(self, tmp_path, monkeypatch):
+    def test_fit_failure_fit_time_s_is_nan(self, monkeypatch):
+        from benchmarking.core.cell_worker import _run_cell
+
         problem = _minimal_discrete_problem()
         spec = BaselineSpec("pgmpy", "discrete", "mle", "ve")
         monkeypatch.setattr(PgmpyAdapter, "fit",
                             lambda self, p, **kw: (_ for _ in ()).throw(RuntimeError("x")))
-        cfg = _make_runner_cfg(problem, spec, tmp_path)
-        rows = list(Runner().run(cfg))
+        rows = _run_cell(_build_test_ctx(problem, spec))
         for r in rows:
-            assert math.isnan(r.fit_time_s)
+            assert math.isnan(r["fit_time_s"])
 
 
 # ---------------------------------------------------------------------------

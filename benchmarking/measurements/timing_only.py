@@ -15,6 +15,7 @@ import time
 from typing import Any
 
 from benchmarking.core.results import CellResult
+from benchmarking.core.runner import _classify_exception
 from benchmarking.domains.base import BenchmarkProblem, Query
 from benchmarking.measurements.accuracy_timing import _infer_family
 
@@ -145,7 +146,10 @@ class TimingOnly:
                 err_msg = None
             except Exception as exc:
                 q_time = time.perf_counter() - t0
-                status = "error"
+                # Classify the failure mode (oom/not_supported/error) the same
+                # way fit-time failures are classified (#127 Stage 4): a torch
+                # allocator failure at query time must classify as "oom".
+                status = _classify_exception(exc)
                 err_msg = str(exc)
 
             cumulative_query_time_s += q_time
