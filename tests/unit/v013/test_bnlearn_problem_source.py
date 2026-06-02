@@ -15,6 +15,7 @@ from benchmarking.problems.bnlearn import (
     _NETWORKS,
     BnlearnConfig,
     BnlearnProblemSource,
+    _decode_config_index,
 )
 
 
@@ -29,20 +30,10 @@ class TestBnlearnValidation:
         with pytest.raises(ValueError, match="Unknown bnlearn network"):
             list(source.iter_problems(cfg))
 
-    def test_gaussian_network_raises_not_implemented(self):
-        """Gaussian networks are registered but not loadable until Stage 3."""
+    def test_registry_kinds_recorded(self):
+        """Gaussian/CLG kinds are registered (loading is covered in Stage 3)."""
         assert _NETWORKS["ecoli70"]["kind"] == "gaussian"
-        source = BnlearnProblemSource()
-        cfg = BnlearnConfig(networks=["ecoli70"], seeds=[0])
-        with pytest.raises(NotImplementedError, match="Gaussian/CLG"):
-            list(source.iter_problems(cfg))
-
-    def test_clg_network_raises_not_implemented(self):
         assert _NETWORKS["sangiovese"]["kind"] == "clg"
-        source = BnlearnProblemSource()
-        cfg = BnlearnConfig(networks=["sangiovese"], seeds=[0])
-        with pytest.raises(NotImplementedError, match="Gaussian/CLG"):
-            list(source.iter_problems(cfg))
 
     def test_registry_kind_counts(self):
         """24 discrete + 4 gaussian + 3 clg = 31 networks.
@@ -155,3 +146,123 @@ class TestBnlearnOracleCompatibility:
         assert gt.shape[0] == 500  # all reference rows survive empty evidence
         n_states = problem.variables[target][1]
         assert gt.min() >= 0 and gt.max() < n_states
+
+
+# --- Stage 3: Gaussian + CLG -----------------------------------------------
+
+class TestBnlearnGaussian:
+    """Pure Gaussian network loading + sampling."""
+
+    def test_config_decoder_roundtrip(self):
+        """_decode_config_index is the inverse of the R-side flat encoding."""
+        import json
+        from pathlib import Path
+
+        path = Path("benchmarking/data/bnlearn/mehra.json")
+        if not path.exists():
+            pytest.skip("mehra.json not bundled")
+        data = json.loads(path.read_text())
+        for cpd in data["cpds"]:
+            if cpd["type"] == "clg_continuous" and len(cpd.get("discrete_parents", [])) >= 2:
+                dps, dlevels = cpd["discrete_parents"], cpd["dlevels"]
+                K = len(cpd["intercepts"])
+                for i in [0, 1, 17, 100, K - 1]:
+                    cfg = _decode_config_index(i, dps, dlevels)
+                    re_i, mult = 0, 1
+                    for dp in dps:
+                        re_i += dlevels[dp].index(cfg[dp]) * mult
+                        mult *= len(dlevels[dp])
+                    assert re_i == i, f"round-trip failed: {i} -> {cfg} -> {re_i}"
+                return
+        pytest.skip("no multi-discrete-parent CLG node found")
+
+    @pytest.mark.slow
+    def test_ecoli70_loads_and_samples(self):
+        cfg = BnlearnConfig(networks=["ecoli70"], seeds=[0],
+                            n_train=200, n_test=50, n_reference=100)
+        p = next(BnlearnProblemSource().iter_problems(cfg))
+        assert p.family == "continuous_gauss"
+        assert p.problem_id == "ecoli70"
+        assert len(p.variables) == 46
+        assert len(p.train_data) == 46
+        assert all(t.shape == (200,) for t in p.train_data.values())
+        assert all(t.dtype == torch.float32 for t in p.train_data.values())
+        for t in p.train_data.values():
+            assert torch.isfinite(t).all()
+        assert any(t.std() > 0 for t in p.train_data.values()), \
+            "all nodes zero-variance — sampler broken"
+        assert p.true_model is not None
+        assert p.ground_truth is not None and p.ground_truth.samples.shape == (100, 46)
+
+    @pytest.mark.slow
+    def test_ecoli70_determinism(self):
+        cfg = BnlearnConfig(networks=["ecoli70"], seeds=[42],
+                            n_train=100, n_test=50, n_reference=50)
+        p1 = next(BnlearnProblemSource().iter_problems(cfg))
+        p2 = next(BnlearnProblemSource().iter_problems(cfg))
+        for node in p1.train_data:
+            assert torch.equal(p1.train_data[node], p2.train_data[node])
+
+
+class TestBnlearnCLG:
+    """CLG network loading + sampling (mixed discrete/continuous)."""
+
+    @pytest.mark.slow
+    def test_sangiovese_loads_and_samples(self):
+        cfg = BnlearnConfig(networks=["sangiovese"], seeds=[0],
+                            n_train=200, n_test=50, n_reference=100)
+        p = next(BnlearnProblemSource().iter_problems(cfg))
+        assert p.family == "clg"
+        assert len(p.variables) == 15
+
+        discrete = [n for n, v in p.variables.items() if v[0] == "discrete"]
+        continuous = [n for n, v in p.variables.items() if v[0] != "discrete"]
+        assert discrete and continuous, "sangiovese should have both kinds"
+
+        for node in discrete:
+            t = p.train_data[node]
+            assert t.dtype == torch.long
+            assert (t >= 0).all() and (t < p.variables[node][1]).all()
+        for node in continuous:
+            t = p.train_data[node]
+            assert t.dtype == torch.float32
+            assert torch.isfinite(t).all()
+
+    @pytest.mark.slow
+    def test_mehra_loads_finite(self):
+        """Largest network (multi-discrete config decoding) samples finite."""
+        cfg = BnlearnConfig(networks=["mehra"], seeds=[0],
+                            n_train=50, n_test=20, n_reference=20)
+        p = next(BnlearnProblemSource().iter_problems(cfg))
+        assert p.family == "clg"
+        for node, t in p.train_data.items():
+            assert torch.isfinite(t.float()).all(), f"non-finite in {node}"
+
+
+class TestBnlearnContinuousModel:
+    """_BnlearnContinuousModel acts correctly as problem.true_model."""
+
+    @pytest.mark.slow
+    def test_ecoli70_model_clamps_continuous_evidence(self):
+        cfg = BnlearnConfig(networks=["ecoli70"], seeds=[0],
+                            n_train=10, n_test=10, n_reference=10)
+        p = next(BnlearnProblemSource().iter_problems(cfg))
+        node = list(p.variables.keys())[0]
+        ev = {node: torch.tensor([1.5])}
+        samples = p.true_model.sample(n=100, evidence=ev)
+        assert torch.allclose(samples[node], torch.full((100,), 1.5))
+        # Non-clamped nodes still finite.
+        for other, t in samples.items():
+            assert torch.isfinite(t.float()).all()
+
+    @pytest.mark.slow
+    def test_sangiovese_model_clamps_discrete_evidence(self):
+        cfg = BnlearnConfig(networks=["sangiovese"], seeds=[0],
+                            n_train=10, n_test=10, n_reference=10)
+        p = next(BnlearnProblemSource().iter_problems(cfg))
+        discrete = [n for n, v in p.variables.items() if v[0] == "discrete"]
+        if not discrete:
+            pytest.skip("sangiovese has no discrete nodes (unexpected)")
+        node = discrete[0]
+        samples = p.true_model.sample(n=100, evidence={node: torch.tensor([0])})
+        assert torch.all(samples[node] == 0)

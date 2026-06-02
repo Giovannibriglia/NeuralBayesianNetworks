@@ -184,7 +184,189 @@ def _reference_pool(
     g.add_nodes_from(variables)
     g.add_edges_from(dag)
     col_order = list(nx.topological_sort(g))
-    return torch.stack([sample_dict[n] for n in col_order], dim=1).float()
+    # .float() per column so mixed long (discrete) + float (continuous) columns
+    # in CLG networks stack cleanly; the discrete oracle re-casts via col.long().
+    return torch.stack([sample_dict[n].float() for n in col_order], dim=1)
+
+
+_DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "bnlearn"
+
+
+def _load_continuous_json(name: str) -> dict:
+    """Load a Gaussian or CLG network from its bundled JSON (Stage 1 output)."""
+    json_path = _DATA_DIR / f"{name}.json"
+    if not json_path.exists():
+        raise FileNotFoundError(
+            f"Bundled bnlearn JSON not found at {json_path}. Gaussian/CLG "
+            f"network JSON is produced by scripts/convert_bnlearn_continuous.R."
+        )
+    import json
+
+    with open(json_path) as f:
+        return json.load(f)
+
+
+def _decode_config_index(
+    i: int, discrete_parents: list[str], dlevels: dict[str, list[str]],
+) -> dict[str, str]:
+    """Decode a flat CLG config index → discrete-parent state assignment.
+
+    First discrete parent varies fastest — bnlearn's native ``expand.grid``
+    encoding (design doc §5.2). Inverse of the encoding used in
+    ``_BnlearnContinuousModel._sample_clg_node``.
+    """
+    cfg: dict[str, str] = {}
+    for dp in discrete_parents:
+        n_states = len(dlevels[dp])
+        cfg[dp] = dlevels[dp][i % n_states]
+        i //= n_states
+    return cfg
+
+
+def _json_edges(data: dict) -> list[tuple[str, str]]:
+    """Normalise the JSON ``edges`` field to ``[(from, to), ...]``.
+
+    Stage 1 emits dicts ``{"from", "to"}``; tolerate ``[from, to]`` too.
+    """
+    out: list[tuple[str, str]] = []
+    for e in data["edges"]:
+        if isinstance(e, dict):
+            out.append((e["from"], e["to"]))
+        else:
+            out.append((e[0], e[1]))
+    return out
+
+
+class _BnlearnContinuousModel:
+    """Sampling model for Gaussian / CLG bnlearn networks.
+
+    Doubles as (a) the data generator for train/test/reference rows and
+    (b) ``problem.true_model`` for the oracle's
+    ``forward_with_clamp_posterior_samples``, which calls
+    ``true_model.sample(n=N, evidence=ev)`` and indexes the result by node
+    name. ``sample`` therefore returns ``{node: tensor[N]}`` (long for
+    discrete nodes, float for continuous), and clamps any node present in
+    ``evidence`` to its observed value instead of drawing it.
+    """
+
+    def __init__(
+        self, data: dict, variables: dict[str, tuple[str, int | None]],
+    ) -> None:
+        self._kind = data["kind"]                      # "gaussian" | "clg"
+        self._cpds = {c["name"]: c for c in data["cpds"]}
+        self._variables = variables
+        self._nodes = list(data["nodes"])
+        g = nx.DiGraph()
+        g.add_nodes_from(self._nodes)
+        g.add_edges_from(_json_edges(data))
+        self._topo = list(nx.topological_sort(g))
+
+    def sample(
+        self,
+        n: int = 1,
+        evidence: dict | None = None,
+        seed: int | None = None,
+        **_kwargs: Any,
+    ) -> dict[str, torch.Tensor]:
+        """Ancestral forward sample of ``n`` rows (evidence-clamped)."""
+        import numpy as np
+
+        evidence = evidence or {}
+        rng = np.random.default_rng(seed)
+        values: dict[str, Any] = {}
+
+        for node in self._topo:
+            if node in evidence:
+                values[node] = self._clamp(node, evidence[node], n)
+                continue
+            cpd = self._cpds[node]
+            ntype = cpd["type"]
+            if ntype == "gaussian":
+                values[node] = self._sample_gaussian_node(cpd, values, n, rng)
+            elif ntype == "discrete":
+                values[node] = self._sample_discrete_node(cpd, values, n, rng)
+            elif ntype == "clg_continuous":
+                values[node] = self._sample_clg_node(cpd, values, n, rng)
+            else:
+                raise ValueError(f"Unknown node type {ntype!r} for {node!r}")
+
+        out: dict[str, torch.Tensor] = {}
+        for node in self._nodes:
+            is_discrete = self._variables[node][0] == "discrete"
+            dtype = torch.long if is_discrete else torch.float32
+            out[node] = torch.as_tensor(values[node], dtype=dtype)
+        return out
+
+    # -- per-node samplers (numpy arrays) -----------------------------------
+
+    def _clamp(self, node: str, value: Any, n: int):
+        import numpy as np
+
+        if isinstance(value, torch.Tensor):
+            scalar = value.detach().cpu().reshape(-1)[0].item()
+        else:
+            scalar = float(value)
+        if self._variables[node][0] == "discrete":
+            return np.full(n, int(round(scalar)), dtype=np.int64)
+        return np.full(n, float(scalar), dtype=np.float64)
+
+    @staticmethod
+    def _sample_gaussian_node(cpd, values, n, rng):
+        import numpy as np
+
+        means = np.full(n, float(cpd["intercept"]), dtype=np.float64)
+        for parent, beta in cpd["coefficients"].items():
+            means += float(beta) * values[parent]
+        return rng.normal(means, float(cpd["sd"]))
+
+    def _sample_clg_node(self, cpd, values, n, rng):
+        import numpy as np
+
+        dps = cpd["discrete_parents"]
+        cps = cpd["continuous_parents"]
+        dlevels = cpd["dlevels"]
+        intercepts = np.asarray(cpd["intercepts"], dtype=np.float64)
+        sds = np.asarray(cpd["sds"], dtype=np.float64)
+
+        # Per-sample flat config index: first discrete parent fastest. The
+        # discrete parent's state-index (values[dp]) aligns with dlevels order
+        # (== that node's own `states` order; verified for all bundled CLG nets).
+        config = np.zeros(n, dtype=np.int64)
+        mult = 1
+        for dp in dps:
+            config += values[dp].astype(np.int64) * mult
+            mult *= len(dlevels[dp])
+
+        means = intercepts[config].copy()
+        for cp in cps:
+            coefs = np.asarray(cpd["coefficients"][cp], dtype=np.float64)
+            means += coefs[config] * values[cp]
+        return rng.normal(means, sds[config])
+
+    @staticmethod
+    def _sample_discrete_node(cpd, values, n, rng):
+        import numpy as np
+
+        states = cpd["states"]
+        parents = cpd.get("parents", [])
+        k = len(states)
+        prob = np.asarray(cpd["prob"], dtype=np.float64).reshape(
+            cpd["prob_dim"], order="F",
+        )  # axis 0 = own states; axes 1.. = parents (in `parents` order)
+
+        if not parents:
+            probs = np.broadcast_to(prob.reshape(k, 1), (k, n))
+        else:
+            # Parent state-indices align with each parent's prob axis (parent
+            # levels == that parent's own `states`; verified on healthcare).
+            parent_idx = tuple(values[p].astype(np.int64) for p in parents)
+            probs = prob[(slice(None),) + parent_idx]  # (k, n)
+
+        probs = probs / probs.sum(axis=0, keepdims=True).clip(min=1e-12)
+        # Vectorised inverse-CDF categorical sampling.
+        cum = np.cumsum(probs, axis=0)               # (k, n)
+        u = rng.random(n)
+        return (u[None, :] < cum).argmax(axis=0).astype(np.int64)
 
 
 class BnlearnProblemSource:
@@ -206,46 +388,89 @@ class BnlearnProblemSource:
                     f"Known networks: {sorted(_NETWORKS.keys())}"
                 )
             meta = _NETWORKS[net_name]
-            if meta["kind"] != "discrete":
-                raise NotImplementedError(
-                    f"Network {net_name!r} has kind={meta['kind']!r}; only "
-                    f"'discrete' is supported in Stage 2 of Phase 4. "
-                    f"Gaussian/CLG networks land in Stage 3."
-                )
-
+            kind = meta["kind"]
             logger.info(
                 "Loading bnlearn network %s (kind=%s, n_nodes=%d)",
-                net_name, meta["kind"], meta["n_nodes"],
+                net_name, kind, meta["n_nodes"],
             )
-            model = _load_discrete_model(net_name)  # cached across seeds
-            dag = list(model.edges())
-            variables: dict[str, tuple[str, int]] = {}
-            for node in model.nodes():
-                n_states = len(model.get_cpds(node).state_names[node])
-                variables[node] = ("discrete", n_states)
+            if kind == "discrete":
+                yield from self._discrete_problems(net_name, config)
+            elif kind in ("gaussian", "clg"):
+                yield from self._continuous_problems(net_name, kind, config)
+            else:
+                raise ValueError(
+                    f"Network {net_name!r} has unsupported kind={kind!r}."
+                )
 
-            for seed in config.seeds:
-                train_data = _forward_sample_discrete(model, config.n_train, seed)
-                # Distinct derived seeds keep train/test/reference independent
-                # yet deterministic per (network, seed).
-                test_data = _forward_sample_discrete(
-                    model, config.n_test, seed + 100_000,
-                )
-                ref_dict = _forward_sample_discrete(
-                    model, config.n_reference, seed + 200_000,
-                )
-                gt_samples = _reference_pool(ref_dict, variables, dag)
+    def _discrete_problems(
+        self, net_name: str, config: BnlearnConfig,
+    ) -> Iterator[BenchmarkProblem]:
+        model = _load_discrete_model(net_name)  # cached across seeds
+        dag = list(model.edges())
+        variables: dict[str, tuple[str, int]] = {}
+        for node in model.nodes():
+            n_states = len(model.get_cpds(node).state_names[node])
+            variables[node] = ("discrete", n_states)
 
-                yield BenchmarkProblem(
-                    name=net_name,
-                    dag=dag,
-                    variables=variables,
-                    train_data=train_data,
-                    test_data=test_data,
-                    queries=[],
-                    ground_truth=GroundTruth(samples=gt_samples),
-                    true_model=model,
-                    family="discrete",
-                    problem_id=net_name,
-                    seed=seed,
-                )
+        for seed in config.seeds:
+            train_data = _forward_sample_discrete(model, config.n_train, seed)
+            # Distinct derived seeds keep train/test/reference independent
+            # yet deterministic per (network, seed).
+            test_data = _forward_sample_discrete(model, config.n_test, seed + 100_000)
+            ref_dict = _forward_sample_discrete(model, config.n_reference, seed + 200_000)
+            gt_samples = _reference_pool(ref_dict, variables, dag)
+
+            yield BenchmarkProblem(
+                name=net_name,
+                dag=dag,
+                variables=variables,
+                train_data=train_data,
+                test_data=test_data,
+                queries=[],
+                ground_truth=GroundTruth(samples=gt_samples),
+                true_model=model,
+                family="discrete",
+                problem_id=net_name,
+                seed=seed,
+            )
+
+    def _continuous_problems(
+        self, net_name: str, kind: str, config: BnlearnConfig,
+    ) -> Iterator[BenchmarkProblem]:
+        data = _load_continuous_json(net_name)
+        dag = _json_edges(data)
+        cpds = {c["name"]: c for c in data["cpds"]}
+        # Per-node type: discrete nodes (CLG only) keep their cardinality;
+        # continuous nodes are labelled "continuous_lg" (a per-node CLG dist)
+        # so the oracle dispatches them to the continuous/sample path.
+        variables: dict[str, tuple[str, int | None]] = {}
+        for node in data["nodes"]:
+            c = cpds[node]
+            if c["type"] == "discrete":
+                variables[node] = ("discrete", len(c["states"]))
+            else:
+                variables[node] = ("continuous_lg", None)
+
+        # family: pure Gaussian -> continuous_gauss; mixed -> clg (design doc §9).
+        family = "continuous_gauss" if kind == "gaussian" else "clg"
+        model = _BnlearnContinuousModel(data, variables)  # shared across seeds
+
+        for seed in config.seeds:
+            train_data = model.sample(config.n_train, seed=seed)
+            test_data = model.sample(config.n_test, seed=seed + 100_000)
+            ref_dict = model.sample(config.n_reference, seed=seed + 200_000)
+            gt_samples = _reference_pool(ref_dict, variables, dag)
+
+            yield BenchmarkProblem(
+                name=net_name,
+                dag=dag,
+                variables=variables,
+                train_data=train_data,
+                test_data=test_data,
+                queries=[],
+                ground_truth=GroundTruth(samples=gt_samples),
+                true_model=model,
+                family=family,
+                problem_id=net_name,
+                seed=seed,
+            )
