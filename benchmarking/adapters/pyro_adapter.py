@@ -153,7 +153,13 @@ class PyroAdapter:
         self._topo = list(nx.topological_sort(g))
         self._parents = {n: list(g.predecessors(n)) for n in self._topo}
 
-        for node, (kind, k) in problem.variables.items():
+        # Fit in topological order so each discrete node's parents are
+        # already registered in self._cards before _fit_discrete_cpt looks
+        # them up.  problem.variables iterates in insertion order, which is
+        # not guaranteed topological (e.g. alarm/sachs have children before
+        # their parents) — using it here raised KeyError(parent). See #127.
+        for node in self._topo:
+            kind, k = problem.variables[node]
             if kind == "discrete":
                 self._cards[node] = k
                 self._fit_discrete_cpt(node, k, problem)

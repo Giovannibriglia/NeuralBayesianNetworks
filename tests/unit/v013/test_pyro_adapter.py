@@ -525,3 +525,52 @@ class TestRegressions:
             f"P(B|D=2,A=0) mean = {means[2]:+.3f}, P(B|D=0,A=0) mean = "
             f"{means[0]:+.3f}, gap = {gap:+.3f} (expected ~2.0)."
         )
+
+    # -- Bug 5 (#127): topological fit order ----------------------------------
+
+    @pytest.mark.parametrize(
+        "net, target",
+        [("alarm", "LVFAILURE"), ("sachs", "Erk")],
+    )
+    def test_fit_succeeds_when_child_precedes_parent_127(self, net, target):
+        """Bug 5 regression: fit() must register parent cardinalities in
+        topological order, not problem.variables insertion order.
+
+        alarm and sachs both have discrete child nodes appearing *before*
+        their parents in insertion order (alarm: 17 such (child, parent)
+        pairs, sachs: 15).  Pre-fix, fit() iterated insertion order and
+        _fit_discrete_cpt's ``self._cards[p]`` parent lookup raised
+        KeyError(parent_name) — 472x KeyError('LVFAILURE') on alarm and
+        135x KeyError('Erk') on sachs in the bnlearn_paper run.  These are
+        NODE names, not state values.
+
+        Reference: issue #127 (Bug 5),
+        docs/v0.13-nbn-cat-ve-investigation.md.
+        """
+        pytest.importorskip("pyro")
+        from benchmarking.problems.bnlearn import (
+            BnlearnConfig,
+            BnlearnProblemSource,
+        )
+
+        cfg = BnlearnConfig(
+            networks=[net], seeds=[0],
+            n_train=500, n_test=100, n_reference=100,
+        )
+        problem = next(BnlearnProblemSource().iter_problems(cfg))
+
+        adapter = PyroAdapter(
+            mechanism="empirical", inference_method="importance", n_samples=20,
+        )
+        # Pre-fix this raised KeyError(target) at fit time.
+        adapter.fit(problem)
+        assert adapter._fitted
+        assert target in adapter._cards
+
+        # A query on the previously-failing node returns a valid posterior.
+        post = adapter.query(
+            Query(targets=(target,), evidence={}, kind="marginal")
+        )
+        assert isinstance(post, Posterior)
+        assert post.probs is not None
+        assert torch.isclose(post.probs.sum(), torch.tensor(1.0), atol=1e-4)
