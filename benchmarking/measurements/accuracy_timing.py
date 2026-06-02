@@ -52,6 +52,7 @@ import torch
 
 from benchmarking.core.oracle import filter_ground_truth, forward_with_clamp_posterior_samples
 from benchmarking.core.results import CellResult
+from benchmarking.core.runner import _classify_exception
 from benchmarking.domains.base import BenchmarkProblem, Query
 from benchmarking.metrics import _compute_metrics_per_node
 
@@ -188,6 +189,11 @@ class AccuracyAndTiming:
         # ---- Phase 1: query loop (timed individually) ----
         posteriors: list[Any] = []
         query_times: list[float] = []
+        # Status for failed queries, classified the same way as fit-time
+        # failures (#127 Stage 4): a torch CPU/CUDA allocator failure raised
+        # during query must classify as "oom", not "error", just as it would
+        # if raised during fit. Indices align with ``posteriors``.
+        query_statuses: list[str] = []
         cumulative_query_time_s = 0.0
         timed_out_at: int | None = None
 
@@ -199,13 +205,16 @@ class AccuracyAndTiming:
             try:
                 posterior = adapter.query(q)
                 err_msg = None
+                q_status = "ok"
             except Exception as exc:
                 posterior = None
                 err_msg = str(exc)
+                q_status = _classify_exception(exc)
             elapsed = time.perf_counter() - t0
             cumulative_query_time_s += elapsed
             query_times.append(elapsed)
             posteriors.append((posterior, err_msg))
+            query_statuses.append(q_status)
 
         # ---- Phase 2: accuracy scoring (metrics_time_s) ----
         t_metrics = time.perf_counter()
@@ -231,7 +240,11 @@ class AccuracyAndTiming:
             q_time = query_times[i]
 
             if posterior is None or mdict is None:
-                # Query failed: one row per metric with error status.
+                # Query failed: one row per metric. Status is the classified
+                # failure mode (oom/not_supported/error) for a raised
+                # exception; a scoring failure with no exception falls back to
+                # "error" (#127 Stage 4).
+                fail_status = query_statuses[i] if posterior is None else "error"
                 for mk in _METRIC_KEYS:
                     rows.append(CellResult(
                         benchmark=benchmark,
@@ -245,7 +258,7 @@ class AccuracyAndTiming:
                         evidence_mode=emode,
                         metric=mk,
                         value=float("nan"),
-                        status="error",
+                        status=fail_status,
                         fit_time_s=fit_time_s,
                         query_time_s=q_time,
                         metrics_time_s=metrics_time_s,
@@ -269,7 +282,7 @@ class AccuracyAndTiming:
                         evidence_mode=emode,
                         metric=tk,
                         value=tv,
-                        status="error",
+                        status=fail_status,
                         fit_time_s=fit_time_s,
                         query_time_s=q_time,
                         metrics_time_s=metrics_time_s,

@@ -355,6 +355,22 @@ class TestClassifyException:
     def test_runtime_error_other_is_error(self):
         assert _classify_exception(RuntimeError("some other failure")) == "error"
 
+    def test_runtime_error_full_torch_cpu_allocator_msg_is_oom(self):
+        """The verbatim torch CPU allocator message from the Bug 4 torture
+        smoke classifies as oom (#127 Stage 4).
+
+        The markers already covered this string; the actual Stage 4 gap was
+        that query-time exceptions were never routed through this classifier
+        (fixed in the measurement layer). This pins the exact message so a
+        future markers edit can't silently regress the classification.
+        """
+        exc = RuntimeError(
+            "[enforce fail at alloc_cpu.cpp:127] err == 0. DefaultCPUAllocator: "
+            "can't allocate memory: you tried to allocate 614515507200 bytes. "
+            "Error code 12 (Cannot allocate memory)"
+        )
+        assert _classify_exception(exc) == "oom"
+
     def test_import_error_is_not_supported(self):
         assert _classify_exception(ImportError("zuko not installed")) == "not_supported"
 

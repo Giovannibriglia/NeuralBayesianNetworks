@@ -124,6 +124,31 @@ class _StubErrorAdapter:
     def is_applicable(self, problem): return True
 
 
+# The exact torch CPU allocator message the torture smoke surfaced (#127).
+_OOM_QUERY_MSG = (
+    "[enforce fail at alloc_cpu.cpp:127] err == 0. DefaultCPUAllocator: "
+    "can't allocate memory: you tried to allocate 614515507200 bytes. "
+    "Error code 12 (Cannot allocate memory)"
+)
+
+
+class _StubOOMAdapter:
+    """Stub adapter that raises a torch CPU allocator OOM on query().
+
+    Reproduces the Bug 4 torture-smoke scenario where the allocator failure
+    happens at query time rather than fit time (#127 Stage 4). Such failures
+    must classify as ``oom``, not ``error``.
+    """
+    name = "stub-oom"
+
+    def fit(self, problem, **kwargs): pass
+
+    def query(self, q: Query) -> Posterior:
+        raise RuntimeError(_OOM_QUERY_MSG)
+
+    def is_applicable(self, problem): return True
+
+
 # ---------------------------------------------------------------------------
 # Protocol conformance
 # ---------------------------------------------------------------------------
@@ -299,6 +324,38 @@ class TestCellResultSchema:
         result = m.measure(problem, _StubErrorAdapter(), queries)
         for row in result:
             assert row.status == "error"
+            assert row.error_msg is not None
+
+    def test_timing_only_query_oom_classifies_as_oom(self):
+        """A torch CPU allocator failure raised at query time classifies as
+        oom, not error (#127 Stage 4).
+
+        The torture smoke surfaced 24 catchable allocator failures at
+        22/79/109/614 GB attempt sizes that were classifying as 'error'
+        because the query-time exception was never routed through
+        _classify_exception — only the fit-time path was. This regression-
+        guards the query-time path for TimingOnly.
+        """
+        problem, queries = _get_discrete_problem_and_queries()
+        m = TimingOnly()
+        result = m.measure(problem, _StubOOMAdapter(), queries)
+        assert len(result) > 0
+        for row in result:
+            assert row.status == "oom", (
+                f"expected oom, got {row.status!r} for {row.error_msg!r}"
+            )
+            assert row.error_msg is not None
+
+    def test_accuracy_timing_query_oom_classifies_as_oom(self):
+        """Same query-time OOM classification, for AccuracyAndTiming (#127)."""
+        problem, queries = _get_discrete_problem_and_queries()
+        m = AccuracyAndTiming()
+        result = m.measure(problem, _StubOOMAdapter(), queries)
+        assert len(result) > 0
+        for row in result:
+            assert row.status == "oom", (
+                f"expected oom, got {row.status!r} for {row.error_msg!r}"
+            )
             assert row.error_msg is not None
 
     def test_query_time_s_is_nonnegative(self):
