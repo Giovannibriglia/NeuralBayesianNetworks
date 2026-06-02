@@ -55,6 +55,7 @@ class TimingOnly:
         query_roles: list[str] | None = None,
         query_kinds: list[str] | None = None,
         evidence_strategies: list[str] | None = None,
+        evidence_modes: list[str] | None = None,
         query_budget_s: float = float("inf"),
     ) -> list[CellResult]:
         """Time each query individually; return one row per query.
@@ -114,6 +115,13 @@ class TimingOnly:
                 f"evidence_strategies length {len(evidence_strategies)} "
                 f"!= queries length {len(queries)}"
             )
+        if evidence_modes is None:
+            evidence_modes = ["full"] * len(queries)
+        if len(evidence_modes) != len(queries):
+            raise ValueError(
+                f"evidence_modes length {len(evidence_modes)} "
+                f"!= queries length {len(queries)}"
+            )
 
         family = problem.family or _infer_family(problem)
         problem_id = problem.problem_id or problem.name
@@ -123,8 +131,8 @@ class TimingOnly:
         cumulative_query_time_s = 0.0
         timed_out_at: int | None = None
 
-        for i, (q, role, qkind, estrat) in enumerate(
-            zip(queries, query_roles, query_kinds, evidence_strategies)
+        for i, (q, role, qkind, estrat, emode) in enumerate(
+            zip(queries, query_roles, query_kinds, evidence_strategies, evidence_modes)
         ):
             if cumulative_query_time_s >= query_budget_s:
                 timed_out_at = i
@@ -155,6 +163,7 @@ class TimingOnly:
                     query_role=role,
                     query_kind=qkind,
                     evidence_strategy=estrat,
+                    evidence_mode=emode,
                     metric=tk,
                     value=tv,
                     status=status,
@@ -166,10 +175,11 @@ class TimingOnly:
 
         # Timeout rows for queries that never started.
         if timed_out_at is not None:
-            for role, qkind, estrat in zip(
+            for role, qkind, estrat, emode in zip(
                 query_roles[timed_out_at:],
                 query_kinds[timed_out_at:],
                 evidence_strategies[timed_out_at:],
+                evidence_modes[timed_out_at:],
             ):
                 for tk, tv in [
                     ("fit_time_s", fit_time_s),
@@ -185,6 +195,7 @@ class TimingOnly:
                         query_role=role,
                         query_kind=qkind,
                         evidence_strategy=estrat,
+                        evidence_mode=emode,
                         metric=tk,
                         value=tv,
                         status="timeout",

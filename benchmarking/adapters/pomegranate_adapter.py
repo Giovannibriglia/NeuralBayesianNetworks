@@ -176,6 +176,10 @@ class PomegranateAdapter:
         mask = torch.zeros((1, n), dtype=torch.bool)
 
         for k, v in q.evidence.items():
+            if v is None:
+                # Phase 3 empty mode: leave this node unobserved (masked) so
+                # predict_proba marginalizes over it.
+                continue
             i = self._node_to_idx[k]
             if isinstance(v, torch.Tensor):
                 scalar = int(v.reshape(-1)[0].item())

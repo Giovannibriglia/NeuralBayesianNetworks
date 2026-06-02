@@ -457,11 +457,16 @@ class TopologicalAllocator:
         self._target_allocator = _TargetAllocator()
         self._kind_evidence_allocator = _KindEvidenceAllocator()
         self._value_allocator = _ValueAllocator()
-        self._cache: dict[tuple[str, str], NodeRoles] = {}
+        self._cache: dict[tuple[str, str, int], NodeRoles] = {}
 
     def _get_roles(self, problem: BenchmarkProblem, G: nx.DiGraph) -> NodeRoles:
-        """Get-or-compute NodeRoles, cached by (family, problem_id)."""
-        key = (problem.family, problem.problem_id)
+        """Get-or-compute NodeRoles, cached by (family, problem_id, seed).
+
+        Seed is part of the key because the synthetic DAG varies by seed:
+        two problems sharing a problem_id (e.g. n_nodes="10") but differing
+        in seed have distinct topologies and must not share a cache entry.
+        """
+        key = (problem.family, problem.problem_id, problem.seed)
         roles = self._cache.get(key)
         if roles is None:
             roles = compute_node_roles(G)

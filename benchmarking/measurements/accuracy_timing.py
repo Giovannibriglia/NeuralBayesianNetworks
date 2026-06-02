@@ -109,6 +109,7 @@ class AccuracyAndTiming:
         query_roles: list[str] | None = None,
         query_kinds: list[str] | None = None,
         evidence_strategies: list[str] | None = None,
+        evidence_modes: list[str] | None = None,
         query_budget_s: float = float("inf"),
     ) -> list[CellResult]:
         """Run timing + accuracy measurement for all queries.
@@ -172,6 +173,13 @@ class AccuracyAndTiming:
                 f"evidence_strategies length {len(evidence_strategies)} "
                 f"!= queries length {len(queries)}"
             )
+        if evidence_modes is None:
+            evidence_modes = ["full"] * len(queries)
+        if len(evidence_modes) != len(queries):
+            raise ValueError(
+                f"evidence_modes length {len(evidence_modes)} "
+                f"!= queries length {len(queries)}"
+            )
 
         family = problem.family or _infer_family(problem)
         problem_id = problem.problem_id or problem.name
@@ -214,10 +222,10 @@ class AccuracyAndTiming:
 
         # ---- Phase 3: emit CellResult rows ----
         rows: list[CellResult] = []
-        for i, (q, (posterior, err_msg), mdict, role, qkind, estrat) in enumerate(
+        for i, (q, (posterior, err_msg), mdict, role, qkind, estrat, emode) in enumerate(
             zip(
                 queries, posteriors, per_query_metric_dicts,
-                query_roles, query_kinds, evidence_strategies,
+                query_roles, query_kinds, evidence_strategies, evidence_modes,
             )
         ):
             q_time = query_times[i]
@@ -234,6 +242,7 @@ class AccuracyAndTiming:
                         query_role=role,
                         query_kind=qkind,
                         evidence_strategy=estrat,
+                        evidence_mode=emode,
                         metric=mk,
                         value=float("nan"),
                         status="error",
@@ -257,6 +266,7 @@ class AccuracyAndTiming:
                         query_role=role,
                         query_kind=qkind,
                         evidence_strategy=estrat,
+                        evidence_mode=emode,
                         metric=tk,
                         value=tv,
                         status="error",
@@ -288,6 +298,7 @@ class AccuracyAndTiming:
                     query_role=role,
                     query_kind=qkind,
                     evidence_strategy=estrat,
+                    evidence_mode=emode,
                     metric=mk,
                     value=value,
                     status=status,
@@ -312,6 +323,7 @@ class AccuracyAndTiming:
                     query_role=role,
                     query_kind=qkind,
                     evidence_strategy=estrat,
+                    evidence_mode=emode,
                     metric=tk,
                     value=tv,
                     status="ok",
@@ -323,10 +335,11 @@ class AccuracyAndTiming:
 
         # ---- Timeout rows for queries that never started ----
         if timed_out_at is not None:
-            for role, qkind, estrat in zip(
+            for role, qkind, estrat, emode in zip(
                 query_roles[timed_out_at:],
                 query_kinds[timed_out_at:],
                 evidence_strategies[timed_out_at:],
+                evidence_modes[timed_out_at:],
             ):
                 for mk in _METRIC_KEYS:
                     rows.append(CellResult(
@@ -338,6 +351,7 @@ class AccuracyAndTiming:
                         query_role=role,
                         query_kind=qkind,
                         evidence_strategy=estrat,
+                        evidence_mode=emode,
                         metric=mk,
                         value=float("nan"),
                         status="timeout",
@@ -360,6 +374,7 @@ class AccuracyAndTiming:
                         query_role=role,
                         query_kind=qkind,
                         evidence_strategy=estrat,
+                        evidence_mode=emode,
                         metric=tk,
                         value=tv,
                         status="timeout",

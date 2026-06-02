@@ -116,6 +116,21 @@ def _classify_exception(exc: Exception) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Per-query metadata helpers
+# ---------------------------------------------------------------------------
+
+def _evidence_mode_for(q: Any) -> str:
+    """Return ``"empty"`` if any evidence value is ``None``, else ``"full"``.
+
+    Phase 3: HeaviestQueryByRole emits paired full/empty queries. A query is
+    empty-mode when its evidence variables are structurally specified but
+    unobserved (``None`` values, marginalized by the adapter/oracle). Defends
+    against mixed dicts by treating any ``None`` as empty-mode.
+    """
+    return "empty" if any(v is None for v in q.evidence.values()) else "full"
+
+
+# ---------------------------------------------------------------------------
 # Sentinel row helpers
 # ---------------------------------------------------------------------------
 
@@ -186,6 +201,7 @@ def _fit_failure_rows(
             query_role=role,
             query_kind=getattr(q, "query_kind", "prediction"),
             evidence_strategy=getattr(q, "evidence_strategy", "random"),
+            evidence_mode=_evidence_mode_for(q),
             metric="status",
             value=_NAN,
             status=status,
@@ -275,6 +291,7 @@ class Runner:
         evidence_strategies = [
             getattr(q, "evidence_strategy", "random") for q in queries
         ]
+        evidence_modes = [_evidence_mode_for(q) for q in queries]
 
         # --- Fit ---
         try:
@@ -311,6 +328,7 @@ class Runner:
             query_roles=query_roles,
             query_kinds=query_kinds,
             evidence_strategies=evidence_strategies,
+            evidence_modes=evidence_modes,
             query_budget_s=cfg.per_cell_timeout_s,
         )
         for row in rows:
