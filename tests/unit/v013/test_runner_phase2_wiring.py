@@ -19,15 +19,14 @@ Reference: PR #124, #109, #74; docs/v0.13-benchmark-redesign.md §3, §6.
 """
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Iterator
 
 import torch
 
-import benchmarking.core.runner as runner_mod
-from benchmarking.core.config import BaselineSpec, RunnerConfig
+import benchmarking.core.config as config_mod
+from benchmarking.core.cell_worker import _run_cell
+from benchmarking.core.config import BaselineSpec
 from benchmarking.core.results import CellResult
-from benchmarking.core.runner import Runner
 from benchmarking.domains.base import BenchmarkProblem, GroundTruth, Query
 from benchmarking.measurements import AccuracyAndTiming, TimingOnly
 from benchmarking.selectors.topological import TopologicalAllocator
@@ -67,13 +66,6 @@ def _asia_problem(n_rows: int = 50) -> BenchmarkProblem:
         problem_id="asia_test",
         seed=0,
     )
-
-
-class _FixedProblemSource:
-    """Yields a single pre-built problem; source_config IS the problem."""
-
-    def iter_problems(self, problem: BenchmarkProblem) -> Iterator[BenchmarkProblem]:
-        yield problem
 
 
 class _FakeAdapter:
@@ -137,37 +129,50 @@ class _RaisingAdapter:
         raise RuntimeError("boom")
 
 
-def _runner_cfg(problem, selector, measurement, tmp_path: Path) -> RunnerConfig:
-    return RunnerConfig(
-        benchmark="synthetic",
-        config_name="phase2_wiring",
-        problem_source=_FixedProblemSource(),
-        source_config=problem,
-        selector=selector,
-        measurement=measurement,
-        baselines=[BaselineSpec(library="pgmpy", mechanism="discrete", param_method="mle")],
-        n_queries_per_cell=20,
-        per_cell_timeout_s=120.0,
-        jsonl_path=tmp_path / "out.jsonl",
-    )
+_N_QUERIES = 20
+
+
+def _wiring_ctx(problem, selector, measurement) -> dict:
+    """ctx mirroring what Runner._run_cell passes to the cell worker."""
+    return {
+        "problem": problem,
+        "baseline_spec": BaselineSpec(
+            library="pgmpy", mechanism="discrete", param_method="mle",
+        ),
+        "seed": problem.seed,
+        "selector": selector,
+        "measurement": measurement,
+        "benchmark": "synthetic",
+        "n_queries_per_cell": _N_QUERIES,
+        "per_cell_timeout_s": 120.0,
+        "fit_budget_s": 1200.0,
+        "default_role": "random",
+    }
 
 
 class TestRunnerPhase2Wiring:
-    """Verify per-query metadata fields propagate through runner + measurements."""
+    """Verify per-query metadata fields propagate through the cell + measurements.
 
-    def test_topological_metadata_in_results(self, monkeypatch, tmp_path):
-        """End-to-end: TopologicalAllocator → Runner → measure() preserves metadata."""
-        monkeypatch.setattr(runner_mod, "build_adapter", lambda spec: _FakeAdapter())
+    Bug 4 Stage 2: the cell runs in a subprocess, so these tests (which
+    monkeypatch ``build_adapter`` and use a recording-spy measurement that
+    must be observed afterwards) call ``cell_worker._run_cell`` directly
+    in-process — where the patch and the spy's ``.received`` apply. The
+    patch targets ``benchmarking.core.config.build_adapter`` (the name the
+    worker imports), not the runner module. Intent unchanged.
+    """
+
+    def test_topological_metadata_in_results(self, monkeypatch):
+        """TopologicalAllocator → cell → measure() preserves metadata."""
+        monkeypatch.setattr(config_mod, "build_adapter", lambda spec: _FakeAdapter())
 
         problem = _asia_problem()
         selector = TopologicalAllocator()
         measurement = _RecordingMeasurement()
-        cfg = _runner_cfg(problem, selector, measurement, tmp_path)
 
-        list(Runner().run(cfg))
+        _run_cell(_wiring_ctx(problem, selector, measurement))
 
         # Recompute the exact queries the selector produced (deterministic).
-        expected = selector.select(problem, cfg.n_queries_per_cell, problem.seed)
+        expected = selector.select(problem, _N_QUERIES, problem.seed)
         assert len(expected) > 0
 
         rec = measurement.received
@@ -185,16 +190,15 @@ class TestRunnerPhase2Wiring:
             r in {"hub", "cut", "terminal", "random"} for r in rec["query_roles"]
         )
 
-    def test_uniform_random_selector_unchanged(self, monkeypatch, tmp_path):
-        """UniformRandomSelector queries carry default metadata; runner doesn't crash."""
-        monkeypatch.setattr(runner_mod, "build_adapter", lambda spec: _FakeAdapter())
+    def test_uniform_random_selector_unchanged(self, monkeypatch):
+        """UniformRandomSelector queries carry default metadata; cell doesn't crash."""
+        monkeypatch.setattr(config_mod, "build_adapter", lambda spec: _FakeAdapter())
 
         problem = _asia_problem()
         selector = UniformRandomSelector()
         measurement = _RecordingMeasurement()
-        cfg = _runner_cfg(problem, selector, measurement, tmp_path)
 
-        list(Runner().run(cfg))
+        _run_cell(_wiring_ctx(problem, selector, measurement))
 
         rec = measurement.received
         assert len(rec["queries"]) > 0

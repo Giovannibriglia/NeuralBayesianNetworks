@@ -59,29 +59,96 @@ def main(input_path: str, output_path: str) -> int:
 
 
 def _run_cell(ctx: dict) -> list[dict]:
-    """The actual cell logic.
+    """Run one (problem, baseline, seed) cell.
 
-    Stage 1: minimal placeholder that returns a single ok row.
-    Stage 2: full measurement code moves here.
+    This is the per-cell logic that lived inline in
+    ``benchmarking.core.runner.Runner._run_cell`` before Bug 4. Same
+    semantics — build adapter, applicability gate, query selection, fit
+    (with exception/safety-net classification), measurement with the
+    Phase 3 per-query soft timeout — just running inside a subprocess.
+
+    The cell helpers (``_not_supported_sentinel``, ``_fit_failure_rows``,
+    ``_classify_exception``, ``_evidence_mode_for``) still live in the
+    runner module; they are imported here rather than duplicated.
+
+    Returns a list of plain dicts (``dataclasses.asdict`` of each
+    ``CellResult``). The parent reconstructs ``CellResult`` objects.
+
+    See docs/v0.13-runner-subprocess-isolation.md §5.
     """
-    # Stage 1 placeholder. In Stage 2, this becomes:
-    #   - build_adapter(ctx["baseline_spec"])
-    #   - adapter.fit(ctx["problem"])
-    #   - run queries via measurement code
-    #   - yield CellResult rows
-    problem = ctx.get("problem")
-    baseline_spec = ctx.get("baseline_spec")
-    return [{
-        "status": "ok",
-        "stage": "stage1_placeholder",
-        "problem_id": problem.problem_id
-            if hasattr(problem, "problem_id")
-            else ctx.get("problem_id", "unknown"),
-        "baseline": baseline_spec.library
-            if hasattr(baseline_spec, "library")
-            else "unknown",
-        "seed": ctx.get("seed", 0),
-    }]
+    import dataclasses
+    from time import perf_counter
+
+    from benchmarking.core.config import build_adapter
+    from benchmarking.core.runner import (
+        _NAN,
+        _classify_exception,
+        _evidence_mode_for,
+        _fit_failure_rows,
+        _not_supported_sentinel,
+    )
+
+    problem = ctx["problem"]
+    spec = ctx["baseline_spec"]
+    selector = ctx["selector"]
+    measurement = ctx["measurement"]
+    benchmark = ctx["benchmark"]
+    n_queries_per_cell = ctx["n_queries_per_cell"]
+    per_cell_timeout_s = ctx["per_cell_timeout_s"]
+    fit_budget_s = ctx["fit_budget_s"]
+    default_role = ctx["default_role"]
+
+    def _emit(results) -> list[dict]:
+        return [dataclasses.asdict(r) for r in results]
+
+    adapter = build_adapter(spec)
+
+    # --- Applicability gate ---
+    if not adapter.is_applicable(problem):
+        return _emit([_not_supported_sentinel(problem, adapter, benchmark)])
+
+    # --- Query selection (seed from problem generation) ---
+    queries = selector.select(problem, n_queries_per_cell, problem.seed)
+    query_roles = [getattr(q, "query_role", default_role) for q in queries]
+    query_kinds = [getattr(q, "query_kind", "prediction") for q in queries]
+    evidence_strategies = [
+        getattr(q, "evidence_strategy", "random") for q in queries
+    ]
+    evidence_modes = [_evidence_mode_for(q) for q in queries]
+
+    # --- Fit ---
+    try:
+        t0 = perf_counter()
+        adapter.fit(problem, **spec.extra_kwargs)
+        fit_time_s = perf_counter() - t0
+    except Exception as exc:
+        status = _classify_exception(exc)
+        return _emit(_fit_failure_rows(
+            problem, adapter, queries, query_roles, benchmark,
+            fit_time_s=_NAN, status=status, error_msg=repr(exc),
+        ))
+
+    # --- Fit safety net ---
+    if fit_time_s > fit_budget_s:
+        return _emit(_fit_failure_rows(
+            problem, adapter, queries, query_roles, benchmark,
+            fit_time_s=fit_time_s, status="timeout",
+            error_msg=f"fit exceeded {fit_budget_s:.0f}s safety budget",
+        ))
+
+    # --- Measurement (handles per-query cumulative timeout internally) ---
+    rows = measurement.measure(
+        problem, adapter, queries,
+        fit_time_s=fit_time_s,
+        benchmark=benchmark,
+        seed=problem.seed,
+        query_roles=query_roles,
+        query_kinds=query_kinds,
+        evidence_strategies=evidence_strategies,
+        evidence_modes=evidence_modes,
+        query_budget_s=per_cell_timeout_s,
+    )
+    return _emit(rows)
 
 
 if __name__ == "__main__":
