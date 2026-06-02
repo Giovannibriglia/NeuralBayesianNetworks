@@ -130,6 +130,13 @@ class PgmpyAdapter:
             for k, v in problem.train_data.items()
         })
         bn = DiscreteBayesianNetwork(problem.dag)
+        # pgmpy seeds nodes from edges only, so isolated nodes (no parents or
+        # children) are dropped from the model — querying them later raises
+        # "node not in graph". Add them explicitly so MLE/Bayes estimate their
+        # marginal CPDs. Mirrors the LG path below (_fit_lg).
+        for node in problem.variables:
+            if node not in bn.nodes():
+                bn.add_node(node)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FutureWarning)
             if self.param_method == "bayes":

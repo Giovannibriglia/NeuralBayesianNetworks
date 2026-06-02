@@ -55,10 +55,13 @@ class HeaviestQueryByRole:
         )
         self._kind_evidence_allocator = _KindEvidenceAllocator()
         self._value_allocator = _ValueAllocator(max_retry=self.max_retry)
-        self._cache: dict[tuple[str, str], NodeRoles] = {}
+        self._cache: dict[tuple[str, str, int], NodeRoles] = {}
 
     def _get_roles(self, problem: BenchmarkProblem, G: nx.DiGraph) -> NodeRoles:
-        key = (problem.family, problem.problem_id)
+        # Key includes seed: the synthetic DAG varies by seed, so two problems
+        # sharing a problem_id (e.g. n_nodes="10") but differing in seed have
+        # distinct topologies and must not share a NodeRoles cache entry.
+        key = (problem.family, problem.problem_id, problem.seed)
         roles = self._cache.get(key)
         if roles is None:
             roles = compute_node_roles(G)

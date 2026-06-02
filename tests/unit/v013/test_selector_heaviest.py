@@ -207,13 +207,51 @@ class TestHeaviestQueryByRole:
             assert set(a.evidence.keys()) == set(b.evidence.keys())
 
     def test_cache_reused(self, asia_problem):
-        """NodeRoles computed once per (family, problem_id)."""
+        """NodeRoles computed once per (family, problem_id, seed)."""
+        import dataclasses
+
         selector = HeaviestQueryByRole()
         selector.select(asia_problem, n_queries=999, seed=0)
         assert len(selector._cache) == 1
-        # Second call shouldn't grow cache
+        assert ("discrete", "asia_test", 0) in selector._cache
+        # Second call with the SAME problem shouldn't grow cache (the
+        # select(seed=...) arg drives value RNG, not the cache key).
         selector.select(asia_problem, n_queries=999, seed=1)
         assert len(selector._cache) == 1
+        # A problem sharing problem_id but with a different seed (hence a
+        # different DAG in real runs) gets its own cache entry — no stale reuse.
+        problem_seed1 = dataclasses.replace(asia_problem, seed=1)
+        selector.select(problem_seed1, n_queries=999, seed=0)
+        assert len(selector._cache) == 2
+        assert ("discrete", "asia_test", 1) in selector._cache
+
+    def test_different_seeds_produce_distinct_cache_entries(self):
+        """Regression: cache keys on seed, so structurally different DAGs at
+        the same n_nodes do not share a NodeRoles entry.
+
+        The synthetic source yields different DAGs across seeds at the same
+        n (n=10/seed=0 has no isolated nodes; seed=1 isolates several). Before
+        the fix, both shared cache key ('discrete', '10') and seed=1 reused
+        seed=0's roles. The fix adds seed to the key → two distinct entries.
+        """
+        from benchmarking.problems import SyntheticConfig, SyntheticProblemSource
+
+        problems = list(SyntheticProblemSource().iter_problems(SyntheticConfig(
+            families=["discrete"], n_nodes_list=[10], seeds=[0, 1],
+            n_train=256, n_test=64, n_reference=512,
+            edge_density=0.20, max_in_degree=4, cardinality=4,
+            fraction_continuous=0.5,
+        )))
+        assert len(problems) == 2
+        # Same problem_id ("10"), different seeds, structurally different DAGs.
+        assert problems[0].problem_id == problems[1].problem_id
+        assert problems[0].seed != problems[1].seed
+        assert set(map(tuple, problems[0].dag)) != set(map(tuple, problems[1].dag))
+
+        selector = HeaviestQueryByRole()
+        selector.select(problems[0], n_queries=999, seed=problems[0].seed)
+        selector.select(problems[1], n_queries=999, seed=problems[1].seed)
+        assert len(selector._cache) == 2
 
     def test_raises_without_test_data(self, asia_problem):
         """V1 mode requires test_data; raise if absent."""

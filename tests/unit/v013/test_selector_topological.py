@@ -579,19 +579,30 @@ class TestTopologicalAllocator:
             assert a.evidence_strategy == b.evidence_strategy
 
     def test_cache_reused_across_calls(self, asia_dag):
-        """NodeRoles is computed once per (family, problem_id)."""
+        """NodeRoles is computed once per (family, problem_id, seed)."""
+        import dataclasses
+
         problem = self._make_benchmark_problem(asia_dag)
         selector = TopologicalAllocator()
 
-        # First call populates cache
+        # First call populates cache for this (family, problem_id, seed)
         selector.select(problem, n_queries=10, seed=0)
         assert len(selector._cache) == 1
         cache_key = next(iter(selector._cache))
-        assert cache_key == ("discrete", "asia_test")
+        assert cache_key == ("discrete", "asia_test", 0)
 
-        # Second call hits cache (cache size unchanged)
+        # Second call with the SAME problem hits the cache (size unchanged).
+        # The select(seed=...) arg drives query-value RNG, not the cache key,
+        # which is derived from problem.seed.
         selector.select(problem, n_queries=10, seed=1)
         assert len(selector._cache) == 1
+
+        # A problem sharing problem_id but with a different seed (hence a
+        # different DAG in real runs) gets its own cache entry — no stale reuse.
+        problem_seed1 = dataclasses.replace(problem, seed=1)
+        selector.select(problem_seed1, n_queries=10, seed=0)
+        assert len(selector._cache) == 2
+        assert ("discrete", "asia_test", 1) in selector._cache
 
     def test_backward_compat_random_only(self, asia_dag):
         """allocation={'random': 1.0} → all queries have query_role='random'

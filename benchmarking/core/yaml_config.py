@@ -88,6 +88,7 @@ def load_runner_config(
     from benchmarking.measurements import AccuracyAndTiming, TimingOnly
     from benchmarking.problems import SyntheticProblemSource
     from benchmarking.selectors import UniformRandomSelector
+    from benchmarking.selectors.heaviest import HeaviestQueryByRole
     from benchmarking.selectors.topological import TopologicalAllocator
 
     text = Path(path).read_text()
@@ -159,9 +160,16 @@ def load_runner_config(
                 n_evidence_values=block.get("n_evidence_values"),
                 max_retry=block.get("max_retry"),
             )
+        if stype == "heaviest_by_role":
+            # Phase 3 scalability selector. Deterministic; ignores
+            # n_queries_per_cell (emits a fixed count per DAG, spec §2.1).
+            return HeaviestQueryByRole(
+                n_evidence=block.get("n_evidence"),
+                max_retry=block.get("max_retry"),
+            )
         raise ValueError(
             f"Config {str(path)!r}: unknown selector type {stype!r}. "
-            f"Supported: 'uniform_random', 'topological'."
+            f"Supported: 'uniform_random', 'topological', 'heaviest_by_role'."
         )
 
     if isinstance(selector_cfg, str):

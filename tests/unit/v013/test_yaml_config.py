@@ -71,6 +71,8 @@ _INFERENCE_CONFIGS = [
     "inference_scalability.yaml",
     "inference_smoke_topological.yaml",
     "inference_smoke_random_only.yaml",
+    "scalability_smoke.yaml",
+    "scalability_paper.yaml",
 ]
 _PARAM_CONFIGS = [
     "parameter_learning_smoke.yaml",
@@ -288,6 +290,58 @@ def test_yaml_dispatch_topological_string(tmp_path: Path) -> None:
     cfg = load_runner_config(p, jsonl_path=tmp_path / "out.jsonl")
     assert isinstance(cfg.selector, TopologicalAllocator)
     assert cfg.selector.target_allocation["hub"] == 0.30  # default
+
+
+def test_yaml_dispatch_heaviest_dict(tmp_path: Path) -> None:
+    """Phase 3: dict selector type='heaviest_by_role' builds HeaviestQueryByRole."""
+    from benchmarking.selectors.heaviest import HeaviestQueryByRole
+
+    d = _minimal_valid()
+    d["selector"] = {"type": "heaviest_by_role"}
+    p = _write_yaml(tmp_path, d)
+    cfg = load_runner_config(p, jsonl_path=tmp_path / "out.jsonl")
+    assert isinstance(cfg.selector, HeaviestQueryByRole)
+
+
+def test_yaml_dispatch_heaviest_string(tmp_path: Path) -> None:
+    """String 'heaviest_by_role' builds HeaviestQueryByRole with defaults."""
+    from benchmarking.selectors.heaviest import HeaviestQueryByRole
+
+    d = _minimal_valid()
+    d["selector"] = "heaviest_by_role"
+    p = _write_yaml(tmp_path, d)
+    cfg = load_runner_config(p, jsonl_path=tmp_path / "out.jsonl")
+    assert isinstance(cfg.selector, HeaviestQueryByRole)
+
+
+def test_yaml_dispatch_heaviest_passes_overrides(tmp_path: Path) -> None:
+    """n_evidence / max_retry from the YAML block reach the selector."""
+    from benchmarking.selectors.heaviest import HeaviestQueryByRole
+
+    d = _minimal_valid()
+    d["selector"] = {
+        "type": "heaviest_by_role",
+        "n_evidence": {"prediction": 2, "diagnosis": 2},
+        "max_retry": 5,
+    }
+    p = _write_yaml(tmp_path, d)
+    cfg = load_runner_config(p, jsonl_path=tmp_path / "out.jsonl")
+    assert isinstance(cfg.selector, HeaviestQueryByRole)
+    assert cfg.selector.n_evidence == {"prediction": 2, "diagnosis": 2}
+    assert cfg.selector.max_retry == 5
+
+
+def test_scalability_paper_config_loads(tmp_path: Path) -> None:
+    """The paper config loads and exposes the Phase 3 selector + 60s budget."""
+    from benchmarking.selectors.heaviest import HeaviestQueryByRole
+
+    cfg = load_runner_config(
+        _CONFIG_DIR / "scalability_paper.yaml",
+        jsonl_path=tmp_path / "out.jsonl",
+    )
+    assert isinstance(cfg.selector, HeaviestQueryByRole)
+    assert cfg.per_cell_timeout_s == 60.0
+    assert len(cfg.baselines) == 4
 
 
 def test_yaml_dispatch_unknown_selector_raises(tmp_path: Path) -> None:
