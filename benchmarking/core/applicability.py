@@ -34,30 +34,30 @@ BASELINE_FAMILY_APPLICABILITY: dict[str, BaselineApplicability] = {
     # --- Parameter learning (no inference_method suffix) ---
     "pgmpy-mle":               BaselineApplicability(frozenset({"discrete"})),
     "pgmpy-bayes":             BaselineApplicability(frozenset({"discrete"})),
-    "pgmpy-lg":                BaselineApplicability(frozenset({"continuous_lg", "continuous_gauss"})),
+    "pgmpy-lg":                BaselineApplicability(frozenset({"continuous_lg"})),
     "nbn-cat":                 BaselineApplicability(frozenset({"discrete"})),
     "nbn-neuralcat":           BaselineApplicability(frozenset({"discrete"})),
-    "nbn-lg":                  BaselineApplicability(frozenset({"continuous_lg", "continuous_gauss"})),
+    "nbn-lg":                  BaselineApplicability(frozenset({"continuous_lg"})),
     "nbn-mdn":                 BaselineApplicability(
-        frozenset({"continuous_lg", "continuous_gauss", "continuous_nongauss", "hybrid"})),
+        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
     "nbn-flow":                BaselineApplicability(
-        frozenset({"continuous_lg", "continuous_gauss", "continuous_nongauss", "hybrid"})),
-    "nbn-hybrid":              BaselineApplicability(frozenset({"hybrid", "clg"})),
+        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
+    "nbn-hybrid":              BaselineApplicability(frozenset({"hybrid"})),
 
     # --- Inference ---
     "pgmpy-mle-ve":            BaselineApplicability(frozenset({"discrete"})),
     "pgmpy-bayes-ve":          BaselineApplicability(frozenset({"discrete"})),
-    "pgmpy-lg-predict":        BaselineApplicability(frozenset({"continuous_lg", "continuous_gauss"})),
+    "pgmpy-lg-predict":        BaselineApplicability(frozenset({"continuous_lg"})),
     "nbn-cat-ve":              BaselineApplicability(frozenset({"discrete"})),
     "nbn-cat-lw":              BaselineApplicability(frozenset({"discrete"})),
     "nbn-neuralcat-ve":        BaselineApplicability(frozenset({"discrete"})),
     "nbn-neuralcat-lw":        BaselineApplicability(frozenset({"discrete"})),
-    "nbn-lg-lw":               BaselineApplicability(frozenset({"continuous_lg", "continuous_gauss"})),
+    "nbn-lg-lw":               BaselineApplicability(frozenset({"continuous_lg"})),
     "nbn-mdn-lw":              BaselineApplicability(
-        frozenset({"continuous_lg", "continuous_gauss", "continuous_nongauss", "hybrid"})),
+        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
     "nbn-flow-lw":             BaselineApplicability(
-        frozenset({"continuous_lg", "continuous_gauss", "continuous_nongauss", "hybrid"})),
-    "nbn-hybrid-router":       BaselineApplicability(frozenset({"hybrid", "clg"})),
+        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
+    "nbn-hybrid-router":       BaselineApplicability(frozenset({"hybrid"})),
 
     # --- Other libraries ---
     # gpytorch-gp / gpytorch-gp-predict: per-node SVGP regression.
@@ -77,9 +77,9 @@ BASELINE_FAMILY_APPLICABILITY: dict[str, BaselineApplicability] = {
     "pomegranate-discrete":      BaselineApplicability(frozenset({"discrete"})),
     "pomegranate-discrete-ve":   BaselineApplicability(frozenset({"discrete"})),
     "pyro-empirical":            BaselineApplicability(
-        frozenset({"discrete", "continuous_lg", "continuous_gauss", "clg", "hybrid"})),
+        frozenset({"discrete", "continuous_lg", "hybrid"})),
     "pyro-empirical-importance": BaselineApplicability(
-        frozenset({"discrete", "continuous_lg", "continuous_gauss", "clg", "hybrid"})),
+        frozenset({"discrete", "continuous_lg", "hybrid"})),
 }
 
 

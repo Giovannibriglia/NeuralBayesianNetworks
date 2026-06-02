@@ -1,0 +1,45 @@
+# Bnlearn smoke — Phase 4 BnlearnProblemSource, fast end-to-end check.
+#
+# Exercises the full Phase 4 pipeline on one network per kind:
+#   - asia       (discrete,         8 nodes, downloaded .bif)
+#   - ecoli70    (continuous_gauss, 46 nodes, bundled JSON)
+#   - sangiovese (clg,              15 nodes, bundled JSON)
+#
+# Baselines span the families: discrete-only (pgmpy/pomegranate/nbn-cat),
+# Gaussian (pgmpy-lg-predict, nbn-lg-lw), CLG (nbn-hybrid-router), and pyro
+# (all). Inapplicable (baseline, family) cells emit not_supported rows.
+#
+# Design: docs/phase4-design-draft.md §6, §10 Stage 4.
+# Wall-clock budget: ~5 min on CPU.
+version: "v0.13"
+benchmark: bnlearn
+config_name: bnlearn_smoke
+metrics: all
+
+source:
+  networks: [asia, ecoli70, sangiovese]
+  seeds: [0, 1]
+  n_train: 1000
+  n_test: 200
+  n_reference: 500
+
+selector:
+  type: topological
+  target_allocation:
+    hub: 0.30
+    cut: 0.25
+    terminal: 0.25
+    random: 0.20
+
+baselines:
+  - {library: pgmpy,       mechanism: discrete,  param_method: mle, inference_method: ve}
+  - {library: pgmpy,       mechanism: lg,        param_method: lg,  inference_method: predict}
+  - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: ve}
+  - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance, device: cpu}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ve}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: lw, extra_kwargs: {n_samples: 512}}
+  - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router}
+
+n_queries_per_cell: 32
+per_cell_timeout_s: 60.0
+fit_timeout_s_multiplier: 10.0

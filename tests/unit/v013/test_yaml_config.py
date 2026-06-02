@@ -344,6 +344,70 @@ def test_scalability_paper_config_loads(tmp_path: Path) -> None:
     assert len(cfg.baselines) == 4
 
 
+def _bnlearn_source(**overrides) -> dict:
+    src = {
+        "networks": ["asia"], "seeds": [0],
+        "n_train": 100, "n_test": 20, "n_reference": 50,
+    }
+    src.update(overrides)
+    return src
+
+
+def test_yaml_dispatch_bnlearn(tmp_path: Path) -> None:
+    """Phase 4: benchmark=bnlearn builds BnlearnProblemSource + BnlearnConfig."""
+    from benchmarking.problems import BnlearnConfig, BnlearnProblemSource
+
+    d = _minimal_valid()
+    d["benchmark"] = "bnlearn"
+    d["source"] = _bnlearn_source()
+    p = _write_yaml(tmp_path, d)
+    cfg = load_runner_config(p, jsonl_path=tmp_path / "out.jsonl")
+    assert cfg.benchmark == "bnlearn"
+    assert isinstance(cfg.problem_source, BnlearnProblemSource)
+    assert isinstance(cfg.source_config, BnlearnConfig)
+    assert cfg.source_config.networks == ["asia"]
+
+
+def test_yaml_dispatch_bnlearn_all_fields(tmp_path: Path) -> None:
+    """All 5 BnlearnConfig fields thread through the YAML source block."""
+    d = _minimal_valid()
+    d["benchmark"] = "bnlearn"
+    d["source"] = _bnlearn_source(
+        networks=["asia", "alarm"], seeds=[0, 1, 2],
+        n_train=1000, n_test=200, n_reference=500,
+    )
+    p = _write_yaml(tmp_path, d)
+    sc = load_runner_config(p, jsonl_path=tmp_path / "out.jsonl").source_config
+    assert sc.networks == ["asia", "alarm"]
+    assert sc.seeds == [0, 1, 2]
+    assert sc.n_train == 1000
+    assert sc.n_test == 200
+    assert sc.n_reference == 500
+
+
+def test_yaml_dispatch_bnlearn_unknown_source_field_raises(tmp_path: Path) -> None:
+    d = _minimal_valid()
+    d["benchmark"] = "bnlearn"
+    d["source"] = _bnlearn_source(edge_density=0.2)  # synthetic-only field
+    p = _write_yaml(tmp_path, d)
+    with pytest.raises(ValueError, match="edge_density"):
+        load_runner_config(p, jsonl_path=tmp_path / "out.jsonl")
+
+
+def test_bnlearn_smoke_config_loads(tmp_path: Path) -> None:
+    """The committed bnlearn_smoke.yaml loads cleanly."""
+    from benchmarking.problems import BnlearnProblemSource
+
+    cfg = load_runner_config(
+        _CONFIG_DIR / "bnlearn_smoke.yaml",
+        jsonl_path=tmp_path / "out.jsonl",
+    )
+    assert cfg.benchmark == "bnlearn"
+    assert isinstance(cfg.problem_source, BnlearnProblemSource)
+    assert cfg.source_config.networks == ["asia", "ecoli70", "sangiovese"]
+    assert len(cfg.baselines) == 7
+
+
 def test_yaml_dispatch_unknown_selector_raises(tmp_path: Path) -> None:
     """Unknown selector name raises ValueError, not silent fall-through."""
     d = _minimal_valid()

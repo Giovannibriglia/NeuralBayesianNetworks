@@ -78,7 +78,7 @@ Users do not need R for normal use — they just need the bundled JSON files.
 
 Network names match bnlearn's canonical naming (lowercase, no spaces).
 
-Total: 22 discrete + 4 Gaussian + 3 CLG = 29 networks.
+Total: 24 discrete + 4 Gaussian + 3 CLG = 31 networks.
 
 The full list is enumerated in `BnlearnProblemSource._NETWORKS` as a
 mapping `{name → metadata}` where metadata includes:
@@ -274,17 +274,32 @@ since each `(network, seed)` is a distinct entry.
 
 ## 8. Oracle compatibility
 
-The existing oracle (`benchmarking/core/oracle.py`) computes ground
-truth from `problem.true_model`. For bnlearn problems, `true_model` is
-the pgmpy model loaded from the bnlearn file — the same kind of object
-the oracle already handles for synthetic problems.
+The existing oracle (`benchmarking/core/oracle.py`) dispatches on the
+**target node's kind**, not the network's family (confirmed in Stages 2-3):
 
-**Stage 2 verification step**: confirm `filter_ground_truth` and
-per-family ground-truth functions accept a pgmpy model with the same
-interface as synthetic-source ones. If any code path is synthetic-only,
-surface and extend.
+- **Discrete target**: `filter_ground_truth` does exact-match rejection
+  on `problem.ground_truth.samples` (a pre-sampled reference pool). Used
+  for discrete queries in both discrete and CLG networks.
+- **Continuous target**: `forward_with_clamp_posterior_samples` calls
+  `problem.true_model.sample(n, evidence)` for evidence-clamped ancestral
+  sampling. Used for continuous queries in both Gaussian and CLG networks.
 
-Expected outcome: oracle is generic, no changes needed.
+Implications for `BnlearnProblemSource`:
+
+- **Discrete networks**: populate `ground_truth.samples` by
+  forward-sampling `n_reference` rows in topological column order (mirrors
+  `SyntheticProblemSource._ensure_gt_samples`). `true_model` is the loaded
+  pgmpy `DiscreteBayesianNetwork`.
+- **Gaussian / CLG networks**: build a `_BnlearnContinuousModel` whose
+  `.sample(n, evidence)` does ancestral sampling with evidence-clamping.
+  This object doubles as both the data generator (no evidence) and
+  `problem.true_model` (with evidence), so continuous targets get accurate
+  ground truth with **zero oracle changes**. CLG networks additionally
+  populate `ground_truth.samples` for their discrete-target queries.
+
+Stage 3 verified this end-to-end: `forward_with_clamp` returns finite
+samples for both marginal and evidence-clamped queries on ecoli70
+(Gaussian) and sangiovese (CLG).
 
 ## 9. Family naming
 
@@ -298,8 +313,15 @@ network, but parameter generation differs from bnlearn's. Keep names
 distinct so the parquet shows source clearly. Readers can distinguish
 "synthetic LG at n=100" from "ECOLI70 with 46 nodes" downstream.
 
-The applicability machinery (`benchmarking/core/applicability.py`)
-gains two new family values.
+`continuous_gauss` and `clg` are **reporting** family values — they appear
+on `problem.family` and in the parquet's `family` column. They do **not**
+need to be added to `applicability.py`: adapters' `is_applicable` infer the
+gating family from the per-node variable *kinds*
+(`all continuous → continuous_lg`, `mixed → hybrid`), not from
+`problem.family`. So a Gaussian network gates as `continuous_lg` and a CLG
+network gates as `hybrid` (verified in Stage 4's smoke). The per-node type
+must therefore be the literal `"continuous"` (not `"continuous_lg"`), or the
+inference falls through to `hybrid` and the LG baselines never run.
 
 ## 10. Implementation plan (4 stages)
 

@@ -440,16 +440,18 @@ class BnlearnProblemSource:
         data = _load_continuous_json(net_name)
         dag = _json_edges(data)
         cpds = {c["name"]: c for c in data["cpds"]}
-        # Per-node type: discrete nodes (CLG only) keep their cardinality;
-        # continuous nodes are labelled "continuous_lg" (a per-node CLG dist)
-        # so the oracle dispatches them to the continuous/sample path.
+        # Per-node type uses the canonical labels the rest of the stack
+        # expects: "discrete" (with cardinality) or "continuous". The CLG/
+        # Gaussian distinction lives at the *family* level, not per node.
+        # Adapters' is_applicable infer family from these via
+        # ``kinds == {"continuous"}``, so the literal "continuous" matters.
         variables: dict[str, tuple[str, int | None]] = {}
         for node in data["nodes"]:
             c = cpds[node]
             if c["type"] == "discrete":
                 variables[node] = ("discrete", len(c["states"]))
             else:
-                variables[node] = ("continuous_lg", None)
+                variables[node] = ("continuous", None)
 
         # family: pure Gaussian -> continuous_gauss; mixed -> clg (design doc §9).
         family = "continuous_gauss" if kind == "gaussian" else "clg"
