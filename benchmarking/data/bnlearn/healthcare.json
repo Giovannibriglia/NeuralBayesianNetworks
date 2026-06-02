@@ -1,0 +1,173 @@
+{
+  "name": "healthcare",
+  "kind": "clg",
+  "nodes": [
+    "A",
+    "C",
+    "D",
+    "H",
+    "I",
+    "O",
+    "T"
+  ],
+  "edges": [
+    {
+      "from": "A",
+      "to": "C"
+    },
+    {
+      "from": "A",
+      "to": "D"
+    },
+    {
+      "from": "A",
+      "to": "H"
+    },
+    {
+      "from": "A",
+      "to": "O"
+    },
+    {
+      "from": "C",
+      "to": "I"
+    },
+    {
+      "from": "D",
+      "to": "I"
+    },
+    {
+      "from": "H",
+      "to": "D"
+    },
+    {
+      "from": "I",
+      "to": "T"
+    },
+    {
+      "from": "O",
+      "to": "T"
+    }
+  ],
+  "cpds": [
+    {
+      "name": "A",
+      "type": "discrete",
+      "parents": [],
+      "states": [
+        "young",
+        "adult",
+        "old"
+      ],
+      "prob_dim": [
+        3
+      ],
+      "prob_dimnames": {
+        "A": ["young", "adult", "old"]
+      },
+      "prob": [0.35, 0.45, 0.2]
+    },
+    {
+      "name": "C",
+      "type": "discrete",
+      "parents": [
+        "A"
+      ],
+      "states": [
+        "none",
+        "mild",
+        "severe"
+      ],
+      "prob_dim": [
+        3,
+        3
+      ],
+      "prob_dimnames": {
+        "C": ["none", "mild", "severe"],
+        "A": ["young", "adult", "old"]
+      },
+      "prob": [0.88, 0.1, 0.02, 0.75, 0.2, 0.05, 0.42, 0.53, 0.05]
+    },
+    {
+      "name": "D",
+      "type": "clg_continuous",
+      "discrete_parents": [
+        "A",
+        "H"
+      ],
+      "continuous_parents": [],
+      "dlevels": {
+        "A": ["young", "adult", "old"],
+        "H": ["none", "any"]
+      },
+      "intercepts": [0, 0, 0, 1, 4, 7],
+      "coefficients": {},
+      "sds": [0, 0, 0, 0.5, 1, 1.5]
+    },
+    {
+      "name": "H",
+      "type": "discrete",
+      "parents": [
+        "A"
+      ],
+      "states": [
+        "none",
+        "any"
+      ],
+      "prob_dim": [
+        2,
+        3
+      ],
+      "prob_dimnames": {
+        "H": ["none", "any"],
+        "A": ["young", "adult", "old"]
+      },
+      "prob": [0.9, 0.1, 0.75, 0.25, 0.6, 0.4]
+    },
+    {
+      "name": "I",
+      "type": "clg_continuous",
+      "discrete_parents": [
+        "C"
+      ],
+      "continuous_parents": [
+        "D"
+      ],
+      "dlevels": {
+        "C": ["none", "mild", "severe"]
+      },
+      "intercepts": [100, 100, 100],
+      "coefficients": {
+        "D": [300, 550, 800]
+      },
+      "sds": [30, 50, 100]
+    },
+    {
+      "name": "O",
+      "type": "clg_continuous",
+      "discrete_parents": [
+        "A"
+      ],
+      "continuous_parents": [],
+      "dlevels": {
+        "A": ["young", "adult", "old"]
+      },
+      "intercepts": [60, 180, 360],
+      "coefficients": {},
+      "sds": [10, 20, 40]
+    },
+    {
+      "name": "T",
+      "type": "gaussian",
+      "parents": [
+        "I",
+        "O"
+      ],
+      "intercept": 120,
+      "coefficients": {
+        "I": 1.02,
+        "O": 1.05
+      },
+      "sd": 10
+    }
+  ]
+}
