@@ -1,0 +1,84 @@
+# Bnlearn paper-scale benchmark — full network coverage.
+#
+# All 31 networks across three kinds (24 discrete + 4 Gaussian + 3 CLG),
+# 5 seeds, TopologicalAllocator selector, generous per-cell budget.
+#
+# This config produces paper §5 source data for the real-network arm
+# of the v0.13 benchmark. It complements scalability_paper.yaml (synthetic
+# scalability arm).
+#
+# WARNING: full run is multi-day wall-clock. Massive discrete networks
+# (munin*, link at 724-1041 nodes) will have many timeout rows; that's
+# expected outcome, recorded as status, not failure.
+#
+# Design: docs/phase4-design-draft.md §3, §6.
+version: "v0.13"
+benchmark: bnlearn
+config_name: bnlearn_paper
+metrics: all
+
+source:
+  networks:
+    # Discrete — small
+    - asia
+    - cancer
+    - earthquake
+    - sachs
+    - survey
+    # Discrete — medium
+    - alarm
+    - barley
+    - child
+    - insurance
+    - mildew
+    - water
+    # Discrete — large
+    - hailfinder
+    - hepar2
+    - win95pts
+    # Discrete — very large
+    - andes
+    - diabetes
+    - link
+    - munin1
+    - pathfinder
+    - pigs
+    # Discrete — massive
+    - munin
+    - munin2
+    - munin3
+    - munin4
+    # Gaussian
+    - ecoli70
+    - magic-niab
+    - magic-irri
+    - arth150
+    # CLG
+    - healthcare
+    - sangiovese
+    - mehra
+  seeds: [0, 1, 2, 3, 4]
+  n_train: 10240
+  n_test: 1024
+  n_reference: 10240
+
+selector:
+  type: topological
+  target_allocation:
+    hub: 0.30
+    cut: 0.25
+    terminal: 0.25
+    random: 0.20
+
+n_queries_per_cell: 256
+
+baselines:
+  - {library: pgmpy,       mechanism: discrete,  param_method: mle, inference_method: ve}
+  - {library: pgmpy,       mechanism: lg,        param_method: lg,  inference_method: predict}
+  - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: ve}
+  - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance, device: cpu}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ve}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: lw}
+  - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router}
+
+per_cell_timeout_s: 120
