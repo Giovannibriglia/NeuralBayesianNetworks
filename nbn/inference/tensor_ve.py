@@ -159,9 +159,25 @@ class TensorVariableElimination(InferenceEngine):
         # same algorithm, far smaller input on dense networks.
         graph = model.dag.networkx_graph
         relevant = relevant_subnetwork(graph, target, evidence_keys)
+        # Bug 2 Stage 2b (#127): the kept factors are the CPTs of the
+        # relevant nodes, whose scopes are {node} ∪ parents(node).  Some
+        # of those parents lie *outside* the relevant set — e.g. an
+        # evidence node's CPT references its own non-relevant parents.
+        # Those parent variables must be eliminated too; otherwise they
+        # survive into query()/query_batch()'s final "multiply remaining
+        # factors" step and re-form the very joint pruning is meant to
+        # avoid (barley aks_m2 hub-given-MB blew up to a 118M-element
+        # factor when `sort` (card 67) et al. were left un-eliminated).
+        # The elimination scope is therefore the union of the kept
+        # factors' scopes = relevant ∪ parents(relevant), and the min-fill
+        # order is computed over that induced subgraph — the same ordering
+        # unpruned VE would use over exactly these factors.
+        factor_scope = set(relevant)
+        for node in relevant:
+            factor_scope.update(graph.predecessors(node))
         elimination_order = get_order(
             order,
-            graph.subgraph(relevant),
+            graph.subgraph(factor_scope),
             targets=[target],
             evidence=list(evidence_keys),
         )
