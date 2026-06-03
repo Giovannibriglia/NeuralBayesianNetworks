@@ -2,7 +2,7 @@
 
 The benchmark → figures workflow is two-phase, both under this one CLI:
 
-    nbn-bench inference --config benchmarking/configs/inference_smoke.yaml
+    nbn-bench inference --config benchmarking/configs/synthetic/smoke_tests/inference_smoke.yaml
     nbn-bench plot <results-dir-or-parquet> --output-dir <out>
 
 ``inference`` runs the benchmark and writes a parquet (+ tables/figures);

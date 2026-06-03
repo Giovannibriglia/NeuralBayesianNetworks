@@ -18,7 +18,7 @@ File naming::
 
 Example::
 
-    inference_paper_discrete_tv_per_node_vs_problem_id.pdf
+    inference_complete_discrete_tv_per_node_vs_problem_id.pdf
 
 Return dict key: ``"{family}_{metric}"`` (e.g., ``"discrete_tv_per_node"``).
 
@@ -155,7 +155,7 @@ def render_figures(
     output_dir:
         Root output directory.  Figures land in ``{output_dir}/figures/``.
     output_prefix:
-        Run label prefix (e.g. ``"inference_paper"``).
+        Run label prefix (e.g. ``"inference_complete"``).
     formats:
         File formats to produce per figure.  Default: png + pdf + svg.
     log_y_for_time:

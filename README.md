@@ -66,8 +66,8 @@ gpytorch, and pomegranate have no applicable hybrid baselines.
     pip install -e ".[dev,bench,neural,gp,mcmc]"
 
 The `gp` and `mcmc` extras install gpytorch and pyro respectively.
-Both are required for paper-grade benchmark runs (`inference_paper.yaml`,
-`parameter_learning_paper.yaml`). Without them the runner silently skips
+Both are required for paper-grade benchmark runs (`synthetic/complete/inference_complete.yaml`,
+`synthetic/complete/parameter_learning_complete.yaml`). Without them the runner silently skips
 those baselines (cells emit `not_supported` rather than erroring).
 
 ## Quick start
@@ -153,16 +153,16 @@ Each crash test has a smoke config (CI, < 60s) and a paper config
 
 ```bash
 # Smoke (runs in CI):
-nbn-bench param-learning --config benchmarking/configs/parameter_learning_smoke.yaml
-nbn-bench inference      --config benchmarking/configs/inference_smoke.yaml
+nbn-bench param-learning --config benchmarking/configs/synthetic/smoke_tests/parameter_learning_smoke.yaml
+nbn-bench inference      --config benchmarking/configs/synthetic/smoke_tests/inference_smoke.yaml
 
 # Paper (8 GB VRAM, the laptop variant used for v0.6c-d paper data):
-nbn-bench param-learning --config benchmarking/configs/parameter_learning_paper_laptop.yaml
-nbn-bench inference      --config benchmarking/configs/inference_paper_laptop.yaml
+nbn-bench param-learning --config benchmarking/configs/synthetic/complete/parameter_learning_complete_laptop.yaml
+nbn-bench inference      --config benchmarking/configs/synthetic/complete/inference_complete_laptop.yaml
 
 # Paper (≥16 GB VRAM, canonical config without batch reductions):
-nbn-bench param-learning --config benchmarking/configs/parameter_learning_paper.yaml
-nbn-bench inference      --config benchmarking/configs/inference_paper.yaml
+nbn-bench param-learning --config benchmarking/configs/synthetic/complete/parameter_learning_complete.yaml
+nbn-bench inference      --config benchmarking/configs/synthetic/complete/inference_complete.yaml
 ```
 
 Each invocation writes its output under `benchmarking/results/`:
@@ -190,7 +190,7 @@ Each config is a YAML file with these fields:
                           optional inference_method and device (cpu|cuda|auto)
     per_cell_timeout_s:   wall-clock cap per (family, n_nodes, seed, baseline)
 
-See `benchmarking/configs/*.yaml` for all four shipped configs.
+See `benchmarking/configs/**/*.yaml` for all shipped configs.
 
 ## Status
 

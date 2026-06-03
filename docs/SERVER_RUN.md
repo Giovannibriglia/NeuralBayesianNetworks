@@ -61,8 +61,8 @@ cd /path/to/NeuralBayesianNetworks   # always from repo root
 # pyro on CPU; pyro timeouts at n≥100 for discrete/continuous_lg/hybrid
 # add ~3-5 h regardless of CUDA). ~30-50 h on a CPU-only server.
 nohup nbn-bench inference \
-  --config benchmarking/configs/inference_paper.yaml \
-  > /tmp/inference_paper.log 2>&1 &
+  --config benchmarking/configs/synthetic/complete/inference_complete.yaml \
+  > /tmp/inference_complete.log 2>&1 &
 echo "PID=$!"
 ```
 
@@ -76,8 +76,8 @@ they share VRAM and the combined memory pressure may cause OOM at large n.
 
 | Hardware | Inference config |
 |---|---|
-| Server (≥16 GB VRAM or CPU-only) | `inference_paper.yaml` |
-| Laptop (8 GB VRAM) | `inference_paper_laptop.yaml` |
+| Server (≥16 GB VRAM or CPU-only) | `synthetic/complete/inference_complete.yaml` |
+| Laptop (8 GB VRAM) | `synthetic/complete/inference_complete_laptop.yaml` |
 
 ### Output location
 
@@ -233,7 +233,7 @@ does each baseline's full cell pipeline overflow the 60s budget?"
 
 ```bash
 nohup nbn-bench inference \
-  --config benchmarking/configs/inference_scalability.yaml \
+  --config benchmarking/configs/synthetic/complete/inference_scalability.yaml \
   > /tmp/inference_scalability.log 2>&1 &
 echo "PID $!"
 ```
