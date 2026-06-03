@@ -1,9 +1,49 @@
+# =============================================================================
+# synthetic inference complete — paper-grade (RTX 4070 laptop, 8 GB VRAM).
+# =============================================================================
+#
+# Schema reference (benchmarking/core/yaml_config.py):
+#
+# Top-level (RunnerConfig):
+#   version                   required, must be "v0.13"
+#   benchmark                 required, "bnlearn" | "synthetic"
+#   config_name               required, used as the output-artifact prefix
+#   metrics                   default: "all"  ("all" | "timing")
+#   selector                  default: "uniform_random"
+#                             ("uniform_random" | {type: topological, ...}
+#                              | {type: heaviest_by_role, ...})
+#   source                    required, see below
+#   baselines                 required, non-empty list of baseline specs
+#   n_queries_per_cell        required
+#   per_cell_timeout_s        required (seconds)
+#   fit_timeout_s_multiplier  default: 10.0
+#   fit_timeout_s             default: null (computed = multiplier * per_cell_timeout_s)
+#
+# Source (synthetic):
+#   families             required, list
+#                        (discrete | continuous_lg | continuous_nongauss | hybrid)
+#   n_nodes_list         required, list of int node counts
+#   seeds                required, list of int RNG seeds
+#   n_train              required
+#   n_test               default: 2000
+#   n_reference          required
+#   edge_density         required
+#   max_in_degree        required
+#   cardinality          required
+#   fraction_continuous  required
+#   device               default: "cpu"
+#
+# Baseline spec (each item in `baselines`):
+#   library, mechanism, param_method        (required)
+#   inference_method, device, extra_kwargs   (optional)
+# =============================================================================
+
 # Paper-grade inference config — RTX 4070 Laptop (8 GB VRAM) variant.
 # Same baselines / families / n_nodes / seeds / metrics as inference_paper.yaml.
 # nbn_lw_n_samples preserved at 4096 (v0.6c-A correctness fix).
 version: "v0.13"
 benchmark: synthetic
-config_name: paper_laptop
+config_name: complete_laptop
 metrics: all
 selector: uniform_random
 

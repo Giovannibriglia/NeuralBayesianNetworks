@@ -65,19 +65,19 @@ def _minimal_valid(config_name: str = "test") -> dict:
 
 _CONFIG_DIR = Path("benchmarking/configs")
 _INFERENCE_CONFIGS = [
-    "inference_smoke.yaml",
-    "inference_paper.yaml",
-    "inference_paper_laptop.yaml",
-    "inference_scalability.yaml",
-    "inference_smoke_topological.yaml",
-    "inference_smoke_random_only.yaml",
-    "scalability_smoke.yaml",
-    "scalability_paper.yaml",
+    "synthetic/smoke_tests/inference_smoke.yaml",
+    "synthetic/complete/inference_complete.yaml",
+    "synthetic/complete/inference_complete_laptop.yaml",
+    "synthetic/complete/inference_scalability.yaml",
+    "synthetic/smoke_tests/inference_smoke_topological.yaml",
+    "synthetic/smoke_tests/inference_smoke_random_only.yaml",
+    "synthetic/smoke_tests/scalability_smoke.yaml",
+    "synthetic/complete/scalability_complete.yaml",
 ]
 _PARAM_CONFIGS = [
-    "parameter_learning_smoke.yaml",
-    "parameter_learning_paper.yaml",
-    "parameter_learning_paper_laptop.yaml",
+    "synthetic/smoke_tests/parameter_learning_smoke.yaml",
+    "synthetic/complete/parameter_learning_complete.yaml",
+    "synthetic/complete/parameter_learning_complete_laptop.yaml",
 ]
 
 
@@ -331,12 +331,12 @@ def test_yaml_dispatch_heaviest_passes_overrides(tmp_path: Path) -> None:
     assert cfg.selector.max_retry == 5
 
 
-def test_scalability_paper_config_loads(tmp_path: Path) -> None:
+def test_scalability_complete_config_loads(tmp_path: Path) -> None:
     """The paper config loads and exposes the Phase 3 selector + 60s budget."""
     from benchmarking.selectors.heaviest import HeaviestQueryByRole
 
     cfg = load_runner_config(
-        _CONFIG_DIR / "scalability_paper.yaml",
+        _CONFIG_DIR / "synthetic/complete/scalability_complete.yaml",
         jsonl_path=tmp_path / "out.jsonl",
     )
     assert isinstance(cfg.selector, HeaviestQueryByRole)
@@ -395,11 +395,11 @@ def test_yaml_dispatch_bnlearn_unknown_source_field_raises(tmp_path: Path) -> No
 
 
 def test_bnlearn_smoke_config_loads(tmp_path: Path) -> None:
-    """The committed bnlearn_smoke.yaml loads cleanly."""
+    """The committed bnlearn smoke config loads cleanly."""
     from benchmarking.problems import BnlearnProblemSource
 
     cfg = load_runner_config(
-        _CONFIG_DIR / "bnlearn_smoke.yaml",
+        _CONFIG_DIR / "bnlearn/smoke_tests/inference_smoke.yaml",
         jsonl_path=tmp_path / "out.jsonl",
     )
     assert cfg.benchmark == "bnlearn"
