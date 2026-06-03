@@ -63,10 +63,14 @@ class CellRunResult:
     classification: 'completed' / 'timeout' / 'killed'. The per-row
       status field within rows is independent — this classification
       describes the subprocess lifecycle.
+    stderr: subprocess stderr text, captured post-exit. Logging only —
+      the result rows still come from the output file, so this does not
+      change the isolation/result-passing contract.
     """
     rows: list[dict]
     exit_code: int
     classification: str
+    stderr: str = ""
 
 
 def run_cell_in_subprocess(
@@ -133,6 +137,16 @@ def run_cell_in_subprocess(
 
         exit_code = proc.returncode
 
+        # Drain the already-captured stderr now that the process has exited
+        # (read is non-blocking on a finished process). Logging only; does not
+        # affect the result rows (those come from the output file).
+        stderr_text = ""
+        if proc.stderr is not None:
+            try:
+                stderr_text = proc.stderr.read().decode("utf-8", "replace")
+            except Exception:
+                stderr_text = ""
+
         # If the subprocess died from a signal, mark as killed
         # (Negative return code on POSIX = killed by signal)
         if exit_code is not None and exit_code < 0 and classification == "completed":
@@ -175,6 +189,7 @@ def run_cell_in_subprocess(
             rows=rows,
             exit_code=exit_code if exit_code is not None else -1,
             classification=classification,
+            stderr=stderr_text,
         )
     finally:
         # Clean up temp files

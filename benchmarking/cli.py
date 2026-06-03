@@ -71,12 +71,51 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _setup_console_logging(verbose: bool, *, inference: bool) -> None:
+    """Configure root + console handler. The inference benchmark is tqdm-led,
+    so its console shows WARNING+ unless ``-v`` (the run.log keeps full INFO);
+    other commands keep INFO on the console."""
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    for h in list(root.handlers):           # idempotent across calls/tests
+        root.removeHandler(h)
+    console = logging.StreamHandler()
+    if inference and not verbose:
+        console.setLevel(logging.WARNING)
+    else:
+        console.setLevel(logging.DEBUG if verbose else logging.INFO)
+    console.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"))
+    root.addHandler(console)
+
+
+def _attach_run_log(results_dir) -> logging.FileHandler:
+    """Attach a FileHandler writing all INFO+ logs to <results_dir>/run.log."""
+    from pathlib import Path
+    Path(results_dir).mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(
+        Path(results_dir) / "run.log", mode="w", encoding="utf-8",
+    )
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"))
+    logging.getLogger().addHandler(handler)
+    return handler
+
+
+def _suppress_library_warnings() -> None:
+    """Silence known-noisy dependency warnings on the console (the subprocess
+    re-emits pgmpy's FutureWarning to its stderr, which is captured to the
+    run.log per cell, so nothing is actually lost)."""
+    import warnings
+    warnings.filterwarnings("ignore", category=FutureWarning, module=r"pgmpy.*")
+    warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"pyro.*")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-    )
+    _setup_console_logging(args.verbose, inference=(args.cmd == "inference"))
 
     if args.cmd == "param-learning":
         print(
@@ -105,70 +144,83 @@ def main(argv: list[str] | None = None) -> int:
         device = None if args.device == "auto" else args.device
         cfg = load_runner_config(args.config, device_override=device)
 
-        # ── cell loop ────────────────────────────────────────────────────────
-        for _ in Runner().run(cfg):
-            pass
+        # Console noise from dependencies stays out of the terminal; the
+        # subprocess re-emits it to stderr -> captured to run.log per cell.
+        _suppress_library_warnings()
 
-        # ── post-run pipeline ────────────────────────────────────────────────
-        # JSONL is already on disk from the runner.  Produce parquet + tables
-        # + figures so callers get the same output package as v0.12.
-        # Each step is independent: a failure logs the error and sets rc=1
-        # but does not prevent the remaining steps from running.
-        rc = 0
+        # The run.log lives in the results dir alongside the parquet and
+        # captures the full INFO stream (incl. per-cell subprocess stderr),
+        # regardless of the console level. Detached in `finally` so it closes
+        # even on crash.
         results_dir = cfg.jsonl_path.parent
         config_name = cfg.config_name
         parquet_path = results_dir / f"{config_name}_metrics.parquet"
-
-        # Step 1: JSONL → parquet
+        log_handler = _attach_run_log(results_dir)
         try:
-            from benchmarking.core.output import jsonl_to_parquet
-            jsonl_to_parquet(cfg.jsonl_path, parquet_path)
-            logger.info("Wrote parquet: %s", parquet_path)
-        except Exception as exc:
-            logger.error("Post-run step 1 (jsonl_to_parquet) failed: %s", exc)
-            rc = 1
+            # ── cell loop ──────────────────────────────────────────────────
+            for _ in Runner().run(cfg):
+                pass
 
-        # Step 2+3: aggregate → tables (independent of figures)
-        if parquet_path.exists():
+            # ── post-run pipeline ──────────────────────────────────────────
+            # JSONL is already on disk from the runner.  Produce parquet +
+            # tables + figures so callers get the same output package as
+            # v0.12.  Each step is independent: a failure logs the error and
+            # sets rc=1 but does not prevent the remaining steps from running.
+            rc = 0
+
+            # Step 1: JSONL → parquet
             try:
-                from benchmarking._aggregate import aggregate
-                from benchmarking._tables import write_all
-                aggregated = aggregate(parquet_path)
-                table_paths = write_all(
-                    aggregated,
-                    output_dir=results_dir,
-                    output_prefix=config_name,
-                )
-                logger.info(
-                    "Wrote %d table files to: %s",
-                    len(table_paths), results_dir / "tables",
-                )
+                from benchmarking.core.output import jsonl_to_parquet
+                jsonl_to_parquet(cfg.jsonl_path, parquet_path)
+                logger.info("Wrote parquet: %s", parquet_path)
             except Exception as exc:
-                logger.error(
-                    "Post-run step 2 (aggregate/tables) failed: %s", exc,
-                )
+                logger.error("Post-run step 1 (jsonl_to_parquet) failed: %s", exc)
                 rc = 1
 
-            # Step 4: figures
-            try:
-                from benchmarking._plot_v2 import render_figures
-                figure_paths = render_figures(
-                    parquet_path=parquet_path,
-                    output_dir=results_dir,
-                    output_prefix=config_name,
-                )
-                n_figs = sum(len(v) for v in figure_paths.values())
-                logger.info(
-                    "Wrote %d figure files to: %s",
-                    n_figs, results_dir / "figures",
-                )
-            except Exception as exc:
-                logger.error(
-                    "Post-run step 3 (render_figures) failed: %s", exc,
-                )
-                rc = 1
+            # Step 2+3: aggregate → tables (independent of figures)
+            if parquet_path.exists():
+                try:
+                    from benchmarking._aggregate import aggregate
+                    from benchmarking._tables import write_all
+                    aggregated = aggregate(parquet_path)
+                    table_paths = write_all(
+                        aggregated,
+                        output_dir=results_dir,
+                        output_prefix=config_name,
+                    )
+                    logger.info(
+                        "Wrote %d table files to: %s",
+                        len(table_paths), results_dir / "tables",
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Post-run step 2 (aggregate/tables) failed: %s", exc,
+                    )
+                    rc = 1
 
-        return rc
+                # Step 4: figures
+                try:
+                    from benchmarking._plot_v2 import render_figures
+                    figure_paths = render_figures(
+                        parquet_path=parquet_path,
+                        output_dir=results_dir,
+                        output_prefix=config_name,
+                    )
+                    n_figs = sum(len(v) for v in figure_paths.values())
+                    logger.info(
+                        "Wrote %d figure files to: %s",
+                        n_figs, results_dir / "figures",
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Post-run step 3 (render_figures) failed: %s", exc,
+                    )
+                    rc = 1
+
+            return rc
+        finally:
+            logging.getLogger().removeHandler(log_handler)
+            log_handler.close()
 
     raise AssertionError(f"unhandled subcommand {args.cmd!r}")  # pragma: no cover
 
