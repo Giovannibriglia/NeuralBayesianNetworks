@@ -43,7 +43,6 @@ _TOP_LEVEL_KEYS = frozenset({
     "baselines",
     "n_queries_per_cell",
     "per_cell_timeout_s",
-    "fit_timeout_s_multiplier",
     "fit_timeout_s",
 })
 
@@ -203,10 +202,7 @@ def load_runner_config(
     # ── iteration parameters ─────────────────────────────────────────────────
     n_queries_per_cell = int(d["n_queries_per_cell"])
     per_cell_timeout_s = float(d["per_cell_timeout_s"])
-    fit_timeout_s_multiplier = float(d.get("fit_timeout_s_multiplier", 10.0))
-    fit_timeout_s = d.get("fit_timeout_s")
-    if fit_timeout_s is not None:
-        fit_timeout_s = float(fit_timeout_s)
+    fit_timeout_s = float(d.get("fit_timeout_s", 1000.0))
 
     if jsonl_path is None:
         from benchmarking.core.output import make_results_dir
@@ -222,7 +218,6 @@ def load_runner_config(
         baselines=baselines,
         n_queries_per_cell=n_queries_per_cell,
         per_cell_timeout_s=per_cell_timeout_s,
-        fit_timeout_s_multiplier=fit_timeout_s_multiplier,
         fit_timeout_s=fit_timeout_s,
         jsonl_path=jsonl_path,
     )
