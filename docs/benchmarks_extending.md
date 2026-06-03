@@ -95,7 +95,7 @@ baselines:
 
 n_queries_per_cell: 16
 per_cell_timeout_s: 120.0
-fit_timeout_s_multiplier: 10.0
+fit_timeout_s: 1000.0
 ```
 
 Run with:

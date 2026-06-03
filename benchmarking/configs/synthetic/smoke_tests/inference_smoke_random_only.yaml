@@ -16,7 +16,6 @@
 #   baselines                 required, non-empty list of baseline specs
 #   n_queries_per_cell        required
 #   per_cell_timeout_s        required (seconds)
-#   fit_timeout_s_multiplier  default: 10.0
 #   fit_timeout_s             default: null (computed = multiplier * per_cell_timeout_s)
 #
 # Source (synthetic):
@@ -86,4 +85,3 @@ baselines:
 # clearly demonstrated across many queries.
 n_queries_per_cell: 16
 per_cell_timeout_s: 60.0
-fit_timeout_s_multiplier: 10.0

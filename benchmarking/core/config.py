@@ -82,12 +82,12 @@ class RunnerConfig:
         cumulative total of adapter.query() wall-clock for a cell exceeds
         this value, remaining queries receive status="timeout" rows.
         Does NOT gate fit() or metrics computation.
-    fit_timeout_s_multiplier:
-        fit() is allowed up to this multiple of ``per_cell_timeout_s``.
-        If ``fit_time_s > fit_timeout_s_multiplier * per_cell_timeout_s``,
-        the cell is emitted with status="timeout" and remaining queries
-        are skipped.  Default 10x provides a generous safety net without
-        letting a runaway fit block the full run.
+    fit_timeout_s:
+        fit() is allowed up to this many seconds.  If
+        ``fit_time_s > fit_timeout_s``, the cell is emitted with
+        status="timeout" and remaining queries are skipped.  Default
+        1000s is a generous safety net without letting a runaway fit
+        block the full run.
     jsonl_path:
         Path to the JSONL output file (streaming, line-buffered).
 
@@ -103,8 +103,7 @@ class RunnerConfig:
     baselines: list[BaselineSpec]
     n_queries_per_cell: int
     per_cell_timeout_s: float
-    fit_timeout_s_multiplier: float = 10.0
-    fit_timeout_s: float | None = None  # explicit override; if set, ignores multiplier
+    fit_timeout_s: float = 1000.0  # fit() safety budget (seconds)
     jsonl_path: Path = field(default_factory=lambda: Path("output.jsonl"))
 
 

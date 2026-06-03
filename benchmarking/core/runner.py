@@ -334,11 +334,7 @@ class Runner:
             One per (problem, baseline, query, metric).  Includes
             not_supported, timeout, error, and oom sentinel rows.
         """
-        fit_budget_s = (
-            cfg.fit_timeout_s
-            if cfg.fit_timeout_s is not None
-            else cfg.fit_timeout_s_multiplier * cfg.per_cell_timeout_s
-        )
+        fit_budget_s = cfg.fit_timeout_s
         default_role = getattr(cfg.selector, "query_role", "random")
 
         # Per-cell progress bar (problem × baseline). Determinate when the

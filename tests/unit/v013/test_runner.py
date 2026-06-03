@@ -110,7 +110,7 @@ def _make_runner_cfg(
     *,
     per_cell_timeout_s: float = 120.0,
     measurement: Any = None,
-    fit_timeout_s_multiplier: float = 10.0,
+    fit_timeout_s: float = 1000.0,
     config_name: str = "test",
 ) -> RunnerConfig:
     if measurement is None:
@@ -125,7 +125,7 @@ def _make_runner_cfg(
         baselines=[spec],
         n_queries_per_cell=_N_QUERIES,
         per_cell_timeout_s=per_cell_timeout_s,
-        fit_timeout_s_multiplier=fit_timeout_s_multiplier,
+        fit_timeout_s=fit_timeout_s,
         jsonl_path=tmp_path / "out.jsonl",
     )
 
@@ -219,9 +219,9 @@ class TestRunnerConfig:
         )
         assert cfg.benchmark == "synthetic"
         assert cfg.n_queries_per_cell == 4
-        assert cfg.fit_timeout_s_multiplier == 10.0
+        assert cfg.fit_timeout_s == 1000.0
 
-    def test_fit_timeout_s_multiplier_custom(self, tmp_path):
+    def test_fit_timeout_s_custom(self, tmp_path):
         src, src_cfg = _make_source_cfg("discrete")
         cfg = RunnerConfig(
             benchmark="synthetic",
@@ -233,10 +233,10 @@ class TestRunnerConfig:
             baselines=[],
             n_queries_per_cell=4,
             per_cell_timeout_s=60.0,
-            fit_timeout_s_multiplier=5.0,
+            fit_timeout_s=500.0,
             jsonl_path=tmp_path / "out.jsonl",
         )
-        assert cfg.fit_timeout_s_multiplier == 5.0
+        assert cfg.fit_timeout_s == 500.0
 
     def test_source_config_held_separately(self, tmp_path):
         src, src_cfg = _make_source_cfg("discrete")
