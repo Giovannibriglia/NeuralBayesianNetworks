@@ -95,3 +95,31 @@ def test_n_parameters_absent_logged(tmp_path):
     assert "n_parameters" in log and "absent" in log.lower()
     assert not list(out_dir.rglob("*_vs_n_parameters*")), "n_parameters figures should be skipped"
     assert list(out_dir.rglob("*_vs_n_nodes*")), "n_nodes figures should still be produced"
+
+
+def test_n_parameters_lookup_keyed_by_problem_and_family():
+    """#133 regression: the same problem_id across two families with different
+    n_parameters must be retrieved independently (synthetic case), not collapsed
+    to whichever family sorts first."""
+    from scripts.make_paper_figures import n_parameters_lookup
+
+    df = pd.DataFrame([
+        {"problem_id": "10", "family": "discrete", "n_parameters": 256.0},
+        {"problem_id": "10", "family": "hybrid", "n_parameters": 72.0},
+        {"problem_id": "10", "family": "continuous_lg", "n_parameters": 0.0},
+        {"problem_id": "5", "family": "discrete", "n_parameters": 44.0},
+    ])
+    lut = n_parameters_lookup(df)
+    assert lut[("10", "discrete")] == 256.0
+    assert lut[("10", "hybrid")] == 72.0          # NOT collapsed to 256
+    assert lut[("10", "continuous_lg")] == 0.0
+    assert lut[("5", "discrete")] == 44.0
+    # family-scoped flatten (mirrors process_cell) yields the right x-lookup
+    hybrid = {p: v for (p, f), v in lut.items() if f == "hybrid"}
+    assert hybrid == {"10": 72.0}
+
+
+def test_n_parameters_lookup_absent_returns_none():
+    df = pd.DataFrame([{"problem_id": "5", "family": "discrete", "value": 1.0}])
+    from scripts.make_paper_figures import n_parameters_lookup
+    assert n_parameters_lookup(df) is None

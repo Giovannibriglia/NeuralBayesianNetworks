@@ -55,6 +55,12 @@ class CellResult:
     # Phase 3 per-query metadata (default "full" keeps pre-Phase-3 selectors working)
     evidence_mode: str = "full"             # "full" | "empty"
 
+    # Problem-level metadata (#133): total discrete CPT cell count, a
+    # cardinality-aware proxy for inference cost (paper figures §5.4b). None
+    # when the problem can't supply structure. Injected once per cell by the
+    # runner, so it's identical across all rows of a given problem.
+    n_parameters: int | None = None
+
 
 # Valid status values (for validation in implementations)
 VALID_STATUSES = frozenset({"ok", "timeout", "oom", "error", "not_supported"})
