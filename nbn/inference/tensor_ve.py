@@ -21,6 +21,7 @@ import torch
 
 from nbn.core.factor import LogFactor
 from nbn.inference._elimination_order import get_order
+from nbn.inference._pruning import relevant_subnetwork
 from nbn.inference.base import InferenceEngine
 
 logger = logging.getLogger(__name__)
@@ -33,8 +34,9 @@ class TensorVariableElimination(InferenceEngine):
         self.treewidth_threshold = treewidth_threshold
         # Memoise factor build by id(model). Cleared on `invalidate_cache`.
         self._factor_cache: Dict[int, Dict[str, LogFactor]] = {}
-        # Memoise the elimination order per (id(model), targets, evidence_keys).
-        self._plan_cache: Dict[tuple, list[str]] = {}
+        # Memoise the (elimination_order, relevant_set) per
+        # (id(model), targets, evidence_keys, order).
+        self._plan_cache: Dict[tuple, tuple[list[str], set[str]]] = {}
 
     def invalidate_cache(self, model=None) -> None:
         if model is None:
@@ -93,7 +95,40 @@ class TensorVariableElimination(InferenceEngine):
         *,
         order: str = "min_fill",
     ) -> list[str]:
-        """Compute (or look up cached) elimination plan.
+        """Compute (or look up cached) elimination order.
+
+        Thin wrapper over :meth:`_plan_with_relevant` returning just the
+        order, preserving the historical list-valued contract used by
+        external callers (the memory-guard test and the
+        ``ve_profile_n20`` diagnostic).
+        """
+        return self._plan_with_relevant(
+            model, target, evidence_keys, order=order,
+        )[0]
+
+    def _plan_with_relevant(
+        self,
+        model,
+        target: str,
+        evidence_keys: tuple[str, ...],
+        *,
+        order: str = "min_fill",
+    ) -> tuple[list[str], set[str]]:
+        """Compute (or look up cached) elimination plan + relevant set.
+
+        Returns a ``(elimination_order, relevant_set)`` tuple where
+        ``relevant_set`` is the Bayes-ball relevant subnetwork for
+        ``(target, evidence_keys)`` (Bug 2 of #127).  The elimination
+        order is computed on the *induced subgraph* of that relevant set,
+        not the full DAG, so barren and m-separated nodes never enter the
+        ordering.  Callers also use ``relevant_set`` to drop factors for
+        non-relevant nodes before elimination (see ``query`` /
+        ``query_batch``).
+
+        This is the single source of truth for both the order and the
+        relevant set: both are derived once per cached
+        ``(id(model), target, evidence_keys, order)`` key, so
+        ``relevant_subnetwork`` runs at most once per distinct query.
 
         Parameters
         ----------
@@ -109,20 +144,30 @@ class TensorVariableElimination(InferenceEngine):
         -----
         Cache key includes ``order`` so different strategies cache
         independently; the same ``(model, target, evidence_keys)``
-        query under two orders does *not* invalidate either entry.
+        query under two orders does *not* invalidate either entry.  The
+        relevant set is a deterministic function of
+        ``(model, target, evidence_keys)`` so it is cached alongside the
+        order under the same key.
         """
         key = (id(model), target, evidence_keys, order)
         cached = self._plan_cache.get(key)
         if cached is not None:
             return cached
+        # Bug 2 (#127): restrict elimination to the variables m-connected
+        # to the target given evidence.  The min-fill order is then
+        # computed on the induced subgraph rather than the full DAG —
+        # same algorithm, far smaller input on dense networks.
+        graph = model.dag.networkx_graph
+        relevant = relevant_subnetwork(graph, target, evidence_keys)
         elimination_order = get_order(
             order,
-            model.dag.networkx_graph,
+            graph.subgraph(relevant),
             targets=[target],
             evidence=list(evidence_keys),
         )
-        self._plan_cache[key] = elimination_order
-        return elimination_order
+        result = (elimination_order, relevant)
+        self._plan_cache[key] = result
+        return result
 
     # ------------------------------------------------------------------ #
     # Single-row query (kept identical to the v0.2 path)
@@ -149,6 +194,19 @@ class TensorVariableElimination(InferenceEngine):
         }
         factors = self._extract_factors(model)
 
+        to_eliminate, relevant = self._plan_with_relevant(
+            model, target, tuple(sorted(ev_int.keys())), order=order,
+        )
+
+        # Bug 2 (#127): drop factors for non-relevant nodes.  Pruning the
+        # elimination *order* alone is not enough — the final
+        # "multiply remaining factors" step below would otherwise re-form
+        # the giant joint over the dropped barren/m-separated variables
+        # and OOM exactly as before.  The relevant set (requisite
+        # probability nodes) is precisely the CPTs needed to preserve
+        # P(target | evidence) up to the final softmax normalisation.
+        factors = {n: f for n, f in factors.items() if n in relevant}
+
         # Condition each factor on evidence
         conditioned: list[LogFactor] = []
         for _node, factor in factors.items():
@@ -157,10 +215,6 @@ class TensorVariableElimination(InferenceEngine):
                 if ev_node in f.variables:
                     f = f.condition({ev_node: ev_val})
             conditioned.append(f)
-
-        to_eliminate = self._plan(
-            model, target, tuple(sorted(ev_int.keys())), order=order,
-        )
         for var in to_eliminate:
             relevant = [f for f in conditioned if var in f.variables]
             rest = [f for f in conditioned if var not in f.variables]
@@ -245,6 +299,16 @@ class TensorVariableElimination(InferenceEngine):
 
         factors = self._extract_factors(model)
 
+        to_eliminate, relevant = self._plan_with_relevant(
+            model, target, tuple(sorted(ev_norm.keys())), order=order,
+        )
+
+        # Bug 2 (#127): drop factors for non-relevant nodes before
+        # conditioning.  See the rationale in ``query`` — order pruning
+        # alone would relocate, not fix, the barley OOM because the
+        # final factor product re-forms the giant joint.
+        factors = {n: f for n, f in factors.items() if n in relevant}
+
         # Condition each factor batchwise.
         # `conditioned` holds tuples `(log_values_tensor, vars, has_batch)`.
         conditioned: list[tuple[torch.Tensor, list[str], bool]] = []
@@ -253,10 +317,6 @@ class TensorVariableElimination(InferenceEngine):
                 f.log_values, f.variables, ev_norm,
             )
             conditioned.append((lv, vars_, has_b))
-
-        to_eliminate = self._plan(
-            model, target, tuple(sorted(ev_norm.keys())), order=order,
-        )
 
         # v0.6b round-2: pre-allocation memory-budget guard.  Estimate
         # the peak intermediate-factor size by walking the plan

@@ -8,8 +8,11 @@ Reference: docs/v0.13-bug2-subnetwork-pruning.md §6.1
 """
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import networkx as nx
 import pytest
+import torch
 
 from nbn.inference._pruning import relevant_subnetwork
 
@@ -166,3 +169,77 @@ class TestRelevantSubnetworkAPI:
         dag = _dag([("A", "B")])
         with pytest.raises(KeyError, match="ZZZ"):
             relevant_subnetwork(dag, target="A", evidence={"ZZZ": 0})
+
+
+def _all_nodes(graph, target, evidence=None):
+    """Drop-in for relevant_subnetwork that disables pruning by returning
+    the full node set — reproduces the pre-Stage-2 eliminate-everything
+    behaviour for the equivalence tests below."""
+    return set(graph.nodes())
+
+
+class TestPruningPreservesAnswers:
+    """Verify pruned VE produces posteriors identical to unpruned VE.
+
+    Pruning is the correctness guarantee of m-separation — a strict
+    improvement, not an approximation. We run the same query twice on the
+    same model: once through the real (pruned) code path, and once with
+    ``relevant_subnetwork`` monkeypatched to return every node (which
+    reproduces the pre-Stage-2 behaviour: no factors dropped, the full
+    DAG eliminated). The posteriors must match to numerical precision.
+
+    Wiring point: Bug 2 Stage 2, ``nbn/inference/tensor_ve.py``.
+    """
+
+    def _make_model(self):
+        from benchmarking.synthetic import make_synthetic_bn
+
+        bn = make_synthetic_bn(
+            family="discrete", n_nodes=12, cardinality=3,
+            max_in_degree=3, edge_density=0.25,
+            n_train=100, n_test=20, n_reference=50, seed=0, device="cpu",
+        )
+        return bn.true_model
+
+    def _query_pruned_and_unpruned(self, model, target, evidence):
+        from nbn.inference.tensor_ve import TensorVariableElimination
+        import nbn.inference.tensor_ve as ve_mod
+
+        # Real (pruned) path — fresh engine so the plan cache is clean.
+        pruned = TensorVariableElimination().query(model, [target], evidence)
+        # Unpruned reference: patch the name as bound inside tensor_ve.
+        with patch.object(ve_mod, "relevant_subnetwork", _all_nodes):
+            unpruned = TensorVariableElimination().query(
+                model, [target], evidence,
+            )
+        return pruned, unpruned
+
+    def test_pruned_equals_unpruned_marginal(self):
+        """Marginal queries P(target): pruning drops barren descendants
+        of the target, unpruned keeps them — answers must be identical."""
+        model = self._make_model()
+        for target in ["X0", "X4", "X8", "X11"]:
+            pruned, unpruned = self._query_pruned_and_unpruned(
+                model, target, {},
+            )
+            assert torch.allclose(pruned, unpruned, atol=1e-6), (
+                f"pruned != unpruned for marginal P({target}): "
+                f"{pruned} vs {unpruned}"
+            )
+            assert torch.isclose(
+                pruned.sum(), torch.tensor(1.0), atol=1e-5
+            ), f"posterior P({target}) not normalised: sum={pruned.sum()}"
+
+    def test_pruned_equals_unpruned_conditional(self):
+        """Conditional queries P(target | evidence): pruning drops nodes
+        m-separated from the target given the evidence."""
+        model = self._make_model()
+        evidence = {"X1": 0, "X3": 1}
+        for target in ["X0", "X7", "X10"]:
+            pruned, unpruned = self._query_pruned_and_unpruned(
+                model, target, evidence,
+            )
+            assert torch.allclose(pruned, unpruned, atol=1e-6), (
+                f"pruned != unpruned for P({target} | {evidence}): "
+                f"{pruned} vs {unpruned}"
+            )

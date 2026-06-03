@@ -16,10 +16,25 @@ import pytest
 import torch
 
 from benchmarking.synthetic import make_synthetic_bn
+import nbn.inference.tensor_ve as ve_mod
 from nbn.inference.tensor_ve import (
     TensorVariableElimination,
     _estimate_peak_bytes,
 )
+
+
+def _all_nodes(graph, target, evidence=None):
+    """Disable Bug 2 subnetwork pruning by returning the full node set.
+
+    Bug 2 / PR #131 (Stage 2) wired ``relevant_subnetwork`` into VE, which
+    shrinks the elimination scope to the variables m-connected to the
+    target.  The two tests below were calibrated to the *full* 20-node
+    elimination and measure pre-pruning behaviour (the min-fill-vs-
+    topological estimator and the OOM guard) that pruning by design now
+    bypasses; patching the relevant set back to all nodes restores the
+    elimination scope they were written to exercise.
+    """
+    return set(graph.nodes())
 
 
 def test_estimator_predicts_smaller_peak_for_min_fill_than_topological() -> None:
@@ -37,8 +52,12 @@ def test_estimator_predicts_smaller_peak_for_min_fill_than_topological() -> None
     target = "X2"
     ev_keys = ("X0", "X10")
     factors = eng._extract_factors(bn.true_model)
-    plan_topo = eng._plan(bn.true_model, target, ev_keys, order="topological")
-    plan_mf = eng._plan(bn.true_model, target, ev_keys, order="min_fill")
+    # Bug 2 / PR #131: pruning would reduce this query to a 1-variable
+    # elimination (where min-fill and topological coincide).  Disable it so
+    # the estimator is exercised on the full 20-node scope this test targets.
+    with patch.object(ve_mod, "relevant_subnetwork", _all_nodes):
+        plan_topo = eng._plan(bn.true_model, target, ev_keys, order="topological")
+        plan_mf = eng._plan(bn.true_model, target, ev_keys, order="min_fill")
 
     peak_topo = _estimate_peak_bytes(
         plan_topo, factors, evidence_keys=ev_keys, B=16,
@@ -111,7 +130,12 @@ def test_query_batch_oom_guard_raises_on_constrained_cuda_device() -> None:
     # raises before any tensor op that would touch the device.
     fake_device = torch.device("cuda:0")
     model_cls = type(bn.true_model)
-    with patch.object(model_cls, "device",
+    # Bug 2 / PR #131: disable pruning so the guard sees the full 20-node
+    # elimination peak (~256 MiB) this test calibrates against; with pruning
+    # the relevant scope shrinks below the 64 MiB threshold and the guard
+    # correctly would not fire (pruning solves the OOM rather than guarding it).
+    with patch.object(ve_mod, "relevant_subnetwork", _all_nodes), \
+         patch.object(model_cls, "device",
                       new_callable=PropertyMock,
                       return_value=fake_device), \
          patch("torch.cuda.mem_get_info",
