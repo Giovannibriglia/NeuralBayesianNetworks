@@ -190,18 +190,24 @@ def size_bucket_lookup(benchmark: str, problem_ids, n_nodes: dict[str, int]) -> 
     return {p: _synthetic_size_bucket(n_nodes[p]) for p in problem_ids if p in n_nodes}
 
 
-def n_parameters_lookup(df: pd.DataFrame) -> dict[str, float] | None:
-    """Read n_parameters from the parquet if the column exists, else None.
+def n_parameters_lookup(df: pd.DataFrame) -> dict[tuple[str, str], float] | None:
+    """Map ``(problem_id, family) -> n_parameters`` from the parquet (#133),
+    or None if the column is absent.
 
-    Per spec 5.4, computing it from network structure is deferred to a runner
-    change that emits it as a problem-level column; absence -> skip the figures.
+    Keyed by ``(problem_id, family)`` rather than ``problem_id`` alone because
+    in the synthetic benchmark the same ``problem_id`` (n_nodes) recurs across
+    families with different n_parameters (e.g. discrete n=10 -> 256, hybrid -> 72,
+    continuous -> 0); keying by problem_id alone would collapse them to whichever
+    family sorted first. For bnlearn each problem_id maps to a single family, so
+    the extra key is a no-op there (behavior unchanged).
     """
     if "n_parameters" not in df.columns:
         return None
-    sub = df[["problem_id", "n_parameters"]].dropna()
+    sub = df[["problem_id", "family", "n_parameters"]].dropna(subset=["n_parameters"])
     if sub.empty:
         return None
-    return {p: float(v) for p, v in sub.groupby("problem_id")["n_parameters"].first().items()}
+    g = sub.groupby(["problem_id", "family"])["n_parameters"].first()
+    return {(p, f): float(v) for (p, f), v in g.items()}
 
 
 # --- Per-query extraction (the melted schema) ---------------------------------
@@ -457,10 +463,14 @@ def _table_scoped(df_cell, family, aggregation, scope_col, scope_val, out_path, 
 def process_cell(df_cell, benchmark, family, size, aggregation, n_nodes, n_params, cell_dir):
     cell_dir.mkdir(parents=True, exist_ok=True)
     title = f"{benchmark}/{family}/{size}"
-    # x-axes available
+    # x-axes available. n_params is keyed by (problem_id, family); scope it to
+    # this cell's family and flatten to {problem_id: value} so the scaling
+    # helpers can look up by problem_id as for n_nodes.
     axes = [("n_nodes", n_nodes)]
     if n_params is not None:
-        axes.append(("n_parameters", n_params))
+        n_params_family = {p: v for (p, f), v in n_params.items() if f == family}
+        if n_params_family:
+            axes.append(("n_parameters", n_params_family))
 
     fig_success_rate(df_cell, cell_dir / "success_rate.pdf", title)
 

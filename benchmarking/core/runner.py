@@ -27,6 +27,7 @@ from typing import Any, Iterator
 from benchmarking.core.config import BaselineSpec, RunnerConfig, build_adapter
 from benchmarking.core.output import JsonlWriter
 from benchmarking.core.results import CellResult
+from benchmarking.domains._n_parameters import n_parameters_from_problem
 
 _NAN = float("nan")
 
@@ -358,6 +359,16 @@ class Runner:
 
         result = run_cell_in_subprocess(ctx, timeout_s=cell_timeout_s)
 
+        # #133: enrich every row with the problem's n_parameters (a tighter,
+        # cardinality-aware cost proxy than n_nodes; paper figures §5.4b).
+        # Computed once per cell from problem.variables + problem.dag and
+        # injected here -- the single choke point all rows (measurement rows,
+        # every sentinel, subprocess-reconstructed rows) pass through -- rather
+        # than threaded through the ~12 CellResult construction sites.
+        n_params = n_parameters_from_problem(problem)
+
         for row in _rows_to_cellresults(result.rows, problem, spec, cfg.benchmark):
+            if n_params is not None and row.n_parameters is None:
+                row = dataclasses.replace(row, n_parameters=n_params)
             writer.write(row)
             yield row
