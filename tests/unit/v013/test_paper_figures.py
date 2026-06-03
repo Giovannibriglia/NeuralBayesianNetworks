@@ -1,10 +1,11 @@
-"""Smoke test for scripts/make_paper_figures.py.
+"""Smoke test for the `nbn-bench plot` subcommand (benchmarking/_paper_figures.py).
 
 Doesn't verify figure content (manual review). Verifies:
 1. Pipeline runs without exception against a representative DataFrame
 2. Both aggregation flags work
 3. At least one PDF and one .tex are emitted
 4. n_parameters absence is logged and the *_vs_n_parameters figures skipped
+5. The deprecated scripts/make_paper_figures.py shim still works + warns
 
 Reference: docs/v0.13-paper-figures.md
 """
@@ -17,7 +18,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-_SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "make_paper_figures.py"
+_SHIM = Path(__file__).resolve().parents[3] / "scripts" / "make_paper_figures.py"
 
 
 def _make_minimal_parquet(tmp_path: Path) -> Path:
@@ -60,8 +61,9 @@ def _make_minimal_parquet(tmp_path: Path) -> Path:
 
 
 def _run(parquet: Path, out_dir: Path, aggregation: str):
+    """Invoke the `nbn-bench plot` subcommand (positional parquet)."""
     return subprocess.run(
-        [sys.executable, str(_SCRIPT), "--parquet", str(parquet),
+        [sys.executable, "-m", "benchmarking.cli", "plot", str(parquet),
          "--output-dir", str(out_dir), "--aggregation", aggregation],
         capture_output=True, text=True,
     )
@@ -101,7 +103,7 @@ def test_n_parameters_lookup_keyed_by_problem_and_family():
     """#133 regression: the same problem_id across two families with different
     n_parameters must be retrieved independently (synthetic case), not collapsed
     to whichever family sorts first."""
-    from scripts.make_paper_figures import n_parameters_lookup
+    from benchmarking._paper_figures import n_parameters_lookup
 
     df = pd.DataFrame([
         {"problem_id": "10", "family": "discrete", "n_parameters": 256.0},
@@ -121,5 +123,49 @@ def test_n_parameters_lookup_keyed_by_problem_and_family():
 
 def test_n_parameters_lookup_absent_returns_none():
     df = pd.DataFrame([{"problem_id": "5", "family": "discrete", "value": 1.0}])
-    from scripts.make_paper_figures import n_parameters_lookup
+    from benchmarking._paper_figures import n_parameters_lookup
     assert n_parameters_lookup(df) is None
+
+
+def test_run_plot_direct_call(tmp_path):
+    """The module entry point run_plot() works without the CLI/subprocess."""
+    from benchmarking._paper_figures import run_plot
+
+    parquet = _make_minimal_parquet(tmp_path)
+    out_dir = tmp_path / "figures_direct"
+    rc = run_plot(parquet=parquet, output_dir=out_dir, aggregation="iqm_iqr")
+    assert rc == 0
+    assert list(out_dir.rglob("*.pdf"))
+    assert list(out_dir.rglob("*.tex"))
+
+
+def test_run_plot_accepts_directory(tmp_path):
+    """run_plot resolves a directory to its *_metrics.parquet."""
+    from benchmarking._paper_figures import run_plot
+
+    # Lay the parquet out as `<dir>/<name>_metrics.parquet`.
+    parquet = _make_minimal_parquet(tmp_path)
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    target = results_dir / "smoke_metrics.parquet"
+    target.write_bytes(parquet.read_bytes())
+
+    out_dir = tmp_path / "figures_from_dir"
+    rc = run_plot(parquet=results_dir, output_dir=out_dir, aggregation="iqm_iqr")
+    assert rc == 0
+    assert list(out_dir.rglob("*.pdf"))
+
+
+def test_deprecated_shim_still_works_and_warns(tmp_path):
+    """scripts/make_paper_figures.py delegates to run_plot and emits a
+    DeprecationWarning (backward compat for existing callers)."""
+    parquet = _make_minimal_parquet(tmp_path)
+    out_dir = tmp_path / "figures_shim"
+    result = subprocess.run(
+        [sys.executable, str(_SHIM), "--parquet", str(parquet),
+         "--output-dir", str(out_dir)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, f"shim failed: {result.stderr[-800:]}"
+    assert "deprecat" in (result.stdout + result.stderr).lower()
+    assert list(out_dir.rglob("*.pdf"))

@@ -1,12 +1,14 @@
 """``nbn-bench`` CLI dispatcher (v0.13).
 
-Two subcommands, both consume a YAML config:
+The benchmark → figures workflow is two-phase, both under this one CLI:
 
-    nbn-bench inference     --config benchmarking/configs/inference_smoke.yaml
-    nbn-bench param-learning --config benchmarking/configs/parameter_learning_smoke.yaml
+    nbn-bench inference --config benchmarking/configs/inference_smoke.yaml
+    nbn-bench plot <results-dir-or-parquet> --output-dir <out>
 
-``param-learning`` is structurally preserved but stubbed — the
-ParamLearningMeasurement is deferred to a later v0.13 phase.
+``inference`` runs the benchmark and writes a parquet (+ tables/figures);
+``plot`` reads that parquet and renders the paper figures + LaTeX tables
+(docs/v0.13-paper-figures.md). ``param-learning`` is structurally preserved
+but stubbed — the ParamLearningMeasurement is deferred to a later v0.13 phase.
 See issue #109 for status.
 """
 from __future__ import annotations
@@ -45,6 +47,27 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="'auto' (default), 'cpu', or 'cuda[:i]'.")
     inf.add_argument("-v", "--verbose", action="store_true")
 
+    plot = sub.add_parser(
+        "plot",
+        help="Generate paper figures + LaTeX tables from a benchmark parquet.",
+        description=(
+            "Read a benchmark parquet (the output of `nbn-bench inference`) and "
+            "produce figures + LaTeX tables per docs/v0.13-paper-figures.md."
+        ),
+    )
+    plot.add_argument("parquet",
+                      help="Path to a *_metrics.parquet file, or a directory "
+                           "containing one (a results dir from `nbn-bench inference`).")
+    plot.add_argument("--output-dir", required=True,
+                      help="Directory to write figures + LaTeX tables into.")
+    plot.add_argument("--aggregation", choices=["iqm_iqr", "mean_std"],
+                      default="iqm_iqr",
+                      help="Aggregation statistic (default: iqm_iqr).")
+    plot.add_argument("--benchmark", default=None,
+                      help="Restrict to one benchmark; default processes all "
+                           "present in the parquet.")
+    plot.add_argument("-v", "--verbose", action="store_true")
+
     return parser
 
 
@@ -63,6 +86,17 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 0
+
+    if args.cmd == "plot":
+        from pathlib import Path
+
+        from benchmarking._paper_figures import run_plot
+        return run_plot(
+            parquet=Path(args.parquet),
+            output_dir=Path(args.output_dir),
+            aggregation=args.aggregation,
+            benchmark=args.benchmark,
+        )
 
     if args.cmd == "inference":
         from benchmarking.core.yaml_config import load_runner_config
