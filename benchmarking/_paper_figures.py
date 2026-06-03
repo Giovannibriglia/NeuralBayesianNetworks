@@ -64,6 +64,19 @@ LIBRARY_COLORS = {
 }
 _FALLBACK_COLOR = "tab:gray"
 
+# Status -> color for the 100%-stacked status breakdown (spec 5.1). Green for
+# the good segment; failure modes warm-progressing-to-distinct. not_supported
+# is neutral gray (applicability, not failure). STATUS_ORDER fixes the stacking
+# order bottom-up: ok grows from the floor, failures stacked above.
+STATUS_COLORS = {
+    "ok": "#2ca02c",             # green
+    "not_supported": "#7f7f7f",  # gray (neutral — applicability, not failure)
+    "timeout": "#ff7f0e",        # orange (over budget)
+    "error": "#d62728",          # red (genuine failure)
+    "oom": "#8c564b",            # brown (memory failure)
+}
+STATUS_ORDER = ("ok", "not_supported", "timeout", "error", "oom")
+
 # Collapse the 5 registry size_class buckets to 3 headline buckets (spec 4.1).
 SIZE_COLLAPSE = {
     "small": "small",
@@ -231,6 +244,30 @@ def per_query_success(df_cell: pd.DataFrame) -> dict[str, float]:
     return out
 
 
+def per_query_status_counts(df_cell: pd.DataFrame) -> pd.DataFrame:
+    """Per-baseline status counts over the same unit as :func:`per_query_success`.
+
+    The counting unit is one executed query (``metric=="query_time_s"`` rows,
+    one per query, carrying its per-query status: ok / timeout / error / oom /
+    not_supported) *plus* the whole-cell sentinel rows (``metric=="status"``,
+    one per unsupported/fit-failed unit). Both contribute to the denominator
+    exactly as in ``per_query_success`` (total = executed + sentinel), so the
+    stacked percentages are the per-query success rate decomposed by status.
+
+    Returns a DataFrame indexed by baseline with one column per status in
+    STATUS_ORDER (counts, reindexed with fill 0); empty if no unit rows exist.
+    """
+    unit = df_cell[df_cell["metric"].isin(["query_time_s", "status"])]
+    if unit.empty:
+        return pd.DataFrame()
+    counts = unit.groupby(["baseline", "status"]).size().unstack(fill_value=0)
+    # Surface any status outside the palette rather than silently dropping it.
+    unknown = [c for c in counts.columns if c not in STATUS_ORDER]
+    if unknown:
+        logger.warning("status(es) outside stacked-bar palette dropped: %s", unknown)
+    return counts.reindex(columns=list(STATUS_ORDER), fill_value=0)
+
+
 def query_time_totals(df_cell: pd.DataFrame) -> pd.DataFrame:
     """Per-(baseline, problem_id, seed) total query time (spec 3.4): sum of
     query_time_s over the metric=="query_time_s", status=="ok" rows."""
@@ -258,21 +295,41 @@ def _savefig(fig, out_path: Path) -> None:
     plt.close(fig)
 
 
-def fig_success_rate(df_cell, out_path: Path, title: str) -> None:
-    rates = per_query_success(df_cell)
-    if not rates:
+def fig_status_stacked(df_cell, out_path: Path, title: str) -> None:
+    """100%-stacked status breakdown per baseline (spec 5.1).
+
+    Each bar sums to 100%; segments show the fraction of each status
+    (ok / not_supported / timeout / error / oom) over the per-query unit.
+    Replaces the prior single-segment success-rate plot — same artifact name
+    (``success_rate.pdf``), richer information: the green segment is exactly the
+    old success rate, and the remainder is decomposed by failure mode.
+    """
+    counts = per_query_status_counts(df_cell)
+    totals = counts.sum(axis=1) if not counts.empty else pd.Series(dtype=float)
+    counts = counts[totals > 0] if not counts.empty else counts
+    if counts.empty:
         logger.info("skip empty (no baselines): %s", out_path.name)
         return
-    baselines = sorted(rates)
-    colors = baseline_colors(baselines)
+    pct = counts.div(counts.sum(axis=1), axis=0) * 100
+    baselines = sorted(pct.index)
+    pct = pct.loc[baselines]
+
     fig, ax = plt.subplots(figsize=(max(5, 0.7 * len(baselines)), 4))
-    ax.bar(range(len(baselines)), [rates[b] for b in baselines],
-           color=[colors[b] for b in baselines])
+    bottoms = np.zeros(len(baselines))
+    for status in STATUS_ORDER:
+        values = pct[status].to_numpy()
+        if (values == 0).all():
+            continue  # don't add a legend entry for an absent status
+        ax.bar(range(len(baselines)), values, bottom=bottoms,
+               color=STATUS_COLORS[status], label=status,
+               edgecolor="white", linewidth=0.5)
+        bottoms += values
     ax.set_xticks(range(len(baselines)))
     ax.set_xticklabels(baselines, rotation=45, ha="right", fontsize=8)
     ax.set_ylim(0, 100)
-    ax.set_ylabel("Success rate (%)")
-    ax.set_title(f"{title} — success rate")
+    ax.set_ylabel("% of queries")
+    ax.set_title(f"{title} — status breakdown")
+    ax.legend(loc="upper right", bbox_to_anchor=(1.0, 1.0), fontsize=7)
     _savefig(fig, out_path)
 
 
@@ -468,7 +525,7 @@ def process_cell(df_cell, benchmark, family, size, aggregation, n_nodes, n_param
         if n_params_family:
             axes.append(("n_parameters", n_params_family))
 
-    fig_success_rate(df_cell, cell_dir / "success_rate.pdf", title)
+    fig_status_stacked(df_cell, cell_dir / "success_rate.pdf", title)
 
     for metric in ACCURACY_METRICS:
         if family in DISCRETE_FAMILIES and metric == "w1_per_node":
