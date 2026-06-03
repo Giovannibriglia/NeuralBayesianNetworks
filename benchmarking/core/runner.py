@@ -22,14 +22,46 @@ Reference: docs/v0.13-benchmark-redesign.md §3, §4.1, §6
 from __future__ import annotations
 
 import dataclasses
+import logging
+import sys
 from typing import Any, Iterator
+
+from tqdm import tqdm
 
 from benchmarking.core.config import BaselineSpec, RunnerConfig, build_adapter
 from benchmarking.core.output import JsonlWriter
 from benchmarking.core.results import CellResult
 from benchmarking.domains._n_parameters import n_parameters_from_problem
 
+logger = logging.getLogger(__name__)
+
 _NAN = float("nan")
+
+
+def _estimate_total_cells(cfg: RunnerConfig) -> int | None:
+    """Best-effort total cell count (problems × baselines) for the progress
+    bar. Returns None (indeterminate counter) when the problem grid can't be
+    sized cheaply from the source config without materialising the generator."""
+    sc = cfg.source_config
+    seeds = getattr(sc, "seeds", None)
+    if seeds is None:
+        return None
+    networks = getattr(sc, "networks", None)
+    n_problems = None
+    if networks is not None:
+        n_problems = len(networks) * len(seeds)
+    else:
+        for attr in ("n_nodes_values", "n_values", "n_nodes_list", "n_nodes"):
+            vals = getattr(sc, attr, None)
+            if isinstance(vals, (list, tuple)):
+                n_problems = len(vals) * len(seeds)
+                break
+    if n_problems is None:
+        return None
+    try:
+        return n_problems * len(cfg.baselines)
+    except TypeError:
+        return None
 
 # Bug 4 (#127) Stage 2: fixed buffer (seconds) added on top of the
 # fit + query budgets to derive the cell-level subprocess hard timeout.
@@ -309,14 +341,33 @@ class Runner:
         )
         default_role = getattr(cfg.selector, "query_role", "random")
 
-        with JsonlWriter(cfg.jsonl_path) as writer:
-            for problem in cfg.problem_source.iter_problems(cfg.source_config):
-                for spec in cfg.baselines:
-                    yield from self._run_cell(
-                        cfg, problem, spec, writer,
-                        fit_budget_s=fit_budget_s,
-                        default_role=default_role,
-                    )
+        # Per-cell progress bar (problem × baseline). Determinate when the
+        # source config exposes its problem grid (networks/n-values × seeds);
+        # an indeterminate counter otherwise. Disabled when stdout is not a
+        # tty (CI / piped / writing to run.log) so no control chars leak.
+        total_cells = _estimate_total_cells(cfg)
+        pbar = tqdm(
+            total=total_cells, disable=not sys.stdout.isatty(),
+            ncols=80, unit="cell", desc="cells",
+        )
+        try:
+            with JsonlWriter(cfg.jsonl_path) as writer:
+                for problem in cfg.problem_source.iter_problems(cfg.source_config):
+                    for spec in cfg.baselines:
+                        name = build_adapter(spec).name
+                        pid = getattr(problem, "problem_id", "?")
+                        pbar.set_description(f"fitting {name} on {pid}")
+                        # Goes to run.log (INFO); console is WARNING-gated.
+                        logger.info("fitting %s on %s (seed=%s)",
+                                    name, pid, getattr(problem, "seed", 0))
+                        yield from self._run_cell(
+                            cfg, problem, spec, writer,
+                            fit_budget_s=fit_budget_s,
+                            default_role=default_role,
+                        )
+                        pbar.update(1)
+        finally:
+            pbar.close()
 
     def _run_cell(
         self,
@@ -358,6 +409,17 @@ class Runner:
         cell_timeout_s = fit_budget_s + cfg.per_cell_timeout_s + _CELL_TIMEOUT_BUFFER_S
 
         result = run_cell_in_subprocess(ctx, timeout_s=cell_timeout_s)
+
+        # Persist the cell subprocess's captured stderr to the run.log (INFO,
+        # so it stays off the WARNING-gated console). The subprocess is a
+        # separate process whose logs would otherwise be lost; this is the
+        # only place they re-enter the parent's logging. Bug 4 isolation is
+        # untouched — this is the already-captured stream, read post-exit.
+        stderr_text = (getattr(result, "stderr", "") or "").strip()
+        if stderr_text:
+            logger.info("cell subprocess stderr [%s/%s]:\n%s",
+                        getattr(problem, "problem_id", "?"),
+                        build_adapter(spec).name, stderr_text)
 
         # #133: enrich every row with the problem's n_parameters (a tighter,
         # cardinality-aware cost proxy than n_nodes; paper figures §5.4b).
