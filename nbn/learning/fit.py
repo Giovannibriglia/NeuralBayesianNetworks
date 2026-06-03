@@ -94,6 +94,23 @@ def fit(
             mech_kwargs.setdefault("lr", lr)
             mech_kwargs.setdefault("batch_size", batch_size)
 
+            # Bug 1a (#127): thread declared cardinalities so tabular
+            # mechanisms span the full declared range rather than truncating
+            # to observed-distinct values (which caused query-time factor-axis
+            # mismatches on networks with rare states). Mechanisms that don't
+            # need them ignore the kwargs. Only supplied when available so the
+            # mechanism keeps its observed-data fallback otherwise.
+            node_var = model.variables.get(node)
+            if node_var is not None and node_var.cardinality is not None:
+                mech_kwargs.setdefault("n_classes", int(node_var.cardinality))
+            parent_vars = [model.variables.get(p) for p in parents]
+            if parents and all(
+                pv is not None and pv.cardinality is not None for pv in parent_vars
+            ):
+                mech_kwargs.setdefault(
+                    "parent_cards", [int(pv.cardinality) for pv in parent_vars]
+                )
+
             metrics = mech.fit_local(x, pa_tensor, **mech_kwargs)
 
             # Compute held-out LL on full data for logging
