@@ -28,14 +28,18 @@ Old (functional) adapter: benchmarking/baselines/pgmpy_adapter.py
 """
 from __future__ import annotations
 
+import logging
 import warnings
 from typing import Any
 
 import torch
 
+from benchmarking.core._device import resolve_device
 from benchmarking.core.applicability import BASELINE_FAMILY_APPLICABILITY as _BASELINE_APPLICABILITY
 from benchmarking.domains.base import BenchmarkProblem, Query
 from benchmarking.domains.posterior import Posterior
+
+logger = logging.getLogger(__name__)
 
 _VALID_PARAM_METHODS = frozenset({"mle", "bayes", "lg"})
 _VALID_INFERENCE_METHODS = frozenset({"ve", "predict"})
@@ -66,6 +70,7 @@ class PgmpyAdapter:
         param_method: str,
         inference_method: str,
         n_samples: int = 1024,
+        device: str | None = None,
         **kwargs: Any,
     ) -> None:
         if param_method not in _VALID_PARAM_METHODS:
@@ -81,6 +86,18 @@ class PgmpyAdapter:
         self.param_method = param_method
         self.inference_method = inference_method
         self.n_samples = int(n_samples)
+        # pgmpy is a CPU-only library: its inference and estimators run on
+        # numpy/pandas, not torch tensors.  We accept the device arg for a
+        # uniform adapter contract but always run on CPU; if a GPU device
+        # was explicitly requested, log the override so it isn't silently
+        # surprising in the device column.
+        resolved = resolve_device(device)
+        if resolved.startswith("cuda"):
+            logger.info(
+                "PgmpyAdapter: device=%r requested but pgmpy is CPU-only; "
+                "running on cpu.", resolved,
+            )
+        self.device = "cpu"
         self.name = f"pgmpy-{param_method}-{inference_method}"
 
         # State populated by fit()
