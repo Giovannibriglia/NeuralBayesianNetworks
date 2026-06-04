@@ -31,6 +31,7 @@ from tqdm import tqdm
 from benchmarking.core.config import BaselineSpec, RunnerConfig, build_adapter
 from benchmarking.core.output import JsonlWriter
 from benchmarking.core.results import CellResult
+from benchmarking.domains.base import FailedProblem
 from benchmarking.domains._n_parameters import n_parameters_from_problem
 
 logger = logging.getLogger(__name__)
@@ -349,6 +350,41 @@ class Runner:
         try:
             with JsonlWriter(cfg.jsonl_path) as writer:
                 for problem in cfg.problem_source.iter_problems(cfg.source_config):
+                    # A problem source yields this sentinel when a problem
+                    # fails to load (e.g. a download 404).  Record one error
+                    # row per baseline so the failure is visible in the
+                    # parquet, then continue — the source generator stays
+                    # alive and advances to the next problem.
+                    if isinstance(problem, FailedProblem):
+                        logger.warning(
+                            "problem %s failed to load (%s); recording %d error "
+                            "rows and skipping", problem.problem_id,
+                            problem.error_msg, len(cfg.baselines),
+                        )
+                        for spec in cfg.baselines:
+                            error_row = CellResult(
+                                benchmark=problem.benchmark,
+                                family=problem.family,
+                                problem_id=problem.problem_id,
+                                seed=-1,
+                                baseline=build_adapter(spec).name,
+                                query_role="",
+                                metric="status",
+                                value=float("nan"),
+                                status="error",
+                                fit_time_s=float("nan"),
+                                query_time_s=float("nan"),
+                                metrics_time_s=float("nan"),
+                                error_msg=f"problem load failed: {problem.error_msg}",
+                                query_kind="",
+                                evidence_strategy="",
+                                evidence_mode="full",
+                                n_parameters=None,
+                            )
+                            writer.write(error_row)
+                            yield error_row
+                        pbar.update(len(cfg.baselines))
+                        continue
                     for spec in cfg.baselines:
                         name = build_adapter(spec).name
                         pid = getattr(problem, "problem_id", "?")
