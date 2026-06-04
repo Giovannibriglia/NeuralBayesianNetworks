@@ -22,9 +22,23 @@ from typing import Any, Iterator
 import networkx as nx
 import torch
 
-from benchmarking.domains.base import BenchmarkProblem, GroundTruth
+from benchmarking.domains.base import BenchmarkProblem, FailedProblem, GroundTruth
 
 logger = logging.getLogger(__name__)
+
+
+def _kind_to_family(kind: str) -> str:
+    """Map a registry ``kind`` to the v0.13 parquet ``family`` string.
+
+    Mirrors the ``family`` values set by ``_discrete_problems`` /
+    ``_continuous_problems`` so a ``FailedProblem`` row carries the same
+    ``family`` a successful load would have produced.
+    """
+    if kind == "gaussian":
+        return "continuous_gauss"
+    if kind == "clg":
+        return "clg"
+    return "discrete"
 
 # Cache directory for downloaded .bif files.
 _CACHE_DIR = Path("~/.cache/nbn/bnlearn").expanduser()
@@ -102,9 +116,29 @@ class BnlearnConfig:
     n_reference: int = 5000
 
 
+# bnlearn hosts the munin1/2/3 partitions under the ``munin4`` directory, not a
+# per-name directory.  Verified 2026-06-04: ``/bnrepository/munin4/munin{1,2,3}.bif.gz``
+# return HTTP 200 while ``/bnrepository/munin{1,2,3}/...`` return 404 (this is what
+# silently killed the 2026-06-03 bnlearn_complete run at munin1).  Everything else —
+# including ``munin`` and ``munin4`` themselves — uses the per-name directory.
+_URL_DIRECTORY_OVERRIDES: dict[str, str] = {
+    "munin1": "munin4",
+    "munin2": "munin4",
+    "munin3": "munin4",
+}
+
+# Hard timeout for a single download attempt.  ``urlretrieve`` accepts no timeout
+# and would block indefinitely on a stalled connection; ``urlopen(timeout=...)``
+# bounds connect + per-read blocking.  No retries: a wrong URL is not transient,
+# and a failed load is now recorded as a FailedProblem row (the run continues)
+# rather than aborting — so retrying a permanent 404 would only waste time.
+_DOWNLOAD_TIMEOUT_S = 30.0
+
+
 def _bif_url(name: str) -> str:
     """URL for the bnlearn discrete ``.bif`` file (gzipped)."""
-    return f"https://www.bnlearn.com/bnrepository/{name}/{name}.bif.gz"
+    directory = _URL_DIRECTORY_OVERRIDES.get(name, name)
+    return f"https://www.bnlearn.com/bnrepository/{directory}/{name}.bif.gz"
 
 
 def _ensure_cached(name: str) -> Path:
@@ -121,7 +155,8 @@ def _ensure_cached(name: str) -> Path:
     logger.info("Downloading bnlearn network %s from %s", name, url)
     local_gz = _CACHE_DIR / f"{name}.bif.gz"
     try:
-        urllib.request.urlretrieve(url, local_gz)
+        with urllib.request.urlopen(url, timeout=_DOWNLOAD_TIMEOUT_S) as response:
+            local_gz.write_bytes(response.read())
     except Exception as e:  # noqa: BLE001 — re-raised with context
         raise RuntimeError(f"Failed to download {name}.bif.gz from {url}: {e}") from e
 
@@ -379,8 +414,18 @@ class BnlearnProblemSource:
     seed-specific forward-sampled data.
     """
 
-    def iter_problems(self, config: BnlearnConfig) -> Iterator[BenchmarkProblem]:
-        """Yield one ``BenchmarkProblem`` per ``(network, seed)`` pair."""
+    def iter_problems(
+        self, config: BnlearnConfig,
+    ) -> Iterator[BenchmarkProblem | FailedProblem]:
+        """Yield one ``BenchmarkProblem`` per ``(network, seed)`` pair.
+
+        A network whose data fails to load (download 404, parse error, …)
+        does **not** abort the run: the failure is caught here — keeping this
+        generator alive — and a single ``FailedProblem`` sentinel is yielded
+        in its place before continuing to the next network.  An unknown
+        network name remains a fatal config error (raised), since it signals
+        a typo the caller should fix rather than a transient/data problem.
+        """
         for net_name in config.networks:
             if net_name not in _NETWORKS:
                 raise ValueError(
@@ -393,14 +438,27 @@ class BnlearnProblemSource:
                 "Loading bnlearn network %s (kind=%s, n_nodes=%d)",
                 net_name, kind, meta["n_nodes"],
             )
-            if kind == "discrete":
-                yield from self._discrete_problems(net_name, config)
-            elif kind in ("gaussian", "clg"):
-                yield from self._continuous_problems(net_name, kind, config)
-            else:
-                raise ValueError(
-                    f"Network {net_name!r} has unsupported kind={kind!r}."
+            try:
+                if kind == "discrete":
+                    yield from self._discrete_problems(net_name, config)
+                elif kind in ("gaussian", "clg"):
+                    yield from self._continuous_problems(net_name, kind, config)
+                else:
+                    raise ValueError(
+                        f"Network {net_name!r} has unsupported kind={kind!r}."
+                    )
+            except Exception as exc:  # noqa: BLE001 — recorded as a FailedProblem row
+                logger.exception(
+                    "Failed to load bnlearn network %s; recording an error row "
+                    "and continuing with the next network", net_name,
                 )
+                yield FailedProblem(
+                    problem_id=net_name,
+                    family=_kind_to_family(kind),
+                    error_msg=f"{type(exc).__name__}: {exc}",
+                    benchmark="bnlearn",
+                )
+                continue
 
     def _discrete_problems(
         self, net_name: str, config: BnlearnConfig,

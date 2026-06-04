@@ -218,6 +218,16 @@ def main(argv: list[str] | None = None) -> int:
                     rc = 1
 
             return rc
+        except Exception:
+            # Route any uncaught exception to run.log *before* the finally
+            # block detaches the FileHandler.  Python's default excepthook
+            # only fires at interpreter top-level — after this finally runs —
+            # so a traceback would otherwise miss run.log entirely, leaving it
+            # ending on its last INFO line (the "silent stop" seen 2026-06-04).
+            # Re-raised so the exit code / stderr traceback are unchanged.
+            logger.critical("Unhandled exception during inference run",
+                            exc_info=True)
+            raise
         finally:
             logging.getLogger().removeHandler(log_handler)
             log_handler.close()

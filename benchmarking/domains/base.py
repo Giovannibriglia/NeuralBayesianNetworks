@@ -110,6 +110,31 @@ class BenchmarkProblem:
     seed: int = 0
 
 
+@dataclass(frozen=True)
+class FailedProblem:
+    """Sentinel yielded by a problem source when a problem fails to load.
+
+    A problem source (e.g. ``BnlearnProblemSource``) yields one of these
+    *in place of* a ``BenchmarkProblem`` when loading a problem raises — for
+    example a download 404 or a ``.bif`` parse error.  Because the failure is
+    caught *inside* the source's generator, the generator stays alive and
+    advances to the next problem: a single bad network no longer aborts a
+    multi-day run.
+
+    The runner detects this sentinel (``isinstance`` check), emits one
+    ``status="error"`` row per baseline so the failure is recorded in the
+    parquet, and continues.  ``seed`` is recorded as ``-1`` on those rows
+    since loading failed before any per-seed data existed.
+
+    Reference: investigation report 2026-06-04 (bnlearn_complete munin1 404).
+    """
+
+    problem_id: str
+    family: str
+    error_msg: str
+    benchmark: str
+
+
 class BenchmarkDomain(ABC):
     """A domain = one family of test problems.
 
