@@ -109,8 +109,14 @@ baselines:
   - {library: pgmpy,       mechanism: lg,        param_method: lg,  inference_method: predict}
   - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: ve}
   - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance, device: cpu}
-  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ve}
-  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: lw}
-  - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router}
+  - { library: nbn,   mechanism: cat,      param_method: mle,   inference_method: ve }
+  - { library: nbn,   mechanism: cat,      param_method: mle,   inference_method: lw,      extra_kwargs: { n_samples: 4096 } }
+  - { library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: ve }
+  - { library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: lw,      extra_kwargs: { n_samples: 4096 } }
+  - { library: nbn,   mechanism: lg,       param_method: mle,   inference_method: lw,      extra_kwargs: { n_samples: 4096 } }
+  - { library: nbn,   mechanism: mdn,      param_method: mle,   inference_method: lw,      extra_kwargs: { n_samples: 4096 } }
+  - { library: nbn,   mechanism: flow,     param_method: mle,   inference_method: lw,      extra_kwargs: { n_samples: 4096 } }
+  - { library: nbn,   mechanism: hybrid,   param_method: mle,   inference_method: router}
 
-per_cell_timeout_s: 120
+per_cell_timeout_s: 256
+fit_timeout_s: 1200
