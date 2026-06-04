@@ -67,17 +67,14 @@ _CONFIG_DIR = Path("benchmarking/configs")
 _INFERENCE_CONFIGS = [
     "synthetic/smoke_tests/inference_smoke.yaml",
     "synthetic/complete/inference_complete.yaml",
-    "synthetic/complete/inference_complete_laptop.yaml",
-    "synthetic/complete/inference_scalability.yaml",
     "synthetic/smoke_tests/inference_smoke_topological.yaml",
     "synthetic/smoke_tests/inference_smoke_random_only.yaml",
     "synthetic/smoke_tests/scalability_smoke.yaml",
-    "synthetic/complete/scalability_complete.yaml",
+    "synthetic/complete/inference_scalability_complete.yaml",
 ]
 _PARAM_CONFIGS = [
     "synthetic/smoke_tests/parameter_learning_smoke.yaml",
     "synthetic/complete/parameter_learning_complete.yaml",
-    "synthetic/complete/parameter_learning_complete_laptop.yaml",
 ]
 
 
@@ -336,12 +333,12 @@ def test_scalability_complete_config_loads(tmp_path: Path) -> None:
     from benchmarking.selectors.heaviest import HeaviestQueryByRole
 
     cfg = load_runner_config(
-        _CONFIG_DIR / "synthetic/complete/scalability_complete.yaml",
+        _CONFIG_DIR / "synthetic/complete/inference_scalability_complete.yaml",
         jsonl_path=tmp_path / "out.jsonl",
     )
     assert isinstance(cfg.selector, HeaviestQueryByRole)
     assert cfg.per_cell_timeout_s == 60.0
-    assert len(cfg.baselines) == 4
+    assert len(cfg.baselines) == 13
 
 
 def _bnlearn_source(**overrides) -> dict:
