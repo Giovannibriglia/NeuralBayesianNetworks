@@ -16,11 +16,15 @@ v0.13 Posterior contract: W1 accuracy requires a sample distribution, not
 a point mass.  The _posterior_samples() method was already correct; the
 fix is one line in query().
 
-Device: default "cpu".  PR #102 measured GPU as 11× slower than CPU for
-pyro's Importance sampler: each pyro.sample() triggers a CUDA kernel
-launch (~5–10 µs); at benchmark scale (50 particles × 1024 queries × up
-to 50 nodes) the launch overhead dominates.  The device arg is preserved
-and validated; "auto" resolves at __init__ time.
+Device: None/"auto" now auto-detect (cuda-if-available-else-cpu) via
+resolve_device(), consistent with the other adapters.  CAVEAT: PR #102
+measured GPU as 11× slower than CPU for pyro's Importance sampler — each
+pyro.sample() triggers a CUDA kernel launch (~5–10 µs), and at benchmark
+scale (50 particles × 1024 queries × up to 50 nodes) the launch overhead
+dominates.  Pin ``device: cpu`` in the config for a pyro baseline whose
+wall-clock matters; auto-detect is the default so smoke runs exercise the
+GPU path locally.  The lstsq driver follows self.device (gels on CUDA,
+gelsd on CPU).
 
 n_samples: default 50.  Reduced from the old default of 200 to fit the
 600s per-cell budget (200 particles projected ~1273s at B=1024 batch size;
@@ -51,6 +55,7 @@ from typing import Any
 
 import torch
 
+from benchmarking.core._device import resolve_device
 from benchmarking.core.applicability import BASELINE_FAMILY_APPLICABILITY as _BASELINE_APPLICABILITY
 from benchmarking.domains.base import BenchmarkProblem, Query
 from benchmarking.domains.posterior import Posterior
@@ -68,7 +73,7 @@ class PyroAdapter:
 
         adapter = PyroAdapter(mechanism="empirical", inference_method="importance")
         adapter = PyroAdapter(mechanism="empirical", inference_method="importance",
-                              n_samples=50, device="cpu")
+                              n_samples=50)  # device auto-detects
 
     The ``name`` attribute is derived:
     ``"pyro-{mechanism}-{inference_method}"`` → ``"pyro-empirical-importance"``.
@@ -79,7 +84,7 @@ class PyroAdapter:
         mechanism: str,
         inference_method: str,
         n_samples: int = 50,
-        device: str = "cpu",
+        device: str | None = None,
         **kwargs: Any,
     ) -> None:
         if mechanism not in _VALID_MECHANISMS:
@@ -95,12 +100,11 @@ class PyroAdapter:
         self.mechanism = mechanism
         self.inference_method = inference_method
         self.n_samples = int(n_samples)
-        # "auto" resolves to cuda/cpu at construction time — matches the v0.12
-        # adapter.  Stored as a plain str (not torch.device) so that
-        # self.device.startswith("cuda") works for the lstsq driver check.
-        if device == "auto":
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.device: str = device
+        # None / "auto" resolve to cuda-if-available-else-cpu; concrete
+        # strings pass through.  Stored as a plain str (not torch.device) so
+        # that self.device.startswith("cuda") works for the lstsq driver
+        # check below (gels on CUDA, gelsd on CPU).
+        self.device: str = resolve_device(device)
         self.name = f"pyro-{mechanism}-{inference_method}"
 
         # State populated by fit()

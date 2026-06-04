@@ -150,9 +150,18 @@ class TestProtocolConformance:
         )
         assert adapter.n_samples == 20
 
-    def test_device_default_is_cpu(self):
+    def test_device_default_auto_detects(self):
+        """Default device (None) auto-detects: cuda-if-available-else-cpu.
+
+        Behavior change (device-autodetect fix, 2026-06-04): the default
+        was "cpu"; it now resolves via resolve_device() so the adapter uses
+        the GPU when one is present. Pin device="cpu" in config to force CPU.
+        """
+        import torch
+
         adapter = PyroAdapter(mechanism="empirical", inference_method="importance")
-        assert adapter.device == "cpu"
+        expected = "cuda" if torch.cuda.is_available() else "cpu"
+        assert adapter.device == expected
 
     def test_device_auto_resolves_at_init(self):
         """device='auto' must be replaced with 'cpu' or 'cuda' at __init__ time."""

@@ -61,6 +61,14 @@ class CellResult:
     # runner, so it's identical across all rows of a given problem.
     n_parameters: int | None = None
 
+    # Device the baseline actually ran on ("cpu" | "cuda" | "cuda:N").
+    # Stamped per cell by the worker from the adapter's resolved device
+    # (cell_worker._emit); error/sentinel rows emitted before an adapter
+    # exists carry the *would-be* resolved device via resolve_device(). None
+    # only for legacy rows / fixtures that predate this column. Additive —
+    # downstream readers select columns by name, never by exact schema.
+    device: str | None = None
+
 
 # Valid status values (for validation in implementations)
 VALID_STATUSES = frozenset({"ok", "timeout", "oom", "error", "not_supported"})

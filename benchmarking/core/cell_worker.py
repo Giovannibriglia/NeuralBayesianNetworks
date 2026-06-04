@@ -135,7 +135,16 @@ def _run_cell(ctx: dict) -> list[dict]:
     default_role = ctx["default_role"]
 
     def _emit(results) -> list[dict]:
-        return [dataclasses.asdict(r) for r in results]
+        # Stamp the resolved device on every row at this single choke point
+        # (same pattern as the runner's n_parameters injection) rather than
+        # threading it through the ~10 CellResult construction sites in the
+        # measurements and sentinel helpers. `adapter` is always built before
+        # any _emit() call (late-binding closure).
+        dev = str(getattr(adapter, "device", "cpu"))
+        return [
+            dataclasses.asdict(dataclasses.replace(r, device=dev))
+            for r in results
+        ]
 
     adapter = build_adapter(spec)
 

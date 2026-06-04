@@ -24,6 +24,7 @@ from typing import Any
 
 import torch
 
+from benchmarking.core._device import resolve_device
 from benchmarking.core.applicability import BASELINE_FAMILY_APPLICABILITY as _BASELINE_APPLICABILITY
 from benchmarking.domains.base import BenchmarkProblem, Query
 from benchmarking.domains.posterior import Posterior
@@ -75,7 +76,7 @@ class NBNAdapter:
 
     Construction::
 
-        adapter = NBNAdapter(mechanism="cat", engine="lw", device="cpu")
+        adapter = NBNAdapter(mechanism="cat", engine="lw")  # device auto-detects
 
     The ``name`` attribute is derived: ``"nbn-{mechanism}-{engine}"``.
     """
@@ -84,7 +85,7 @@ class NBNAdapter:
         self,
         mechanism: str,
         engine: str,
-        device: str = "cpu",
+        device: str | None = None,
         n_samples: int = 1024,
         **kwargs: Any,
     ) -> None:
@@ -99,7 +100,8 @@ class NBNAdapter:
             )
         self.mechanism = mechanism
         self.engine = engine
-        self.device = torch.device(device)
+        # None / "auto" -> cuda-if-available-else-cpu; concrete passes through.
+        self.device = torch.device(resolve_device(device))
         self.n_samples = int(n_samples)
         self.name = f"nbn-{mechanism}-{engine}"
 

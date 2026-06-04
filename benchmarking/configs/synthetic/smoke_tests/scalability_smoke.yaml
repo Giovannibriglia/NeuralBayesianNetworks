@@ -72,7 +72,7 @@ source:
 baselines:
   - {library: pgmpy,       mechanism: discrete,  param_method: mle, inference_method: ve}
   - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: ve}
-  - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance, device: cpu}
+  - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance}
   - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router}
 
 # Ignored by heaviest_by_role (see selector note above); required by the loader.

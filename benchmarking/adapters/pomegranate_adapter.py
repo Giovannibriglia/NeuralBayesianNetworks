@@ -29,14 +29,18 @@ Old (functional) adapter: benchmarking/baselines/pomegranate_adapter.py
 """
 from __future__ import annotations
 
+import logging
 import warnings
 from typing import Any
 
 import torch
 
+from benchmarking.core._device import resolve_device
 from benchmarking.core.applicability import BASELINE_FAMILY_APPLICABILITY as _BASELINE_APPLICABILITY
 from benchmarking.domains.base import BenchmarkProblem, Query
 from benchmarking.domains.posterior import Posterior
+
+logger = logging.getLogger(__name__)
 
 
 class PomegranateAdapter:
@@ -51,7 +55,15 @@ class PomegranateAdapter:
 
     name = "pomegranate-discrete-ve"
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, device: str | None = None, **kwargs: Any) -> None:
+        # None / "auto" -> cuda-if-available-else-cpu; concrete passes through.
+        # pomegranate 1.x is torch-based: CPTs are built on CPU (counting is
+        # cheap there) and the assembled BayesianNetwork is moved to
+        # self.device via model.to() in fit().  Verified: predict_proba runs
+        # correctly on CUDA when the whole module (incl. the lazily-built
+        # factor graph) is moved together; building distributions directly on
+        # CUDA instead leaves factor-graph message buffers on CPU and crashes.
+        self.device = resolve_device(device)
         # State populated by fit()
         self.model: Any | None = None
         self._node_to_idx: dict[str, int] = {}
@@ -143,6 +155,11 @@ class PomegranateAdapter:
             for parent, child in problem.dag
         ]
         self.model = BayesianNetwork(distributions=dist_objs, edges=edges_obj)
+        # Move the whole module (distributions + lazily-built factor graph) to
+        # the resolved device. Build stays on CPU above; only the final model
+        # is relocated. No-op for "cpu".
+        if self.device != "cpu":
+            self.model.to(self.device)
         self.problem = problem
 
     # -------------------------------------------------------------------------
@@ -172,8 +189,9 @@ class PomegranateAdapter:
         target = q.targets[0]
         n = len(self._topo)
         # dtype=torch.long is mandatory — see module docstring / bug fix note.
-        row = torch.zeros((1, n), dtype=torch.long)
-        mask = torch.zeros((1, n), dtype=torch.bool)
+        # Tensors live on self.device so they match the (possibly CUDA) model.
+        row = torch.zeros((1, n), dtype=torch.long, device=self.device)
+        mask = torch.zeros((1, n), dtype=torch.bool, device=self.device)
 
         for k, v in q.evidence.items():
             if v is None:
@@ -199,7 +217,9 @@ class PomegranateAdapter:
         # .get_data() extracts the underlying probability vector.
         if hasattr(result, "get_data"):
             result = result.get_data()
-        probs = result.float().detach()
+        # Back to CPU for downstream metric computation (consistent with the
+        # other adapters, which return CPU posteriors).
+        probs = result.float().detach().cpu()
         return Posterior(probs=probs)
 
     # -------------------------------------------------------------------------

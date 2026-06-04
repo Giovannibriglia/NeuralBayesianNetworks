@@ -141,7 +141,11 @@ def main(argv: list[str] | None = None) -> int:
         from benchmarking.core.yaml_config import load_runner_config
         from benchmarking.core.runner import Runner
 
-        device = None if args.device == "auto" else args.device
+        # "auto" passes through as a literal string; each adapter's
+        # resolve_device() turns it into cuda-if-available-else-cpu.
+        # (Was: collapsed to None here, which then collapsed to "cpu" at
+        # build_adapter — so every nbn baseline silently ran on CPU.)
+        device = args.device
         cfg = load_runner_config(args.config, device_override=device)
 
         # Console noise from dependencies stays out of the terminal; the

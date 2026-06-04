@@ -28,6 +28,7 @@ from typing import Any, Iterator
 
 from tqdm import tqdm
 
+from benchmarking.core._device import resolve_device
 from benchmarking.core.config import BaselineSpec, RunnerConfig, build_adapter
 from benchmarking.core.output import JsonlWriter
 from benchmarking.core.results import CellResult
@@ -298,6 +299,8 @@ def _rows_to_cellresults(
                 query_time_s=_NAN,
                 metrics_time_s=_NAN,
                 error_msg=d.get("error_msg"),
+                # No adapter ran (worker died); record the would-be device.
+                device=resolve_device(spec.device),
             )
 
 
@@ -380,6 +383,9 @@ class Runner:
                                 evidence_strategy="",
                                 evidence_mode="full",
                                 n_parameters=None,
+                                # Problem never loaded, so no adapter ran;
+                                # record the would-be device for this baseline.
+                                device=resolve_device(spec.device),
                             )
                             writer.write(error_row)
                             yield error_row

@@ -34,7 +34,10 @@ class BaselineSpec:
         ``"pomegranate"`` → PomegranateAdapter()
         ``"pyro"``        → PyroAdapter(mechanism, inference_method)
 
-    ``device`` is optional; if None, adapters use their own default ("cpu").
+    ``device`` is optional and passed through verbatim (``None`` |
+    ``"auto"`` | a concrete string). Each adapter calls
+    ``resolve_device()`` in its ``__init__`` to translate ``None`` /
+    ``"auto"`` into cuda-if-available-else-cpu.
     """
 
     library: str                          # 'nbn' | 'pgmpy' | 'pomegranate' | 'pyro'
@@ -132,7 +135,10 @@ def build_adapter(spec: BaselineSpec) -> Any:
     from benchmarking.adapters import NBNAdapter, PgmpyAdapter, PomegranateAdapter, PyroAdapter
 
     lib = spec.library
-    device = spec.device or "cpu"
+    # Pass the raw spec value through (None | "auto" | concrete); each
+    # adapter calls resolve_device() to translate. Collapsing to "cpu"
+    # here was the bug that forced every baseline onto CPU.
+    device = spec.device
     kw = spec.extra_kwargs
 
     if lib == "nbn":
@@ -155,11 +161,12 @@ def build_adapter(spec: BaselineSpec) -> Any:
         return PgmpyAdapter(
             param_method=spec.param_method,
             inference_method=spec.inference_method,
+            device=device,
             **kw,
         )
 
     if lib == "pomegranate":
-        return PomegranateAdapter(**kw)
+        return PomegranateAdapter(device=device, **kw)
 
     if lib == "pyro":
         if spec.inference_method is None:
