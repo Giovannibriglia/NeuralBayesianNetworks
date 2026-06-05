@@ -317,8 +317,13 @@ def _render_family_metric(
         any_drawn = True
 
     # DNF cells for this specific (family, metric).
+    # #123: filter to applicable baselines so the DNF annotation doesn't
+    # count registry-excluded baselines (e.g., gpytorch post-#97) whose
+    # error rows are present in the parquet but not plotted.
+    applicable = [bl for bl in baselines if is_applicable(bl, family)]
     err_sub = df[
         (df["family"] == family)
+        & (df["baseline"].isin(applicable))
         & (df["status"].isin(["error", "timeout", "oom"]))
     ]
     if not err_sub.empty:

@@ -187,6 +187,63 @@ def test_legend_filters_per_panel(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------- #
+# #123 (Issue A): DNF tally counts applicable baselines only
+# ---------------------------------------------------------------------- #
+
+
+def test_dnf_annotation_excludes_non_applicable_baselines(tmp_path: Path) -> None:
+    """#123 Issue A regression: the DNF tally must count error/timeout/oom
+    rows from *applicable* baselines only.
+
+    Pre-fix, the tally scanned all failure rows for the family while the
+    figure plotted only applicable baselines — so registry-excluded
+    baselines (e.g. gpytorch post-#97) inflated the "DNF: N cells"
+    annotation relative to what the figure shows (11 annotated vs 8
+    visible in the original Phase D review).
+
+    Here: ``pgmpy-lg-predict`` is continuous_lg-only (same registry fact
+    the legend test above pins), so its error row on the *discrete* family
+    must not appear in the discrete figure's DNF sidecar, while the
+    applicable ``pgmpy-mle-ve`` timeout must.
+    """
+    p = tmp_path / "raw" / "metrics.parquet"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    _write_synthetic_parquet([
+        # ok row so the discrete figure draws.
+        {"family": "discrete", "n_nodes": 5, "seed": 0,
+         "baseline": "nbn-cat-ve", "metric": "accuracy",
+         "value": 0.05, "status": "ok"},
+        # Applicable baseline failure → counted.
+        {"family": "discrete", "n_nodes": 5, "seed": 0,
+         "baseline": "pgmpy-mle-ve", "metric": "accuracy",
+         "value": float("nan"), "status": "timeout"},
+        # Non-applicable baseline failure (continuous_lg-only baseline on
+        # the discrete family) → must NOT be counted.
+        {"family": "discrete", "n_nodes": 5, "seed": 0,
+         "baseline": "pgmpy-lg-predict", "metric": "accuracy",
+         "value": float("nan"), "status": "error"},
+    ], p)
+
+    render_figures(
+        parquet_path=p,
+        output_dir=tmp_path,
+        output_prefix="dnf123",
+        formats=("png",),
+    )
+
+    sidecar = tmp_path / "figures" / "dnf123_discrete_accuracy_vs_problem_id_dnf.txt"
+    assert sidecar.exists(), "DNF sidecar missing — applicable failure not counted?"
+    text = sidecar.read_text(encoding="utf-8")
+    assert "pgmpy-mle-ve" in text, "applicable baseline's DNF must be listed"
+    assert "pgmpy-lg-predict" not in text, (
+        "#123: non-applicable baseline's failure leaked into the DNF tally"
+    )
+    # Exactly one DNF entry: the applicable baseline's timeout.
+    entries = [ln for ln in text.splitlines() if ln.startswith("  n=")]
+    assert len(entries) == 1, f"expected 1 DNF entry, got {entries}"
+
+
+# ---------------------------------------------------------------------- #
 # v0.7-#49 regression: dense-DNF figures must not overlap plot area
 # ---------------------------------------------------------------------- #
 
