@@ -42,6 +42,13 @@ class NeuralCategoricalMechanism(Mechanism):
     ) -> None:
         super().__init__()
         self.n_classes = int(n_classes)
+        # #153: LikelihoodWeightingEngine.query builds its weighted histogram
+        # (probs over the K classes) only for mechanisms exposing
+        # ``_class_values``.  Label-encoded classes are the contiguous indices
+        # 0..K-1 — exactly what ``forward()``'s Categorical samples — matching
+        # CategoricalTableMechanism's ``arange(K)`` convention.  K is fixed at
+        # construction (fit_local never widens it), so set it here.
+        self._class_values: torch.Tensor = torch.arange(self.n_classes)
         self.hidden = tuple(hidden)
         self.embedding_dim = embedding_dim
         self.activation = activation
