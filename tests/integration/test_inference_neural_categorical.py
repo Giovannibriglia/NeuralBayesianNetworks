@@ -32,6 +32,7 @@ from __future__ import annotations
 import torch
 
 from nbn.core.network import NeuralBayesianNetwork
+from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
 from nbn.inference.tensor_ve import TensorVariableElimination
 from nbn.mechanisms.categorical_table import CategoricalTableMechanism
 from nbn.mechanisms.neural_categorical import NeuralCategoricalMechanism
@@ -101,6 +102,99 @@ def test_ve_runs_on_neural_categorical_mechanism() -> None:
             f"in _extract_factors is broken, or the neural mechanism's "
             f"learned CPD is far from the planted P(C|B)."
         )
+
+
+def test_lw_returns_probs_on_neural_categorical_mechanism() -> None:
+    """v0.13-#153 regression: LW inference on a NeuralCategoricalMechanism
+    target must return a probability vector, not the (weights, samples)
+    tuple fallback.
+
+    Pre-#153: ``LikelihoodWeightingEngine.query`` builds its weighted
+    histogram only for mechanisms exposing ``_class_values``.
+    ``NeuralCategoricalMechanism`` lacked the attribute, so the engine
+    fell through to the tuple path → the benchmarking adapter produced
+    ``Posterior(probs=None)`` → the accuracy scorer marked every
+    nbn-neuralcat-lw accuracy metric ``not_supported`` on discrete
+    targets (while ``nbn-cat-lw`` on the same problems worked).
+
+    Post-#153: ``_class_values = arange(K)`` is set in ``__init__``
+    (K is constructor-fixed), matching CategoricalTableMechanism's
+    convention, so LW returns probs for both mechanisms.  The test
+    compares the neural posterior against the cat-table posterior on
+    the same planted chain — commensurate (same shape, both near the
+    analytical truth), not strictly equal.
+    """
+    torch.manual_seed(0)
+
+    def _build(mech_for_C):
+        net = NeuralBayesianNetwork(
+            [("A", "B"), ("B", "C")],
+            variables={
+                "A": ("discrete", 2),
+                "B": ("discrete", 2),
+                "C": ("discrete", 2),
+            },
+            device="cpu",
+        )
+        mA = CategoricalTableMechanism(alpha=0.0)
+        mB = CategoricalTableMechanism(alpha=0.0)
+        net.set_mechanism("A", mA)
+        net.set_mechanism("B", mB)
+        net.set_mechanism("C", mech_for_C)
+        return net, mA, mB
+
+    n = 8000
+    a = torch.distributions.Categorical(P_A).sample((n,))
+    b = torch.distributions.Categorical(P_B_GIVEN_A[a]).sample()
+    c = torch.distributions.Categorical(P_C_GIVEN_B[b]).sample()
+
+    mC_neural = NeuralCategoricalMechanism(n_classes=2, hidden=(16, 16))
+    net_neural, mA1, mB1 = _build(mC_neural)
+    mC_table = CategoricalTableMechanism(alpha=0.0)
+    net_table, mA2, mB2 = _build(mC_table)
+
+    for mA, mB in ((mA1, mB1), (mA2, mB2)):
+        mA.fit_local(a, parents=None)
+        mB.fit_local(b, parents=a.unsqueeze(-1), parent_cards=[2])
+    mC_neural.fit_local(c.long(), parents=b.unsqueeze(-1).float(), epochs=80, lr=5e-3)
+    mC_table.fit_local(c, parents=b.unsqueeze(-1), parent_cards=[2])
+
+    eng = LikelihoodWeightingEngine(n_samples=8192)
+    for a_obs in (0, 1):
+        truth = _truth_C_given_A(a_obs)
+        ev = {"A": torch.tensor([a_obs])}
+
+        out_neural = eng.query(net_neural, ["C"], evidence=ev)
+        # The #153 assertion: probs tensor, not the (weights, samples) tuple.
+        assert isinstance(out_neural, torch.Tensor), (
+            f"LW fell through to the tuple path for NeuralCategorical "
+            f"(got {type(out_neural).__name__}) — _class_values missing?"
+        )
+        assert out_neural.shape == (2,)
+        assert abs(out_neural.sum().item() - 1.0) < 1e-5
+
+        out_table = eng.query(net_table, ["C"], evidence=ev)
+        assert isinstance(out_table, torch.Tensor)
+        assert out_table.shape == out_neural.shape
+
+        # Commensurate, not equal: both posteriors near the analytical
+        # truth within fit + IS-sampling noise.
+        for label, out in (("neural", out_neural), ("table", out_table)):
+            diff = (out - truth).abs().max().item()
+            assert diff < 0.08, (
+                f"P(C | A={a_obs}) via LW ({label}) {out.tolist()} drifted "
+                f"from analytical truth {truth.tolist()} by {diff:.4f}; "
+                f"tolerance 0.08."
+            )
+
+
+def test_neural_categorical_class_values_set_at_construction() -> None:
+    """#153: _class_values must exist (arange(K)) before fit_local — both
+    production paths (network default-mechanism assignment, benchmark
+    adapter _make_mech) construct the mechanism unfitted."""
+    mech = NeuralCategoricalMechanism(n_classes=5)
+    assert mech._class_values is not None
+    assert torch.equal(mech._class_values, torch.arange(5))
 
 
 def test_ve_raises_clean_runtime_error_on_unfitted_mechanism() -> None:
