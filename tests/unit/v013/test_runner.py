@@ -37,7 +37,10 @@ from benchmarking.core.runner import (
     Runner,
     _classify_exception,
     _estimate_total_cells,
+    _fit_failure_rows,
     _is_structural_limit,
+    _not_supported_sentinel,
+    _rows_to_cellresults,
 )
 from benchmarking.domains.base import BenchmarkProblem, GroundTruth
 from benchmarking.measurements import AccuracyAndTiming, TimingOnly
@@ -565,6 +568,66 @@ class TestJsonlWriter:
         # File should be readable (closed properly)
         content = path.read_text()
         assert content.strip()
+
+
+# ---------------------------------------------------------------------------
+# TestSentinelQueryRole (#154)
+# ---------------------------------------------------------------------------
+
+class _StubProblem:
+    family = "discrete"
+    problem_id = "10"
+    seed = 0
+
+
+class _StubAdapter:
+    name = "stub-adapter"
+
+
+class TestSentinelQueryRole:
+    """#154: sentinel rows must use query_role='' (cell-level, no role), not
+    the 'random' placeholder — otherwise role decompositions attribute them
+    to the 'random' role. Matches the FailedProblem path convention."""
+
+    def test_not_supported_sentinel_uses_empty_query_role(self):
+        row = _not_supported_sentinel(_StubProblem(), _StubAdapter(), "synthetic")
+        assert row.metric == "status"
+        assert row.status == "not_supported"
+        assert row.query_role == ""
+
+    def test_fit_failure_empty_queries_uses_empty_query_role(self):
+        rows = list(_fit_failure_rows(
+            _StubProblem(), _StubAdapter(), queries=[], query_roles=[],
+            benchmark="synthetic", fit_time_s=1.0, status="error",
+            error_msg="boom",
+        ))
+        assert len(rows) == 1
+        assert rows[0].metric == "status"
+        assert rows[0].query_role == ""
+
+    def test_fit_failure_per_query_rows_keep_real_roles(self):
+        # The non-empty branch carries the selector's roles — unaffected.
+        class _StubQuery:
+            evidence = {"X0": 1.0}
+
+        rows = list(_fit_failure_rows(
+            _StubProblem(), _StubAdapter(), queries=[_StubQuery(), _StubQuery()],
+            query_roles=["hub", "terminal"], benchmark="synthetic",
+            fit_time_s=1.0, status="error", error_msg="boom",
+        ))
+        assert [r.query_role for r in rows] == ["hub", "terminal"]
+
+    def test_worker_death_reconstruction_uses_empty_query_role(self):
+        # Synthesized cell_runner row: only status/error_msg present.
+        spec = BaselineSpec("nbn", "cat", "mle", "lw")
+        rows = list(_rows_to_cellresults(
+            [{"status": "timeout", "error_msg": "subprocess killed"}],
+            _StubProblem(), spec, "synthetic",
+        ))
+        assert len(rows) == 1
+        assert rows[0].metric == "status"
+        assert rows[0].status == "timeout"
+        assert rows[0].query_role == ""
 
 
 # ---------------------------------------------------------------------------
