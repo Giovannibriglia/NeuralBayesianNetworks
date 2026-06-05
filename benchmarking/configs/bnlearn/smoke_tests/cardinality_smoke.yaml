@@ -1,0 +1,54 @@
+# =============================================================================
+# bnlearn cardinality smoke — high-cardinality discrete regression check.
+# =============================================================================
+#
+# Catches the Bug 1a / Bug 2 cardinality+pruning regression class on a
+# high-cardinality discrete network (barley, K=67); see the #127 closing
+# comment and PRs #130, #131.
+#
+# Why a separate config: inference_smoke.yaml (asia/ecoli70/sangiovese) is
+# low-cardinality, so it couldn't catch the CategoricalTableMechanism
+# cardinality truncation (#130) or the VE-eliminates-whole-network 612 GB
+# OOM (#131) — both first surfaced on barley in the 2026-06-02 bnlearn_paper
+# run. Adding barley to inference_smoke would blow its ~5 min budget
+# (pyro-empirical-importance runs ~10 s/query on barley), so this config
+# keeps only the fast discrete-VE baselines that the bugs actually affected.
+#
+# Mirrors the bug4_torture_smoke.yaml pattern of targeted smoke configs for
+# specific bug classes.
+#
+# Wall-clock budget: ~60 s (measured 23 s on 2026-06-05: load ~15 s; all
+# three baselines fit and answer 32 queries in seconds post-#131).
+#
+# Expected statuses: ok + not_supported only. The not_supported rows are
+# metric-level gating, identical across baselines: w1_per_node (continuous-
+# only metric) and tv/jsd on queries whose evidence finds too few exact
+# matches in the n_reference=500 oracle pool (high-cardinality evidence).
+# Any error / timeout / oom row is a regression.
+version: "v0.13"
+benchmark: bnlearn
+config_name: bnlearn_cardinality_smoke
+metrics: all
+
+source:
+  networks: [barley]
+  seeds: [0]
+  n_train: 1000
+  n_test: 200
+  n_reference: 500
+
+selector:
+  type: topological
+  target_allocation:
+    hub: 0.30
+    cut: 0.25
+    terminal: 0.25
+    random: 0.20
+
+baselines:
+  - {library: nbn,         mechanism: cat,      param_method: mle, inference_method: ve}
+  - {library: pgmpy,       mechanism: discrete, param_method: mle, inference_method: ve}
+  - {library: pomegranate, mechanism: discrete, param_method: mle, inference_method: ve}
+
+n_queries_per_cell: 32
+per_cell_timeout_s: 60.0
