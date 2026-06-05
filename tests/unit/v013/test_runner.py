@@ -33,9 +33,15 @@ from benchmarking.adapters import NBNAdapter, PgmpyAdapter, PomegranateAdapter, 
 from benchmarking.core.config import BaselineSpec, RunnerConfig, build_adapter
 from benchmarking.core.output import JsonlWriter
 from benchmarking.core.results import CellResult, VALID_STATUSES
-from benchmarking.core.runner import Runner, _classify_exception, _is_structural_limit
+from benchmarking.core.runner import (
+    Runner,
+    _classify_exception,
+    _estimate_total_cells,
+    _is_structural_limit,
+)
 from benchmarking.domains.base import BenchmarkProblem, GroundTruth
 from benchmarking.measurements import AccuracyAndTiming, TimingOnly
+from benchmarking.problems.bnlearn import BnlearnConfig
 from benchmarking.problems.synthetic import SyntheticConfig, SyntheticProblemSource
 from benchmarking.selectors.uniform import UniformRandomSelector
 
@@ -254,6 +260,65 @@ class TestRunnerConfig:
         )
         assert cfg.problem_source is src
         assert cfg.source_config is src_cfg
+
+
+# ---------------------------------------------------------------------------
+# TestEstimateTotalCells (#155)
+# ---------------------------------------------------------------------------
+
+def _estimate_cfg(source_config: Any, n_baselines: int) -> RunnerConfig:
+    """Minimal RunnerConfig for _estimate_total_cells — it only reads
+    source_config and baselines."""
+    return RunnerConfig(
+        benchmark="synthetic",
+        config_name="test",
+        problem_source=SyntheticProblemSource(),
+        source_config=source_config,
+        selector=UniformRandomSelector(),
+        measurement=TimingOnly(),
+        baselines=[BaselineSpec("nbn", "cat", "mle", "lw")] * n_baselines,
+        n_queries_per_cell=4,
+        per_cell_timeout_s=60.0,
+        jsonl_path=Path("unused.jsonl"),
+    )
+
+
+class TestEstimateTotalCells:
+    def test_single_family_synthetic(self):
+        sc = SyntheticConfig(
+            families=["discrete"], n_nodes_list=[10, 50, 100], seeds=[0, 1],
+        )
+        assert _estimate_total_cells(_estimate_cfg(sc, 3)) == 1 * 3 * 2 * 3
+
+    def test_multi_family_synthetic(self):
+        # Regression for #155: scalability_complete is 4 families × 11
+        # n_nodes × 5 seeds × 13 baselines = 2860, not 715.
+        sc = SyntheticConfig(
+            families=["discrete", "continuous_lg", "continuous_nongauss", "hybrid"],
+            n_nodes_list=[10, 20, 30, 40, 50, 100, 200, 300, 400, 500, 1000],
+            seeds=[0, 1, 2, 3, 4],
+        )
+        assert _estimate_total_cells(_estimate_cfg(sc, 13)) == 2860
+
+    def test_bnlearn_networks_no_family_multiplier(self):
+        # Each (network, seed) is one cell-group; family is intrinsic to the
+        # network, not a grid dimension.
+        sc = BnlearnConfig(networks=["asia", "alarm", "ecoli70"], seeds=[0, 1])
+        assert _estimate_total_cells(_estimate_cfg(sc, 5)) == 3 * 2 * 5
+
+    def test_source_without_grid_returns_none(self):
+        # Sources whose config exposes no sizable grid stay indeterminate.
+        problem_like = object()
+        assert _estimate_total_cells(_estimate_cfg(problem_like, 3)) is None
+
+    def test_source_without_families_falls_back_to_one(self):
+        # Defensive: a future synthetic-style source lacking a families
+        # attribute is treated as single-family.
+        class _NoFamilies:
+            seeds = [0, 1]
+            n_nodes_list = [10, 50]
+
+        assert _estimate_total_cells(_estimate_cfg(_NoFamilies(), 4)) == 2 * 2 * 4
 
 
 # ---------------------------------------------------------------------------

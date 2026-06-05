@@ -51,12 +51,18 @@ def _estimate_total_cells(cfg: RunnerConfig) -> int | None:
     networks = getattr(sc, "networks", None)
     n_problems = None
     if networks is not None:
+        # Bnlearn-style source: one cell-group per (network, seed); each
+        # network's family is intrinsic, not a grid dimension.
         n_problems = len(networks) * len(seeds)
     else:
+        # Synthetic-style source: grid is families × n_nodes × seeds (#155).
+        # Sources without a families attribute fall back to a single family.
+        families = getattr(sc, "families", None)
+        n_families = len(families) if isinstance(families, (list, tuple)) else 1
         for attr in ("n_nodes_values", "n_values", "n_nodes_list", "n_nodes"):
             vals = getattr(sc, attr, None)
             if isinstance(vals, (list, tuple)):
-                n_problems = len(vals) * len(seeds)
+                n_problems = n_families * len(vals) * len(seeds)
                 break
     if n_problems is None:
         return None
