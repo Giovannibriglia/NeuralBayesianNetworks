@@ -37,6 +37,7 @@ import torch
 
 from benchmarking.core._device import resolve_device
 from benchmarking.core.applicability import BASELINE_FAMILY_APPLICABILITY as _BASELINE_APPLICABILITY
+from benchmarking.core.interfaces import default_query_batch
 from benchmarking.domains.base import BenchmarkProblem, Query
 from benchmarking.domains.posterior import Posterior
 
@@ -221,6 +222,11 @@ class PomegranateAdapter:
         # other adapters, which return CPU posteriors).
         probs = result.float().detach().cpu()
         return Posterior(probs=probs)
+
+    def query_batch(self, queries: list[Query]) -> list[Posterior]:
+        """Sequential default (PR 1, #148); library-level batching via
+        pomegranate's row-batched ``predict_proba`` lands in PR 3."""
+        return default_query_batch(self, queries)
 
     # -------------------------------------------------------------------------
     # Applicability

@@ -19,6 +19,7 @@ from benchmarking.core.interfaces import (
     Measurement,
     ProblemSource,
     QuerySelector,
+    default_query_batch,
 )
 from benchmarking.core.results import CellResult
 from benchmarking.domains.base import BenchmarkProblem, Query
@@ -55,6 +56,9 @@ class StubBaselineAdapter:
 
     def query(self, query: Query) -> Posterior:
         return Posterior(probs=torch.tensor([0.5, 0.5]))
+
+    def query_batch(self, queries: list[Query]) -> list[Posterior]:
+        return default_query_batch(self, queries)
 
     def is_applicable(self, problem: BenchmarkProblem) -> bool:
         return True

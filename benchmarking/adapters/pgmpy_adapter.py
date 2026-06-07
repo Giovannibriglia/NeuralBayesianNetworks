@@ -36,6 +36,7 @@ import torch
 
 from benchmarking.core._device import resolve_device
 from benchmarking.core.applicability import BASELINE_FAMILY_APPLICABILITY as _BASELINE_APPLICABILITY
+from benchmarking.core.interfaces import default_query_batch
 from benchmarking.domains.base import BenchmarkProblem, Query
 from benchmarking.domains.posterior import Posterior
 
@@ -374,6 +375,11 @@ class PgmpyAdapter:
         )
         post_std = post_var.clamp_min(1e-12).sqrt()
         return post_mean.reshape(1), post_std.reshape(1)
+
+    def query_batch(self, queries: list[Query]) -> list[Posterior]:
+        """Sequential default (PR 1, #148). Pgmpy stays sequential
+        (design doc §3.3); no override planned."""
+        return default_query_batch(self, queries)
 
     # -------------------------------------------------------------------------
     # Applicability
