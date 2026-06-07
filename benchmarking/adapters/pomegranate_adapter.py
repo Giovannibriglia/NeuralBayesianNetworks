@@ -56,6 +56,11 @@ class PomegranateAdapter:
 
     name = "pomegranate-discrete-ve"
 
+    # v0.14 (#148) §5.6: real library-batched query_batch override
+    # (PR 3) — swept by the speed benchmark. See nbn_adapter for why
+    # this is an explicit flag.
+    supports_batched_queries: bool = True
+
     def __init__(self, device: str | None = None, **kwargs: Any) -> None:
         # None / "auto" -> cuda-if-available-else-cpu; concrete passes through.
         # pomegranate 1.x is torch-based: CPTs are built on CPU (counting is

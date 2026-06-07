@@ -1,0 +1,42 @@
+# =============================================================================
+# batch_speed smoke — fast end-to-end check of the batch_sizes sweep (#148).
+# =============================================================================
+#
+# Tiny fixture for CI / local gating of the sweep dispatch path
+# (docs/v0.14-batched-queries-design.md §1.7, §5.6):
+#   - one 8-node discrete problem, 1 seed
+#   - n_batch_queries: 16 (NOT 10240 — keeps every cell sub-second)
+#   - batch_sizes [1, 4]: nbn-cat-ve runs at both values (swept);
+#     pgmpy-mle-ve is pinned to batch_size: 1 and runs once
+#
+# Wall-clock budget: < 30 s on CPU.
+# =============================================================================
+version: "v0.14"
+benchmark: synthetic
+config_name: batch_speed_smoke
+metrics: timing
+
+batch_sizes: [1, 4]
+n_batch_queries: 16
+
+source:
+  families: [discrete]
+  n_nodes_list: [8]
+  seeds: [0]
+  n_train: 100
+  n_test: 50
+  n_reference: 100
+  edge_density: 0.20
+  max_in_degree: 4
+  cardinality: 2
+  fraction_continuous: 0.5
+
+selector:
+  type: heaviest_by_role
+
+baselines:
+  - {library: nbn,   mechanism: cat,      param_method: mle, inference_method: ve}
+  - {library: pgmpy, mechanism: discrete, param_method: mle, inference_method: ve, batch_size: 1}
+
+n_queries_per_cell: 12
+per_cell_timeout_s: 60

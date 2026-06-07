@@ -80,6 +80,10 @@ class PyroAdapter:
     ``"pyro-{mechanism}-{inference_method}"`` → ``"pyro-empirical-importance"``.
     """
 
+    # v0.14 (#148) §5.6: sequential-only (query_batch is the default
+    # helper) — the speed-benchmark sweep runs this once at batch_size=1.
+    supports_batched_queries: bool = False
+
     def __init__(
         self,
         mechanism: str,

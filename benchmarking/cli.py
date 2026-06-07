@@ -113,6 +113,61 @@ def _suppress_library_warnings() -> None:
     warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"pyro.*")
 
 
+def _run_cells(cfg) -> None:
+    """Drive the cell loop, with the v0.14 batch_sizes sweep (#148, §5.6).
+
+    No ``batch_sizes`` in the config → single pass, exactly the
+    pre-sweep behavior. With ``batch_sizes``, one pass per sweep value:
+
+      * swept baselines — adapter ``supports_batched_queries`` and no
+        explicit YAML ``batch_size`` pin — run at every sweep value,
+        with their batch_size overridden to it;
+      * pinned / non-batchable baselines run once, on the first pass,
+        at their own batch_size (typically 1). An explicit pin always
+        wins: a batchable baseline pinned to 1 runs once, sequentially.
+
+    All passes append to the same streaming JSONL (JsonlWriter opens in
+    append mode), so the final parquet carries every sweep value with
+    the batch_size column distinguishing them (§1.4).
+    """
+    import dataclasses
+
+    from benchmarking.core.config import build_adapter
+    from benchmarking.core.runner import Runner
+
+    if not cfg.batch_sizes:
+        for _ in Runner().run(cfg):
+            pass
+        return
+
+    def _swept(spec) -> bool:
+        if spec.batch_size_pinned:
+            return False
+        adapter = build_adapter(spec)
+        return bool(getattr(adapter, "supports_batched_queries", False))
+
+    swept_flags = [_swept(spec) for spec in cfg.baselines]
+    for i, sweep_value in enumerate(cfg.batch_sizes):
+        pass_baselines = []
+        for spec, is_swept in zip(cfg.baselines, swept_flags):
+            if is_swept:
+                pass_baselines.append(
+                    dataclasses.replace(spec, batch_size=sweep_value)
+                )
+            elif i == 0:
+                # Pinned / non-batchable: once, at its own batch_size.
+                pass_baselines.append(spec)
+        if not pass_baselines:
+            continue
+        logger.info(
+            "batch_sizes sweep: pass %d/%d (batch_size=%d, %d baselines)",
+            i + 1, len(cfg.batch_sizes), sweep_value, len(pass_baselines),
+        )
+        pass_cfg = dataclasses.replace(cfg, baselines=pass_baselines)
+        for _ in Runner().run(pass_cfg):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     _setup_console_logging(args.verbose, inference=(args.cmd == "inference"))
@@ -139,7 +194,6 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "inference":
         from benchmarking.core.yaml_config import load_runner_config
-        from benchmarking.core.runner import Runner
 
         # "auto" passes through as a literal string; each adapter's
         # resolve_device() turns it into cuda-if-available-else-cpu.
@@ -161,9 +215,8 @@ def main(argv: list[str] | None = None) -> int:
         parquet_path = results_dir / f"{config_name}_metrics.parquet"
         log_handler = _attach_run_log(results_dir)
         try:
-            # ── cell loop ──────────────────────────────────────────────────
-            for _ in Runner().run(cfg):
-                pass
+            # ── cell loop (v0.14: sweeps batch_sizes when configured) ──────
+            _run_cells(cfg)
 
             # ── post-run pipeline ──────────────────────────────────────────
             # JSONL is already on disk from the runner.  Produce parquet +

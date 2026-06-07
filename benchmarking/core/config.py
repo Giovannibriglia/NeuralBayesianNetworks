@@ -52,6 +52,12 @@ class BaselineSpec:
     # adapter consumes per query_batch call. 1 = sequential (default;
     # pyro/pgmpy stay pinned here). Set per-baseline in YAML (§1.5).
     batch_size: int = 1
+    # True iff the YAML explicitly set batch_size for this baseline
+    # (§5.6 sweep dispatch): a pinned baseline runs once at its pinned
+    # value; an unpinned baseline whose adapter supports batching
+    # follows the batch_sizes sweep. Explicit pin always wins — a
+    # batchable baseline pinned to 1 runs once, sequentially.
+    batch_size_pinned: bool = False
 
 
 @dataclass
@@ -112,6 +118,12 @@ class RunnerConfig:
     per_cell_timeout_s: float
     fit_timeout_s: float = 1000.0  # fit() safety budget (seconds)
     jsonl_path: Path = field(default_factory=lambda: Path("output.jsonl"))
+    # Batched-queries speed benchmark (v0.14, #148, design doc §1.7/§5.6):
+    # when set, the CLI iterates these batch_size values — baselines whose
+    # adapters support batching (and are not YAML-pinned) run once per
+    # value; pinned / non-batchable baselines run once on the first pass.
+    # None = no sweep (every existing benchmark).
+    batch_sizes: list[int] | None = None
 
 
 def build_adapter(spec: BaselineSpec) -> Any:

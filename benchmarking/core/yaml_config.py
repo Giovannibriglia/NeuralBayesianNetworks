@@ -32,6 +32,9 @@ if TYPE_CHECKING:
     from benchmarking.problems import SyntheticConfig
 
 _VERSION = "v0.13"
+# v0.14 (#148): batched-queries configs. Same schema as v0.13 plus the
+# optional top-level batch_sizes / n_batch_queries fields below.
+_ACCEPTED_VERSIONS = frozenset({"v0.13", "v0.14"})
 
 _TOP_LEVEL_KEYS = frozenset({
     "version",
@@ -44,6 +47,9 @@ _TOP_LEVEL_KEYS = frozenset({
     "n_queries_per_cell",
     "per_cell_timeout_s",
     "fit_timeout_s",
+    # v0.14 batched queries (#148, design doc §1.7, §5.3-5.4)
+    "batch_sizes",
+    "n_batch_queries",
 })
 
 _BASELINE_REQUIRED = frozenset({"library", "mechanism", "param_method"})
@@ -95,10 +101,10 @@ def load_runner_config(
 
     # ── version check ────────────────────────────────────────────────────────
     version = d.get("version")
-    if version != _VERSION:
+    if version not in _ACCEPTED_VERSIONS:
         raise ValueError(
             f"Config {str(path)!r} has version={version!r}; "
-            f"this runner requires version: {_VERSION!r}. "
+            f"this runner requires version in {sorted(_ACCEPTED_VERSIONS)}. "
             f"See docs/v0.13-benchmark-redesign.md §1c for the new schema."
         )
 
@@ -152,10 +158,15 @@ def load_runner_config(
     # the Phase 2 dict form (``selector: {type: topological, ...}``).
     selector_cfg = d.get("selector", "uniform_random")
 
+    # Top-level n_batch_queries (v0.14, #148, §5.3): the speed benchmark
+    # sets it once for all baselines; a selector-block value overrides.
+    top_level_nbq = int(d.get("n_batch_queries", 1))
+
     def _build_selector(stype: str, block: dict[str, Any]):
         # n_batch_queries (v0.14, #148): evidence-value variants per query
-        # position, design doc §1.1, §2.4. Default 1 = existing behavior.
-        n_batch_queries = int(block.get("n_batch_queries", 1))
+        # position, design doc §1.1, §2.4. Default = top-level value
+        # (itself defaulting to 1 = existing behavior).
+        n_batch_queries = int(block.get("n_batch_queries", top_level_nbq))
         if stype == "uniform_random":
             return UniformRandomSelector(n_batch_queries=n_batch_queries)
         if stype == "topological":
@@ -209,6 +220,22 @@ def load_runner_config(
     per_cell_timeout_s = float(d["per_cell_timeout_s"])
     fit_timeout_s = float(d.get("fit_timeout_s", 1000.0))
 
+    # ── batch_sizes sweep (v0.14, #148, §1.7/§5.4) ───────────────────────────
+    raw_sweep = d.get("batch_sizes")
+    batch_sizes: list[int] | None = None
+    if raw_sweep is not None:
+        if not isinstance(raw_sweep, list) or not raw_sweep:
+            raise ValueError(
+                f"Config {str(path)!r}: batch_sizes must be a non-empty "
+                f"list of ints, got {raw_sweep!r}."
+            )
+        batch_sizes = [int(v) for v in raw_sweep]
+        if any(v < 1 for v in batch_sizes):
+            raise ValueError(
+                f"Config {str(path)!r}: batch_sizes values must be >= 1, "
+                f"got {batch_sizes}."
+            )
+
     if jsonl_path is None:
         from benchmarking.core.output import make_results_dir
         jsonl_path = make_results_dir(benchmark, str(d["config_name"])) / "metrics.jsonl"
@@ -225,6 +252,7 @@ def load_runner_config(
         per_cell_timeout_s=per_cell_timeout_s,
         fit_timeout_s=fit_timeout_s,
         jsonl_path=jsonl_path,
+        batch_sizes=batch_sizes,
     )
 
 
@@ -346,6 +374,9 @@ def _parse_baseline_spec(
     device = str(raw_device) if raw_device is not None else device_override
 
     # batch_size (v0.14, #148): per-baseline adapter consumption, §1.5.
+    # An explicit YAML value pins the baseline (§5.6): it runs once at
+    # that value in a batch_sizes sweep instead of following the sweep.
+    batch_size_pinned = "batch_size" in b
     batch_size = int(b.get("batch_size", 1))
     if batch_size < 1:
         raise ValueError(
@@ -364,4 +395,5 @@ def _parse_baseline_spec(
         device=device,
         extra_kwargs=dict(b.get("extra_kwargs") or {}),
         batch_size=batch_size,
+        batch_size_pinned=batch_size_pinned,
     )

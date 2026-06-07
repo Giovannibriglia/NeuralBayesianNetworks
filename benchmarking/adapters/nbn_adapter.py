@@ -82,6 +82,14 @@ class NBNAdapter:
     The ``name`` attribute is derived: ``"nbn-{mechanism}-{engine}"``.
     """
 
+    # v0.14 (#148) §5.6: this adapter has a real library-batched
+    # query_batch override (PR 2), so the speed-benchmark sweep runs it
+    # at every batch_sizes value. (An explicit class flag rather than
+    # the design doc's __func__-identity check, because PR 1 gave every
+    # adapter an explicit query_batch method — identity can't tell a
+    # real override from a sequential opt-in wrapper.)
+    supports_batched_queries: bool = True
+
     def __init__(
         self,
         mechanism: str,
@@ -320,6 +328,16 @@ class NBNAdapter:
             stacked_evidence[key] = torch.stack(
                 [torch.as_tensor(v).reshape(-1) for v in values]
             ).to(self.device)  # [B, D]
+
+        # All-empty-mode batch (every evidence value None — e.g. the
+        # heaviest selector's V2 queries): the engines infer B from the
+        # evidence tensors, so with {} they'd answer a single marginal
+        # ([1, K]) for a B-query batch. No batched library path exists
+        # for evidence-free queries — fall back to sequential. (Rows
+        # still stamp batch_size=B; filter on evidence_mode when
+        # analyzing batched-speedup figures.)
+        if not stacked_evidence:
+            return default_query_batch(self, queries)
 
         result = self._engine_obj.query_batch(
             self.model, list(targets), stacked_evidence

@@ -66,6 +66,10 @@ class PgmpyAdapter:
     The ``name`` attribute is derived: ``"pgmpy-{param_method}-{inference_method}"``.
     """
 
+    # v0.14 (#148) §5.6: sequential-only (query_batch is the default
+    # helper) — the speed-benchmark sweep runs this once at batch_size=1.
+    supports_batched_queries: bool = False
+
     def __init__(
         self,
         param_method: str,
