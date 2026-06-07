@@ -224,9 +224,89 @@ class PomegranateAdapter:
         return Posterior(probs=probs)
 
     def query_batch(self, queries: list[Query]) -> list[Posterior]:
-        """Sequential default (PR 1, #148); library-level batching via
-        pomegranate's row-batched ``predict_proba`` lands in PR 3."""
-        return default_query_batch(self, queries)
+        """Library-level batching via pomegranate's row-batched
+        ``predict_proba`` API.
+
+        Assumes all queries share (targets, frozenset(evidence_keys)) —
+        the selector contract per design doc §1.2.  Heterogeneous batches
+        (different targets or evidence keys, or mixed concrete/None
+        evidence values) fall back to the sequential default helper.
+
+        Stacks B rows into a single [B, n] MaskedTensor with the shared
+        mask pattern repeated, calls ``predict_proba`` once, and indexes
+        the per-variable output list at the target's column ([B, K]).
+
+        Mirrors NBNAdapter.query_batch's contract checks and edge cases.
+        See docs/v0.14-batched-queries-design.md §3.2.
+        """
+        if not queries:
+            return []
+        # B=1: single-query path — identical semantics, no stacking overhead.
+        if len(queries) == 1:
+            return [self.query(queries[0])]
+        if self.model is None:
+            raise RuntimeError(
+                "Adapter not fitted. Call fit() before query_batch()."
+            )
+
+        # Verify the shared (targets, evidence_keys) contract; fall back to
+        # the sequential helper on any heterogeneity.
+        first = queries[0]
+        targets = first.targets
+        evidence_keys = frozenset(first.evidence.keys())
+        for q in queries[1:]:
+            if q.targets != targets:
+                return default_query_batch(self, queries)
+            if frozenset(q.evidence.keys()) != evidence_keys:
+                return default_query_batch(self, queries)
+
+        from torch.masked import masked_tensor
+
+        target = targets[0]
+        b = len(queries)
+        n = len(self._topo)
+        # dtype=torch.long is mandatory — see module docstring / bug fix
+        # note (v0.5b / issue #31). Tensors live on self.device so they
+        # match the (possibly CUDA) model. Same conventions as query().
+        rows = torch.zeros((b, n), dtype=torch.long, device=self.device)
+        mask = torch.zeros((b, n), dtype=torch.bool, device=self.device)
+
+        for key in evidence_keys:
+            values = [q.evidence[key] for q in queries]
+            none_count = sum(v is None for v in values)
+            if none_count == len(values):
+                # Phase 3 empty mode: leave this column unobserved (masked)
+                # so predict_proba marginalizes over it, as query() does.
+                continue
+            if none_count > 0:
+                return default_query_batch(self, queries)  # mixed modes
+            i = self._node_to_idx[key]
+            rows[:, i] = torch.tensor(
+                [
+                    int(v.reshape(-1)[0].item())
+                    if isinstance(v, torch.Tensor) else int(v)
+                    for v in values
+                ],
+                dtype=torch.long, device=self.device,
+            )
+            mask[:, i] = True
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            mt = masked_tensor(rows, mask)
+            out = self.model.predict_proba(mt)
+
+        idx = self._node_to_idx[target]
+        result = out[idx]  # [B, K] — masked tensor iff target observed
+        if hasattr(result, "get_data"):
+            result = result.get_data()
+        probs = result.float().detach().cpu()
+        if probs.dim() != 2 or probs.shape[0] != b:
+            raise RuntimeError(
+                f"Unexpected predict_proba output for {self.name}: "
+                f"shape {tuple(probs.shape)}, expected [{b}, K]."
+            )
+        return [Posterior(probs=probs[i]) for i in range(b)]
 
     # -------------------------------------------------------------------------
     # Applicability
