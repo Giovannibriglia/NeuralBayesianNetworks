@@ -26,6 +26,7 @@ import torch
 
 from benchmarking.core._device import resolve_device
 from benchmarking.core.applicability import BASELINE_FAMILY_APPLICABILITY as _BASELINE_APPLICABILITY
+from benchmarking.core.interfaces import default_query_batch
 from benchmarking.domains.base import BenchmarkProblem, Query
 from benchmarking.domains.posterior import Posterior
 
@@ -264,6 +265,11 @@ class NBNAdapter:
         # Discrete / VE path: probability vector [1, K] or [K]
         probs = result.squeeze(0) if result.dim() > 1 else result
         return Posterior(probs=probs.detach().cpu())
+
+    def query_batch(self, queries: list[Query]) -> list[Posterior]:
+        """Sequential default (PR 1, #148); library-level batching via the
+        nbn engines' ``query_batch`` lands in PR 2."""
+        return default_query_batch(self, queries)
 
     def is_applicable(self, problem: BenchmarkProblem) -> bool:
         """Return True if this adapter can handle problem.family.

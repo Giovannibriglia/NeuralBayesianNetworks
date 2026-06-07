@@ -122,6 +122,26 @@ class BaselineAdapter(Protocol):
         """Query the fitted model. This call is what gets timed."""
         ...
 
+    def query_batch(self, queries: list[Query]) -> list[Posterior]:
+        """Process a list of queries; return Posteriors in input order.
+
+        Adapters that support library-level batching SHOULD override
+        this. The default implementation (the module-level
+        ``default_query_batch`` helper) loops ``query()`` sequentially.
+
+        Queries within a single call SHOULD share
+        (target, frozenset(evidence_keys)). The selector (when
+        ``n_batch_queries > 1``) emits such groups; adapters MAY assume
+        this and exploit it for batching. The default helper makes no
+        such assumption.
+
+        Failure semantics: this method does NOT promise atomic
+        semantics. A failure partway through MUST raise;
+        partial-success returns are not supported.
+        See docs/v0.14-batched-queries-design.md §1.2, §4.4.
+        """
+        ...
+
     def is_applicable(self, problem: BenchmarkProblem) -> bool:
         """Return False if this adapter cannot handle problem.family.
 
@@ -130,3 +150,27 @@ class BaselineAdapter(Protocol):
         inapplicable (adapter, problem) pairs cleanly.
         """
         ...
+
+
+# ---------------------------------------------------------------------------
+# Default query_batch helper
+# ---------------------------------------------------------------------------
+
+def default_query_batch(
+    adapter: BaselineAdapter,
+    queries: list[Query],
+) -> list[Posterior]:
+    """Sequential fallback for adapters without library-level batching.
+
+    Adapters that don't implement library-level batching opt in
+    explicitly by delegating to this helper::
+
+        def query_batch(self, queries):
+            return default_query_batch(self, queries)
+
+    Posteriors are returned in input order. A failure partway through
+    raises (no partial-success returns) — see the protocol docstring.
+
+    See docs/v0.14-batched-queries-design.md §1.2, §3.3.
+    """
+    return [adapter.query(q) for q in queries]
