@@ -438,6 +438,7 @@ class TopologicalAllocator:
         n_evidence: Mapping[str, int] | None = None,
         n_evidence_values: int | None = None,
         max_retry: int | None = None,
+        n_batch_queries: int = 1,
     ) -> None:
         self.target_allocation = dict(target_allocation or self._DEFAULT_TARGET_ALLOC)
         self.kind_allocation = dict(kind_allocation or self._DEFAULT_KIND_ALLOC)
@@ -453,6 +454,9 @@ class TopologicalAllocator:
         self.max_retry = (
             max_retry if max_retry is not None else self._DEFAULT_MAX_RETRY
         )
+        # v0.14 (#148): evidence-value variants per query position,
+        # design doc §1.1, §2.4. 1 = existing single-variant behavior.
+        self.n_batch_queries = int(n_batch_queries)
 
         self._target_allocator = _TargetAllocator()
         self._kind_evidence_allocator = _KindEvidenceAllocator()
@@ -551,3 +555,29 @@ class TopologicalAllocator:
             )
 
         return queries
+
+    def select_groups(
+        self,
+        problem: BenchmarkProblem,
+        n_queries: int,
+        seed: int,
+        *,
+        batch_size: int = 1,
+    ) -> list[list[Query]]:
+        """Grouped form of ``select()`` (v0.14, #148; design doc §1.3, §2.3).
+
+        Expands each selected query position into ``self.n_batch_queries``
+        evidence-value variants sampled from ``problem.train_data``,
+        chunked into inner lists of length <= ``batch_size``. At
+        ``n_batch_queries=1`` this is ``[[q] for q in select(...)]`` with
+        the original Query objects.
+        """
+        from benchmarking.selectors._batching import make_query_groups
+
+        return make_query_groups(
+            self.select(problem, n_queries, seed),
+            problem,
+            n_batch_queries=self.n_batch_queries,
+            batch_size=batch_size,
+            seed=seed,
+        )

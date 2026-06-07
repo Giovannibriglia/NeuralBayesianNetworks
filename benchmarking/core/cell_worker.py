@@ -153,13 +153,39 @@ def _run_cell(ctx: dict) -> list[dict]:
         return _emit([_not_supported_sentinel(problem, adapter, benchmark)])
 
     # --- Query selection (seed from problem generation) ---
-    queries = selector.select(problem, n_queries_per_cell, problem.seed)
+    # v0.14 (#148): grouped selection. select_groups emits
+    # list[list[Query]] chunked by the baseline's batch_size; at
+    # n_batch_queries=1 (default) every group is one query and the
+    # flattened list equals select()'s output exactly. Selectors
+    # without select_groups (legacy fixtures) fall back to select().
+    batch_size = getattr(spec, "batch_size", 1)
+    if hasattr(selector, "select_groups"):
+        query_groups = selector.select_groups(
+            problem, n_queries_per_cell, problem.seed,
+            batch_size=batch_size,
+        )
+    else:
+        query_groups = [
+            [q] for q in selector.select(
+                problem, n_queries_per_cell, problem.seed,
+            )
+        ]
+    queries = [q for g in query_groups for q in g]
     query_roles = [getattr(q, "query_role", default_role) for q in queries]
     query_kinds = [getattr(q, "query_kind", "prediction") for q in queries]
     evidence_strategies = [
         getattr(q, "evidence_strategy", "random") for q in queries
     ]
     evidence_modes = [_evidence_mode_for(q) for q in queries]
+
+    # Sentinel representatives (§4.3): fit-failure sentinels are emitted
+    # per GROUP (one representative query each), not per planned query —
+    # at n_batch_queries=1 this is exactly the pre-batching one-sentinel-
+    # per-query behavior; at N>1 it avoids K×N sentinel explosion.
+    sentinel_queries = [g[0] for g in query_groups]
+    sentinel_roles = [
+        getattr(q, "query_role", default_role) for q in sentinel_queries
+    ]
 
     # --- Fit ---
     try:
@@ -169,14 +195,14 @@ def _run_cell(ctx: dict) -> list[dict]:
     except Exception as exc:
         status = _classify_exception(exc)
         return _emit(_fit_failure_rows(
-            problem, adapter, queries, query_roles, benchmark,
+            problem, adapter, sentinel_queries, sentinel_roles, benchmark,
             fit_time_s=_NAN, status=status, error_msg=repr(exc),
         ))
 
     # --- Fit safety net ---
     if fit_time_s > fit_budget_s:
         return _emit(_fit_failure_rows(
-            problem, adapter, queries, query_roles, benchmark,
+            problem, adapter, sentinel_queries, sentinel_roles, benchmark,
             fit_time_s=fit_time_s, status="timeout",
             error_msg=f"fit exceeded {fit_budget_s:.0f}s safety budget",
         ))
@@ -192,6 +218,7 @@ def _run_cell(ctx: dict) -> list[dict]:
         evidence_strategies=evidence_strategies,
         evidence_modes=evidence_modes,
         query_budget_s=per_cell_timeout_s,
+        query_groups=query_groups,
     )
     return _emit(rows)
 

@@ -49,7 +49,7 @@ _TOP_LEVEL_KEYS = frozenset({
 _BASELINE_REQUIRED = frozenset({"library", "mechanism", "param_method"})
 _BASELINE_KNOWN = frozenset({
     "library", "mechanism", "param_method",
-    "inference_method", "device", "extra_kwargs",
+    "inference_method", "device", "extra_kwargs", "batch_size",
 })
 
 
@@ -153,8 +153,11 @@ def load_runner_config(
     selector_cfg = d.get("selector", "uniform_random")
 
     def _build_selector(stype: str, block: dict[str, Any]):
+        # n_batch_queries (v0.14, #148): evidence-value variants per query
+        # position, design doc §1.1, §2.4. Default 1 = existing behavior.
+        n_batch_queries = int(block.get("n_batch_queries", 1))
         if stype == "uniform_random":
-            return UniformRandomSelector()
+            return UniformRandomSelector(n_batch_queries=n_batch_queries)
         if stype == "topological":
             return TopologicalAllocator(
                 target_allocation=block.get("target_allocation"),
@@ -163,6 +166,7 @@ def load_runner_config(
                 n_evidence=block.get("n_evidence"),
                 n_evidence_values=block.get("n_evidence_values"),
                 max_retry=block.get("max_retry"),
+                n_batch_queries=n_batch_queries,
             )
         if stype == "heaviest_by_role":
             # Phase 3 scalability selector. Deterministic; ignores
@@ -170,6 +174,7 @@ def load_runner_config(
             return HeaviestQueryByRole(
                 n_evidence=block.get("n_evidence"),
                 max_retry=block.get("max_retry"),
+                n_batch_queries=n_batch_queries,
             )
         raise ValueError(
             f"Config {str(path)!r}: unknown selector type {stype!r}. "
@@ -340,6 +345,14 @@ def _parse_baseline_spec(
     raw_device = b.get("device")
     device = str(raw_device) if raw_device is not None else device_override
 
+    # batch_size (v0.14, #148): per-baseline adapter consumption, §1.5.
+    batch_size = int(b.get("batch_size", 1))
+    if batch_size < 1:
+        raise ValueError(
+            f"Config {str(path)!r}: baselines[{idx}] batch_size must be "
+            f">= 1, got {batch_size}."
+        )
+
     return BaselineSpec(
         library=str(b["library"]),
         mechanism=str(b["mechanism"]),
@@ -350,4 +363,5 @@ def _parse_baseline_spec(
         ),
         device=device,
         extra_kwargs=dict(b.get("extra_kwargs") or {}),
+        batch_size=batch_size,
     )

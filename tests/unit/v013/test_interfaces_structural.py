@@ -37,6 +37,12 @@ class StubQuerySelector:
     def select(self, problem: BenchmarkProblem, n_queries: int, seed: int) -> list[Query]:
         return []
 
+    def select_groups(
+        self, problem: BenchmarkProblem, n_queries: int, seed: int,
+        *, batch_size: int = 1,
+    ) -> list[list[Query]]:
+        return [[q] for q in self.select(problem, n_queries, seed)]
+
 
 class StubMeasurement:
     def measure(

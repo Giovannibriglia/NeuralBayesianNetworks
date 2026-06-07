@@ -48,6 +48,10 @@ class BaselineSpec:
                                           # | 'importance' | None
     device: str | None = None
     extra_kwargs: dict = field(default_factory=dict)
+    # Batched-queries (v0.14, #148): how many queries this baseline's
+    # adapter consumes per query_batch call. 1 = sequential (default;
+    # pyro/pgmpy stay pinned here). Set per-baseline in YAML (§1.5).
+    batch_size: int = 1
 
 
 @dataclass
