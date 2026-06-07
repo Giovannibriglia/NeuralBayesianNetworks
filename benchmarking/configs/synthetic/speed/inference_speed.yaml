@@ -1,0 +1,74 @@
+# =============================================================================
+# batch_speed benchmark — paper-scale batched-queries sweep (#148).
+# =============================================================================
+#
+# Design: docs/v0.14-batched-queries-design.md §5 (LOCKED 2026-06-07).
+#
+#   - Synthetic only, n=100 per family (§5.1), 5 seeds (§5.5)
+#   - n_batch_queries: 10240 evidence-value variants per query position,
+#     uniform across baselines (§5.3)
+#   - batch_sizes sweep [1, 8, 32, 128, 512, 1024] (§5.4): baselines whose
+#     adapters support batching (nbn-*, pomegranate-*) run once per sweep
+#     value; pinned baselines (pyro-*, pgmpy-*, batch_size: 1) run once
+#     total on the first pass (§5.6)
+#   - metrics: timing — TimingOnly, no accuracy scoring
+#
+# Known risk (§5.3 / §8.1): non-batchable baselines process 10240 queries
+# sequentially per cell. At ~10s/query (pyro on n=100 continuous) the
+# 600s per-cell budget forces a soft timeout after ~60 queries → DNF
+# sentinel rows. This is documented expected behavior, not a bug: their
+# figure lines show as flat B=1 references where they complete and DNF
+# where they don't.
+#
+# Compute budget (§5.7): ~365 cells; hours of wall-clock. This is a real
+# run, not CI — see inference_speed_smoke.yaml for the fast gate.
+# =============================================================================
+version: "v0.14"
+benchmark: synthetic
+config_name: batch_speed
+metrics: timing
+
+batch_sizes: [1, 8, 32, 128, 512, 1024]
+n_batch_queries: 10240
+
+source:
+  families: [discrete, continuous_lg, continuous_nongauss, hybrid]
+  n_nodes_list: [100]
+  seeds: [0, 1, 2, 3, 4]
+  n_train: 20480        # 2x n_batch_queries: variant sampling without replacement
+  n_test: 1024
+  n_reference: 10240
+  edge_density: 0.20
+  max_in_degree: 4
+  cardinality: 4
+  fraction_continuous: 0.5
+
+selector:
+  type: heaviest_by_role
+  # n_batch_queries comes from the top-level field above.
+
+# Baselines: all applicable per family (§5.2); inapplicable (baseline,
+# family) cells emit not_supported rows via is_applicable, as everywhere.
+# Batchable (no explicit batch_size — follows the sweep): nbn-*, pomegranate.
+# Non-batchable (batch_size: 1 pinned — runs once): pyro-*, pgmpy-*.
+baselines:
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ve}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: lw}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ve}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: lw}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: lw}
+  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: lw}
+  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: lw}
+  - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router}
+  - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: ve}
+  - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance, batch_size: 1}
+  - {library: pgmpy,       mechanism: discrete,  param_method: mle,   inference_method: ve,      batch_size: 1}
+  - {library: pgmpy,       mechanism: discrete,  param_method: bayes, inference_method: ve,      batch_size: 1}
+  - {library: pgmpy,       mechanism: lg,        param_method: lg,    inference_method: predict, batch_size: 1}
+
+# n_queries_per_cell is ignored by heaviest_by_role (fixed up-to-12
+# positions per DAG) but required by the schema.
+n_queries_per_cell: 12
+# Aggressive per-cell budget (§8.1): batchable baselines finish in
+# seconds; sequential baselines at N=10240 hit this and DNF by design.
+per_cell_timeout_s: 600

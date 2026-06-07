@@ -239,3 +239,19 @@ class TestQueryBatchEdgeCases:
         sequential = [cat_ve_adapter.query(q) for q in queries]
         for bp, sp in zip(batched, sequential):
             assert torch.allclose(bp.probs, sp.probs, atol=1e-6)
+
+    def test_all_empty_mode_batch_falls_back(self, cat_ve_adapter):
+        """All-None evidence (empty mode, e.g. heaviest V2 queries):
+        engines infer B from evidence tensors, so an evidence-free batch
+        must take the sequential fallback and still return B posteriors.
+        Regression for the PR 5 speed-smoke failure (shape (1, K) for B=4).
+        """
+        queries = [
+            Query(targets=("X2",), evidence={"X0": None}, kind="marginal")
+            for _ in range(4)
+        ]
+        batched = cat_ve_adapter.query_batch(queries)
+        sequential = [cat_ve_adapter.query(q) for q in queries]
+        assert len(batched) == 4
+        for bp, sp in zip(batched, sequential):
+            assert torch.allclose(bp.probs, sp.probs, atol=1e-6)
