@@ -551,6 +551,120 @@ def process_cell(df_cell, benchmark, family, size, aggregation, n_nodes, n_param
                       cell_dir / f"table_kind_{k}.tex", f"kind={k} {family}/{size}")
 
 
+def _build_batch_speed_figure(
+    df: pd.DataFrame,
+    aggregation: str,
+    title: str,
+):
+    """Build the batch-speed figure (v0.14 #148, design doc §6.PR6).
+
+    Log-log batch_size vs amortized per-query time, one line per
+    baseline, one facet per family. Returns ``(fig, dnf_lines)`` so
+    tests can inspect facet structure / axis scales / annotations;
+    :func:`fig_batch_speed` saves and closes it.
+
+    Data contract: ``df`` is a speed-benchmark slice. Plotted points
+    use ``status == "ok"`` / ``metric == "query_time_s"`` rows, first
+    averaged per (family, baseline, batch_size, seed), then aggregated
+    across seeds via :func:`aggregate` for the band. DNF annotation
+    (matching the #163 convention): error/timeout/oom rows are counted
+    per (family, baseline, batch_size, status) and reported via a
+    corner note + sidecar lines.
+
+    Returns ``(None, [])`` when there is nothing to plot.
+    """
+    if "batch_size" not in df.columns:
+        return None, []
+    ok = df[(df["status"] == "ok") & (df["metric"] == "query_time_s")].copy()
+    ok = ok[ok["value"].notna() & (ok["value"] > 0)]
+    if ok.empty:
+        return None, []
+
+    families = sorted(ok["family"].dropna().unique())
+    colors = baseline_colors(sorted(ok["baseline"].unique()))
+
+    fig, axes = plt.subplots(
+        1, len(families),
+        figsize=(4.2 * len(families), 3.6),
+        sharey=True, squeeze=False,
+    )
+    dnf_lines: list[str] = []
+
+    for ax, family in zip(axes[0], families):
+        sub = ok[ok["family"] == family]
+        for bl in sorted(sub["baseline"].unique()):
+            blsub = sub[sub["baseline"] == bl]
+            pts = []
+            for bs, grp in blsub.groupby("batch_size"):
+                # Per-seed mean first (queries within a cell), then
+                # seed-aggregate for the band — same two-level pattern
+                # as the scaling figures.
+                seed_means = grp.groupby("seed")["value"].mean()
+                c, lo, hi = aggregate(seed_means, aggregation)
+                lo, hi = clip_band("time", lo, hi)
+                pts.append((int(bs), c, lo, hi))
+            pts.sort(key=lambda p: p[0])
+            xs = [p[0] for p in pts]
+            ax.plot(xs, [p[1] for p in pts], marker="o", markersize=4,
+                    color=colors[bl], label=bl)
+            ax.fill_between(xs, [p[2] for p in pts], [p[3] for p in pts],
+                            color=colors[bl], alpha=0.2)
+
+        # DNF cells for this family — failed rows (error/timeout/oom),
+        # deduped to (baseline, batch_size, status). #163 convention:
+        # corner count + sidecar detail. Pinned baselines simply absent
+        # at swept values are NOT DNF (by-design non-runs, §5.6).
+        fam_dnf = df[
+            (df["family"] == family)
+            & (df["status"].isin(["error", "timeout", "oom"]))
+        ]
+        n_dnf_before = len(dnf_lines)
+        if not fam_dnf.empty:
+            grouped = fam_dnf.groupby(
+                ["baseline", "batch_size", "status"]
+            ).size()
+            for (bl, bs, st), _n in grouped.items():
+                dnf_lines.append(f"  {family} B={int(bs)} {bl}: {st}")
+        n_fam_dnf = len(dnf_lines) - n_dnf_before
+        if n_fam_dnf:
+            ax.text(0.98, 0.98,
+                    f"DNF: {n_fam_dnf} cells (see *_dnf.txt)",
+                    fontsize=7, alpha=0.6, ha="right", va="top",
+                    transform=ax.transAxes)
+
+        ax.set_xscale("log", base=2)
+        ax.set_yscale("log")
+        ax.set_xlabel("batch_size")
+        ax.set_title(family, fontsize=10)
+        ax.legend(fontsize=6, loc="best")
+
+    axes[0][0].set_ylabel("per-query time [s] (amortized)")
+    fig.suptitle(f"{title} — per-query time vs batch_size", fontsize=11)
+    return fig, dnf_lines
+
+
+def fig_batch_speed(
+    df: pd.DataFrame,
+    aggregation: str,
+    out_path: Path,
+    title: str,
+) -> None:
+    """Render + save the batch-speed figure (and its DNF sidecar)."""
+    fig, dnf_lines = _build_batch_speed_figure(df, aggregation, title)
+    if fig is None:
+        logger.info("skip empty (no ok batched rows): %s", out_path.name)
+        return
+    if dnf_lines:
+        sidecar = out_path.with_name(out_path.stem + "_dnf.txt")
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text(
+            "Error/timeout/oom cells for the batch-speed figure:\n"
+            + "\n".join(dnf_lines) + "\n",
+            encoding="utf-8",
+        )
+    _savefig(fig, out_path)
+
+
 def _resolve_parquet(parquet: Path) -> Path:
     """Accept a ``.parquet`` file or a directory; in the latter case find the
     single ``*_metrics.parquet`` inside (the layout written by
@@ -629,6 +743,19 @@ def run_plot(
                              n_nodes, n_params_global,
                              output_dir / bench / family / size)
                 produced += 1
+
+        # Batch-speed figure (v0.14 #148): auto-detected — rendered when
+        # the parquet carries batched rows (batch_size > 1 anywhere),
+        # i.e. the output of a batch_sizes-sweep run. One figure per
+        # benchmark, faceted by family, at the benchmark level of the
+        # output tree.
+        if "batch_size" in dfb.columns and (dfb["batch_size"] > 1).any():
+            fig_batch_speed(
+                dfb, aggregation,
+                output_dir / bench / "batch_speed.pdf",
+                bench,
+            )
+            produced += 1
 
     logger.info("done: %d cells produced, %d cells skipped (empty)", produced, len(skipped))
     return 0
