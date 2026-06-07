@@ -267,9 +267,98 @@ class NBNAdapter:
         return Posterior(probs=probs.detach().cpu())
 
     def query_batch(self, queries: list[Query]) -> list[Posterior]:
-        """Sequential default (PR 1, #148); library-level batching via the
-        nbn engines' ``query_batch`` lands in PR 2."""
-        return default_query_batch(self, queries)
+        """Library-level batching via the nbn engine's ``query_batch`` API.
+
+        Assumes all queries share (targets, frozenset(evidence_keys)) —
+        the selector contract per design doc §1.2.  Heterogeneous batches
+        (different targets or evidence keys, or mixed concrete/None
+        evidence values) fall back to the sequential default helper.
+
+        Returns Posteriors in input order:
+            Posterior(probs=...)   for discrete targets — [K] per query,
+                unpacked from the engine's [B, K] output
+            Posterior(samples=...) for continuous targets — per-row
+                multinomial resample of the engine's weighted particles
+                (the 2-D generalisation of the B=1 path in ``query()``)
+
+        See docs/v0.14-batched-queries-design.md §3.1.
+        """
+        if not queries:
+            return []
+        # B=1: single-query path — identical semantics, no stacking overhead.
+        if len(queries) == 1:
+            return [self.query(queries[0])]
+        if self.model is None or self._engine_obj is None:
+            raise RuntimeError(
+                "Adapter not fitted. Call fit() before query_batch()."
+            )
+
+        # Verify the shared (targets, evidence_keys) contract; fall back to
+        # the sequential helper on any heterogeneity.
+        first = queries[0]
+        targets = first.targets
+        evidence_keys = frozenset(first.evidence.keys())
+        for q in queries[1:]:
+            if q.targets != targets:
+                return default_query_batch(self, queries)
+            if frozenset(q.evidence.keys()) != evidence_keys:
+                return default_query_batch(self, queries)
+
+        # Stack evidence per variable into [B, D] tensors on self.device
+        # (D=1 for the scalar evidence the selectors emit).  A key whose
+        # value is None in every query is dropped — Phase 3 empty mode,
+        # same as _prep_evidence(); mixed None/concrete is heterogeneous.
+        b = len(queries)
+        stacked_evidence: dict[str, torch.Tensor] = {}
+        for key in evidence_keys:
+            values = [q.evidence[key] for q in queries]
+            none_count = sum(v is None for v in values)
+            if none_count == len(values):
+                continue  # marginalize, as _prep_evidence does for None
+            if none_count > 0:
+                return default_query_batch(self, queries)  # mixed modes
+            stacked_evidence[key] = torch.stack(
+                [torch.as_tensor(v).reshape(-1) for v in values]
+            ).to(self.device)  # [B, D]
+
+        result = self._engine_obj.query_batch(
+            self.model, list(targets), stacked_evidence
+        )
+
+        if isinstance(result, tuple):
+            # LW continuous path: (weights [B, S], samples [B, S, D])
+            return self._unpack_lw_continuous_batch(*result)
+
+        # Discrete / VE path: probability matrix [B, K]
+        if result.dim() != 2 or result.shape[0] != b:
+            raise RuntimeError(
+                f"Unexpected engine.query_batch output for {self.name}: "
+                f"shape {tuple(result.shape)}, expected [{b}, K]."
+            )
+        return [Posterior(probs=result[i].detach().cpu()) for i in range(b)]
+
+    def _unpack_lw_continuous_batch(
+        self,
+        weights: torch.Tensor,   # [B, S], softmax-normalised per row
+        samples: torch.Tensor,   # [B, S, D]
+    ) -> list[Posterior]:
+        """Per-row multinomial resampling for batched LW continuous output.
+
+        The engine returns per-row weighted particle pools (V1 finding:
+        B×S independent draws, per-row weights).  ``torch.multinomial``
+        accepts 2-D input and resamples each row independently — this is
+        the [B, S] generalisation of the B=1 resample in ``query()``.
+        """
+        n_particles = weights.shape[1]
+        idx = torch.multinomial(
+            weights, num_samples=n_particles, replacement=True
+        )  # [B, S]
+        # Single target → column 0 of the sample tensor (as in query()).
+        resampled = torch.gather(samples[..., 0], 1, idx)  # [B, S]
+        return [
+            Posterior(samples=resampled[i].detach().cpu())
+            for i in range(resampled.shape[0])
+        ]
 
     def is_applicable(self, problem: BenchmarkProblem) -> bool:
         """Return True if this adapter can handle problem.family.
