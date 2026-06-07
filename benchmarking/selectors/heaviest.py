@@ -48,11 +48,15 @@ class HeaviestQueryByRole:
         self,
         n_evidence: dict | None = None,
         max_retry: int | None = None,
+        n_batch_queries: int = 1,
     ) -> None:
         self.n_evidence = dict(n_evidence or self._DEFAULT_N_EVIDENCE)
         self.max_retry = (
             max_retry if max_retry is not None else self._DEFAULT_MAX_RETRY
         )
+        # v0.14 (#148): evidence-value variants per query position,
+        # design doc §1.1, §2.4. 1 = existing single-variant behavior.
+        self.n_batch_queries = int(n_batch_queries)
         self._kind_evidence_allocator = _KindEvidenceAllocator()
         self._value_allocator = _ValueAllocator(max_retry=self.max_retry)
         self._cache: dict[tuple[str, str, int], NodeRoles] = {}
@@ -171,3 +175,29 @@ class HeaviestQueryByRole:
                 queries.append(v2_query)
 
         return queries
+
+    def select_groups(
+        self,
+        problem: BenchmarkProblem,
+        n_queries: int,
+        seed: int,
+        *,
+        batch_size: int = 1,
+    ) -> list[list[Query]]:
+        """Grouped form of ``select()`` (v0.14, #148; design doc §1.3, §2.3).
+
+        Expands each selected query position into ``self.n_batch_queries``
+        evidence-value variants sampled from ``problem.train_data``,
+        chunked into inner lists of length <= ``batch_size``. At
+        ``n_batch_queries=1`` this is ``[[q] for q in select(...)]`` with
+        the original Query objects.
+        """
+        from benchmarking.selectors._batching import make_query_groups
+
+        return make_query_groups(
+            self.select(problem, n_queries, seed),
+            problem,
+            n_batch_queries=self.n_batch_queries,
+            batch_size=batch_size,
+            seed=seed,
+        )

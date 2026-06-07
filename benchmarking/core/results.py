@@ -69,6 +69,13 @@ class CellResult:
     # downstream readers select columns by name, never by exact schema.
     device: str | None = None
 
+    # Batched-queries (v0.14, #148): the number of queries the adapter
+    # processed in the library call that produced this row. 1 for all
+    # pre-batching rows and for sequential dispatch; B when the row came
+    # from a query_batch call of B queries (design doc §1.4, §1.6).
+    # Additive — existing data reads as null → 1 on the consumer side.
+    batch_size: int = 1
+
 
 # Valid status values (for validation in implementations)
 VALID_STATUSES = frozenset({"ok", "timeout", "oom", "error", "not_supported"})

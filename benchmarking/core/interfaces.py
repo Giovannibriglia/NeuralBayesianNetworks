@@ -59,6 +59,27 @@ class QuerySelector(Protocol):
         """Return a list of queries, ordered. Deterministic given seed."""
         ...
 
+    def select_groups(
+        self,
+        problem: BenchmarkProblem,
+        n_queries: int,
+        seed: int,
+        *,
+        batch_size: int = 1,
+    ) -> list[list[Query]]:
+        """Return grouped queries (v0.14 batched queries, #148).
+
+        Outer list: groups whose queries share (targets, evidence_keys),
+        chunked to length <= ``batch_size``. With the selector's
+        ``n_batch_queries=1`` (default), every inner list has length 1
+        and wraps the exact Query objects ``select()`` returns —
+        identity behavior for existing benchmarks.
+
+        Deterministic given seed.
+        See docs/v0.14-batched-queries-design.md §1.3, §2.3.
+        """
+        ...
+
 
 @runtime_checkable
 class Measurement(Protocol):

@@ -57,8 +57,11 @@ class UniformRandomSelector:
         evidence may be empty.
     """
 
-    def __init__(self, n_evidence: int = 3) -> None:
+    def __init__(self, n_evidence: int = 3, n_batch_queries: int = 1) -> None:
         self.n_evidence = n_evidence
+        # v0.14 (#148): evidence-value variants per query position,
+        # design doc §1.1, §2.4. 1 = existing single-variant behavior.
+        self.n_batch_queries = int(n_batch_queries)
 
     def select(
         self,
@@ -113,6 +116,32 @@ class UniformRandomSelector:
             queries.append(Query(targets=(target,), evidence=ev, kind="marginal"))
 
         return queries
+
+    def select_groups(
+        self,
+        problem: BenchmarkProblem,
+        n_queries: int,
+        seed: int,
+        *,
+        batch_size: int = 1,
+    ) -> list[list[Query]]:
+        """Grouped form of ``select()`` (v0.14, #148; design doc §1.3, §2.3).
+
+        Expands each selected query position into ``self.n_batch_queries``
+        evidence-value variants sampled from ``problem.train_data``,
+        chunked into inner lists of length <= ``batch_size``. At
+        ``n_batch_queries=1`` this is ``[[q] for q in select(...)]`` with
+        the original Query objects.
+        """
+        from benchmarking.selectors._batching import make_query_groups
+
+        return make_query_groups(
+            self.select(problem, n_queries, seed),
+            problem,
+            n_batch_queries=self.n_batch_queries,
+            batch_size=batch_size,
+            seed=seed,
+        )
 
     # -----------------------------------------------------------------------
     # Selector role label (for CellResult.query_role)
