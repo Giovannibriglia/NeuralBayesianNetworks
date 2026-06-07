@@ -103,6 +103,7 @@ class _RecordingMeasurement:
         evidence_strategies: list[str] | None = None,
         evidence_modes: list[str] | None = None,
         query_budget_s: float = float("inf"),
+        query_groups: list[list[Query]] | None = None,
     ) -> list[CellResult]:
         self.received = {
             "query_roles": query_roles,
@@ -110,6 +111,7 @@ class _RecordingMeasurement:
             "evidence_strategies": evidence_strategies,
             "evidence_modes": evidence_modes,
             "queries": queries,
+            "query_groups": query_groups,
         }
         return []
 

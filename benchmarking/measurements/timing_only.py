@@ -11,11 +11,9 @@ Reference: docs/v0.13-benchmark-redesign.md §2.2, §3, §4.1
 """
 from __future__ import annotations
 
-import time
 from typing import Any
 
 from benchmarking.core.results import CellResult
-from benchmarking.core.runner import _classify_exception
 from benchmarking.domains.base import BenchmarkProblem, Query
 from benchmarking.measurements.accuracy_timing import _infer_family
 
@@ -58,6 +56,7 @@ class TimingOnly:
         evidence_strategies: list[str] | None = None,
         evidence_modes: list[str] | None = None,
         query_budget_s: float = float("inf"),
+        query_groups: list[list[Query]] | None = None,
     ) -> list[CellResult]:
         """Time each query individually; return one row per query.
 
@@ -124,38 +123,40 @@ class TimingOnly:
                 f"!= queries length {len(queries)}"
             )
 
+        # v0.14 (#148): grouped dispatch. Without query_groups (legacy
+        # callers), every query is its own length-1 group — the dispatch
+        # helper routes B=1 through adapter.query(), so behavior is
+        # identical to the pre-batching loop.
+        if query_groups is None:
+            query_groups = [[q] for q in queries]
+        n_grouped = sum(len(g) for g in query_groups)
+        if n_grouped != len(queries):
+            raise ValueError(
+                f"query_groups flatten to {n_grouped} queries "
+                f"!= queries length {len(queries)}"
+            )
+
         family = problem.family or _infer_family(problem)
         problem_id = problem.problem_id or problem.name
         baseline = adapter.name
 
+        # Group dispatch — atomic batch failure, amortized timing,
+        # #127-Stage-4 exception classification all live in the helper.
+        from benchmarking.measurements._batch_dispatch import run_query_groups
+
+        outcomes, unstarted_groups = run_query_groups(
+            adapter, query_groups, query_budget_s=query_budget_s,
+        )
+
         rows: list[CellResult] = []
-        cumulative_query_time_s = 0.0
-        timed_out_at: int | None = None
-
-        for i, (q, role, qkind, estrat, emode) in enumerate(
-            zip(queries, query_roles, query_kinds, evidence_strategies, evidence_modes)
-        ):
-            if cumulative_query_time_s >= query_budget_s:
-                timed_out_at = i
-                break
-            t0 = time.perf_counter()
-            try:
-                adapter.query(q)
-                q_time = time.perf_counter() - t0
-                status = "ok"
-                err_msg = None
-            except Exception as exc:
-                q_time = time.perf_counter() - t0
-                # Classify the failure mode (oom/not_supported/error) the same
-                # way fit-time failures are classified (#127 Stage 4): a torch
-                # allocator failure at query time must classify as "oom".
-                status = _classify_exception(exc)
-                err_msg = str(exc)
-
-            cumulative_query_time_s += q_time
+        for o in outcomes:
+            i = o.flat_index
+            role, qkind = query_roles[i], query_kinds[i]
+            estrat, emode = evidence_strategies[i], evidence_modes[i]
             for tk, tv in [
                 ("fit_time_s", fit_time_s),
-                ("query_time_s", q_time if status == "ok" else float("nan")),
+                ("query_time_s",
+                 o.query_time_s if o.status == "ok" else float("nan")),
                 ("metrics_time_s", 0.0),
             ]:
                 rows.append(CellResult(
@@ -170,43 +171,45 @@ class TimingOnly:
                     evidence_mode=emode,
                     metric=tk,
                     value=tv,
-                    status=status,
+                    status=o.status,
                     fit_time_s=fit_time_s,
-                    query_time_s=q_time,
+                    query_time_s=o.query_time_s,
                     metrics_time_s=0.0,
-                    error_msg=err_msg,
+                    error_msg=o.error_msg,
+                    batch_size=o.batch_size,
                 ))
 
-        # Timeout rows for queries that never started.
-        if timed_out_at is not None:
-            for role, qkind, estrat, emode in zip(
-                query_roles[timed_out_at:],
-                query_kinds[timed_out_at:],
-                evidence_strategies[timed_out_at:],
-                evidence_modes[timed_out_at:],
-            ):
-                for tk, tv in [
-                    ("fit_time_s", fit_time_s),
-                    ("query_time_s", float("nan")),
-                    ("metrics_time_s", 0.0),
-                ]:
-                    rows.append(CellResult(
-                        benchmark=benchmark,
-                        family=family,
-                        problem_id=problem_id,
-                        seed=seed,
-                        baseline=baseline,
-                        query_role=role,
-                        query_kind=qkind,
-                        evidence_strategy=estrat,
-                        evidence_mode=emode,
-                        metric=tk,
-                        value=tv,
-                        status="timeout",
-                        fit_time_s=fit_time_s,
-                        query_time_s=float("nan"),
-                        metrics_time_s=0.0,
-                        error_msg="query budget exceeded",
-                    ))
+        # Timeout rows for groups that never started — one row-set per
+        # unstarted GROUP (§4.3 sentinel principle; identical to the
+        # per-query emission at B=1).
+        for group, flat_start in unstarted_groups:
+            role = query_roles[flat_start]
+            qkind = query_kinds[flat_start]
+            estrat = evidence_strategies[flat_start]
+            emode = evidence_modes[flat_start]
+            for tk, tv in [
+                ("fit_time_s", fit_time_s),
+                ("query_time_s", float("nan")),
+                ("metrics_time_s", 0.0),
+            ]:
+                rows.append(CellResult(
+                    benchmark=benchmark,
+                    family=family,
+                    problem_id=problem_id,
+                    seed=seed,
+                    baseline=baseline,
+                    query_role=role,
+                    query_kind=qkind,
+                    evidence_strategy=estrat,
+                    evidence_mode=emode,
+                    metric=tk,
+                    value=tv,
+                    status="timeout",
+                    fit_time_s=fit_time_s,
+                    query_time_s=float("nan"),
+                    metrics_time_s=0.0,
+                    error_msg="query budget exceeded",
+                    batch_size=len(group),
+                ))
 
         return rows
