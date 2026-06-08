@@ -311,6 +311,43 @@ def _rows_to_cellresults(
 
 
 # ---------------------------------------------------------------------------
+# Batch-size sweep resolution (v0.14 fit-once query-many, #174)
+# ---------------------------------------------------------------------------
+
+def _resolve_batch_sizes(
+    cfg: RunnerConfig, spec: BaselineSpec, adapter: Any | None = None,
+) -> list[int]:
+    """Return the batch_sizes this (cfg, baseline) cell sweeps.
+
+    Design doc §3.2 / §5.4. The cell worker fits once and loops
+    ``measure()`` over the returned list, so this is where the
+    swept-vs-pinned decision (formerly ``cli._run_cells``) now lives:
+
+    * No top-level ``cfg.batch_sizes`` → ``[spec.batch_size]`` (length 1):
+      identity behavior for every non-sweep config (bnlearn, scalability,
+      smoke).
+    * Explicit YAML pin (``batch_size_pinned``) → ``[spec.batch_size]``:
+      a pinned baseline runs once at its pinned value, even if its adapter
+      could batch (explicit pin always wins, §5.6).
+    * Adapter supports batching and is unpinned → ``cfg.batch_sizes``: the
+      baseline is swept across every value, fit once.
+    * Adapter does not support batching → ``[spec.batch_size]`` (length 1).
+
+    ``adapter`` may be passed to avoid a redundant ``build_adapter`` when
+    the caller already has the instance.
+    """
+    if not cfg.batch_sizes:
+        return [getattr(spec, "batch_size", 1)]
+    if spec.batch_size_pinned:
+        return [spec.batch_size]
+    if adapter is None:
+        adapter = build_adapter(spec)
+    if getattr(adapter, "supports_batched_queries", False):
+        return list(cfg.batch_sizes)
+    return [spec.batch_size]
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -398,7 +435,14 @@ class Runner:
                         pbar.update(len(cfg.baselines))
                         continue
                     for spec in cfg.baselines:
-                        name = build_adapter(spec).name
+                        adapter_probe = build_adapter(spec)
+                        name = adapter_probe.name
+                        # v0.14 fit-once query-many (#174): resolve the
+                        # batch_sizes this cell sweeps. The swept-vs-pinned
+                        # decision (formerly cli._run_cells) lives here now,
+                        # alongside the cell key — reusing the probe adapter
+                        # already built for the name so we don't build twice.
+                        batch_sizes = _resolve_batch_sizes(cfg, spec, adapter_probe)
                         pid = getattr(problem, "problem_id", "?")
                         pbar.set_description(f"fitting {name} on {pid}")
                         # Goes to run.log (INFO); console is WARNING-gated.
@@ -408,6 +452,7 @@ class Runner:
                             cfg, problem, spec, writer,
                             fit_budget_s=fit_budget_s,
                             default_role=default_role,
+                            batch_sizes=batch_sizes,
                         )
                         pbar.update(1)
         finally:
@@ -422,6 +467,7 @@ class Runner:
         *,
         fit_budget_s: float,
         default_role: str,
+        batch_sizes: list[int] | None = None,
     ) -> Iterator[CellResult]:
         # Bug 4 (#127) Stage 2: the per-cell work (build_adapter →
         # applicability → select → fit → measure) now runs inside a
@@ -431,6 +477,13 @@ class Runner:
         # same row semantics — just isolated.  See
         # docs/v0.13-runner-subprocess-isolation.md §5.
         from benchmarking.core.cell_runner import run_cell_in_subprocess
+
+        # v0.14 fit-once query-many (#174): the batch_sizes this cell sweeps.
+        # The caller (run()) resolves it per-baseline; fall back to the
+        # spec's own batch_size for direct callers (tests) — a length-1
+        # sweep, identity behavior.
+        if batch_sizes is None:
+            batch_sizes = [getattr(spec, "batch_size", 1)]
 
         ctx = {
             "problem": problem,
@@ -443,14 +496,21 @@ class Runner:
             "per_cell_timeout_s": cfg.per_cell_timeout_s,
             "fit_budget_s": fit_budget_s,
             "default_role": default_role,
+            "batch_sizes": batch_sizes,
         }
 
         # Cell-level hard timeout is a backstop for hangs the worker
         # cannot self-limit (C-level loop, allocator thrash).  It must be
-        # generous enough not to fire on legitimate cells, whose internal
-        # budgets are fit_budget_s (fit) + per_cell_timeout_s (queries)
-        # plus unbounded metrics time — so we add a fixed buffer on top.
-        cell_timeout_s = fit_budget_s + cfg.per_cell_timeout_s + _CELL_TIMEOUT_BUFFER_S
+        # generous enough not to fire on legitimate cells. The worker fits
+        # ONCE (fit_budget_s) then runs one measure() pass per batch_size,
+        # each bounded by per_cell_timeout_s (design doc §4.1 / §8.4) — so a
+        # swept cell of N batch_sizes needs N × per_cell_timeout_s of query
+        # budget. The fixed buffer absorbs unbounded metrics time on top.
+        cell_timeout_s = (
+            fit_budget_s
+            + len(batch_sizes) * cfg.per_cell_timeout_s
+            + _CELL_TIMEOUT_BUFFER_S
+        )
 
         result = run_cell_in_subprocess(ctx, timeout_s=cell_timeout_s)
 

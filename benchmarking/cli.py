@@ -114,58 +114,28 @@ def _suppress_library_warnings() -> None:
 
 
 def _run_cells(cfg) -> None:
-    """Drive the cell loop, with the v0.14 batch_sizes sweep (#148, §5.6).
+    """Drive the cell loop.
 
-    No ``batch_sizes`` in the config → single pass, exactly the
-    pre-sweep behavior. With ``batch_sizes``, one pass per sweep value:
+    v0.14 fit-once query-many (#174, design doc §3.2/§6): a single
+    ``Runner().run(cfg)`` pass drives the whole config. The batch_sizes
+    sweep is no longer an outer loop here — the runner resolves a
+    per-baseline batch_sizes list (``cfg.batch_sizes`` for swept baselines,
+    ``[spec.batch_size]`` for pinned / non-batchable ones) and the cell
+    worker fits each ``(problem, seed, baseline)`` cell ONCE, then loops
+    ``measure()`` over that list. This eliminates the redundant per-sweep-
+    value re-fits that the old outer loop incurred (one full fit per sweep
+    value); see ``runner._resolve_batch_sizes``.
 
-      * swept baselines — adapter ``supports_batched_queries`` and no
-        explicit YAML ``batch_size`` pin — run at every sweep value,
-        with their batch_size overridden to it;
-      * pinned / non-batchable baselines run once, on the first pass,
-        at their own batch_size (typically 1). An explicit pin always
-        wins: a batchable baseline pinned to 1 runs once, sequentially.
-
-    All passes append to the same streaming JSONL (JsonlWriter opens in
-    append mode), so the final parquet carries every sweep value with
-    the batch_size column distinguishing them (§1.4).
+    With no ``cfg.batch_sizes`` every baseline resolves to a length-1 list,
+    so existing non-sweep configs (bnlearn, scalability, smoke) are
+    unchanged. The final parquet still carries every sweep value with the
+    batch_size column distinguishing them (§1.4), stamped per row by the
+    measurement layer (PR #168).
     """
-    import dataclasses
-
-    from benchmarking.core.config import build_adapter
     from benchmarking.core.runner import Runner
 
-    if not cfg.batch_sizes:
-        for _ in Runner().run(cfg):
-            pass
-        return
-
-    def _swept(spec) -> bool:
-        if spec.batch_size_pinned:
-            return False
-        adapter = build_adapter(spec)
-        return bool(getattr(adapter, "supports_batched_queries", False))
-
-    swept_flags = [_swept(spec) for spec in cfg.baselines]
-    for i, sweep_value in enumerate(cfg.batch_sizes):
-        pass_baselines = []
-        for spec, is_swept in zip(cfg.baselines, swept_flags):
-            if is_swept:
-                pass_baselines.append(
-                    dataclasses.replace(spec, batch_size=sweep_value)
-                )
-            elif i == 0:
-                # Pinned / non-batchable: once, at its own batch_size.
-                pass_baselines.append(spec)
-        if not pass_baselines:
-            continue
-        logger.info(
-            "batch_sizes sweep: pass %d/%d (batch_size=%d, %d baselines)",
-            i + 1, len(cfg.batch_sizes), sweep_value, len(pass_baselines),
-        )
-        pass_cfg = dataclasses.replace(cfg, baselines=pass_baselines)
-        for _ in Runner().run(pass_cfg):
-            pass
+    for _ in Runner().run(cfg):
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:
