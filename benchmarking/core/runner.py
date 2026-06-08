@@ -443,6 +443,11 @@ class Runner:
             "per_cell_timeout_s": cfg.per_cell_timeout_s,
             "fit_budget_s": fit_budget_s,
             "default_role": default_role,
+            # v0.14 fit-once query-many (#174). Stage (a): always a
+            # single-element list, so the worker's sweep loop runs once —
+            # behavior bitwise identical to pre-#174. Stage (b) populates
+            # this with cfg.batch_sizes for swept baselines.
+            "batch_sizes": [getattr(spec, "batch_size", 1)],
         }
 
         # Cell-level hard timeout is a backstop for hangs the worker

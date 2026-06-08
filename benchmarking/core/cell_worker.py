@@ -98,10 +98,17 @@ def _run_cell(ctx: dict) -> list[dict]:
     """Run one (problem, baseline, seed) cell.
 
     This is the per-cell logic that lived inline in
-    ``benchmarking.core.runner.Runner._run_cell`` before Bug 4. Same
-    semantics — build adapter, applicability gate, query selection, fit
-    (with exception/safety-net classification), measurement with the
-    Phase 3 per-query soft timeout — just running inside a subprocess.
+    ``benchmarking.core.runner.Runner._run_cell`` before Bug 4 — build
+    adapter, applicability gate, fit (with exception/safety-net
+    classification), measurement with the Phase 3 per-query soft timeout —
+    running inside a subprocess.
+
+    v0.14 fit-once query-many (#174, design doc §5.2): the cell is
+    sweep-aware. It fits the adapter ONCE, then loops
+    ``measurement.measure()`` over ``ctx["batch_sizes"]`` (a list[int]),
+    emitting per-value rows. Length 1 (the default the runner passes for
+    pinned / non-swept baselines and for every non-sweep config) is bitwise
+    identical to the pre-#174 single-pass behavior.
 
     The cell helpers (``_not_supported_sentinel``, ``_fit_failure_rows``,
     ``_classify_exception``, ``_evidence_mode_for``) still live in the
@@ -133,6 +140,13 @@ def _run_cell(ctx: dict) -> list[dict]:
     per_cell_timeout_s = ctx["per_cell_timeout_s"]
     fit_budget_s = ctx["fit_budget_s"]
     default_role = ctx["default_role"]
+    # v0.14 fit-once query-many (#174, design doc §5.2): the batch_sizes
+    # this cell sweeps. Length 1 = no sweep (identity with pre-#174
+    # behavior); length N = swept (fit once, then loop measure() over the
+    # list). The runner derives it per-baseline (cfg.batch_sizes for swept
+    # baselines, [spec.batch_size] for pinned). Legacy contexts without the
+    # key fall back to the spec's own batch_size — a single-element sweep.
+    batch_sizes = ctx.get("batch_sizes") or [getattr(spec, "batch_size", 1)]
 
     def _emit(results) -> list[dict]:
         # Stamp the resolved device on every row at this single choke point
@@ -146,81 +160,106 @@ def _run_cell(ctx: dict) -> list[dict]:
             for r in results
         ]
 
-    adapter = build_adapter(spec)
-
-    # --- Applicability gate ---
-    if not adapter.is_applicable(problem):
-        return _emit([_not_supported_sentinel(problem, adapter, benchmark)])
-
-    # --- Query selection (seed from problem generation) ---
-    # v0.14 (#148): grouped selection. select_groups emits
-    # list[list[Query]] chunked by the baseline's batch_size; at
-    # n_batch_queries=1 (default) every group is one query and the
-    # flattened list equals select()'s output exactly. Selectors
-    # without select_groups (legacy fixtures) fall back to select().
-    batch_size = getattr(spec, "batch_size", 1)
-    if hasattr(selector, "select_groups"):
-        query_groups = selector.select_groups(
-            problem, n_queries_per_cell, problem.seed,
-            batch_size=batch_size,
-        )
-    else:
-        query_groups = [
+    def _select_groups(batch_size: int):
+        # v0.14 (#148): grouped selection. select_groups emits
+        # list[list[Query]] chunked by the given batch_size; at
+        # n_batch_queries=1 (default) every group is one query and the
+        # flattened list equals select()'s output exactly. Selectors
+        # without select_groups (legacy fixtures) fall back to select().
+        # §5.3: select_groups is idempotent across calls for a fixed seed —
+        # safe to call once per sweep value.
+        if hasattr(selector, "select_groups"):
+            return selector.select_groups(
+                problem, n_queries_per_cell, problem.seed,
+                batch_size=batch_size,
+            )
+        return [
             [q] for q in selector.select(
                 problem, n_queries_per_cell, problem.seed,
             )
         ]
-    queries = [q for g in query_groups for q in g]
-    query_roles = [getattr(q, "query_role", default_role) for q in queries]
-    query_kinds = [getattr(q, "query_kind", "prediction") for q in queries]
-    evidence_strategies = [
-        getattr(q, "evidence_strategy", "random") for q in queries
-    ]
-    evidence_modes = [_evidence_mode_for(q) for q in queries]
 
-    # Sentinel representatives (§4.3): fit-failure sentinels are emitted
-    # per GROUP (one representative query each), not per planned query —
-    # at n_batch_queries=1 this is exactly the pre-batching one-sentinel-
-    # per-query behavior; at N>1 it avoids K×N sentinel explosion.
-    sentinel_queries = [g[0] for g in query_groups]
-    sentinel_roles = [
-        getattr(q, "query_role", default_role) for q in sentinel_queries
-    ]
+    adapter = build_adapter(spec)
 
-    # --- Fit ---
+    # --- Applicability gate ---
+    # §5.2 step 2: one not_supported sentinel per batch_size (no fit
+    # attempted). At length 1 this is exactly the pre-#174 single sentinel.
+    if not adapter.is_applicable(problem):
+        return _emit([
+            _not_supported_sentinel(problem, adapter, benchmark)
+            for _ in batch_sizes
+        ])
+
+    def _fit_failure_for_all(*, fit_time_s: float, status: str,
+                             error_msg: str) -> list:
+        # §5.2 step 4 / locked decision #2: a fit failure emits fit-failure
+        # sentinels for EVERY batch_size in the sweep. Sentinel representatives
+        # are one-per-group (§4.3), so the group structure (and thus the count)
+        # is recomputed per batch_size. At length 1 this is exactly the
+        # pre-#174 single-pass fit-failure output.
+        rows: list = []
+        for batch_size in batch_sizes:
+            groups = _select_groups(batch_size)
+            sentinel_queries = [g[0] for g in groups]
+            sentinel_roles = [
+                getattr(q, "query_role", default_role)
+                for q in sentinel_queries
+            ]
+            rows.extend(_fit_failure_rows(
+                problem, adapter, sentinel_queries, sentinel_roles, benchmark,
+                fit_time_s=fit_time_s, status=status, error_msg=error_msg,
+            ))
+        return rows
+
+    # --- Fit (ONCE per cell, regardless of how many batch_sizes follow) ---
     try:
         t0 = perf_counter()
         adapter.fit(problem, **spec.extra_kwargs)
         fit_time_s = perf_counter() - t0
     except Exception as exc:
         status = _classify_exception(exc)
-        return _emit(_fit_failure_rows(
-            problem, adapter, sentinel_queries, sentinel_roles, benchmark,
+        return _emit(_fit_failure_for_all(
             fit_time_s=_NAN, status=status, error_msg=repr(exc),
         ))
 
-    # --- Fit safety net ---
+    # --- Fit safety net (timed against fit_budget_s, the single fit) ---
     if fit_time_s > fit_budget_s:
-        return _emit(_fit_failure_rows(
-            problem, adapter, sentinel_queries, sentinel_roles, benchmark,
+        return _emit(_fit_failure_for_all(
             fit_time_s=fit_time_s, status="timeout",
             error_msg=f"fit exceeded {fit_budget_s:.0f}s safety budget",
         ))
 
-    # --- Measurement (handles per-query cumulative timeout internally) ---
-    rows = measurement.measure(
-        problem, adapter, queries,
-        fit_time_s=fit_time_s,
-        benchmark=benchmark,
-        seed=problem.seed,
-        query_roles=query_roles,
-        query_kinds=query_kinds,
-        evidence_strategies=evidence_strategies,
-        evidence_modes=evidence_modes,
-        query_budget_s=per_cell_timeout_s,
-        query_groups=query_groups,
-    )
-    return _emit(rows)
+    # --- Sweep loop: one measure() pass per batch_size, each with its own
+    # query_budget_s (locked decision #1); a query failure in one pass does
+    # not break the loop (locked decision #3, the measurement layer already
+    # classifies per-pass). Each measure() stamps its own batch_size per row
+    # from the group sizes (PR #168). At length 1 this is a single pass,
+    # bitwise identical to the pre-#174 output.
+    all_rows: list = []
+    for batch_size in batch_sizes:
+        query_groups = _select_groups(batch_size)
+        queries = [q for g in query_groups for q in g]
+        query_roles = [getattr(q, "query_role", default_role) for q in queries]
+        query_kinds = [getattr(q, "query_kind", "prediction") for q in queries]
+        evidence_strategies = [
+            getattr(q, "evidence_strategy", "random") for q in queries
+        ]
+        evidence_modes = [_evidence_mode_for(q) for q in queries]
+
+        rows = measurement.measure(
+            problem, adapter, queries,
+            fit_time_s=fit_time_s,
+            benchmark=benchmark,
+            seed=problem.seed,
+            query_roles=query_roles,
+            query_kinds=query_kinds,
+            evidence_strategies=evidence_strategies,
+            evidence_modes=evidence_modes,
+            query_budget_s=per_cell_timeout_s,
+            query_groups=query_groups,
+        )
+        all_rows.extend(rows)
+    return _emit(all_rows)
 
 
 if __name__ == "__main__":
