@@ -26,6 +26,18 @@ from nbn.inference.base import InferenceEngine
 
 logger = logging.getLogger(__name__)
 
+# Empirical broadcast live-set multiplier (issue #177).
+#
+# The per-step max-factor estimate in ``_estimate_peak_bytes`` captures
+# only one union-scope tensor, but ``_log_factor_product_batched``
+# materialises three simultaneously (``a_aligned`` + ``b_aligned`` +
+# their sum), and conditioned factors persist across elimination steps.
+# Measurement (2026-06-08, nbn-neuralcat-ve, B=16..128) found
+# actual/predicted = 2.85× rock-stable across batch sizes; 3.0 rounds
+# conservative. See #177 for the measurement and #178 for the deeper
+# live-set model that would replace this scalar.
+_LIVESET_MULTIPLIER = 3.0
+
 
 class TensorVariableElimination(InferenceEngine):
     """Log-domain VE for discrete BNs (single-row + truly batched queries)."""
@@ -346,26 +358,13 @@ class TensorVariableElimination(InferenceEngine):
         # ``status='oom'`` so paper-config cells fail cleanly with a
         # DNF triangle rather than crashing the harness.
         if device.type == "cuda":
-            estimated_peak = _estimate_peak_bytes(
+            msg = _memory_budget_message(
                 to_eliminate, factors,
                 evidence_keys=tuple(sorted(ev_norm.keys())),
-                B=B,
+                B=B, device=device, order=order,
             )
-            try:
-                free_bytes, _total_bytes = torch.cuda.mem_get_info(device)
-            except RuntimeError:
-                free_bytes = None
-            if free_bytes is not None and estimated_peak > 0.9 * free_bytes:
-                raise torch.cuda.OutOfMemoryError(
-                    f"TensorVariableElimination: query out of memory "
-                    f"pre-allocation guard — plan would need "
-                    f"~{estimated_peak / 1024 ** 3:.2f} GiB peak "
-                    f"intermediate factor at order={order!r}, but only "
-                    f"{free_bytes / 1024 ** 3:.2f} GiB is free on "
-                    f"{device}.  Query rejected; try a coarser query "
-                    f"(fewer evidence variables) or a different "
-                    f"elimination order.",
-                )
+            if msg is not None:
+                raise torch.cuda.OutOfMemoryError(msg)
 
         for var in to_eliminate:
             relevant = [f for f in conditioned if var in f[1]]
@@ -433,12 +432,14 @@ def _estimate_peak_bytes(
     but tracks only ``(scope_set, has_b, cardinalities)`` triples and
     never allocates a tensor.
 
-    Returns an upper bound on the peak: the actual realised peak may be
-    smaller because PyTorch's broadcasting can keep some operand axes
-    at size 1 instead of materialising the full union scope (the
-    round-1 diagnostic measured a 16:1 algebraic-to-realised ratio on
-    the naive plan; for min-fill the ratio is closer to 1:1 because
-    union scopes are smaller).
+    The bare per-step walk returns the largest single union-scope
+    factor.  That is *not* the realised peak: ``_log_factor_product_batched``
+    holds ~3 union-scope tensors live at once and conditioned factors
+    persist across steps, so the measured peak runs ~2.85× the bare walk
+    (2026-06-08, nbn-neuralcat-ve, B=16..128).  The result is therefore
+    scaled by ``_LIVESET_MULTIPLIER`` (#177) before return so the guard
+    compares against a realistic peak; #178 tracks a principled live-set
+    model that would replace the scalar.
     """
     ev_set = set(evidence_keys)
     state: list[tuple[set[str], bool, Dict[str, int]]] = []
@@ -469,7 +470,53 @@ def _estimate_peak_bytes(
         # Marginalise: drop var from the surviving factor.
         union_scope.discard(var)
         state = rest + [(union_scope, prod_has_b, cards)]
-    return peak
+    # Scale by the broadcast live-set multiplier (#177): the bare ``peak``
+    # above is the largest single union-scope factor, but the realised
+    # peak holds ~3 such tensors plus persistent conditioned factors.
+    return int(peak * _LIVESET_MULTIPLIER)
+
+
+def _memory_budget_message(
+    plan: list[str],
+    factors: Dict[str, LogFactor],
+    *,
+    evidence_keys: tuple[str, ...],
+    B: int,
+    device: torch.device,
+    order: str,
+    safety: float = 0.9,
+) -> str | None:
+    """Return the pre-allocation guard's rejection message, or ``None``.
+
+    Extracted from :meth:`TensorVariableElimination.query_batch` (#177) so
+    the guard's *decision* — the estimated peak (which includes the
+    ``_LIVESET_MULTIPLIER`` from #177) versus ``safety`` × live free cuda
+    memory — is unit-testable without driving a full cuda query flow.  The
+    caller owns the ``device.type == 'cuda'`` gate and the raise; this
+    helper only compares the estimate against the budget.
+
+    Returns ``None`` (query allowed) when ``mem_get_info`` is unavailable
+    or the estimate fits; otherwise the formatted guard message.
+    """
+    estimated_peak = _estimate_peak_bytes(
+        plan, factors, evidence_keys=evidence_keys, B=B,
+    )
+    try:
+        free_bytes, _total_bytes = torch.cuda.mem_get_info(device)
+    except RuntimeError:
+        free_bytes = None
+    if free_bytes is None or estimated_peak <= safety * free_bytes:
+        return None
+    return (
+        f"TensorVariableElimination: query out of memory "
+        f"pre-allocation guard — plan would need "
+        f"~{estimated_peak / 1024 ** 3:.2f} GiB peak "
+        f"intermediate factor at order={order!r}, but only "
+        f"{free_bytes / 1024 ** 3:.2f} GiB is free on "
+        f"{device}.  Query rejected; try a coarser query "
+        f"(fewer evidence variables) or a different "
+        f"elimination order."
+    )
 
 
 # ---------------------------------------------------------------------- #
