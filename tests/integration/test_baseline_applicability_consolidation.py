@@ -124,6 +124,28 @@ _EXPECTED_APPLICABILITY: dict[tuple[str, str], bool] = {
     ("nbn-hybrid-router", "continuous_lg"): False,
     ("nbn-hybrid-router", "continuous_nongauss"): False,
     ("nbn-hybrid-router", "hybrid"): True,
+    # Amortized neural-proposal IS (v0.14, #181): same accuracy class and
+    # applicable families as LW (it is LW with a learned proposal).
+    ("nbn-cat-ais", "discrete"): True,
+    ("nbn-cat-ais", "continuous_lg"): False,
+    ("nbn-cat-ais", "continuous_nongauss"): False,
+    ("nbn-cat-ais", "hybrid"): False,
+    ("nbn-neuralcat-ais", "discrete"): True,
+    ("nbn-neuralcat-ais", "continuous_lg"): False,
+    ("nbn-neuralcat-ais", "continuous_nongauss"): False,
+    ("nbn-neuralcat-ais", "hybrid"): False,
+    ("nbn-lg-ais", "discrete"): False,
+    ("nbn-lg-ais", "continuous_lg"): True,
+    ("nbn-lg-ais", "continuous_nongauss"): False,
+    ("nbn-lg-ais", "hybrid"): False,
+    ("nbn-mdn-ais", "discrete"): False,
+    ("nbn-mdn-ais", "continuous_lg"): True,
+    ("nbn-mdn-ais", "continuous_nongauss"): True,
+    ("nbn-mdn-ais", "hybrid"): True,
+    ("nbn-flow-ais", "discrete"): False,
+    ("nbn-flow-ais", "continuous_lg"): True,
+    ("nbn-flow-ais", "continuous_nongauss"): True,
+    ("nbn-flow-ais", "hybrid"): True,
     # Other libraries
     # Gated out pending v0.8 BN-inference adapter (issue #96).
     ("gpytorch-gp", "discrete"): False,

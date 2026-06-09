@@ -59,6 +59,16 @@ BASELINE_FAMILY_APPLICABILITY: dict[str, BaselineApplicability] = {
         frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
     "nbn-hybrid-router":       BaselineApplicability(frozenset({"hybrid"})),
 
+    # Amortized neural-proposal IS (v0.14, #181) — same accuracy class /
+    # applicable families as LW (it is LW with a learned proposal).
+    "nbn-cat-ais":             BaselineApplicability(frozenset({"discrete"})),
+    "nbn-neuralcat-ais":       BaselineApplicability(frozenset({"discrete"})),
+    "nbn-lg-ais":              BaselineApplicability(frozenset({"continuous_lg"})),
+    "nbn-mdn-ais":             BaselineApplicability(
+        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
+    "nbn-flow-ais":            BaselineApplicability(
+        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
+
     # --- Other libraries ---
     # gpytorch-gp / gpytorch-gp-predict: per-node SVGP regression.
     # accuracy_supported=False: predictions are independent of evidence
