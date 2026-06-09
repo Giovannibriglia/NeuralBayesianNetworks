@@ -58,6 +58,7 @@ _ENGINE_SPEC: dict[str, str] = {
     "lw":     "lw",
     "ve":     "ve",
     "ais":    "ais",     # amortized neural-proposal IS (v0.14, #181)
+    "avi":    "avi",     # amortized variational inference (v0.14, #182)
     "router": "hybrid",  # HybridRouter
 }
 
@@ -188,6 +189,7 @@ class NBNAdapter:
         import networkx as nx
         from nbn import NeuralBayesianNetwork
         from nbn.inference.amortized_is import AmortizedISEngine
+        from nbn.inference.amortized_vi import AmortizedVIEngine
         from nbn.inference.hybrid import HybridRouter
         from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
         from nbn.inference.tensor_ve import TensorVariableElimination
@@ -226,6 +228,12 @@ class NBNAdapter:
             # once, here, so it is reused across all query/query_batch calls
             # within the fit-once-query-many cell (compatible with PR #176).
             self._engine_obj = AmortizedISEngine(n_samples=self.n_samples)
+            self._engine_obj.train_proposal(model, device=str(self.device))
+        elif engine_spec == "avi":
+            # Amortized VI (#182): train the variational posterior network
+            # once, here, so it is reused across all query/query_batch calls
+            # within the fit-once-query-many cell (compatible with PR #176).
+            self._engine_obj = AmortizedVIEngine(n_samples=self.n_samples)
             self._engine_obj.train_proposal(model, device=str(self.device))
         else:
             self._engine_obj = HybridRouter()
