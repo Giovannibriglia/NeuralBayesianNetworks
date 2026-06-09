@@ -57,6 +57,7 @@ _CONTINUOUS_MECH: dict[str, str] = {
 _ENGINE_SPEC: dict[str, str] = {
     "lw":     "lw",
     "ve":     "ve",
+    "ais":    "ais",     # amortized neural-proposal IS (v0.14, #181)
     "router": "hybrid",  # HybridRouter
 }
 
@@ -186,6 +187,7 @@ class NBNAdapter:
         """
         import networkx as nx
         from nbn import NeuralBayesianNetwork
+        from nbn.inference.amortized_is import AmortizedISEngine
         from nbn.inference.hybrid import HybridRouter
         from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
         from nbn.inference.tensor_ve import TensorVariableElimination
@@ -219,6 +221,12 @@ class NBNAdapter:
             self._engine_obj = LikelihoodWeightingEngine(n_samples=self.n_samples)
         elif engine_spec == "ve":
             self._engine_obj = TensorVariableElimination()
+        elif engine_spec == "ais":
+            # Amortized IS (#181): train the evidence-conditioned proposal
+            # once, here, so it is reused across all query/query_batch calls
+            # within the fit-once-query-many cell (compatible with PR #176).
+            self._engine_obj = AmortizedISEngine(n_samples=self.n_samples)
+            self._engine_obj.train_proposal(model, device=str(self.device))
         else:
             self._engine_obj = HybridRouter()
 
