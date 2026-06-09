@@ -69,6 +69,16 @@ BASELINE_FAMILY_APPLICABILITY: dict[str, BaselineApplicability] = {
     "nbn-flow-ais":            BaselineApplicability(
         frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
 
+    # Amortized variational inference (v0.14, #182) — bounded-ELBO engine;
+    # same applicable families as LW / AIS.
+    "nbn-cat-avi":             BaselineApplicability(frozenset({"discrete"})),
+    "nbn-neuralcat-avi":       BaselineApplicability(frozenset({"discrete"})),
+    "nbn-lg-avi":              BaselineApplicability(frozenset({"continuous_lg"})),
+    "nbn-mdn-avi":             BaselineApplicability(
+        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
+    "nbn-flow-avi":            BaselineApplicability(
+        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
+
     # --- Other libraries ---
     # gpytorch-gp / gpytorch-gp-predict: per-node SVGP regression.
     # accuracy_supported=False: predictions are independent of evidence
