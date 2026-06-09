@@ -226,3 +226,95 @@ def test_proposal_trains_once_and_is_reused(discrete_problem, monkeypatch):
         adapter.query_batch([_disc_q(v % 2) for v in range(b)])
     assert calls["n"] == 1, "must not retrain across query_batch calls"
     assert adapter._engine_obj.recognition_net is net_before
+
+
+# =============================================================================
+# Stage (b): lg + flow + mixed (hybrid) per-node dispatch
+# =============================================================================
+
+def _make_nongauss_problem(n_samples: int = 400, seed: int = 0) -> BenchmarkProblem:
+    torch.manual_seed(seed)
+    dag = [("X0", "X1"), ("X1", "X2")]
+    x0 = torch.randn(n_samples)
+    x1 = torch.sin(2 * x0) + 0.3 * torch.randn(n_samples)
+    x2 = 0.5 * x1 ** 2 + 0.3 * torch.randn(n_samples)
+    train_data = {"X0": x0, "X1": x1, "X2": x2}
+    variables = dict.fromkeys(train_data, ("continuous", None))
+    return BenchmarkProblem(
+        name="avi_nongauss", dag=dag, variables=variables,
+        train_data=train_data, test_data=train_data, queries=[],
+    )
+
+
+def _make_hybrid_problem(n_samples: int = 500, seed: int = 0) -> BenchmarkProblem:
+    g = torch.Generator().manual_seed(seed)
+    torch.manual_seed(seed)
+    dag = [("D0", "C1"), ("C1", "C2"), ("D0", "D3")]
+    d0 = torch.randint(0, 2, (n_samples,), generator=g)
+    c1 = d0.float() + 0.5 * torch.randn(n_samples)
+    c2 = 0.5 * c1 + 0.5 * torch.randn(n_samples)
+    d3 = torch.where(torch.rand(n_samples, generator=g) < 0.2, 1 - d0, d0)
+    train_data = {"D0": d0, "C1": c1, "C2": c2, "D3": d3}
+    variables = {
+        "D0": ("discrete", 2), "C1": ("continuous", None),
+        "C2": ("continuous", None), "D3": ("discrete", 2),
+    }
+    return BenchmarkProblem(
+        name="avi_hybrid", dag=dag, variables=variables,
+        train_data=train_data, test_data=train_data, queries=[],
+    )
+
+
+_CONT_Q = Query(targets=("X2",), evidence={"X0": torch.tensor(1.0)}, kind="marginal")
+
+
+# ---- 9. lg continuous: AVI agrees with LW (analytic Gaussian posterior) -------
+
+@pytest.mark.slow
+def test_lg_continuous_matches_lw(continuous_problem):
+    lw = _fit_adapter("lg", "lw", continuous_problem, n_samples=4096, epochs=10)
+    avi = _fit_adapter("lg", "avi", continuous_problem, n_samples=4096, epochs=20)
+    torch.manual_seed(1)
+    lw_samp = lw.query(_CONT_Q).samples
+    avi_samp = avi.query(_CONT_Q).samples
+    assert avi_samp is not None and torch.isfinite(avi_samp).all()
+    assert avi_samp.shape == lw_samp.shape
+    # LG posterior is exact Gaussian → mean-field Normal q matches well.
+    assert abs(float(lw_samp.mean()) - float(avi_samp.mean())) < 0.15
+
+
+# ---- 10. flow continuous: runs, produces finite reasonable output ------------
+
+@pytest.mark.slow
+def test_flow_continuous_runs():
+    prob = _make_nongauss_problem()
+    lw = _fit_adapter("flow", "lw", prob, n_samples=2048, epochs=20)
+    avi = _fit_adapter("flow", "avi", prob, n_samples=2048, epochs=20)
+    torch.manual_seed(1)
+    lw_samp = lw.query(_CONT_Q).samples
+    avi_samp = avi.query(_CONT_Q).samples
+    assert avi_samp is not None and torch.isfinite(avi_samp).all()
+    assert avi_samp.shape == lw_samp.shape
+    assert abs(float(lw_samp.mean()) - float(avi_samp.mean())) < 0.4
+
+
+# ---- 11. hybrid: recognition net dispatches the right head per node ----------
+
+@pytest.mark.slow
+def test_hybrid_per_node_heads():
+    prob = _make_hybrid_problem()
+    avi = _fit_adapter("hybrid", "avi", prob, n_samples=2048, epochs=10)
+    net = avi._engine_obj.recognition_net
+    kinds = {n: net.heads[n].kind for n in net.node_order}
+    assert kinds["D0"] == "discrete" and kinds["D3"] == "discrete"
+    assert kinds["C1"] == "mdn" and kinds["C2"] == "mdn"
+    torch.manual_seed(1)
+    p_disc = avi.query(
+        Query(targets=("D3",), evidence={"D0": torch.tensor(0)}, kind="marginal")
+    ).probs
+    assert p_disc is not None and torch.isfinite(p_disc).all()
+    assert abs(float(p_disc.sum()) - 1.0) < 1e-4
+    s_cont = avi.query(
+        Query(targets=("C2",), evidence={"D0": torch.tensor(1)}, kind="marginal")
+    ).samples
+    assert s_cont is not None and torch.isfinite(s_cont).all()
