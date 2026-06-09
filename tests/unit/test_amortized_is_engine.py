@@ -230,3 +230,106 @@ def test_proposal_trains_once_and_is_reused(discrete_problem, monkeypatch):
         adapter.query_batch(queries)
     assert calls["n"] == 1, "proposal must not retrain across query_batch calls"
     assert adapter._engine_obj.recognition_net is net_before
+
+
+# =============================================================================
+# Stage (b): flow + lg output heads, plus mixed (hybrid) per-node dispatch
+# =============================================================================
+
+def _make_nongauss_problem(n_samples: int = 400, seed: int = 0) -> BenchmarkProblem:
+    """3-node non-Gaussian chain (exercises the flow head)."""
+    torch.manual_seed(seed)
+    dag = [("X0", "X1"), ("X1", "X2")]
+    x0 = torch.randn(n_samples)
+    x1 = torch.sin(2 * x0) + 0.3 * torch.randn(n_samples)
+    x2 = 0.5 * x1 ** 2 + 0.3 * torch.randn(n_samples)
+    train_data = {"X0": x0, "X1": x1, "X2": x2}
+    variables = dict.fromkeys(train_data, ("continuous", None))
+    return BenchmarkProblem(
+        name="ais_nongauss", dag=dag, variables=variables,
+        train_data=train_data, test_data=train_data, queries=[],
+    )
+
+
+def _make_hybrid_problem(n_samples: int = 500, seed: int = 0) -> BenchmarkProblem:
+    """Mixed discrete+continuous net: D0 → C1 → C2, D0 → D3."""
+    g = torch.Generator().manual_seed(seed)
+    torch.manual_seed(seed)
+    dag = [("D0", "C1"), ("C1", "C2"), ("D0", "D3")]
+    d0 = torch.randint(0, 2, (n_samples,), generator=g)
+    c1 = d0.float() + 0.5 * torch.randn(n_samples)
+    c2 = 0.5 * c1 + 0.5 * torch.randn(n_samples)
+    d3 = torch.where(torch.rand(n_samples, generator=g) < 0.2, 1 - d0, d0)
+    train_data = {"D0": d0, "C1": c1, "C2": c2, "D3": d3}
+    variables = {
+        "D0": ("discrete", 2), "C1": ("continuous", None),
+        "C2": ("continuous", None), "D3": ("discrete", 2),
+    }
+    return BenchmarkProblem(
+        name="ais_hybrid", dag=dag, variables=variables,
+        train_data=train_data, test_data=train_data, queries=[],
+    )
+
+
+_CONT_Q = Query(targets=("X2",), evidence={"X0": torch.tensor(1.0)}, kind="marginal")
+
+
+# ---- 9. lg continuous: AIS agrees with LW (closed-form Gaussian) --------------
+
+@pytest.mark.slow
+def test_lg_continuous_matches_lw(continuous_problem):
+    lw = _fit_adapter("lg", "lw", continuous_problem, n_samples=8192, epochs=10)
+    ais = _fit_adapter("lg", "ais", continuous_problem, n_samples=8192, epochs=10)
+    torch.manual_seed(1)
+    lw_samp = lw.query(_CONT_Q).samples
+    ais_samp = ais.query(_CONT_Q).samples
+    assert ais_samp is not None and torch.isfinite(ais_samp).all()
+    assert ais_samp.shape == lw_samp.shape
+    # LG posterior is exact Gaussian → tight agreement expected.
+    assert abs(float(lw_samp.mean()) - float(ais_samp.mean())) < 0.1
+
+
+# ---- 10. flow continuous: trains, produces reasonable finite output ----------
+
+@pytest.mark.slow
+def test_flow_continuous_runs(continuous_problem):
+    """Flow head trains and produces finite, reasonably-located samples.
+
+    The proposal is a Gaussian surrogate; the weight uses the *true* flow
+    density, so the estimate stays asymptotically correct.  Flow on tiny
+    data is high-variance, so this is a sanity bound (per the issue's
+    'training succeeds and outputs are reasonable' bar), not a tight match.
+    """
+    prob = _make_nongauss_problem()
+    lw = _fit_adapter("flow", "lw", prob, n_samples=4096, epochs=20)
+    ais = _fit_adapter("flow", "ais", prob, n_samples=4096, epochs=20)
+    torch.manual_seed(1)
+    lw_samp = lw.query(_CONT_Q).samples
+    ais_samp = ais.query(_CONT_Q).samples
+    assert ais_samp is not None and torch.isfinite(ais_samp).all()
+    assert ais_samp.shape == lw_samp.shape
+    assert abs(float(lw_samp.mean()) - float(ais_samp.mean())) < 0.3
+
+
+# ---- 11. hybrid: recognition net dispatches the right head per node ----------
+
+@pytest.mark.slow
+def test_hybrid_per_node_heads():
+    """Mixed discrete+continuous net → cat heads for D*, mdn heads for C*."""
+    prob = _make_hybrid_problem()
+    ais = _fit_adapter("hybrid", "ais", prob, n_samples=4096, epochs=10)
+    net = ais._engine_obj.recognition_net
+    kinds = {n: net.heads[n].kind for n in net.node_order}
+    assert kinds["D0"] == "discrete" and kinds["D3"] == "discrete"
+    assert kinds["C1"] == "mdn" and kinds["C2"] == "mdn"
+    # A discrete-target query and a continuous-target query both work.
+    torch.manual_seed(1)
+    p_disc = ais.query(
+        Query(targets=("D3",), evidence={"D0": torch.tensor(0)}, kind="marginal")
+    ).probs
+    assert p_disc is not None and torch.isfinite(p_disc).all()
+    assert abs(float(p_disc.sum()) - 1.0) < 1e-4
+    s_cont = ais.query(
+        Query(targets=("C2",), evidence={"D0": torch.tensor(1)}, kind="marginal")
+    ).samples
+    assert s_cont is not None and torch.isfinite(s_cont).all()
