@@ -358,26 +358,13 @@ class TensorVariableElimination(InferenceEngine):
         # ``status='oom'`` so paper-config cells fail cleanly with a
         # DNF triangle rather than crashing the harness.
         if device.type == "cuda":
-            estimated_peak = _estimate_peak_bytes(
+            msg = _memory_budget_message(
                 to_eliminate, factors,
                 evidence_keys=tuple(sorted(ev_norm.keys())),
-                B=B,
+                B=B, device=device, order=order,
             )
-            try:
-                free_bytes, _total_bytes = torch.cuda.mem_get_info(device)
-            except RuntimeError:
-                free_bytes = None
-            if free_bytes is not None and estimated_peak > 0.9 * free_bytes:
-                raise torch.cuda.OutOfMemoryError(
-                    f"TensorVariableElimination: query out of memory "
-                    f"pre-allocation guard — plan would need "
-                    f"~{estimated_peak / 1024 ** 3:.2f} GiB peak "
-                    f"intermediate factor at order={order!r}, but only "
-                    f"{free_bytes / 1024 ** 3:.2f} GiB is free on "
-                    f"{device}.  Query rejected; try a coarser query "
-                    f"(fewer evidence variables) or a different "
-                    f"elimination order.",
-                )
+            if msg is not None:
+                raise torch.cuda.OutOfMemoryError(msg)
 
         for var in to_eliminate:
             relevant = [f for f in conditioned if var in f[1]]
@@ -487,6 +474,49 @@ def _estimate_peak_bytes(
     # above is the largest single union-scope factor, but the realised
     # peak holds ~3 such tensors plus persistent conditioned factors.
     return int(peak * _LIVESET_MULTIPLIER)
+
+
+def _memory_budget_message(
+    plan: list[str],
+    factors: Dict[str, LogFactor],
+    *,
+    evidence_keys: tuple[str, ...],
+    B: int,
+    device: torch.device,
+    order: str,
+    safety: float = 0.9,
+) -> str | None:
+    """Return the pre-allocation guard's rejection message, or ``None``.
+
+    Extracted from :meth:`TensorVariableElimination.query_batch` (#177) so
+    the guard's *decision* — the estimated peak (which includes the
+    ``_LIVESET_MULTIPLIER`` from #177) versus ``safety`` × live free cuda
+    memory — is unit-testable without driving a full cuda query flow.  The
+    caller owns the ``device.type == 'cuda'`` gate and the raise; this
+    helper only compares the estimate against the budget.
+
+    Returns ``None`` (query allowed) when ``mem_get_info`` is unavailable
+    or the estimate fits; otherwise the formatted guard message.
+    """
+    estimated_peak = _estimate_peak_bytes(
+        plan, factors, evidence_keys=evidence_keys, B=B,
+    )
+    try:
+        free_bytes, _total_bytes = torch.cuda.mem_get_info(device)
+    except RuntimeError:
+        free_bytes = None
+    if free_bytes is None or estimated_peak <= safety * free_bytes:
+        return None
+    return (
+        f"TensorVariableElimination: query out of memory "
+        f"pre-allocation guard — plan would need "
+        f"~{estimated_peak / 1024 ** 3:.2f} GiB peak "
+        f"intermediate factor at order={order!r}, but only "
+        f"{free_bytes / 1024 ** 3:.2f} GiB is free on "
+        f"{device}.  Query rejected; try a coarser query "
+        f"(fewer evidence variables) or a different "
+        f"elimination order."
+    )
 
 
 # ---------------------------------------------------------------------- #
