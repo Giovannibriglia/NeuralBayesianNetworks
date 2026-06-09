@@ -26,6 +26,18 @@ from nbn.inference.base import InferenceEngine
 
 logger = logging.getLogger(__name__)
 
+# Empirical broadcast live-set multiplier (issue #177).
+#
+# The per-step max-factor estimate in ``_estimate_peak_bytes`` captures
+# only one union-scope tensor, but ``_log_factor_product_batched``
+# materialises three simultaneously (``a_aligned`` + ``b_aligned`` +
+# their sum), and conditioned factors persist across elimination steps.
+# Measurement (2026-06-08, nbn-neuralcat-ve, B=16..128) found
+# actual/predicted = 2.85× rock-stable across batch sizes; 3.0 rounds
+# conservative. See #177 for the measurement and #178 for the deeper
+# live-set model that would replace this scalar.
+_LIVESET_MULTIPLIER = 3.0
+
 
 class TensorVariableElimination(InferenceEngine):
     """Log-domain VE for discrete BNs (single-row + truly batched queries)."""
@@ -433,12 +445,14 @@ def _estimate_peak_bytes(
     but tracks only ``(scope_set, has_b, cardinalities)`` triples and
     never allocates a tensor.
 
-    Returns an upper bound on the peak: the actual realised peak may be
-    smaller because PyTorch's broadcasting can keep some operand axes
-    at size 1 instead of materialising the full union scope (the
-    round-1 diagnostic measured a 16:1 algebraic-to-realised ratio on
-    the naive plan; for min-fill the ratio is closer to 1:1 because
-    union scopes are smaller).
+    The bare per-step walk returns the largest single union-scope
+    factor.  That is *not* the realised peak: ``_log_factor_product_batched``
+    holds ~3 union-scope tensors live at once and conditioned factors
+    persist across steps, so the measured peak runs ~2.85× the bare walk
+    (2026-06-08, nbn-neuralcat-ve, B=16..128).  The result is therefore
+    scaled by ``_LIVESET_MULTIPLIER`` (#177) before return so the guard
+    compares against a realistic peak; #178 tracks a principled live-set
+    model that would replace the scalar.
     """
     ev_set = set(evidence_keys)
     state: list[tuple[set[str], bool, Dict[str, int]]] = []
@@ -469,7 +483,10 @@ def _estimate_peak_bytes(
         # Marginalise: drop var from the surviving factor.
         union_scope.discard(var)
         state = rest + [(union_scope, prod_has_b, cards)]
-    return peak
+    # Scale by the broadcast live-set multiplier (#177): the bare ``peak``
+    # above is the largest single union-scope factor, but the realised
+    # peak holds ~3 such tensors plus persistent conditioned factors.
+    return int(peak * _LIVESET_MULTIPLIER)
 
 
 # ---------------------------------------------------------------------- #

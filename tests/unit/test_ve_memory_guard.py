@@ -78,6 +78,46 @@ def test_estimator_predicts_smaller_peak_for_min_fill_than_topological() -> None
     )
 
 
+def test_guard_includes_broadcast_liveset_multiplier() -> None:
+    """Issue #177: ``_estimate_peak_bytes`` scales the bare per-step
+    max-factor walk by ``_LIVESET_MULTIPLIER`` (3.0) to model the
+    broadcast live-set — ``_log_factor_product_batched`` holds
+    ``a_aligned`` + ``b_aligned`` + their sum simultaneously, plus
+    conditioned factors that persist across steps.
+
+    Without this multiplier the guard under-estimates actual peak by
+    ~2.85× (measured 2026-06-08), letting queries that will OOM in
+    execution pass the pre-allocation check.
+    """
+    bn = make_synthetic_bn(
+        family="discrete", n_nodes=20,
+        cardinality=4, max_in_degree=4, edge_density=0.20,
+        n_train=200, n_test=50, n_reference=500,
+        seed=0, device="cpu",
+    )
+    eng = TensorVariableElimination()
+    target = "X2"
+    ev_keys = ("X0", "X10")
+    factors = eng._extract_factors(bn.true_model)
+    with patch.object(ve_mod, "relevant_subnetwork", _all_nodes):
+        plan = eng._plan(bn.true_model, target, ev_keys, order="min_fill")
+
+    scaled = _estimate_peak_bytes(plan, factors, evidence_keys=ev_keys, B=16)
+    # The multiplier is read as a module global at call time, so patching
+    # it to 1.0 recovers the bare per-step max-factor estimate.
+    with patch.object(ve_mod, "_LIVESET_MULTIPLIER", 1.0):
+        bare = _estimate_peak_bytes(plan, factors, evidence_keys=ev_keys, B=16)
+
+    assert bare > 0, "non-trivial plan should predict a positive peak"
+    assert ve_mod._LIVESET_MULTIPLIER >= 2.85, (
+        "multiplier must cover the measured 2.85× under-estimate"
+    )
+    assert scaled == pytest.approx(ve_mod._LIVESET_MULTIPLIER * bare, rel=1e-6), (
+        f"scaled peak {scaled} should be {ve_mod._LIVESET_MULTIPLIER}× the "
+        f"bare per-step max {bare}"
+    )
+
+
 def test_estimator_returns_zero_when_plan_is_empty() -> None:
     """Trivial query (no variables to eliminate): peak is 0."""
     bn = make_synthetic_bn(
