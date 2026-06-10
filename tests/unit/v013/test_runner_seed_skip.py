@@ -155,7 +155,8 @@ def _stub_run_cell(calls, fail_plan):
     """Replacement for Runner._run_cell: records the batch_sizes it was asked to
     run per seed and yields canned rows (oom for fail_plan[seed], else ok)."""
     def _stub(self, cfg, problem, spec, writer, *, fit_budget_s,
-             default_role, batch_sizes=None):
+             default_role, batch_sizes=None, fit_role="standalone",
+             cache_path=None, **kwargs):
         calls.append((problem.seed, tuple(batch_sizes)))
         name = build_adapter(spec).name
         fails = fail_plan.get(problem.seed, set())

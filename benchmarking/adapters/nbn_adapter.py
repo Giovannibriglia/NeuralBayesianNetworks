@@ -188,11 +188,6 @@ class NBNAdapter:
         """
         import networkx as nx
         from nbn import NeuralBayesianNetwork
-        from nbn.inference.amortized_is import AmortizedISEngine
-        from nbn.inference.amortized_vi import AmortizedVIEngine
-        from nbn.inference.hybrid import HybridRouter
-        from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
-        from nbn.inference.tensor_ve import TensorVariableElimination
 
         epochs = int(kwargs.get("epochs", 20))
 
@@ -217,6 +212,55 @@ class NBNAdapter:
         model.fit(problem.train_data, epochs=epochs, batch_size=512, lr=1e-3)
         self.model = model
         self.problem = problem
+        self._attach_engine()
+
+    def load_base_and_attach(
+        self, model_path: str, problem: BenchmarkProblem | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Reload a base model fitted by a sibling baseline, then attach this
+        baseline's engine — the fit-once-save-reload path (#191, Path 2).
+
+        Baselines sharing a fit-identity (same library/mechanism/epochs/fit-data,
+        differing only in ``inference_method``) fit the base ``model.fit()``
+        ONCE; the first writes it with ``torch.save``, the rest call this to
+        reuse it instead of re-fitting. The reloaded model is bitwise-identical
+        to a fresh fit (Stage-1 verified, CPU+CUDA, all mechanisms).
+
+        ``_attach_engine`` is the SAME engine-construction step ``fit`` runs
+        after ``model.fit()``, so a reloaded adapter is indistinguishable from a
+        freshly-fit one for query purposes. Per Decision A, ve/lw attach with no
+        training; ais/avi run their OWN ``train_proposal`` fresh on the reloaded
+        base (recognition nets are per-inference-method, never shared).
+
+        ``map_location=self.device`` relocates the saved tensors onto this
+        baseline's device (the fit-identity key excludes device for exactly
+        this reason). ``weights_only=False`` is required: the payload is a full
+        ``nn.Module`` object, not a bare state-dict.
+
+        ``**kwargs`` (e.g. ``epochs``) are accepted for call-site parity with
+        ``fit`` but unused here — no base fitting happens on reload.
+        """
+        self.model = torch.load(
+            model_path, map_location=self.device, weights_only=False,
+        )
+        self.problem = problem
+        self._attach_engine()
+
+    def _attach_engine(self) -> None:
+        """Construct ``self._engine_obj`` for ``self.engine`` on ``self.model``.
+
+        The per-inference-method half of fitting: everything ``fit`` does AFTER
+        ``model.fit()``. Shared verbatim by ``fit`` (fresh) and
+        ``load_base_and_attach`` (reloaded base) so the two paths are identical
+        downstream. NEVER shared across inference methods — each baseline builds
+        its own engine (and, for ais/avi, trains its own proposal).
+        """
+        from nbn.inference.amortized_is import AmortizedISEngine
+        from nbn.inference.amortized_vi import AmortizedVIEngine
+        from nbn.inference.hybrid import HybridRouter
+        from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
+        from nbn.inference.tensor_ve import TensorVariableElimination
 
         engine_spec = _ENGINE_SPEC[self.engine]
         if engine_spec == "lw":
@@ -228,13 +272,13 @@ class NBNAdapter:
             # once, here, so it is reused across all query/query_batch calls
             # within the fit-once-query-many cell (compatible with PR #176).
             self._engine_obj = AmortizedISEngine(n_samples=self.n_samples)
-            self._engine_obj.train_proposal(model, device=str(self.device))
+            self._engine_obj.train_proposal(self.model, device=str(self.device))
         elif engine_spec == "avi":
             # Amortized VI (#182): train the variational posterior network
             # once, here, so it is reused across all query/query_batch calls
             # within the fit-once-query-many cell (compatible with PR #176).
             self._engine_obj = AmortizedVIEngine(n_samples=self.n_samples)
-            self._engine_obj.train_proposal(model, device=str(self.device))
+            self._engine_obj.train_proposal(self.model, device=str(self.device))
         else:
             self._engine_obj = HybridRouter()
 

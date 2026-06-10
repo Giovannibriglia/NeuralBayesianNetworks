@@ -21,8 +21,10 @@ Reference: docs/v0.13-benchmark-redesign.md §3, §4.1, §6
 """
 from __future__ import annotations
 
+import atexit
 import dataclasses
 import logging
+import shutil
 import sys
 from typing import Any, Iterator
 
@@ -428,6 +430,115 @@ def _resolve_batch_sizes(
 
 
 # ---------------------------------------------------------------------------
+# Fit-once-save-reload (v0.14, #191 Path 2)
+# ---------------------------------------------------------------------------
+# Baselines sharing a fit-identity (same library/mechanism/epochs/fit-data,
+# differing ONLY in inference_method) fit the base model ONCE: the first writes
+# it with torch.save, the rest reload it instead of re-fitting. nbn-only; the
+# base model.fit() is bitwise-identical across all nbn engines (Stage-1
+# verified). pgmpy/pomegranate/pyro have no shareable NBN model and run
+# standalone exactly as before.
+
+
+def _fit_identity_key(spec: BaselineSpec, problem: Any) -> tuple:
+    """The SIX-field key deciding which baselines share a base fit (LOCKED).
+
+    ``(library, mechanism, epochs, family, problem_id, seed)``. This is the
+    SINGLE source of truth — both grouping (`_assign_fit_roles`) and the cache
+    filename (`_fit_cache_filename`) derive from it; never recompute inline.
+
+    Excludes:
+      * ``inference_method`` — the axis we share across (the whole point);
+      * ``n_samples`` — affects only the engine, not ``model.fit()``;
+      * ``device`` — reload relocates via ``map_location`` (Stage-1 CPU<->CUDA
+        faithful), so two baselines differing only in device still share.
+    ``epochs`` is the only ``extra_kwargs`` entry that affects ``model.fit()``
+    today; if a future kwarg does, it MUST be added here.
+    """
+    epochs = int((spec.extra_kwargs or {}).get("epochs", 20))
+    return (
+        spec.library, spec.mechanism, epochs,
+        getattr(problem, "family", ""),
+        getattr(problem, "problem_id", ""),
+        getattr(problem, "seed", 0),
+    )
+
+
+def _fit_cache_filename(key: tuple) -> str:
+    """Stable hash of the fit-identity key -> cache filename. Derives from the
+    same key as grouping, so the fitter's save path and a reloader's load path
+    can never drift."""
+    import hashlib
+
+    h = hashlib.sha1("|".join(map(str, key)).encode()).hexdigest()[:16]
+    return f"fit_{h}.pt"
+
+
+def _assign_fit_roles(
+    cfg: RunnerConfig, problem: Any, failed_configs: dict, seed_skip: bool,
+    fitcache_dir,
+) -> tuple[list[tuple[str, Any]], dict[int, Any]]:
+    """Assign a fit-once-save-reload role to each baseline for this problem.
+
+    Returns ``(roles, delete_after)`` where:
+      * ``roles[i] = (role, cache_path)`` for baseline index ``i``; role is
+        ``"fit"`` (fit + save), ``"reload"`` (reuse the group's saved base), or
+        ``"standalone"`` (fit, no save — singletons and every non-nbn baseline);
+        ``cache_path`` is None for standalone.
+      * ``delete_after[i] = cache_path`` marks that, after baseline ``i``'s cell
+        returns, the parent eagerly deletes that cache file (``i`` is its
+        group's LAST live member).
+
+    Grouping is over the POST-seed-skip LIVE nbn baselines: a baseline whose
+    every batch_size already failed on an earlier seed is fully skipped (not
+    live) and never designated fitter. This is why a seed-skipped fitter cannot
+    strand its reloaders — the first LIVE member becomes the fitter.
+
+    Validity across the spec loop: ``failed_configs`` is keyed by baseline NAME,
+    and within one problem each baseline has a distinct name, so the failures
+    `_register_failures` adds mid-loop only affect the SAME baseline on a LATER
+    seed — never another baseline's skip status this problem. So this pre-pass,
+    computed once at problem start, stays correct for the whole loop.
+
+    Adjacency is NOT required: live members sharing a key are bucketed wherever
+    they sit. Every real config lists them consecutively, so at most one cache
+    file exists at a time; an interleaved config would merely hold more than one
+    concurrently (still leak-proof via eager delete + the run()-level cleanup).
+    """
+    n = len(cfg.baselines)
+    roles: list[tuple[str, Any]] = [("standalone", None)] * n
+    delete_after: dict[int, Any] = {}
+    live_by_key: dict[tuple, list[int]] = {}
+
+    for i, spec in enumerate(cfg.baselines):
+        if spec.library != "nbn":
+            continue  # non-nbn never groups/caches (standalone)
+        adapter = build_adapter(spec)
+        name = adapter.name
+        batch_sizes = _resolve_batch_sizes(cfg, spec, adapter)
+        if seed_skip:
+            surviving = [
+                b for b in batch_sizes
+                if (problem.family, problem.problem_id, name, b)
+                not in failed_configs
+            ]
+            if not surviving:
+                continue  # fully seed-skipped -> not a live member
+        live_by_key.setdefault(_fit_identity_key(spec, problem), []).append(i)
+
+    for key, idxs in live_by_key.items():
+        if len(idxs) < 2:
+            continue  # singleton group -> standalone, nothing to save/reload
+        cache_path = fitcache_dir() / _fit_cache_filename(key)
+        roles[idxs[0]] = ("fit", cache_path)
+        for j in idxs[1:]:
+            roles[j] = ("reload", cache_path)
+        delete_after[idxs[-1]] = cache_path
+
+    return roles, delete_after
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -470,6 +581,31 @@ class Runner:
         # (family, problem_id, baseline, batch_size) -> propagated failure code.
         seed_skip = bool(cfg.batch_sizes)
         failed_configs: dict[tuple, str] = {}
+
+        # Fit-once-save-reload cache (#191 Path 2). nbn baselines sharing a
+        # fit-identity reuse a saved base model. The cache lives under the run
+        # dir (cfg.jsonl_path is run_dir/metrics.jsonl), which is timestamp-
+        # unique — so a stale cache from a crashed prior run lives under a
+        # different dir and can never be reused. Created LAZILY (only when a
+        # group of size > 1 first needs it) so non-grouped runs make no empty
+        # dir. Each file is deleted eagerly after its group's last live member
+        # (below); this atexit + the finally sweep are the leak-proof backstop.
+        fitcache_root = cfg.jsonl_path.parent / "_fitcache"
+        _fitcache_made = {"done": False}
+
+        def fitcache_dir():
+            if not _fitcache_made["done"]:
+                fitcache_root.mkdir(parents=True, exist_ok=True)
+                _fitcache_made["done"] = True
+            return fitcache_root
+
+        def _sweep_fitcache():
+            try:
+                shutil.rmtree(fitcache_root)
+            except (FileNotFoundError, OSError):
+                pass
+
+        atexit.register(_sweep_fitcache)
 
         # Per-cell progress bar (problem × baseline). Determinate when the
         # source config exposes its problem grid (networks/n-values × seeds);
@@ -521,7 +657,15 @@ class Runner:
                             yield error_row
                         pbar.update(len(cfg.baselines))
                         continue
-                    for spec in cfg.baselines:
+                    # Fit-once-save-reload (#191): assign each nbn baseline a
+                    # fit / reload / standalone role for this problem. Computed
+                    # ONCE here from the post-seed-skip live members; valid for
+                    # the whole spec loop (see _assign_fit_roles). non-nbn and
+                    # singleton groups -> standalone (unchanged behavior).
+                    fit_roles, fit_delete_after = _assign_fit_roles(
+                        cfg, problem, failed_configs, seed_skip, fitcache_dir,
+                    )
+                    for i, spec in enumerate(cfg.baselines):
                         adapter_probe = build_adapter(spec)
                         name = adapter_probe.name
                         # v0.14 fit-once query-many (#174): resolve the
@@ -569,16 +713,23 @@ class Runner:
                                     pbar.update(1)
                                     continue
 
-                        pbar.set_description(f"fitting {name} on {pid}")
+                        # Fit-once-save-reload role for this baseline (#191):
+                        # "fit" (fit + save base), "reload" (reuse the group's
+                        # saved base), or "standalone" (fit, no save).
+                        fit_role, cache_path = fit_roles[i]
+                        verb = {"reload": "reloading"}.get(fit_role, "fitting")
+                        pbar.set_description(f"{verb} {name} on {pid}")
                         # Goes to run.log (INFO); console is WARNING-gated.
-                        logger.info("fitting %s on %s (seed=%s)",
-                                    name, pid, getattr(problem, "seed", 0))
+                        logger.info("%s %s on %s (seed=%s)",
+                                    verb, name, pid, getattr(problem, "seed", 0))
                         cell_rows: list[CellResult] = []
                         for row in self._run_cell(
                             cfg, problem, spec, writer,
                             fit_budget_s=fit_budget_s,
                             default_role=default_role,
                             batch_sizes=batch_sizes,
+                            fit_role=fit_role,
+                            cache_path=cache_path,
                         ):
                             cell_rows.append(row)
                             yield row
@@ -588,8 +739,23 @@ class Runner:
                                 batch_sizes, cell_rows,
                             )
                         pbar.update(1)
+                        # Eager cache deletion (#191): this baseline is its
+                        # group's LAST live member, so every reloader has now
+                        # reused the saved base — delete it immediately rather
+                        # than waiting for the run-end sweep. Keeps at most one
+                        # cache file on disk at a time for adjacent configs.
+                        if i in fit_delete_after:
+                            try:
+                                fit_delete_after[i].unlink()
+                            except (FileNotFoundError, OSError):
+                                pass
         finally:
             pbar.close()
+            # Leak-proof backstop: remove the whole cache dir even on crash /
+            # early generator close, then drop the atexit hook (the Runner is
+            # reusable, so a stale hook from a prior run must not linger).
+            _sweep_fitcache()
+            atexit.unregister(_sweep_fitcache)
 
     def _run_cell(
         self,
@@ -601,6 +767,8 @@ class Runner:
         fit_budget_s: float,
         default_role: str,
         batch_sizes: list[int] | None = None,
+        fit_role: str = "standalone",
+        cache_path: Any | None = None,
     ) -> Iterator[CellResult]:
         # Bug 4 (#127) Stage 2: the per-cell work (build_adapter →
         # applicability → select → fit → measure) now runs inside a
@@ -630,6 +798,13 @@ class Runner:
             "fit_budget_s": fit_budget_s,
             "default_role": default_role,
             "batch_sizes": batch_sizes,
+            # Fit-once-save-reload (#191): the worker fits + saves ("fit"),
+            # reloads the group's saved base ("reload", falling back to fit on
+            # a cache miss), or fits without saving ("standalone"). cache_path
+            # is None for standalone. str() so the Path pickles cleanly into
+            # the subprocess ctx and the worker's os.path checks are simple.
+            "fit_role": fit_role,
+            "cache_path": str(cache_path) if cache_path is not None else None,
         }
 
         # Cell-level hard timeout is a backstop for hangs the worker
