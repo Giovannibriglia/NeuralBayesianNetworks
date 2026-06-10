@@ -61,31 +61,38 @@ selector:
 # Batchable (no explicit batch_size — follows the sweep): nbn-*, pomegranate.
 # Non-batchable (batch_size: 1 pinned — runs once): pyro-*, pgmpy-*.
 # Grouped by mechanism, then engine (ve, lw, ais, avi).
+#
+# extra_kwargs: {epochs: 2} caps neural-mechanism training at 2 epochs for
+# speed (the adapter reads kwargs["epochs"], default 20 — nbn_adapter.py).
+# Harmless no-op on closed-form mechanisms (cat tabular MLE, lg). NOTE: the
+# probe used {fit_epochs:2}, which was a double no-op — malformed YAML key
+# AND the adapter reads `epochs`, not `fit_epochs` — so it silently ran 20
+# epochs. {epochs: 2} is the corrected form that actually caps fitting.
 baselines:
   # nbn-cat (discrete)
-  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ve}
-  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: lw}
-  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ais}
-  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: avi}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 2}}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 2}}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 2}}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 2}}
   # nbn-neuralcat (discrete)
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ve}
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: lw}
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ais}
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: avi}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 2}}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 2}}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 2}}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 2}}
   # nbn-lg (continuous_lg)
-  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: lw}
-  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: ais}
-  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: avi}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 2}}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 2}}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 2}}
   # nbn-mdn (continuous_lg / continuous_nongauss / hybrid)
-  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: lw}
-  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: ais}
-  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: avi}
+  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 2}}
+  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 2}}
+  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 2}}
   # nbn-flow (continuous_lg / continuous_nongauss / hybrid)
-  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: lw}
-  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: ais}
-  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: avi}
+  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 2}}
+  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 2}}
+  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 2}}
   # nbn-hybrid (hybrid router)
-  - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router}
+  - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router,  extra_kwargs: {epochs: 2}}
   # other libraries
   - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: ve}
   - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance, batch_size: 1}
