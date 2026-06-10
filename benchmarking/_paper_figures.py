@@ -64,6 +64,18 @@ LIBRARY_COLORS = {
 }
 _FALLBACK_COLOR = "tab:gray"
 
+# Libraries that cannot batch queries by design (adapter
+# ``supports_batched_queries = False``): they are pinned to batch_size=1 in
+# configs and process queries sequentially. Source of truth is the adapter
+# class flag (benchmarking/adapters/{pyro,pgmpy}_adapter.py); mirrored here as
+# a constant so the plotting path stays free of heavy adapter imports.
+#
+# Detection MUST be config/design-level (the library), NOT observational: a
+# *batchable* baseline (e.g. nbn-cat-ve) that OOMs at every batch size above
+# B=1 still has only ok data at B=1, but it is NOT a fixed reference — it
+# renders as points-with-gaps (Change 1), never a dashed line (#148, Change 2).
+_NON_BATCHABLE_LIBRARIES = frozenset({"pyro", "pgmpy"})
+
 # Status -> color for the 100%-stacked status breakdown (spec 5.1). Green for
 # the good segment; failure modes warm-progressing-to-distinct. not_supported
 # is neutral gray (applicability, not failure). STATUS_ORDER fixes the stacking
@@ -583,6 +595,12 @@ def _build_batch_speed_figure(
     families = sorted(ok["family"].dropna().unique())
     colors = baseline_colors(sorted(ok["baseline"].unique()))
 
+    # Full sweep x-grid — every batch size the run swept (any status, so a size
+    # where a baseline FAILED still appears). Batchable lines are laid on this
+    # grid with NaN at missing/failed sizes so the line BREAKS at gaps
+    # (Change 1) instead of bridging a failed cell.
+    grid = sorted(int(b) for b in df["batch_size"].dropna().unique() if b >= 1)
+
     fig, axes = plt.subplots(
         1, len(families),
         figsize=(4.2 * len(families), 3.6),
@@ -594,21 +612,36 @@ def _build_batch_speed_figure(
         sub = ok[ok["family"] == family]
         for bl in sorted(sub["baseline"].unique()):
             blsub = sub[sub["baseline"] == bl]
-            pts = []
+            library = parse_baseline(bl)[0]
+
+            # Per-(baseline, batch_size) center+band: per-seed mean of queries
+            # first, then seed-aggregate — same two-level pattern as the
+            # scaling figures.
+            by_bs: dict[int, tuple[float, float, float]] = {}
             for bs, grp in blsub.groupby("batch_size"):
-                # Per-seed mean first (queries within a cell), then
-                # seed-aggregate for the band — same two-level pattern
-                # as the scaling figures.
                 seed_means = grp.groupby("seed")["value"].mean()
                 c, lo, hi = aggregate(seed_means, aggregation)
                 lo, hi = clip_band("time", lo, hi)
-                pts.append((int(bs), c, lo, hi))
-            pts.sort(key=lambda p: p[0])
-            xs = [p[0] for p in pts]
-            ax.plot(xs, [p[1] for p in pts], marker="o", markersize=4,
+                by_bs[int(bs)] = (c, lo, hi)
+
+            if library in _NON_BATCHABLE_LIBRARIES:
+                # Change 2: non-batchable baseline (pinned B=1). If it succeeded
+                # at B=1, draw a dashed horizontal reference spanning the full
+                # x-axis ("fixed cost, doesn't improve with batching"). If it
+                # DNF'd at B=1 there's no ok data here at all -> no line.
+                if 1 in by_bs:
+                    ax.axhline(by_bs[1][0], ls="--", lw=1.2,
+                               color=colors[bl], label=bl)
+                continue
+
+            # Change 1: batchable baseline on the full grid; NaN where this
+            # baseline has no ok point so the line/band break at the gap.
+            ys = [by_bs[b][0] if b in by_bs else float("nan") for b in grid]
+            los = [by_bs[b][1] if b in by_bs else float("nan") for b in grid]
+            his = [by_bs[b][2] if b in by_bs else float("nan") for b in grid]
+            ax.plot(grid, ys, marker="o", markersize=4,
                     color=colors[bl], label=bl)
-            ax.fill_between(xs, [p[2] for p in pts], [p[3] for p in pts],
-                            color=colors[bl], alpha=0.2)
+            ax.fill_between(grid, los, his, color=colors[bl], alpha=0.2)
 
         # DNF cells for this family — failed rows (error/timeout/oom),
         # deduped to (baseline, batch_size, status). #163 convention:
@@ -663,6 +696,86 @@ def fig_batch_speed(
             encoding="utf-8",
         )
     _savefig(fig, out_path)
+
+
+# --- Batch-speed per-family LaTeX tables (v0.14 #148, Change 3) ---------------
+
+def _batch_speed_cell(rows: pd.DataFrame, aggregation: str) -> str:
+    """One table cell for a (baseline, batch_size) slice.
+
+    ok query-time rows  -> ``IQM$\\pm$band`` (same agg as the figure);
+    else error/timeout/oom rows -> the failure code (most frequent);
+    else (not_supported / absent) -> ``--``.
+    """
+    ok = rows[(rows["status"] == "ok") & (rows["metric"] == "query_time_s")]
+    ok = ok[ok["value"].notna() & (ok["value"] > 0)]
+    if not ok.empty:
+        seed_means = ok.groupby("seed")["value"].mean()
+        return _fmt(*aggregate(seed_means, aggregation))
+    failed = rows[rows["status"].isin(["oom", "timeout", "error"])]
+    if not failed.empty:
+        return str(failed["status"].mode().iloc[0])
+    return "--"
+
+
+def _write_batch_speed_table(out_path, grid, rows, family, aggregation) -> None:
+    """booktabs tabular: rows=methods, cols=batch sizes, + a code legend."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    header = ["Method"] + [f"$B={b}$" for b in grid]
+    ncol = len(header)
+    band = "IQM$\\pm$(Q3$-$Q1)/2" if aggregation == "iqm_iqr" else "mean$\\pm$std"
+    agg_tex = aggregation.replace("_", "\\_")  # underscore is math-mode in text
+    legend = (
+        f"\\multicolumn{{{ncol}}}{{l}}{{\\footnotesize "
+        f"Per-query time [s], {band} over seeds (agg={agg_tex}). "
+        f"\\texttt{{oom}}/\\texttt{{timeout}}/\\texttt{{error}} = cell DNF at "
+        f"that batch size; -- = not run / non-batchable at $B>1$.}} \\\\"
+    )
+    lines = [
+        f"% batch_speed per-query time table — family={family}; agg={aggregation}",
+        "\\begin{tabular}{l" + "r" * (ncol - 1) + "}",
+        "\\toprule",
+        " & ".join(header) + " \\\\",
+        "\\midrule",
+    ]
+    lines += [" & ".join(r) + " \\\\" for r in rows]
+    lines += ["\\midrule", legend, "\\bottomrule", "\\end{tabular}", ""]
+    out_path.write_text("\n".join(lines))
+
+
+def batch_speed_tables(df, aggregation, out_dir: Path, bench: str) -> int:
+    """One ``batch_speed_table_<family>.tex`` per family present in a swept run.
+
+    Mirrors :func:`fig_batch_speed`'s data contract; reuses :func:`aggregate`
+    and :func:`_fmt` so plot and tables agree under ``--aggregation`` (Change 4).
+    Returns the number of tables written.
+    """
+    if "batch_size" not in df.columns:
+        return 0
+    grid = sorted(int(b) for b in df["batch_size"].dropna().unique() if b >= 1)
+    if not grid or max(grid) <= 1:
+        return 0
+
+    out_dir = Path(out_dir)
+    written = 0
+    for family in sorted(df["family"].dropna().unique()):
+        fam = df[df["family"] == family]
+        rows = []
+        for bl in sorted(fam["baseline"].dropna().unique()):
+            blsub = fam[fam["baseline"] == bl]
+            cells = [
+                _batch_speed_cell(blsub[blsub["batch_size"] == b], aggregation)
+                for b in grid
+            ]
+            if all(c == "--" for c in cells):
+                continue  # baseline not applicable to this family
+            rows.append([bl.replace("_", "\\_")] + cells)
+        if not rows:
+            continue
+        out_path = out_dir / f"batch_speed_table_{family}.tex"
+        _write_batch_speed_table(out_path, grid, rows, family, aggregation)
+        written += 1
+    return written
 
 
 def _resolve_parquet(parquet: Path) -> Path:
@@ -756,6 +869,11 @@ def run_plot(
                 bench,
             )
             produced += 1
+            # Per-family LaTeX tables alongside the figure (#148, Change 3);
+            # same aggregation as the figure for consistency (Change 4).
+            produced += batch_speed_tables(
+                dfb, aggregation, output_dir / bench, bench,
+            )
 
     logger.info("done: %d cells produced, %d cells skipped (empty)", produced, len(skipped))
     return 0

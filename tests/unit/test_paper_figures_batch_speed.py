@@ -17,8 +17,13 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import math as _math
+
+import numpy as np
+
 from benchmarking._paper_figures import (
     _build_batch_speed_figure,
+    batch_speed_tables,
     fig_batch_speed,
     run_plot,
 )
@@ -165,4 +170,170 @@ class TestSpeedSmokeRoundTrip:
         for ax in fig.axes:
             for line in ax.get_lines():
                 ys = line.get_ydata()
-                assert all(y > 0 and not math.isnan(y) for y in ys)
+                # axhline reference lines are constant (and excluded below);
+                # batchable lines may carry NaN gaps — check the finite ones.
+                finite = [y for y in ys if not math.isnan(y)]
+                assert finite and all(y > 0 for y in finite)
+
+
+def _solid_line_for(ax, baseline):
+    """The batchable (solid, marker) line for a baseline, or None."""
+    for ln in ax.get_lines():
+        if ln.get_label() == baseline and ln.get_linestyle() == "-":
+            return ln
+    return None
+
+
+class TestChange1PointExclusion:
+    """A mid-sweep failure excludes only that batch size (NaN gap); larger
+    ok batch sizes are NOT dropped."""
+
+    def test_gap_at_failed_batch_size_keeps_larger(self):
+        rows = []
+        # nbn-cat-ve: ok at B in {1, 8, 64}, OOM at B=16.
+        for bs in (1, 8, 64):
+            for seed in (0, 1):
+                rows.append(_row(baseline="nbn-cat-ve", batch_size=bs,
+                                 seed=seed, value=0.02 / bs))
+        for seed in (0, 1):
+            rows.append(_row(baseline="nbn-cat-ve", batch_size=16, seed=seed,
+                             status="oom", value=float("nan")))
+        df = pd.DataFrame(rows)
+
+        fig, _ = _build_batch_speed_figure(df, "iqm_iqr", "t")
+        ax = fig.axes[0]
+        line = _solid_line_for(ax, "nbn-cat-ve")
+        assert line is not None
+        xs = list(line.get_xdata())
+        ys = list(line.get_ydata())
+        grid = dict(zip(xs, ys))
+        assert 16 in grid and _math.isnan(grid[16])          # gap at the OOM
+        assert grid[64] > 0 and not _math.isnan(grid[64])    # larger kept
+        assert not _math.isnan(grid[1]) and not _math.isnan(grid[8])
+
+
+class TestChange2DashedReference:
+    """Non-batchable baselines render as a dashed horizontal reference when ok
+    at B=1, and not at all when they DNF at B=1. A batchable baseline that
+    fails above B=1 is NOT mistaken for a reference line."""
+
+    def _dashed(self, ax):
+        return [ln for ln in ax.get_lines() if ln.get_linestyle() == "--"]
+
+    def test_pinned_ok_draws_dashed_line(self):
+        df = _make_sweep_df(families=("discrete",))  # pgmpy-mle-ve ok at B=1
+        fig, _ = _build_batch_speed_figure(df, "iqm_iqr", "t")
+        dashed = self._dashed(fig.axes[0])
+        assert [ln.get_label() for ln in dashed] == ["pgmpy-mle-ve"]
+
+    def test_pinned_dnf_draws_nothing(self):
+        df = _make_sweep_df(families=("discrete",))
+        # Replace pgmpy's ok B=1 rows with a timeout (no ok data anywhere).
+        df = df[df["baseline"] != "pgmpy-mle-ve"]
+        df = pd.concat([df, pd.DataFrame([
+            _row(baseline="pgmpy-mle-ve", batch_size=1, seed=0,
+                 status="timeout", value=float("nan")),
+        ])], ignore_index=True)
+        fig, _ = _build_batch_speed_figure(df, "iqm_iqr", "t")
+        assert self._dashed(fig.axes[0]) == []
+
+    def test_batchable_failing_above_b1_is_not_dashed(self):
+        """nbn-cat-ve ok only at B=1 (OOM at 8, 16) must stay a point/line,
+        never a dashed reference — detection is by library, not observed data."""
+        rows = [_row(baseline="nbn-cat-ve", batch_size=1, seed=s, value=0.01)
+                for s in (0, 1)]
+        for bs in (8, 16):
+            for s in (0, 1):
+                rows.append(_row(baseline="nbn-cat-ve", batch_size=bs, seed=s,
+                                 status="oom", value=float("nan")))
+        df = pd.DataFrame(rows)
+        fig, _ = _build_batch_speed_figure(df, "iqm_iqr", "t")
+        assert self._dashed(fig.axes[0]) == []            # no false reference
+        assert _solid_line_for(fig.axes[0], "nbn-cat-ve") is not None
+
+
+class TestChange3Tables:
+    def test_table_cells(self, tmp_path):
+        rows = []
+        # Batchable nbn-cat-ve: ok at B in {1, 8}, OOM at B=16.
+        for bs in (1, 8):
+            for seed in (0, 1):
+                rows.append(_row(baseline="nbn-cat-ve", batch_size=bs,
+                                 seed=seed, value=0.02 / bs))
+        for seed in (0, 1):
+            rows.append(_row(baseline="nbn-cat-ve", batch_size=16, seed=seed,
+                             status="oom", value=float("nan")))
+        # Non-batchable pgmpy: ok at B=1 only.
+        for seed in (0, 1):
+            rows.append(_row(baseline="pgmpy-mle-ve", batch_size=1, seed=seed,
+                             value=0.005))
+        df = pd.DataFrame(rows)
+
+        n = batch_speed_tables(df, "iqm_iqr", tmp_path, "synthetic")
+        assert n == 1
+        tex = (tmp_path / "batch_speed_table_discrete.tex").read_text()
+
+        assert "\\toprule" in tex and "$B=1$" in tex and "$B=16$" in tex
+        cat_row = [ln for ln in tex.splitlines()
+                   if ln.startswith("nbn-cat-ve")][0]
+        cells = [c.strip() for c in cat_row.rstrip("\\").split("&")]
+        # Method, B=1, B=8, B=16
+        assert "$\\pm$" in cells[1] and "$\\pm$" in cells[2]   # ok values
+        assert cells[3] == "oom"                               # failed cell
+        pg_row = [ln for ln in tex.splitlines()
+                  if ln.startswith("pgmpy-mle-ve")][0]
+        pcells = [c.strip() for c in pg_row.rstrip("\\").split("&")]
+        assert "$\\pm$" in pcells[1]                           # B=1 value
+        assert pcells[2] == "--" and pcells[3] == "--"         # non-batchable B>1
+
+    def test_pinned_timeout_shows_code(self, tmp_path):
+        rows = [_row(baseline="nbn-cat-ve", batch_size=bs, seed=s,
+                     value=0.02 / bs) for bs in (1, 8) for s in (0, 1)]
+        rows.append(_row(baseline="pyro-empirical-importance", batch_size=1,
+                         seed=0, status="timeout", value=float("nan")))
+        df = pd.DataFrame(rows)
+        batch_speed_tables(df, "iqm_iqr", tmp_path, "synthetic")
+        tex = (tmp_path / "batch_speed_table_discrete.tex").read_text()
+        pyro_row = [ln for ln in tex.splitlines()
+                    if ln.startswith("pyro-empirical-importance")][0]
+        cells = [c.strip() for c in pyro_row.rstrip("\\").split("&")]
+        assert cells[1] == "timeout" and cells[2] == "--"
+
+
+class TestChange4Aggregation:
+    """--aggregation threads identically into plot and tables; iqm and mean
+    diverge on a skewed seed distribution."""
+
+    def _skewed_df(self):
+        # 5 seeds, one heavy outlier: IQM trims it (->~1), mean does not (~20.8).
+        vals = [1.0, 1.0, 1.0, 1.0, 100.0]
+        rows = []
+        for bs in (1, 8):
+            for seed, v in enumerate(vals):
+                rows.append(_row(baseline="nbn-cat-ve", batch_size=bs,
+                                 seed=seed, value=v))
+        return pd.DataFrame(rows)
+
+    def test_table_values_differ_by_agg(self, tmp_path):
+        df = self._skewed_df()
+        out_i, out_m = tmp_path / "iqm", tmp_path / "mean"
+        batch_speed_tables(df, "iqm_iqr", out_i, "synthetic")
+        batch_speed_tables(df, "mean_std", out_m, "synthetic")
+        tex_i = (out_i / "batch_speed_table_discrete.tex").read_text()
+        tex_m = (out_m / "batch_speed_table_discrete.tex").read_text()
+
+        def _b1(tex):
+            row = [ln for ln in tex.splitlines()
+                   if ln.startswith("nbn-cat-ve")][0]
+            return [c.strip() for c in row.rstrip("\\").split("&")][1]
+
+        assert _b1(tex_i) != _b1(tex_m)
+        assert "iqm_iqr" in tex_i and "mean_std" in tex_m
+
+    def test_plot_center_differs_by_agg(self):
+        df = self._skewed_df()
+        fig_i, _ = _build_batch_speed_figure(df, "iqm_iqr", "t")
+        fig_m, _ = _build_batch_speed_figure(df, "mean_std", "t")
+        yi = _solid_line_for(fig_i.axes[0], "nbn-cat-ve").get_ydata()
+        ym = _solid_line_for(fig_m.axes[0], "nbn-cat-ve").get_ydata()
+        assert not np.allclose(np.asarray(yi), np.asarray(ym))
