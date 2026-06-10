@@ -265,6 +265,86 @@ def _fit_failure_rows(
 
 
 # ---------------------------------------------------------------------------
+# Speed-benchmark seed-skip (v0.14, #148 PR 2/2)
+# ---------------------------------------------------------------------------
+# Once a (family, problem_id, baseline, batch_size) config fails on one seed,
+# its remaining seeds are skipped — they are recorded as skip sentinels rather
+# than re-run. Speed-benchmark-only: gated on cfg.batch_sizes being set (no
+# other benchmark sweeps batch sizes, so every accuracy run is untouched).
+# Mirrors PR #189's reporting rule ("any failed seed -> config failed"); see
+# docs/v0.14-batched-queries-design.md.
+
+_FAILURE_STATUSES = ("oom", "timeout", "error")
+
+
+def _skip_sentinel(
+    problem: Any, baseline_name: str, benchmark: str, batch_size: int,
+    status: str, *, device: str | None,
+) -> CellResult:
+    """One sentinel row for a (baseline, batch_size) seed skipped after the
+    config already failed on an earlier seed. Carries the propagated failure
+    code (status) and the correct batch_size so PR #189's table/sidecar treat
+    it identically to a real failure."""
+    return CellResult(
+        benchmark=benchmark,
+        family=problem.family,
+        problem_id=problem.problem_id,
+        seed=problem.seed,
+        baseline=baseline_name,
+        query_role="",
+        metric="status",
+        value=_NAN,
+        status=status,
+        fit_time_s=_NAN,
+        query_time_s=_NAN,
+        metrics_time_s=_NAN,
+        error_msg="skipped: config failed on an earlier seed",
+        batch_size=int(batch_size),
+        device=device,
+    )
+
+
+def _register_failures(
+    registry: dict, problem: Any, baseline_name: str,
+    attempted_batch_sizes: list[int], rows: list[CellResult],
+) -> None:
+    """Update the seed-skip registry from one cell's result rows.
+
+    A config ``(family, problem_id, baseline, B)`` is registered as failed (with
+    a propagated code) when ``B`` either has a genuine failure row of its own, or
+    produced no row at all while the cell did fail somewhere. This covers:
+      * per-batch_size query failure  -> that B registered (matches PR #189's
+        "any failure row -> config failed", even if B also has some ok rows);
+      * fit failure (every B fails)   -> all attempted B registered;
+      * wholesale subprocess death    -> one synthesized failure row (B=1) and
+        no rows for the others -> all attempted B registered via the fallback.
+    A ``not_supported``-only cell has no failure row, so nothing registers —
+    later seeds re-emit not_supported normally (and stay '--' in the table)."""
+    fail_rows = [r for r in rows if r.status in _FAILURE_STATUSES]
+    if not fail_rows:
+        return
+    code_by_bs: dict[int, str] = {}
+    for r in fail_rows:
+        code_by_bs.setdefault(r.batch_size, r.status)
+    # Batch sizes that produced any normal (ok or failure) row this cell. An
+    # attempted B absent here means the subprocess died before emitting it
+    # (wholesale OOM/timeout) -> treat as failed via the fallback code.
+    covered = {r.batch_size for r in rows
+               if r.status == "ok" and r.metric == "query_time_s"}
+    covered |= set(code_by_bs)
+    fallback = max(set(r.status for r in fail_rows),
+                   key=lambda s: sum(r.status == s for r in fail_rows))
+    for b in attempted_batch_sizes:
+        if b in code_by_bs:
+            code = code_by_bs[b]
+        elif b not in covered:
+            code = fallback
+        else:
+            continue  # B ran ok and had no failure of its own
+        registry[(problem.family, problem.problem_id, baseline_name, b)] = code
+
+
+# ---------------------------------------------------------------------------
 # Subprocess result reconstruction (Bug 4 Stage 2)
 # ---------------------------------------------------------------------------
 
@@ -384,6 +464,13 @@ class Runner:
         fit_budget_s = cfg.fit_timeout_s
         default_role = getattr(cfg.selector, "query_role", "random")
 
+        # Speed-benchmark seed-skip (#148 PR 2/2): only the batch_sizes-sweep
+        # (speed) config sets cfg.batch_sizes; every other benchmark leaves it
+        # None and is untouched. The registry maps a failed config
+        # (family, problem_id, baseline, batch_size) -> propagated failure code.
+        seed_skip = bool(cfg.batch_sizes)
+        failed_configs: dict[tuple, str] = {}
+
         # Per-cell progress bar (problem × baseline). Determinate when the
         # source config exposes its problem grid (networks/n-values × seeds);
         # an indeterminate counter otherwise. Disabled when stdout is not a
@@ -444,16 +531,62 @@ class Runner:
                         # already built for the name so we don't build twice.
                         batch_sizes = _resolve_batch_sizes(cfg, spec, adapter_probe)
                         pid = getattr(problem, "problem_id", "?")
+
+                        # Seed-skip (#148 PR 2/2): for any batch size whose config
+                        # already failed on an earlier seed, emit a skip sentinel
+                        # (propagated code) instead of re-running it. The cell only
+                        # runs the still-live batch sizes; if none remain, the
+                        # subprocess is skipped entirely.
+                        if seed_skip:
+                            to_skip = [
+                                b for b in batch_sizes
+                                if (problem.family, problem.problem_id, name, b)
+                                in failed_configs
+                            ]
+                            if to_skip:
+                                dev = resolve_device(spec.device)
+                                n_params = n_parameters_from_problem(problem)
+                                for b in to_skip:
+                                    code = failed_configs[
+                                        (problem.family, problem.problem_id, name, b)
+                                    ]
+                                    row = _skip_sentinel(
+                                        problem, name, cfg.benchmark, b, code,
+                                        device=dev,
+                                    )
+                                    if n_params is not None and row.n_parameters is None:
+                                        row = dataclasses.replace(
+                                            row, n_parameters=n_params)
+                                    writer.write(row)
+                                    yield row
+                                logger.info(
+                                    "seed-skip %s on %s (seed=%s): skipped B=%s",
+                                    name, pid, getattr(problem, "seed", 0), to_skip,
+                                )
+                                batch_sizes = [b for b in batch_sizes
+                                               if b not in to_skip]
+                                if not batch_sizes:
+                                    pbar.update(1)
+                                    continue
+
                         pbar.set_description(f"fitting {name} on {pid}")
                         # Goes to run.log (INFO); console is WARNING-gated.
                         logger.info("fitting %s on %s (seed=%s)",
                                     name, pid, getattr(problem, "seed", 0))
-                        yield from self._run_cell(
+                        cell_rows: list[CellResult] = []
+                        for row in self._run_cell(
                             cfg, problem, spec, writer,
                             fit_budget_s=fit_budget_s,
                             default_role=default_role,
                             batch_sizes=batch_sizes,
-                        )
+                        ):
+                            cell_rows.append(row)
+                            yield row
+                        if seed_skip:
+                            _register_failures(
+                                failed_configs, problem, name,
+                                batch_sizes, cell_rows,
+                            )
                         pbar.update(1)
         finally:
             pbar.close()
