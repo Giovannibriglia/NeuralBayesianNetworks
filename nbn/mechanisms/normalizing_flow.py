@@ -68,13 +68,16 @@ class NormalizingFlowMechanism(Mechanism):
     ) -> None:
         super().__init__()
         try:
-            import zuko
+            import zuko  # noqa: F401 — import validates zuko is installed
         except ImportError as e:
             raise ImportError(
                 "NormalizingFlowMechanism requires zuko. "
                 "Install with: pip install zuko"
             ) from e
-        self._zuko = zuko
+        # NB: we deliberately do NOT stash the zuko module on self (it is a
+        # module object and cannot be pickled, which broke torch.save of a
+        # fitted model — issue #191 Path 2). Every method re-imports zuko
+        # locally, so the attribute was dead. See _build_flow().
         self.d_x = d_x
         self.output_dim = d_x
         self.num_transforms = num_transforms
