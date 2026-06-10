@@ -23,9 +23,11 @@ import numpy as np
 
 from benchmarking._paper_figures import (
     _build_batch_speed_figure,
+    _metric_cell,
     batch_speed_tables,
     fig_batch_speed,
     run_plot,
+    table_headline,
 )
 
 
@@ -328,7 +330,8 @@ class TestChange4Aggregation:
             return [c.strip() for c in row.rstrip("\\").split("&")][1]
 
         assert _b1(tex_i) != _b1(tex_m)
-        assert "iqm_iqr" in tex_i and "mean_std" in tex_m
+        # agg name appears in the caption with its underscore escaped (Change A).
+        assert "iqm\\_iqr" in tex_i and "mean\\_std" in tex_m
 
     def test_plot_center_differs_by_agg(self):
         df = self._skewed_df()
@@ -337,3 +340,103 @@ class TestChange4Aggregation:
         yi = _solid_line_for(fig_i.axes[0], "nbn-cat-ve").get_ydata()
         ym = _solid_line_for(fig_m.axes[0], "nbn-cat-ve").get_ydata()
         assert not np.allclose(np.asarray(yi), np.asarray(ym))
+
+
+# --- PR: table float wrapper (Change A) + seed invalidation (Change B) --------
+
+class TestChangeATableFloat:
+    """All tables are wrapped in a `table` float with \\caption + \\label;
+    the batch_speed legend now lives in the caption, not a tabular row."""
+
+    def test_batch_speed_table_is_float_with_caption_label(self, tmp_path):
+        df = _make_sweep_df(families=("discrete",))
+        assert batch_speed_tables(df, "iqm_iqr", tmp_path, "synthetic") == 1
+        tex = (tmp_path / "batch_speed_table_discrete.tex").read_text()
+        assert "\\begin{table}[t]" in tex and "\\end{table}" in tex
+        assert "\\centering" in tex
+        assert "\\label{tab:synthetic_batch_speed_discrete}" in tex
+        assert "\\multicolumn" not in tex          # legend no longer in tabular
+        cap = [ln for ln in tex.splitlines() if ln.startswith("\\caption{")][0]
+        assert "\\texttt{oom}" in cap              # legend moved into caption
+
+    def test_accuracy_table_also_wrapped_and_escaped(self, tmp_path):
+        """Universal: an accuracy table (table_headline) emits the float too,
+        with underscores in the caption escaped."""
+        rows = []
+        for seed in (0, 1):
+            rows.append(_row(metric="tv_per_node", value=0.1, seed=seed))
+            rows.append(_row(metric="query_time_s", value=0.01, seed=seed))
+        out = tmp_path / "table_headline.tex"
+        table_headline(pd.DataFrame(rows), "discrete", "small", "iqm_iqr",
+                       ["hub"], out, label="tab:synthetic_discrete_small_headline")
+        tex = out.read_text()
+        assert "\\begin{table}[t]" in tex and "\\end{table}" in tex
+        assert "\\caption{" in tex
+        assert "\\label{tab:synthetic_discrete_small_headline}" in tex
+        assert "iqm\\_iqr" in tex and "iqm_iqr" not in tex.replace("iqm\\_iqr", "")
+
+
+class TestChangeBSeedInvalidation:
+    """Speed-only: a (baseline, batch_size) cell with ANY failed seed is fully
+    failed — code in the table, NaN gap in the plot — reversing the prior
+    'ok takes precedence' behavior."""
+
+    def _mixed_df(self, fail_status="oom"):
+        # nbn-cat-ve B=1 all ok; B=8 seed0 FAILED, seeds 1,2 ok.
+        rows = [_row(baseline="nbn-cat-ve", batch_size=1, seed=s, value=0.02)
+                for s in (0, 1, 2)]
+        rows.append(_row(baseline="nbn-cat-ve", batch_size=8, seed=0,
+                         status=fail_status, value=float("nan")))
+        rows += [_row(baseline="nbn-cat-ve", batch_size=8, seed=s, value=0.005)
+                 for s in (1, 2)]
+        return pd.DataFrame(rows)
+
+    def _cells(self, tex):
+        row = [ln for ln in tex.splitlines() if ln.startswith("nbn-cat-ve")][0]
+        return [c.strip() for c in row.rstrip("\\").split("&")]
+
+    def test_table_partial_failure_shows_code(self, tmp_path):
+        batch_speed_tables(self._mixed_df("oom"), "iqm_iqr", tmp_path, "synthetic")
+        cells = self._cells((tmp_path / "batch_speed_table_discrete.tex").read_text())
+        assert "$\\pm$" in cells[1]            # B=1 all ok -> value
+        assert cells[2] == "oom"               # B=8 partial fail -> code, NOT survivor
+
+    def test_table_all_ok_shows_value(self, tmp_path):
+        rows = [_row(baseline="nbn-cat-ve", batch_size=bs, seed=s, value=0.02 / bs)
+                for bs in (1, 8) for s in (0, 1, 2)]
+        batch_speed_tables(pd.DataFrame(rows), "iqm_iqr", tmp_path, "synthetic")
+        cells = self._cells((tmp_path / "batch_speed_table_discrete.tex").read_text())
+        assert "$\\pm$" in cells[1] and "$\\pm$" in cells[2]
+
+    def test_plot_partial_failure_no_point(self):
+        fig, _ = _build_batch_speed_figure(self._mixed_df("oom"), "iqm_iqr", "t")
+        line = _solid_line_for(fig.axes[0], "nbn-cat-ve")
+        grid = dict(zip(line.get_xdata(), line.get_ydata()))
+        assert not _math.isnan(grid[1])        # B=1 all ok -> point
+        assert _math.isnan(grid[8])            # B=8 partial fail -> gap
+
+    def test_forward_compat_single_failed_row(self, tmp_path):
+        """Post-PR-2 the runner may emit only the failed seed's row; the
+        'any failure row' rule still classifies the cell as failed."""
+        rows = [_row(baseline="nbn-cat-ve", batch_size=1, seed=s, value=0.02)
+                for s in (0, 1)]
+        rows.append(_row(baseline="nbn-cat-ve", batch_size=8, seed=0,
+                         status="oom", value=float("nan")))   # single row at B=8
+        batch_speed_tables(pd.DataFrame(rows), "iqm_iqr", tmp_path, "synthetic")
+        cells = self._cells((tmp_path / "batch_speed_table_discrete.tex").read_text())
+        assert cells[2] == "oom"
+
+
+class TestChangeBSpeedOnly:
+    """Accuracy tables keep current per-seed survivor behavior (Change B is
+    confined to the batch_speed table + plot)."""
+
+    def test_accuracy_metric_cell_keeps_survivors(self):
+        df = pd.DataFrame([
+            _row(metric="tv_per_node", value=0.10, seed=1),
+            _row(metric="tv_per_node", value=0.12, seed=2),
+            # seed 0 failed — must NOT invalidate the accuracy cell.
+            _row(metric="query_time_s", value=float("nan"), seed=0, status="oom"),
+        ])
+        cell = _metric_cell(df, "nbn-cat-ve", "tv_per_node", "iqm_iqr")
+        assert cell != "--" and "$\\pm$" in cell   # survivor value, not a code
