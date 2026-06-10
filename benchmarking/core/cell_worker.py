@@ -211,10 +211,32 @@ def _run_cell(ctx: dict) -> list[dict]:
             ))
         return rows
 
-    # --- Fit (ONCE per cell, regardless of how many batch_sizes follow) ---
+    # --- Fit or reload (ONCE per cell, regardless of how many batch_sizes
+    # follow) --- v0.14 fit-once-save-reload (#191 Path 2). The parent assigns
+    # this cell a role:
+    #   * "fit"        -> fit the base model, then save it for the group's
+    #                     reloaders (only after the fit safety-net passes).
+    #   * "reload"     -> reuse the group's saved base via
+    #                     adapter.load_base_and_attach, but fall back to a full
+    #                     fit if the cache file is absent (the fitter OOM'd /
+    #                     crashed / was seed-skipped, so it never wrote it) —
+    #                     this existence check is the single crash-proofing.
+    #   * "standalone" -> fit, no save (singletons + every non-nbn baseline).
+    # In every case fit_time_s is the wall-clock of whatever ran (fit or
+    # reload+attach), measured the same way, so the safety net below applies
+    # uniformly.
+    import os
+
+    fit_role = ctx.get("fit_role", "standalone")
+    cache_path = ctx.get("cache_path")
     try:
         t0 = perf_counter()
-        adapter.fit(problem, **spec.extra_kwargs)
+        if (fit_role == "reload" and cache_path
+                and os.path.exists(cache_path)):
+            adapter.load_base_and_attach(
+                cache_path, problem, **spec.extra_kwargs)
+        else:
+            adapter.fit(problem, **spec.extra_kwargs)
         fit_time_s = perf_counter() - t0
     except Exception as exc:
         status = _classify_exception(exc)
@@ -228,6 +250,20 @@ def _run_cell(ctx: dict) -> list[dict]:
             fit_time_s=fit_time_s, status="timeout",
             error_msg=f"fit exceeded {fit_budget_s:.0f}s safety budget",
         ))
+
+    # --- Save base model for the group's reloaders (#191) ---
+    # Only the designated fitter saves, and only after a clean, in-budget fit
+    # (failures returned above, so reaching here means adapter.model is good).
+    # Best-effort: a save failure must NOT fail the cell — the reloaders simply
+    # find no cache and fall back to fitting (the cache-miss path). Reached only
+    # for fit_role == "fit"; standalone never saves, reload never reaches here
+    # via the save branch (it has no cache_path to write under this contract).
+    if fit_role == "fit" and cache_path:
+        try:
+            import torch
+            torch.save(adapter.model, cache_path)
+        except Exception:
+            pass
 
     # --- Sweep loop: one measure() pass per batch_size, each with its own
     # query_budget_s (locked decision #1); a query failure in one pass does
