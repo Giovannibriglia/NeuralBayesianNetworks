@@ -451,18 +451,31 @@ def _time_cell(df_cell, baseline, aggregation) -> str:
     return _fmt(*aggregate(t["total"], aggregation))
 
 
-def _write_table(out_path: Path, header_cols, rows, caption_note=""):
+def _table_slug(value: str) -> str:
+    """Sanitize a path component for use inside a ``\\label{tab:...}`` key."""
+    return str(value).replace("+", "plus").replace(" ", "_").replace("/", "_")
+
+
+def _write_table(out_path: Path, header_cols, rows, caption="", label=""):
+    """Emit a full ``table`` float (booktabs). ``caption`` is plain text whose
+    underscores are escaped here (it is typeset); ``label`` is used verbatim as
+    the ``\\label{}`` key (not typeset, so underscores are fine)."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     n = len(header_cols)
+    caption_tex = (caption or "auto-generated; paste into paper").replace("_", "\\_")
     lines = [
-        "% " + caption_note if caption_note else "% auto-generated; paste into paper",
+        "\\begin{table}[t]",
+        "\\centering",
         "\\begin{tabular}{l" + "r" * (n - 1) + "}",
         "\\toprule",
         " & ".join(header_cols) + " \\\\",
         "\\midrule",
     ]
     lines += [" & ".join(r) + " \\\\" for r in rows]
-    lines += ["\\bottomrule", "\\end{tabular}", ""]
+    lines += ["\\bottomrule", "\\end{tabular}", f"\\caption{{{caption_tex}}}"]
+    if label:
+        lines.append(f"\\label{{{label}}}")
+    lines += ["\\end{table}", ""]
     out_path.write_text("\n".join(lines))
 
 
@@ -473,7 +486,7 @@ def _metrics_for_family(family) -> list[str]:
     return metrics
 
 
-def table_headline(df_cell, family, size, aggregation, roles, out_path):
+def table_headline(df_cell, family, size, aggregation, roles, out_path, label=""):
     """Rows=baselines; cols = Success%, then per metric (overall + per role),
     then Total time (spec 6). log_likelihood / w1 columns appear only when data
     exists for that metric in the cell."""
@@ -499,10 +512,12 @@ def table_headline(df_cell, family, size, aggregation, roles, out_path):
         rows.append(cells)
     _write_table(out_path, header, rows,
                  f"headline {family}/{size}; agg={aggregation}; "
-                 f"{len(header)} cols (metric x role cross)")
+                 f"{len(header)} cols (metric x role cross)",
+                 label=label)
 
 
-def _table_scoped(df_cell, family, aggregation, scope_col, scope_val, out_path, note):
+def _table_scoped(df_cell, family, aggregation, scope_col, scope_val, out_path, note,
+                  label=""):
     metrics = [m for m in _metrics_for_family(family)
                if not df_cell[(df_cell["metric"] == m) & (df_cell["status"] == "ok")].empty]
     sub = df_cell[df_cell[scope_col] == scope_val]
@@ -520,7 +535,7 @@ def _table_scoped(df_cell, family, aggregation, scope_col, scope_val, out_path, 
                                       **{("role" if scope_col == "query_role" else "kind"): scope_val}))
         cells.append("--" if zero else _time_cell(sub, b, aggregation))
         rows.append(cells)
-    _write_table(out_path, header, rows, note)
+    _write_table(out_path, header, rows, note, label=label)
 
 
 # --- Orchestration ------------------------------------------------------------
@@ -551,16 +566,21 @@ def process_cell(df_cell, benchmark, family, size, aggregation, n_nodes, n_param
             fig_time_scaling(df_cell, time_kind, x_axis, lookup, aggregation,
                              cell_dir / f"{stem}_vs_{x_axis}.pdf", title)
 
-    # Tables
+    # Tables. Labels are unique across the output tree:
+    # tab:<bench>_<family>_<size>_<scope> (size sanitized: "large+" -> "largeplus").
     roles = sorted(df_cell["query_role"].dropna().unique())
     kinds = sorted(df_cell["query_kind"].dropna().unique())
-    table_headline(df_cell, family, size, aggregation, roles, cell_dir / "table_headline.tex")
+    lbl = f"tab:{_table_slug(benchmark)}_{_table_slug(family)}_{_table_slug(size)}"
+    table_headline(df_cell, family, size, aggregation, roles,
+                   cell_dir / "table_headline.tex", label=f"{lbl}_headline")
     for r in roles:
         _table_scoped(df_cell, family, aggregation, "query_role", r,
-                      cell_dir / f"table_role_{r}.tex", f"role={r} {family}/{size}")
+                      cell_dir / f"table_role_{r}.tex", f"role={r} {family}/{size}",
+                      label=f"{lbl}_role_{_table_slug(r)}")
     for k in kinds:
         _table_scoped(df_cell, family, aggregation, "query_kind", k,
-                      cell_dir / f"table_kind_{k}.tex", f"kind={k} {family}/{size}")
+                      cell_dir / f"table_kind_{k}.tex", f"kind={k} {family}/{size}",
+                      label=f"{lbl}_kind_{_table_slug(k)}")
 
 
 def _build_batch_speed_figure(
@@ -578,10 +598,14 @@ def _build_batch_speed_figure(
     Data contract: ``df`` is a speed-benchmark slice. Plotted points
     use ``status == "ok"`` / ``metric == "query_time_s"`` rows, first
     averaged per (family, baseline, batch_size, seed), then aggregated
-    across seeds via :func:`aggregate` for the band. DNF annotation
-    (matching the #163 convention): error/timeout/oom rows are counted
-    per (family, baseline, batch_size, status) and reported via a
-    corner note + sidecar lines.
+    across seeds via :func:`aggregate` for the band. Seed invalidation
+    (#148 Change B): a (family, baseline, batch_size) cell with ANY
+    failed seed (oom/timeout/error) is dropped entirely — no point, and
+    the dashed B=1 reference is suppressed — so a partially-failed config
+    never plots a survivor value. DNF annotation (matching the #163
+    convention): error/timeout/oom rows are counted per (family,
+    baseline, batch_size, status) and reported via a corner note +
+    sidecar lines.
 
     Returns ``(None, [])`` when there is nothing to plot.
     """
@@ -601,6 +625,17 @@ def _build_batch_speed_figure(
     # (Change 1) instead of bridging a failed cell.
     grid = sorted(int(b) for b in df["batch_size"].dropna().unique() if b >= 1)
 
+    # Seed invalidation (#148 Change B, speed-only): a (family, baseline,
+    # batch_size) cell with ANY failed seed (oom/timeout/error) is fully failed
+    # -> no point (NaN gap), and its dashed B=1 reference is suppressed. Built
+    # from the full df (failure rows are dropped from `ok`). Seed-count-agnostic.
+    fail = df[df["status"].isin(["oom", "timeout", "error"])]
+    failed_cells = {
+        (f, b, int(bs))
+        for f, b, bs in zip(fail["family"], fail["baseline"], fail["batch_size"])
+        if pd.notna(bs)
+    }
+
     fig, axes = plt.subplots(
         1, len(families),
         figsize=(4.2 * len(families), 3.6),
@@ -619,6 +654,10 @@ def _build_batch_speed_figure(
             # scaling figures.
             by_bs: dict[int, tuple[float, float, float]] = {}
             for bs, grp in blsub.groupby("batch_size"):
+                # Change B: drop any cell with a failed seed (no point/band; the
+                # dashed B=1 reference below is suppressed via the same `by_bs`).
+                if (family, bl, int(bs)) in failed_cells:
+                    continue
                 seed_means = grp.groupby("seed")["value"].mean()
                 c, lo, hi = aggregate(seed_means, aggregation)
                 lo, hi = clip_band("time", lo, hi)
@@ -703,43 +742,53 @@ def fig_batch_speed(
 def _batch_speed_cell(rows: pd.DataFrame, aggregation: str) -> str:
     """One table cell for a (baseline, batch_size) slice.
 
-    ok query-time rows  -> ``IQM$\\pm$band`` (same agg as the figure);
-    else error/timeout/oom rows -> the failure code (most frequent);
-    else (not_supported / absent) -> ``--``.
+    Failure-first (speed-only seed invalidation, #148 Change B): ANY row with
+    status in {oom, timeout, error} fails the whole cell -> the failure code
+    (most frequent). Otherwise ok query-time rows -> ``IQM$\\pm$band`` (same agg
+    as the figure); otherwise (not_supported / absent) -> ``--``.
+
+    The "any failure row" rule is seed-count-agnostic: correct whether the
+    runner ran every seed or stopped after the first failure (forward-compatible
+    with the PR-2 execution-level seed-skip).
     """
+    failed = rows[rows["status"].isin(["oom", "timeout", "error"])]
+    if not failed.empty:
+        return str(failed["status"].mode().iloc[0])
     ok = rows[(rows["status"] == "ok") & (rows["metric"] == "query_time_s")]
     ok = ok[ok["value"].notna() & (ok["value"] > 0)]
     if not ok.empty:
         seed_means = ok.groupby("seed")["value"].mean()
         return _fmt(*aggregate(seed_means, aggregation))
-    failed = rows[rows["status"].isin(["oom", "timeout", "error"])]
-    if not failed.empty:
-        return str(failed["status"].mode().iloc[0])
     return "--"
 
 
-def _write_batch_speed_table(out_path, grid, rows, family, aggregation) -> None:
-    """booktabs tabular: rows=methods, cols=batch sizes, + a code legend."""
+def _write_batch_speed_table(out_path, grid, rows, family, aggregation, label="") -> None:
+    """``table`` float (booktabs): rows=methods, cols=batch sizes. The code
+    legend lives in ``\\caption`` (hand-built LaTeX — escaped at construction)."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     header = ["Method"] + [f"$B={b}$" for b in grid]
     ncol = len(header)
     band = "IQM$\\pm$(Q3$-$Q1)/2" if aggregation == "iqm_iqr" else "mean$\\pm$std"
     agg_tex = aggregation.replace("_", "\\_")  # underscore is math-mode in text
-    legend = (
-        f"\\multicolumn{{{ncol}}}{{l}}{{\\footnotesize "
+    caption = (
         f"Per-query time [s], {band} over seeds (agg={agg_tex}). "
         f"\\texttt{{oom}}/\\texttt{{timeout}}/\\texttt{{error}} = cell DNF at "
-        f"that batch size; -- = not run / non-batchable at $B>1$.}} \\\\"
+        f"that batch size (any failed seed fails the cell); "
+        f"-- = not run / non-batchable at $B>1$."
     )
     lines = [
-        f"% batch_speed per-query time table — family={family}; agg={aggregation}",
+        "\\begin{table}[t]",
+        "\\centering",
         "\\begin{tabular}{l" + "r" * (ncol - 1) + "}",
         "\\toprule",
         " & ".join(header) + " \\\\",
         "\\midrule",
     ]
     lines += [" & ".join(r) + " \\\\" for r in rows]
-    lines += ["\\midrule", legend, "\\bottomrule", "\\end{tabular}", ""]
+    lines += ["\\bottomrule", "\\end{tabular}", f"\\caption{{{caption}}}"]
+    if label:
+        lines.append(f"\\label{{{label}}}")
+    lines += ["\\end{table}", ""]
     out_path.write_text("\n".join(lines))
 
 
@@ -773,7 +822,10 @@ def batch_speed_tables(df, aggregation, out_dir: Path, bench: str) -> int:
         if not rows:
             continue
         out_path = out_dir / f"batch_speed_table_{family}.tex"
-        _write_batch_speed_table(out_path, grid, rows, family, aggregation)
+        _write_batch_speed_table(
+            out_path, grid, rows, family, aggregation,
+            label=f"tab:{_table_slug(bench)}_batch_speed_{_table_slug(family)}",
+        )
         written += 1
     return written
 
