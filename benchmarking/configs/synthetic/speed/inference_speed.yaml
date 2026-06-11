@@ -37,16 +37,16 @@ benchmark: synthetic
 config_name: batch_speed
 metrics: timing
 
-batch_sizes: [1, 8, 32, 128, 512, 1024]
-n_batch_queries: 10240
+batch_sizes: [1, 64, 256, 512, 1024]
+n_batch_queries: 1024
 
 source:
   families: [discrete, continuous_lg, continuous_nongauss, hybrid]
-  n_nodes_list: [100]
+  n_nodes_list: [50]
   seeds: [0, 1, 2, 3, 4]
-  n_train: 20480        # 2x n_batch_queries: variant sampling without replacement
+  n_train: 4096        # 2x n_batch_queries: variant sampling without replacement
   n_test: 1024
-  n_reference: 10240
+  n_reference: 10000
   edge_density: 0.20
   max_in_degree: 4
   cardinality: 4
@@ -70,34 +70,34 @@ selector:
 # epochs. {epochs: 2} is the corrected form that actually caps fitting.
 baselines:
   # nbn-cat (discrete)
-  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 2}}
-  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 2}}
-  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 2}}
-  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 2}}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 1,  n_samples: 16}}
   # nbn-neuralcat (discrete)
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 2}}
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 2}}
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 2}}
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 2}}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 1,  n_samples: 16}}
   # nbn-lg (continuous_lg)
-  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 2}}
-  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 2}}
-  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 2}}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 1,  n_samples: 16}}
   # nbn-mdn (continuous_lg / continuous_nongauss / hybrid)
-  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 2}}
-  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 2}}
-  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 2}}
+  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 1,  n_samples: 16}}
   # nbn-flow (continuous_lg / continuous_nongauss / hybrid)
-  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 2}}
-  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 2}}
-  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 2}}
+  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 1,  n_samples: 16}}
   # nbn-hybrid (hybrid router)
-  - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router,  extra_kwargs: {epochs: 2}}
+  - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router,    extra_kwargs: {epochs: 1,  n_samples: 16}}
   # other libraries
   - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: ve}
   - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance, batch_size: 1}
-  - {library: pgmpy,       mechanism: discrete,  param_method: mle,   inference_method: ve,      batch_size: 1}
-  - {library: pgmpy,       mechanism: discrete,  param_method: bayes, inference_method: ve,      batch_size: 1}
+  - {library: pgmpy,       mechanism: discrete,  param_method: mle,   inference_method: ve, batch_size: 1}
+  - {library: pgmpy,       mechanism: discrete,  param_method: bayes, inference_method: ve, batch_size: 1}
   - {library: pgmpy,       mechanism: lg,        param_method: lg,    inference_method: predict, batch_size: 1}
 
 # n_queries_per_cell is ignored by heaviest_by_role (fixed up-to-12
