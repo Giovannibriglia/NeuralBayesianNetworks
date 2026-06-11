@@ -338,7 +338,7 @@ def test_scalability_complete_config_loads(tmp_path: Path) -> None:
     )
     assert isinstance(cfg.selector, HeaviestQueryByRole)
     assert cfg.per_cell_timeout_s == 60.0
-    assert len(cfg.baselines) == 13
+    assert len(cfg.baselines) == 23
 
 
 def _bnlearn_source(**overrides) -> dict:
