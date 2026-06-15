@@ -22,9 +22,50 @@ from typing import Any, Iterator
 import networkx as nx
 import torch
 
+from collections import namedtuple
+
+from benchmarking.domains._n_parameters import n_parameters_from_problem
 from benchmarking.domains.base import BenchmarkProblem, FailedProblem, GroundTruth
 
 logger = logging.getLogger(__name__)
+
+# Minimal (variables, dag) carrier so n_parameters_from_problem (#133) can be
+# called before a full BenchmarkProblem is built.
+_StructOnly = namedtuple("_StructOnly", ["variables", "dag"])
+
+
+def _resolve_sample_count(spec: Any, n_parameters: int | None) -> int:
+    """Resolve a scalar-or-tiered sample-count spec to an int.
+
+    ``spec`` is either a scalar (``int``/``float`` -> returned as int,
+    backward-compatible) or a dict ``{"tiers": [{"max_n_params", "value"}, ...]}``.
+    Tiers are evaluated in order; the first whose ``max_n_params`` is ``None``
+    (catch-all) or ``>= n_parameters`` wins. If ``n_parameters`` is unknown
+    (``None``) the catch-all / largest tier is used (defensive: over-sample
+    rather than crash). Raises ``ValueError`` on a malformed spec.
+    """
+    if isinstance(spec, bool) or not isinstance(spec, (int, float, dict)):
+        raise ValueError(
+            f"sample count must be an int or {{'tiers': [...]}}; got {spec!r}")
+    if isinstance(spec, (int, float)):
+        return int(spec)
+    tiers = spec.get("tiers")
+    if not isinstance(tiers, list) or not tiers:
+        raise ValueError(
+            f"tiered sample count needs a non-empty 'tiers' list; got {spec!r}")
+    parsed: list[tuple[Any, int]] = []
+    for t in tiers:
+        if not isinstance(t, dict) or "max_n_params" not in t or "value" not in t:
+            raise ValueError(
+                f"each tier needs 'max_n_params' and 'value' keys; got {t!r}")
+        parsed.append((t["max_n_params"], int(t["value"])))
+    catch_all = next((v for cap, v in parsed if cap is None), parsed[-1][1])
+    if n_parameters is None:
+        return catch_all
+    for cap, value in parsed:
+        if cap is None or n_parameters <= cap:
+            return value
+    return catch_all
 
 
 def _kind_to_family(kind: str) -> str:
@@ -111,9 +152,12 @@ class BnlearnConfig:
 
     networks: list[str] = field(default_factory=list)
     seeds: list[int] = field(default_factory=lambda: [0])
-    n_train: int = 5000
+    # n_train / n_reference accept either a scalar int (backward-compatible) or
+    # a tiered dict {"tiers": [{"max_n_params", "value"}, ...]} resolved per
+    # network from its n_parameters (see _resolve_sample_count). n_test is scalar.
+    n_train: int | dict = 5000
     n_test: int = 1000
-    n_reference: int = 5000
+    n_reference: int | dict = 5000
 
 
 # bnlearn hosts the munin1/2/3 partitions under the ``munin4`` directory, not a
@@ -470,12 +514,19 @@ class BnlearnProblemSource:
             n_states = len(model.get_cpds(node).state_names[node])
             variables[node] = ("discrete", n_states)
 
+        # Resolve tiered (or scalar) sample counts from this network's
+        # n_parameters, known here once the structure is loaded.
+        n_params = n_parameters_from_problem(
+            _StructOnly(variables=variables, dag=dag))
+        n_train = _resolve_sample_count(config.n_train, n_params)
+        n_reference = _resolve_sample_count(config.n_reference, n_params)
+
         for seed in config.seeds:
-            train_data = _forward_sample_discrete(model, config.n_train, seed)
+            train_data = _forward_sample_discrete(model, n_train, seed)
             # Distinct derived seeds keep train/test/reference independent
             # yet deterministic per (network, seed).
             test_data = _forward_sample_discrete(model, config.n_test, seed + 100_000)
-            ref_dict = _forward_sample_discrete(model, config.n_reference, seed + 200_000)
+            ref_dict = _forward_sample_discrete(model, n_reference, seed + 200_000)
             gt_samples = _reference_pool(ref_dict, variables, dag)
 
             yield BenchmarkProblem(
@@ -515,10 +566,18 @@ class BnlearnProblemSource:
         family = "continuous_gauss" if kind == "gaussian" else "clg"
         model = _BnlearnContinuousModel(data, variables)  # shared across seeds
 
+        # Resolve tiered (or scalar) sample counts from n_parameters. Pure
+        # Gaussian nets have n_parameters=0 (continuous nodes contribute none),
+        # so they land in the smallest tier; clg counts its discrete tables.
+        n_params = n_parameters_from_problem(
+            _StructOnly(variables=variables, dag=dag))
+        n_train = _resolve_sample_count(config.n_train, n_params)
+        n_reference = _resolve_sample_count(config.n_reference, n_params)
+
         for seed in config.seeds:
-            train_data = model.sample(config.n_train, seed=seed)
+            train_data = model.sample(n_train, seed=seed)
             test_data = model.sample(config.n_test, seed=seed + 100_000)
-            ref_dict = model.sample(config.n_reference, seed=seed + 200_000)
+            ref_dict = model.sample(n_reference, seed=seed + 200_000)
             gt_samples = _reference_pool(ref_dict, variables, dag)
 
             yield BenchmarkProblem(

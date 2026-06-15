@@ -266,3 +266,91 @@ class TestBnlearnContinuousModel:
         node = discrete[0]
         samples = p.true_model.sample(n=100, evidence={node: torch.tensor([0])})
         assert torch.all(samples[node] == 0)
+
+
+# ── Tiered n_train / n_reference resolver (_resolve_sample_count) ──────────────
+
+from benchmarking.problems.bnlearn import _resolve_sample_count  # noqa: E402
+
+_TIERS = {
+    "tiers": [
+        {"max_n_params": 1000, "value": 10240},
+        {"max_n_params": 10000, "value": 20480},
+        {"max_n_params": 100000, "value": 40960},
+        {"max_n_params": None, "value": 81920},
+    ]
+}
+
+
+class TestResolveSampleCount:
+    def test_scalar_passthrough(self):
+        # A scalar is returned as int regardless of n_parameters.
+        assert _resolve_sample_count(10240, 36) == 10240
+        assert _resolve_sample_count(10240, 999_999) == 10240
+        assert _resolve_sample_count(5000.0, None) == 5000  # float coerced
+
+    def test_tiered_picks_first_match(self):
+        assert _resolve_sample_count(_TIERS, 500) == 10240
+        assert _resolve_sample_count(_TIERS, 5000) == 20480
+        assert _resolve_sample_count(_TIERS, 50000) == 40960
+        assert _resolve_sample_count(_TIERS, 500000) == 81920  # catch-all
+
+    def test_tiered_boundary_inclusive(self):
+        # max_n_params is an inclusive upper bound.
+        assert _resolve_sample_count(_TIERS, 1000) == 10240
+        assert _resolve_sample_count(_TIERS, 1001) == 20480
+        assert _resolve_sample_count(_TIERS, 10000) == 20480
+        assert _resolve_sample_count(_TIERS, 100000) == 40960
+
+    def test_unknown_n_parameters_uses_catch_all(self):
+        # None n_parameters -> defensive: the catch-all (largest) tier.
+        assert _resolve_sample_count(_TIERS, None) == 81920
+        # ... and the last tier when there is no explicit None catch-all.
+        no_catch = {"tiers": [{"max_n_params": 1000, "value": 10240},
+                              {"max_n_params": 100000, "value": 40960}]}
+        assert _resolve_sample_count(no_catch, None) == 40960
+
+    def test_invalid_specs_raise(self):
+        with pytest.raises(ValueError):
+            _resolve_sample_count("10240", 36)          # string, not int/dict
+        with pytest.raises(ValueError):
+            _resolve_sample_count(True, 36)             # bool guarded
+        with pytest.raises(ValueError):
+            _resolve_sample_count({"foo": 1}, 36)       # dict without 'tiers'
+        with pytest.raises(ValueError):
+            _resolve_sample_count({"tiers": []}, 36)    # empty tiers
+        with pytest.raises(ValueError):
+            _resolve_sample_count({"tiers": [{"value": 10240}]}, 36)  # missing max_n_params
+
+
+class TestTieredConfigSchema:
+    def test_inference_complete_tiers_resolve(self):
+        """The shipped inference_complete.yaml parses to tiered specs that
+        resolve to the documented per-network values."""
+        from benchmarking.core.yaml_config import _parse_bnlearn_config
+        import yaml as _yaml
+        from pathlib import Path
+
+        src = _yaml.safe_load(Path(
+            "benchmarking/configs/bnlearn/complete/inference_complete.yaml"
+        ).read_text())["source"]
+        cfg = _parse_bnlearn_config(src, "inference_complete.yaml")
+        assert isinstance(cfg.n_train, dict) and "tiers" in cfg.n_train
+        assert isinstance(cfg.n_reference, dict)
+        assert cfg.n_test == 1024  # n_test stays scalar
+        # asia n_params=36 -> smallest tier; mildew n_params=547158 -> catch-all
+        assert _resolve_sample_count(cfg.n_train, 36) == 10240
+        assert _resolve_sample_count(cfg.n_train, 547158) == 81920
+        assert _resolve_sample_count(cfg.n_reference, 97851) == 40960  # pathfinder
+
+    def test_scalar_config_still_parses(self):
+        """Backward compat: a scalar n_train/n_reference still loads as int."""
+        from benchmarking.core.yaml_config import _parse_bnlearn_config
+        cfg = _parse_bnlearn_config(
+            {"networks": ["asia"], "seeds": [0],
+             "n_train": 10240, "n_reference": 10240, "n_test": 1024},
+            "scalar.yaml",
+        )
+        assert cfg.n_train == 10240 and isinstance(cfg.n_train, int)
+        assert cfg.n_reference == 10240
+        assert _resolve_sample_count(cfg.n_train, 547158) == 10240  # scalar ignores n_params
