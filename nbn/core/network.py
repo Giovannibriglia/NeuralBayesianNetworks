@@ -17,6 +17,50 @@ from nbn.utils.device import resolve_device, to_device
 logger = logging.getLogger(__name__)
 
 
+class _AliasModuleDict(nn.ModuleDict):
+    """An ``nn.ModuleDict`` that tolerates node names containing ``.``.
+
+    ``nn.ModuleDict`` keys map to submodule names, which forbid ``.`` (it would
+    be read as attribute nesting), so a bnlearn node like ``pm2.5`` or
+    ``YR.GLASS`` crashes registration. This subclass transparently stores keys
+    with ``.`` replaced by a reserved token and reverses the substitution on
+    read, so every call site keeps using the original node name unchanged.
+    The transform is a pure, deterministic, reversible string op (no side map
+    to keep in sync across deepcopy / load_state_dict).
+    """
+
+    _TOKEN = "__DOT__"
+
+    @classmethod
+    def _safe(cls, key: str) -> str:
+        return key.replace(".", cls._TOKEN)
+
+    @classmethod
+    def _orig(cls, key: str) -> str:
+        return key.replace(cls._TOKEN, ".")
+
+    def __setitem__(self, key, module):
+        super().__setitem__(self._safe(key), module)
+
+    def __getitem__(self, key):
+        return super().__getitem__(self._safe(key))
+
+    def __delitem__(self, key):
+        super().__delitem__(self._safe(key))
+
+    def __contains__(self, key):
+        return super().__contains__(self._safe(key))
+
+    def __iter__(self):
+        return (self._orig(k) for k in super().__iter__())
+
+    def keys(self):
+        return [self._orig(k) for k in super().keys()]
+
+    def items(self):
+        return [(self._orig(k), v) for k, v in super().items()]
+
+
 class NeuralBayesianNetwork(nn.Module):
     """A Bayesian Network with a *given* DAG and learnable, GPU-resident,
     autograd-compatible per-node neural mechanisms.
@@ -85,8 +129,9 @@ class NeuralBayesianNetwork(nn.Module):
         if missing:
             raise ValueError(f"Variables spec missing nodes: {sorted(missing)}")
 
-        # Mechanism registry (populated by set_mechanism / auto_mechanisms / fit)
-        self.mechanisms: nn.ModuleDict = nn.ModuleDict()
+        # Mechanism registry (populated by set_mechanism / auto_mechanisms / fit).
+        # _AliasModuleDict tolerates dotted node names (e.g. bnlearn's pm2.5).
+        self.mechanisms: nn.ModuleDict = _AliasModuleDict()
 
         self._engine_spec = default_engine
         self._engine = None
