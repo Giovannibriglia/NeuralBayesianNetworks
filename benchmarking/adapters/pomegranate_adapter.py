@@ -7,10 +7,12 @@ Stateful fit-then-query contract. Covers one inference label:
 Returns Posterior(probs=...) — the marginal or conditional probability
 vector for the target node, computed via pomegranate's predict_proba.
 
-fit() builds per-node empirical CPTs from training data with Laplace
-smoothing (α=1) and passes them as pre-built distribution objects.  This
-avoids pomegranate's own optimiser path and gives exact control over the
-prior, matching the v0.12 runner behaviour.
+fit() builds per-node empirical (raw maximum-likelihood) CPTs from training
+data and passes them as pre-built distribution objects.  This avoids
+pomegranate's own optimiser path.  No smoothing is applied: a parent
+configuration never seen in training yields a zero (NaN-normalised) CPT row,
+i.e. the honest library-default behaviour with no adapter-side prior
+(v0.14 — adapter-side +1 Laplace removed for methodology fidelity).
 
 KEY BUG FIX PRESERVED (v0.5b / issue #31):
   row tensor must use dtype=torch.long before wrapping in
@@ -125,7 +127,7 @@ class PomegranateAdapter:
             if not parents:
                 counts = torch.zeros(k)
                 counts.scatter_add_(0, x, torch.ones_like(x, dtype=torch.float))
-                probs = (counts + 1.0) / (counts.sum() + k)
+                probs = counts / counts.sum()
                 dist_objs.append(Categorical(probs.reshape(1, k).double()))
             else:
                 pa_cards = [self._cards[p] for p in parents]
@@ -147,7 +149,7 @@ class PomegranateAdapter:
                 flat = pa_idx * k + x
                 cnt = torch.zeros(n_pa * k)
                 cnt.scatter_add_(0, flat, torch.ones_like(flat, dtype=torch.float))
-                cnt = cnt.reshape(n_pa, k) + 1.0
+                cnt = cnt.reshape(n_pa, k)
                 probs = cnt / cnt.sum(-1, keepdim=True)
                 # Reshape into pomegranate's [*pa_cards, K] layout
                 probs = probs.reshape(*pa_cards, k).double()
