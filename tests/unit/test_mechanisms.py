@@ -206,3 +206,41 @@ class TestNormalizingFlowLongParents:
         mech, _, pa = self._fit()
         s = mech.sample(pa, n=2)
         assert s.shape == (96, 2, 1)
+
+
+class TestNormalizingFlowSanitiseParents:
+    """Regression (#82): a flow node whose continuous parents carry NaN/Inf
+    (from a deep ancestral chain) must not trip a zuko NSF device assert — the
+    context is sanitised to 0 at every inference entry point, mirroring MDN's
+    guard. Output stays finite on the happy path and under non-finite parents."""
+
+    def _fit(self):
+        from nbn.mechanisms.normalizing_flow import NormalizingFlowMechanism
+        mech = NormalizingFlowMechanism()
+        x = torch.randn(96, 1)
+        pa = torch.randn(96, 2)             # continuous parents
+        mech.fit_local(x, pa, epochs=2)
+        return mech, x, pa
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), -float("inf")])
+    def test_nonfinite_parent_does_not_raise_and_stays_finite(self, bad):
+        mech, x, pa = self._fit()
+        p = pa.clone()
+        p[0, 0] = bad                       # one poisoned entry
+        lp = mech.log_prob(x, p)
+        mech.forward(p)
+        s = mech.sample(p, n=2)
+        assert torch.isfinite(lp).all()
+        assert torch.isfinite(s).all()
+
+    def test_happy_path_unchanged(self):
+        # All-finite parents: guard is a no-op, results finite.
+        mech, x, pa = self._fit()
+        assert torch.isfinite(mech.log_prob(x, pa)).all()
+        assert torch.isfinite(mech.sample(pa, n=2)).all()
+
+    def test_shared_guard_is_mdn_guard(self):
+        # The flow guard is the very same helper MDN uses (promoted to utils).
+        from nbn.mechanisms.mdn import _sanitise_parents as mdn_sp
+        from nbn.utils.batching import _sanitise_parents as util_sp
+        assert mdn_sp is util_sp
