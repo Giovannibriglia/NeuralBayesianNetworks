@@ -90,9 +90,24 @@ source:
     - sangiovese
     - mehra
   seeds: [0, 1, 2, 3, 4]
-  n_train: 10240
+  # Tiered by n_parameters (total discrete CPT cells, #133): bigger networks
+  # are more under-determined at a fixed sample count (samples/param < 1 for
+  # 11 of the discrete nets at n=10240), so train/reference scale up with size.
+  # First tier whose max_n_params >= the network's n_parameters wins;
+  # max_n_params: null is the catch-all.
+  n_train:
+    tiers:
+      - { max_n_params: 1000,   value: 10240 }
+      - { max_n_params: 10000,  value: 20480 }
+      - { max_n_params: 100000, value: 40960 }
+      - { max_n_params: null,   value: 81920 }
   n_test: 1024
-  n_reference: 10240
+  n_reference:
+    tiers:
+      - { max_n_params: 1000,   value: 10240 }
+      - { max_n_params: 10000,  value: 20480 }
+      - { max_n_params: 100000, value: 40960 }
+      - { max_n_params: null,   value: 81920 }
 
 selector:
   type: topological

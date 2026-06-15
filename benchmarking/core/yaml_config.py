@@ -338,10 +338,19 @@ def _parse_bnlearn_config(src: Any, path: Any):
     return BnlearnConfig(
         networks=[str(n) for n in src["networks"]],
         seeds=[int(s) for s in src["seeds"]],
-        n_train=int(src.get("n_train", 5000)),
+        # n_train / n_reference accept a scalar OR a tiered dict ({"tiers": ...});
+        # the dict is passed through and resolved per network from n_parameters
+        # in BnlearnProblemSource (_resolve_sample_count). n_test stays scalar.
+        n_train=_sample_count_field(src.get("n_train", 5000)),
         n_test=int(src.get("n_test", 1000)),
-        n_reference=int(src.get("n_reference", 5000)),
+        n_reference=_sample_count_field(src.get("n_reference", 5000)),
     )
+
+
+def _sample_count_field(v: Any) -> int | dict:
+    """A sample-count source field: an int (coerced) or a tiered dict
+    (passed through; validated at resolve time)."""
+    return v if isinstance(v, dict) else int(v)
 
 
 def _parse_baseline_spec(
