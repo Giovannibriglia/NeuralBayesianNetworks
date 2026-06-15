@@ -162,15 +162,17 @@ class PgmpyAdapter:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FutureWarning)
             if self.param_method == "bayes":
-                # BDeu prior, equivalent_sample_size=5 — standard pgmpy default.
-                # v0.8-#53: pgmpy 1.x requires passing prior kwargs to
-                # BayesianEstimator.get_parameters(), not to bn.fit().
+                # Use pgmpy's library defaults verbatim (no adapter-side prior
+                # override): prior_type="BDeu", equivalent_sample_size=5 in
+                # pgmpy 1.1.2 — i.e. identical numbers to the old explicit
+                # kwargs, but no longer disguising the default as our choice
+                # (v0.14 methodology fidelity).
+                # v0.8-#53: pgmpy 1.x requires the estimator path
+                # (BayesianEstimator.get_parameters), not bn.fit().
                 from pgmpy.estimators import BayesianEstimator
 
                 estimator = BayesianEstimator(model=bn, data=df)
-                cpds = estimator.get_parameters(
-                    prior_type="BDeu", equivalent_sample_size=5,
-                )
+                cpds = estimator.get_parameters()
                 bn.add_cpds(*cpds)
             else:
                 # MLE path: try new pgmpy 1.x DiscreteMLE first; fall back to
