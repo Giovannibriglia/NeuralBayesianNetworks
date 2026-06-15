@@ -76,3 +76,18 @@ def n_parameters_from_problem(problem: Any) -> int | None:
             parents[child].append(parent)
 
     return n_parameters_from_cardinalities(cardinalities, parents)
+
+
+def n_nodes_from_problem(problem: Any) -> int | None:
+    """Number of variables (nodes) in a problem; per-problem constant.
+
+    Reads ``len(problem.variables)`` -- the same structure
+    :func:`n_parameters_from_problem` consumes. Returns ``None`` when the
+    problem lacks variables (e.g. a bare unit-test fixture), mirroring
+    ``n_parameters_from_problem``'s None-on-missing contract so the runner's
+    inject sites stay parallel.
+    """
+    variables = getattr(problem, "variables", None)
+    if not variables:
+        return None
+    return len(variables)

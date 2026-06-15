@@ -10,6 +10,7 @@ import types
 import pytest
 
 from benchmarking.domains._n_parameters import (
+    n_nodes_from_problem,
     n_parameters_from_cardinalities,
     n_parameters_from_problem,
 )
@@ -77,6 +78,33 @@ class TestNParametersFromProblem:
     def test_missing_structure_returns_none(self):
         assert n_parameters_from_problem(types.SimpleNamespace()) is None
         assert n_parameters_from_problem(
+            types.SimpleNamespace(variables={}, dag=[])
+        ) is None
+
+
+class TestNNodesFromProblem:
+    """The variable-count wrapper; mirrors n_parameters_from_problem's
+    None-on-missing contract so the runner inject sites stay parallel."""
+
+    def test_counts_variables(self):
+        problem = types.SimpleNamespace(
+            variables={"A": ("discrete", 2), "B": ("discrete", 3)},
+            dag=[("A", "B")],
+        )
+        assert n_nodes_from_problem(problem) == 2
+
+    def test_counts_continuous_too(self):
+        # Unlike n_parameters, continuous nodes still count as nodes.
+        problem = types.SimpleNamespace(
+            variables={"A": ("discrete", 2), "B": ("continuous", 1)},
+            dag=[("A", "B")],
+        )
+        assert n_nodes_from_problem(problem) == 2
+
+    def test_missing_structure_returns_none(self):
+        # Same None-on-missing behavior as n_parameters_from_problem.
+        assert n_nodes_from_problem(types.SimpleNamespace()) is None
+        assert n_nodes_from_problem(
             types.SimpleNamespace(variables={}, dag=[])
         ) is None
 
