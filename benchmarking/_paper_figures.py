@@ -564,6 +564,31 @@ def _table_scoped(df_cell, family, aggregation, scope_col, scope_val, out_path, 
 
 # --- Orchestration ------------------------------------------------------------
 
+def _filter_unsupported_baselines(dff: pd.DataFrame) -> pd.DataFrame:
+    """Drop baselines whose every row in this slice is ``not_supported``,
+    and drop ``not_supported`` rows from any remaining baseline.
+
+    The semantic: ``not_supported`` means "this baseline cannot handle this
+    problem" (e.g. a discrete-only baseline on a continuous family) -- it
+    never participated. Showing it as a 100% failure in the success-rate
+    figure (or as a row of em-dashes in the tables) is misleading noise.
+    Partially-supported baselines stay; their success rate is then computed
+    over the SUPPORTED subset, which is the meaningful denominator.
+    """
+    if "status" not in dff.columns or "baseline" not in dff.columns:
+        return dff
+    # Baselines with at least one non-not_supported row.
+    supported = set(
+        dff.loc[dff["status"] != "not_supported", "baseline"].unique()
+    )
+    # Drop baselines that never had a supported row, AND drop the
+    # not_supported rows from baselines that survive.
+    return dff[
+        dff["baseline"].isin(supported)
+        & (dff["status"] != "not_supported")
+    ]
+
+
 def process_family(
     dff,
     benchmark,
@@ -594,6 +619,16 @@ def process_family(
     plots_dir.mkdir(parents=True, exist_ok=True)
     tables_dir.mkdir(parents=True, exist_ok=True)
     title = f"{benchmark}/{family}"
+
+    # Drop baselines that are entirely not_supported for this family (and any
+    # not_supported rows from survivors) BEFORE the success-rate figure and the
+    # tables: a baseline that never participated is noise, not a 100% failure.
+    # The accuracy/time scaling plots filter to status=="ok" internally, so
+    # this only changes what they'd already exclude.
+    dff = _filter_unsupported_baselines(dff)
+    if dff.empty:
+        logger.info("skip family with no supported baselines: %s", family)
+        return
 
     # x-axes. n_params is keyed by (problem_id, family); scope to this family
     # and flatten to {problem_id: value}. Decision alpha: include the

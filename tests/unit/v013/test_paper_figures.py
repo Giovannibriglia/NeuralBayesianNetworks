@@ -293,6 +293,81 @@ def test_resolve_n_nodes_drops_unknown(caplog):
     assert any("unresolved" in r.message for r in caplog.records)
 
 
+def test_not_supported_baselines_excluded_entirely(tmp_path):
+    """A baseline whose every row is not_supported is dropped from the
+    per-family success-rate figure AND the per-family tables.
+    Partially-supported baselines survive."""
+    from benchmarking._paper_figures import run_plot
+
+    rows = []
+    # baseline A: ok on every problem (fully supported)
+    # baseline B: not_supported on every problem (must vanish)
+    # baseline C: ok on asia, not_supported on alarm (partial — keeps)
+    for baseline, mapping in [
+        ("nbn-cat-ve", {"asia": "ok", "alarm": "ok"}),
+        ("pgmpy-lg-predict", {"asia": "not_supported", "alarm": "not_supported"}),
+        ("nbn-flow-lw", {"asia": "ok", "alarm": "not_supported"}),
+    ]:
+        for problem_id, status in mapping.items():
+            for seed in [0, 1]:
+                for kind in ["diagnosis", "prediction"]:
+                    for metric in ["tv_per_node", "fit_time_s",
+                                   "query_time_s", "metrics_time_s"]:
+                        rows.append({
+                            "benchmark": "bnlearn",
+                            "family": "discrete",
+                            "problem_id": problem_id,
+                            "seed": seed,
+                            "baseline": baseline,
+                            "query_role": "random",
+                            "query_kind": kind,
+                            "evidence_strategy": "random",
+                            "evidence_mode": "full",
+                            "metric": metric,
+                            "value": 0.05 if status == "ok" else None,
+                            "status": status,
+                            "fit_time_s": 0.5 if status == "ok" else None,
+                            "query_time_s": 0.01 if status == "ok" else None,
+                            "metrics_time_s": 0.001 if status == "ok" else None,
+                            "error_msg": None,
+                            "n_nodes": 8 if problem_id == "asia" else 37,
+                            "n_parameters": 36 if problem_id == "asia" else 752,
+                        })
+    parquet = tmp_path / "test_metrics.parquet"
+    pd.DataFrame(rows).to_parquet(parquet)
+    out_dir = tmp_path / "figs"
+    assert run_plot(parquet=parquet, output_dir=out_dir,
+                    aggregation="iqm_iqr") == 0
+
+    overall_tex = (out_dir / "bnlearn" / "tables"
+                   / "discrete_table_overall.tex").read_text()
+    # Fully not_supported baseline: gone everywhere.
+    assert "pgmpy-lg-predict" not in overall_tex
+    # Fully supported: stays.
+    assert "nbn-cat-ve" in overall_tex
+    # Partially supported: stays (success rate computed over supported subset).
+    assert "nbn-flow-lw" in overall_tex
+
+
+def test_filter_unsupported_baselines_unit():
+    """Direct unit test for the helper."""
+    from benchmarking._paper_figures import _filter_unsupported_baselines
+
+    df = pd.DataFrame([
+        {"baseline": "A", "status": "ok"},
+        {"baseline": "A", "status": "timeout"},
+        {"baseline": "B", "status": "not_supported"},
+        {"baseline": "B", "status": "not_supported"},
+        {"baseline": "C", "status": "ok"},
+        {"baseline": "C", "status": "not_supported"},
+    ])
+    out = _filter_unsupported_baselines(df)
+    # B is dropped entirely; C survives but its not_supported row drops.
+    assert set(out["baseline"]) == {"A", "C"}
+    assert (out["status"] != "not_supported").all()
+    assert len(out) == 3   # A:2 ok+timeout, C:1 ok
+
+
 def test_deprecated_shim_still_works_and_warns(tmp_path):
     """scripts/make_paper_figures.py delegates to run_plot and emits a
     DeprecationWarning (backward compat for existing callers)."""
