@@ -174,3 +174,35 @@ class TestDeterministic:
         x = torch.randn(10, 1)
         lp = mech.log_prob(x, None)
         assert (lp == 0.0).all()
+
+
+# ── NormalizingFlow with Long (discrete) parents ──────────────────────────────
+
+class TestNormalizingFlowLongParents:
+    """Regression: a flow node with a discrete (Long) parent must not crash
+    with 'mat1 and mat2 must have the same dtype' — the context is cast to
+    float at every inference entry point (clg networks healthcare / sangiovese,
+    every seed/kind, used to fail here)."""
+
+    def _fit(self):
+        from nbn.mechanisms.normalizing_flow import NormalizingFlowMechanism
+        mech = NormalizingFlowMechanism()
+        x = torch.randn(96, 1)
+        pa = torch.randint(0, 3, (96, 1))   # Long, NOT cast by the caller
+        mech.fit_local(x, pa, epochs=2)
+        return mech, x, pa
+
+    def test_log_prob_long_parent(self):
+        mech, x, pa = self._fit()
+        lp = mech.log_prob(x, pa)           # would raise Long vs Float
+        assert lp.shape == (96,)
+        assert torch.isfinite(lp).all()
+
+    def test_forward_long_parent(self):
+        mech, _, pa = self._fit()
+        mech.forward(pa)                    # builds the conditioned distribution
+
+    def test_sample_long_parent(self):
+        mech, _, pa = self._fit()
+        s = mech.sample(pa, n=2)
+        assert s.shape == (96, 2, 1)
