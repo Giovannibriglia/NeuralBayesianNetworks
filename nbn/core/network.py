@@ -55,7 +55,7 @@ class _AliasModuleDict(nn.ModuleDict):
         return (self._orig(k) for k in super().__iter__())
 
     def keys(self):
-        return [self._orig(k) for k in super().keys()]
+        return list(self)  # __iter__ already yields original (de-aliased) names
 
     def items(self):
         return [(self._orig(k), v) for k, v in super().items()]

@@ -472,7 +472,7 @@ def test_subset_table_labels_unique(tmp_path):
         labels += re.findall(r"\\label\{(tab:[^}]+)\}", tex.read_text())
     assert labels, "no labels found"
     assert len(labels) == len(set(labels)), \
-        f"duplicate labels: {sorted({l for l in labels if labels.count(l) > 1})}"
+        f"duplicate labels: {sorted({lbl for lbl in labels if labels.count(lbl) > 1})}"
 
 
 def test_problem_with_no_solver_excluded(tmp_path):
