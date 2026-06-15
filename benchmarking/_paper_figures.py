@@ -8,18 +8,24 @@ deprecation shim.
 Supports the ``iqm_iqr`` (default) and ``mean_std`` aggregation flags,
 propagated uniformly to every numeric aggregation (accuracy AND time).
 
-Output layout is per-FAMILY (one set of files across all problems in a
-family), flat under ``<output_dir>/<bench>/{plots,tables}/``:
+Output layout is per-FAMILY, with auto-discovered coverage SUBSETS under each
+family, at ``<output_dir>/<bench>/<family>/``:
 
-  plots/<family>_success_rate.pdf
-  plots/<family>_<metric>_vs_<axis>.pdf   metric in {tv,jsd,w1,log_likelihood}
-                                          _per_node; axis in {n_nodes,
-                                          n_parameters}; w1 skipped for
-                                          family==discrete (spec 5.2/5.4)
-  plots/<family>_{total_query_time,fit_time}_vs_<axis>.pdf
-  tables/<family>_table_overall.tex       rows=baselines, cols=metric x role
-  tables/<family>_table_kind_<k>.tex      per query_kind
-  tables/<family>_table_role_<r>.tex      per query_role
+  all/                  every problem, every supported baseline (mixed coverage)
+    plots/success_rate.pdf, <metric>_vs_<axis>.pdf,
+          {total_query_time,fit_time}_vs_<axis>.pdf
+    tables/table_overall.tex, table_kind_<k>.tex, table_role_<r>.tex
+  common/               problems solved by the FULL supported baseline set
+    methods.txt, problems.txt, plots/ (no success_rate), tables/
+  subsetN/              one per auto-discovered solving-baseline set
+    methods.txt, problems.txt, plots/, tables/
+  _subsets_overview.txt navigation aid
+
+A subset groups the problems whose "solving set" (baselines that are ``ok`` on
+every row of the problem) is identical; its plots/tables are restricted to
+those problems and baselines. ``<metric>`` in {tv,jsd,w1,log_likelihood}
+_per_node (w1 skipped for family==discrete); ``<axis>`` in {n_nodes,
+n_parameters}. Filenames carry no ``<family>_`` prefix (the folder names it).
 
 x-axes: ``n_nodes`` is resolved from the parquet column (#195) with a
 ``_NETWORKS`` / synthetic-int fallback for older parquets (resolve_n_nodes).
@@ -589,46 +595,102 @@ def _filter_unsupported_baselines(dff: pd.DataFrame) -> pd.DataFrame:
     ]
 
 
-def process_family(
-    dff,
-    benchmark,
-    family,
-    aggregation,
-    n_nodes,
-    n_params,
-    plots_dir,
-    tables_dir,
-):
-    """Per-family orchestrator (replaces the old per-(family, size) cell).
+def _problem_solving_sets(dff: pd.DataFrame) -> dict[str, frozenset]:
+    """Map ``problem_id -> frozenset(baselines that FULLY solved it)``.
 
-    Produces, across ALL problems in this family at once:
-
-    Plots in ``plots_dir`` (``<family>_*.pdf``):
-      - ``<family>_success_rate.pdf``
-      - ``<family>_<metric>_vs_n_nodes.pdf`` (per applicable metric)
-      - ``<family>_<metric>_vs_n_parameters.pdf`` (SKIPPED when this family's
-        n_parameters are all zero/absent -- decision alpha: a degenerate x=0
-        axis carries no information)
-      - ``<family>_{total_query_time,fit_time}_vs_<axis>.pdf``
-
-    Tables in ``tables_dir`` (``<family>_*.tex``, PR #189 float wrapper):
-      - ``<family>_table_overall.tex`` (whole family, metric x role cross)
-      - ``<family>_table_kind_<k>.tex`` (per query_kind)
-      - ``<family>_table_role_<r>.tex`` (per query_role -- kept, decision beta)
+    A baseline "fully solves" a problem when every one of its rows for that
+    problem is ``status=="ok"`` (no timeout/error/oom). ``dff`` is assumed
+    already cleaned of ``not_supported`` rows by
+    :func:`_filter_unsupported_baselines`, so the only remaining non-ok
+    statuses are genuine failures.
     """
+    out: dict[str, frozenset] = {}
+    for pid, gp in dff.groupby("problem_id"):
+        solvers = {
+            bl for bl, gb in gp.groupby("baseline")
+            if len(gb) and (gb["status"] == "ok").all()
+        }
+        out[str(pid)] = frozenset(solvers)
+    return out
+
+
+def _discover_subsets(dff: pd.DataFrame) -> list[dict]:
+    """Auto-discover baseline-coverage subsets from a family's data.
+
+    Groups problems by their "solving set" (the baselines that fully succeed
+    on every row of the problem). Each unique non-empty solving set with >=1
+    problem becomes a subset:
+      - ``"common"`` when the solving set equals the full supported set,
+      - ``"subset1"``, ``"subset2"``, ... otherwise, numbered by descending
+        baseline-set size, then descending problem count, then the
+        alphabetically-first baseline (fully deterministic).
+
+    Problems that no baseline fully solves (empty solving set) are skipped.
+    Returns dicts ``{name, baselines: sorted list, problems: sorted list}``
+    with ``"common"`` first (if present), then the numbered subsets.
+    """
+    if dff.empty:
+        return []
+    full = frozenset(dff["baseline"].dropna().unique())
+    solving = _problem_solving_sets(dff)
+
+    groups: dict[frozenset, list[str]] = {}
+    for pid, sset in solving.items():
+        if not sset:
+            continue  # no baseline fully solved this problem -> skip
+        groups.setdefault(sset, []).append(pid)
+
+    common = groups.pop(full, None)
+
+    # Deterministic ordering for the numbered subsets.
+    ordered = sorted(
+        groups.items(),
+        key=lambda kv: (-len(kv[0]), -len(kv[1]), sorted(kv[0])[0]),
+    )
+
+    out: list[dict] = []
+    if common is not None:
+        out.append(dict(name="common", baselines=sorted(full),
+                        problems=sorted(common)))
+    for i, (sset, probs) in enumerate(ordered, start=1):
+        out.append(dict(name=f"subset{i}", baselines=sorted(sset),
+                        problems=sorted(probs)))
+    return out
+
+
+def _write_subset_metadata(subset_dir, name, baselines, problems) -> None:
+    subset_dir.mkdir(parents=True, exist_ok=True)
+    (subset_dir / "methods.txt").write_text("\n".join(sorted(baselines)) + "\n")
+    (subset_dir / "problems.txt").write_text("\n".join(sorted(problems)) + "\n")
+
+
+def _write_subsets_overview(family_dir, family, subsets) -> None:
+    """One-page navigation file listing each subset, its baseline count,
+    problem count, and the baselines themselves."""
+    lines = [f"Subsets for family={family}", "=" * 60, ""]
+    for s in subsets:
+        lines.append(f"{s['name']}: {len(s['baselines'])} baselines, "
+                     f"{len(s['problems'])} problems")
+        lines.append(f"  baselines: {', '.join(sorted(s['baselines']))}")
+        lines.append("")
+    (family_dir / "_subsets_overview.txt").write_text("\n".join(lines))
+
+
+def _render_view(dff, benchmark, family, aggregation, n_nodes, n_params,
+                 view_dir, *, subset_name, include_success_rate):
+    """Render one view (the ``all`` view or one subset) into
+    ``view_dir/{plots,tables}/``.
+
+    Filenames carry no ``<family>_`` prefix (the folder path already names the
+    family and subset). Table labels are
+    ``tab:<bench>_<family>_<subset>_<scope>`` -- unique across subsets.
+    ``dff`` is assumed already filtered of ``not_supported`` rows.
+    """
+    plots_dir = view_dir / "plots"
+    tables_dir = view_dir / "tables"
     plots_dir.mkdir(parents=True, exist_ok=True)
     tables_dir.mkdir(parents=True, exist_ok=True)
-    title = f"{benchmark}/{family}"
-
-    # Drop baselines that are entirely not_supported for this family (and any
-    # not_supported rows from survivors) BEFORE the success-rate figure and the
-    # tables: a baseline that never participated is noise, not a 100% failure.
-    # The accuracy/time scaling plots filter to status=="ok" internally, so
-    # this only changes what they'd already exclude.
-    dff = _filter_unsupported_baselines(dff)
-    if dff.empty:
-        logger.info("skip family with no supported baselines: %s", family)
-        return
+    title = f"{benchmark}/{family}/{subset_name}"
 
     # x-axes. n_params is keyed by (problem_id, family); scope to this family
     # and flatten to {problem_id: value}. Decision alpha: include the
@@ -640,38 +702,79 @@ def process_family(
         if any(v and v > 0 for v in n_params_family.values()):
             axes.append(("n_parameters", n_params_family))
 
-    fig_status_stacked(dff, plots_dir / f"{family}_success_rate.pdf", title)
+    if include_success_rate:
+        fig_status_stacked(dff, plots_dir / "success_rate.pdf", title)
 
     for metric in ACCURACY_METRICS:
         if family in DISCRETE_FAMILIES and metric == "w1_per_node":
             continue
         for x_axis, lookup in axes:
             fig_accuracy_scaling(dff, metric, x_axis, lookup, aggregation,
-                                 plots_dir / f"{family}_{metric}_vs_{x_axis}.pdf",
-                                 title)
+                                 plots_dir / f"{metric}_vs_{x_axis}.pdf", title)
 
     for time_kind, stem in [("query_total", "total_query_time"), ("fit", "fit_time")]:
         for x_axis, lookup in axes:
             fig_time_scaling(dff, time_kind, x_axis, lookup, aggregation,
-                             plots_dir / f"{family}_{stem}_vs_{x_axis}.pdf", title)
+                             plots_dir / f"{stem}_vs_{x_axis}.pdf", title)
 
-    # Tables. Labels unique per family: tab:<bench>_<family>_<scope>.
+    # Tables. Labels unique per (family, subset): tab:<bench>_<family>_<subset>_<scope>.
     roles = sorted(dff["query_role"].dropna().unique())
     kinds = sorted(dff["query_kind"].dropna().unique())
-    lbl = f"tab:{_table_slug(benchmark)}_{_table_slug(family)}"
-    table_headline(dff, family, "overall", aggregation, roles,
-                   tables_dir / f"{family}_table_overall.tex",
-                   label=f"{lbl}_overall")
+    lbl = f"tab:{_table_slug(benchmark)}_{_table_slug(family)}_{_table_slug(subset_name)}"
+    scope = f"{family}/{subset_name}"
+    table_headline(dff, family, subset_name, aggregation, roles,
+                   tables_dir / "table_overall.tex", label=f"{lbl}_overall")
     for r in roles:
         _table_scoped(dff, family, aggregation, "query_role", r,
-                      tables_dir / f"{family}_table_role_{r}.tex",
-                      f"role={r} {family}",
+                      tables_dir / f"table_role_{r}.tex", f"role={r} {scope}",
                       label=f"{lbl}_role_{_table_slug(r)}")
     for k in kinds:
         _table_scoped(dff, family, aggregation, "query_kind", k,
-                      tables_dir / f"{family}_table_kind_{k}.tex",
-                      f"kind={k} {family}",
+                      tables_dir / f"table_kind_{k}.tex", f"kind={k} {scope}",
                       label=f"{lbl}_kind_{_table_slug(k)}")
+
+
+def process_family(dff, benchmark, family, aggregation, n_nodes, n_params,
+                   family_dir):
+    """Per-family orchestrator. Produces, under ``family_dir``:
+
+      - ``all/{plots,tables}/``       always (every problem, every supported
+                                      baseline -- mixed-coverage aggregation)
+      - ``common/{plots,tables}/``    if any problem is solved by the full
+                                      supported baseline set
+      - ``subsetN/{plots,tables}/``   one per auto-discovered solving set
+      - ``_subsets_overview.txt``     navigation aid
+
+    Each subset is computed over its problems and restricted to its solving
+    baselines; ``methods.txt`` / ``problems.txt`` record the membership.
+    Subset views omit ``success_rate.pdf`` (100% by construction).
+    """
+    family_dir.mkdir(parents=True, exist_ok=True)
+
+    # Drop baselines entirely not_supported for this family (and not_supported
+    # rows from survivors): a baseline that never participated is noise, not a
+    # 100% failure. (PR #197 semantics; the scaling plots filter to ok anyway.)
+    dff = _filter_unsupported_baselines(dff)
+    if dff.empty:
+        logger.info("skip family with no supported baselines: %s", family)
+        return
+
+    # 1. The "all" view: every problem, every participating baseline.
+    _render_view(dff, benchmark, family, aggregation, n_nodes, n_params,
+                 family_dir / "all", subset_name="all", include_success_rate=True)
+
+    # 2. Auto-discover coverage subsets and render each.
+    subsets = _discover_subsets(dff)
+    _write_subsets_overview(family_dir, family, subsets)
+    for s in subsets:
+        subset_dir = family_dir / s["name"]
+        _write_subset_metadata(subset_dir, s["name"], s["baselines"], s["problems"])
+        sub_dff = dff[dff["baseline"].isin(s["baselines"])
+                      & dff["problem_id"].isin(s["problems"])]
+        if sub_dff.empty:
+            continue
+        _render_view(sub_dff, benchmark, family, aggregation, n_nodes, n_params,
+                     subset_dir, subset_name=s["name"], include_success_rate=False)
 
 
 def _build_batch_speed_figure(
@@ -986,8 +1089,6 @@ def run_plot(
         # n_nodes per problem: parquet column (#195) preferred, _NETWORKS /
         # synthetic-int fallback for older parquets (resolve_n_nodes).
         n_nodes = resolve_n_nodes(dfb, bench)
-        plots_dir = output_dir / bench / "plots"
-        tables_dir = output_dir / bench / "tables"
 
         for family in sorted(dfb["family"].dropna().unique()):
             dff = dfb[dfb["family"] == family]
@@ -996,7 +1097,7 @@ def run_plot(
                 logger.info("skip empty family: %s/%s", bench, family)
                 continue
             process_family(dff, bench, family, aggregation,
-                           n_nodes, n_params_global, plots_dir, tables_dir)
+                           n_nodes, n_params_global, output_dir / bench / family)
             produced += 1
 
         # Batch-speed figure (v0.14 #148): auto-detected — rendered when

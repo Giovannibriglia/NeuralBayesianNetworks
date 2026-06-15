@@ -157,33 +157,37 @@ def test_run_plot_accepts_directory(tmp_path):
 
 
 def test_per_family_output_layout(tmp_path):
-    """run_plot produces the flat per-family layout under <bench>/{plots,tables}/
-    with <family>_* filenames (PR-2)."""
+    """run_plot produces the nested per-family/subset layout under
+    <bench>/<family>/<subset>/{plots,tables}/ with no <family>_ prefix (PR-4)."""
     from benchmarking._paper_figures import run_plot
 
     parquet = _make_minimal_parquet(tmp_path)   # bnlearn / discrete / asia,alarm
     out_dir = tmp_path / "figs"
     assert run_plot(parquet=parquet, output_dir=out_dir, aggregation="iqm_iqr") == 0
 
-    plots = out_dir / "bnlearn" / "plots"
-    tables = out_dir / "bnlearn" / "tables"
-    assert (plots / "discrete_tv_per_node_vs_n_nodes.pdf").exists()
-    assert (plots / "discrete_jsd_per_node_vs_n_nodes.pdf").exists()
-    assert (plots / "discrete_success_rate.pdf").exists()
-    assert (plots / "discrete_total_query_time_vs_n_nodes.pdf").exists()
-    assert (plots / "discrete_fit_time_vs_n_nodes.pdf").exists()
+    all_dir = out_dir / "bnlearn" / "discrete" / "all"
+    plots = all_dir / "plots"
+    tables = all_dir / "tables"
+    assert (plots / "tv_per_node_vs_n_nodes.pdf").exists()
+    assert (plots / "jsd_per_node_vs_n_nodes.pdf").exists()
+    assert (plots / "success_rate.pdf").exists()
+    assert (plots / "total_query_time_vs_n_nodes.pdf").exists()
+    assert (plots / "fit_time_vs_n_nodes.pdf").exists()
     # Tables: overall + per-kind + per-role (decision beta keeps per-role).
-    assert (tables / "discrete_table_overall.tex").exists()
-    assert (tables / "discrete_table_kind_diagnosis.tex").exists()
-    assert (tables / "discrete_table_kind_prediction.tex").exists()
-    assert (tables / "discrete_table_role_hub.tex").exists()
+    assert (tables / "table_overall.tex").exists()
+    assert (tables / "table_kind_diagnosis.tex").exists()
+    assert (tables / "table_kind_prediction.tex").exists()
+    assert (tables / "table_role_hub.tex").exists()
     # Float wrapper + label present (PR #189 universal table format).
-    overall = (tables / "discrete_table_overall.tex").read_text()
-    assert "\\pm" in overall and "\\label{tab:bnlearn_discrete_overall}" in overall
-    # No old per-(family, size) cell tree.
-    assert not (out_dir / "bnlearn" / "discrete").exists()
+    overall = (tables / "table_overall.tex").read_text()
+    assert "\\pm" in overall and "\\label{tab:bnlearn_discrete_all_overall}" in overall
+    # No old flat <family>_ files at the bench level.
+    assert not (out_dir / "bnlearn" / "plots").exists()
+    assert not list(plots.glob("*discrete_*"))
     # discrete skips w1 entirely.
     assert not list(plots.glob("*w1_per_node*"))
+    # Subsets auto-discovered: overview + at least one subset dir.
+    assert (out_dir / "bnlearn" / "discrete" / "_subsets_overview.txt").exists()
 
 
 def _make_allzero_nparams_parquet(tmp_path: Path) -> Path:
@@ -236,9 +240,10 @@ def test_all_zero_n_parameters_skips_that_axis(tmp_path):
     out_dir = tmp_path / "figs_allzero"
     assert run_plot(parquet=parquet, output_dir=out_dir, aggregation="iqm_iqr") == 0
 
-    plots = out_dir / "bnlearn" / "plots"
-    assert (plots / "continuous_gauss_tv_per_node_vs_n_nodes.pdf").exists()
-    assert not list(plots.glob("*_vs_n_parameters*")), (
+    plots = out_dir / "bnlearn" / "continuous_gauss" / "all" / "plots"
+    assert (plots / "tv_per_node_vs_n_nodes.pdf").exists()
+    # skipped everywhere in the family tree, not just the all view
+    assert not list((out_dir / "bnlearn" / "continuous_gauss").rglob("*_vs_n_parameters*")), (
         "all-zero n_parameters family must skip the degenerate n_parameters axis"
     )
 
@@ -339,8 +344,8 @@ def test_not_supported_baselines_excluded_entirely(tmp_path):
     assert run_plot(parquet=parquet, output_dir=out_dir,
                     aggregation="iqm_iqr") == 0
 
-    overall_tex = (out_dir / "bnlearn" / "tables"
-                   / "discrete_table_overall.tex").read_text()
+    overall_tex = (out_dir / "bnlearn" / "discrete" / "all" / "tables"
+                   / "table_overall.tex").read_text()
     # Fully not_supported baseline: gone everywhere.
     assert "pgmpy-lg-predict" not in overall_tex
     # Fully supported: stays.
@@ -366,6 +371,147 @@ def test_filter_unsupported_baselines_unit():
     assert set(out["baseline"]) == {"A", "C"}
     assert (out["status"] != "not_supported").all()
     assert len(out) == 3   # A:2 ok+timeout, C:1 ok
+
+
+def _coverage_df(spec: dict, family: str = "discrete") -> pd.DataFrame:
+    """Build a melted-schema DataFrame from spec {(problem, baseline): status}.
+
+    'ok' rows carry real values; any other status carries NaN. n_nodes is
+    looked up from _NETWORKS by problem name when possible.
+    """
+    from benchmarking.problems.bnlearn import _NETWORKS
+    metrics = [("tv_per_node", 0.05), ("jsd_per_node", 0.01),
+               ("fit_time_s", 0.5), ("query_time_s", 0.01),
+               ("metrics_time_s", 0.001)]
+    rows = []
+    for (pid, bl), status in spec.items():
+        nn = _NETWORKS.get(pid, {}).get("n_nodes", 10)
+        ok = status == "ok"
+        for seed in [0, 1]:
+            for kind in ["diagnosis", "prediction"]:
+                for m, v in metrics:
+                    rows.append({
+                        "benchmark": "bnlearn", "family": family,
+                        "problem_id": pid, "seed": seed, "baseline": bl,
+                        "query_role": "random", "query_kind": kind,
+                        "evidence_strategy": "random", "evidence_mode": "full",
+                        "metric": m, "value": (v if ok else float("nan")),
+                        "status": status,
+                        "fit_time_s": 0.5, "query_time_s": 0.01,
+                        "metrics_time_s": 0.001, "error_msg": None,
+                        "n_nodes": nn, "n_parameters": 100,
+                    })
+    return pd.DataFrame(rows)
+
+
+def test_discover_subsets_basic():
+    """3 baselines A/B/C, 4 problems with distinct solving sets."""
+    from benchmarking._paper_figures import _discover_subsets
+    spec = {}
+    for bl, st in [("A", "ok"), ("B", "ok"), ("C", "ok")]:
+        spec[("asia", bl)] = st                         # P1: common {A,B,C}
+    for bl, st in [("A", "ok"), ("B", "ok"), ("C", "error")]:
+        spec[("alarm", bl)] = st                        # P2: {A,B}
+        spec[("child", bl)] = st                        # P3: {A,B}
+    for bl, st in [("A", "ok"), ("B", "error"), ("C", "error")]:
+        spec[("sachs", bl)] = st                        # P4: {A}
+    subs = _discover_subsets(_coverage_df(spec))
+    names = [s["name"] for s in subs]
+    assert names == ["common", "subset1", "subset2"]
+    by = {s["name"]: s for s in subs}
+    assert by["common"]["baselines"] == ["A", "B", "C"]
+    assert by["common"]["problems"] == ["asia"]
+    assert by["subset1"]["baselines"] == ["A", "B"]
+    assert by["subset1"]["problems"] == ["alarm", "child"]
+    assert by["subset2"]["baselines"] == ["A"]
+    assert by["subset2"]["problems"] == ["sachs"]
+
+
+def test_subset_filenames_and_metadata(tmp_path):
+    from benchmarking._paper_figures import run_plot
+    spec = {}
+    for bl, st in [("nbn-cat-ve", "ok"), ("pgmpy-mle-ve", "ok")]:
+        spec[("asia", bl)] = st                         # common {both}
+    spec[("alarm", "nbn-cat-ve")] = "ok"
+    spec[("alarm", "pgmpy-mle-ve")] = "error"           # subset1 {nbn-cat-ve}
+    parquet = tmp_path / "cov_metrics.parquet"
+    _coverage_df(spec).to_parquet(parquet)
+    out = tmp_path / "figs"
+    assert run_plot(parquet=parquet, output_dir=out, aggregation="iqm_iqr") == 0
+
+    fam = out / "bnlearn" / "discrete"
+    assert (fam / "all" / "plots" / "tv_per_node_vs_n_nodes.pdf").exists()
+    assert (fam / "all" / "tables" / "table_overall.tex").exists()
+    assert (fam / "all" / "plots" / "success_rate.pdf").exists()
+    # common: both baselines on asia; no success_rate in subset views.
+    assert (fam / "common" / "methods.txt").read_text().split() == [
+        "nbn-cat-ve", "pgmpy-mle-ve"]
+    assert (fam / "common" / "problems.txt").read_text().split() == ["asia"]
+    assert not (fam / "common" / "plots" / "success_rate.pdf").exists()
+    assert (fam / "subset1" / "methods.txt").read_text().split() == ["nbn-cat-ve"]
+    assert (fam / "subset1" / "problems.txt").read_text().split() == ["alarm"]
+    assert (fam / "_subsets_overview.txt").exists()
+    overview = (fam / "_subsets_overview.txt").read_text()
+    assert "common" in overview and "subset1" in overview
+
+
+def test_subset_table_labels_unique(tmp_path):
+    from benchmarking._paper_figures import run_plot
+    import re
+    spec = {}
+    for bl, st in [("nbn-cat-ve", "ok"), ("pgmpy-mle-ve", "ok")]:
+        spec[("asia", bl)] = st
+    spec[("alarm", "nbn-cat-ve")] = "ok"
+    spec[("alarm", "pgmpy-mle-ve")] = "error"
+    parquet = tmp_path / "cov_metrics.parquet"
+    _coverage_df(spec).to_parquet(parquet)
+    out = tmp_path / "figs"
+    assert run_plot(parquet=parquet, output_dir=out, aggregation="iqm_iqr") == 0
+    labels = []
+    for tex in out.rglob("*.tex"):
+        labels += re.findall(r"\\label\{(tab:[^}]+)\}", tex.read_text())
+    assert labels, "no labels found"
+    assert len(labels) == len(set(labels)), \
+        f"duplicate labels: {sorted({l for l in labels if labels.count(l) > 1})}"
+
+
+def test_problem_with_no_solver_excluded(tmp_path):
+    from benchmarking._paper_figures import run_plot
+    spec = {}
+    for bl, st in [("nbn-cat-ve", "ok"), ("pgmpy-mle-ve", "ok")]:
+        spec[("asia", bl)] = st                          # normal common problem
+    # P_hard: every baseline fails -> empty solving set -> excluded from subsets
+    spec[("alarm", "nbn-cat-ve")] = "error"
+    spec[("alarm", "pgmpy-mle-ve")] = "error"
+    parquet = tmp_path / "cov_metrics.parquet"
+    _coverage_df(spec).to_parquet(parquet)
+    out = tmp_path / "figs"
+    assert run_plot(parquet=parquet, output_dir=out, aggregation="iqm_iqr") == 0
+    fam = out / "bnlearn" / "discrete"
+    # 'alarm' must not appear in ANY subset's problems.txt
+    for probs in fam.rglob("problems.txt"):
+        assert "alarm" not in probs.read_text().split(), \
+            f"unsolved problem leaked into {probs}"
+
+
+@pytest.mark.slow
+def test_real_bnlearn_parquet_no_crash(tmp_path):
+    """The on-disk bnlearn_complete parquet (no n_nodes column, diverse
+    coverage) renders without crashing and yields >=1 subset per family."""
+    from benchmarking._paper_figures import run_plot
+    rundir = Path(__file__).resolve().parents[3] / (
+        "benchmarking/results/benchmark_bnlearn_bnlearn_complete_20260612_182220")
+    if not rundir.exists():
+        pytest.skip("bnlearn_complete parquet not present")
+    out = tmp_path / "figs"
+    assert run_plot(parquet=rundir, output_dir=out, aggregation="iqm_iqr") == 0
+    for fam in ["discrete", "clg", "continuous_gauss"]:
+        fam_dir = out / "bnlearn" / fam
+        assert (fam_dir / "all").is_dir()
+        assert (fam_dir / "_subsets_overview.txt").exists()
+        subset_dirs = [d for d in fam_dir.iterdir()
+                       if d.is_dir() and d.name not in {"all"}]
+        assert subset_dirs, f"{fam}: no subset dirs"
 
 
 def test_deprecated_shim_still_works_and_warns(tmp_path):
