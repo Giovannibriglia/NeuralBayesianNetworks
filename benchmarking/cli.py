@@ -5,8 +5,9 @@ The benchmark → figures workflow is two-phase, both under this one CLI:
     nbn-bench inference --config benchmarking/configs/synthetic/smoke_tests/inference_smoke.yaml
     nbn-bench plot <results-dir-or-parquet> --output-dir <out>
 
-``inference`` runs the benchmark and writes a parquet (+ tables/figures);
-``plot`` reads that parquet and renders the paper figures + LaTeX tables
+``inference`` runs the benchmark and writes the JSONL + parquet (the
+canonical run artifact); ``plot`` reads that parquet and renders the paper
+figures + LaTeX tables on demand into a chosen output dir
 (docs/v0.13-paper-figures.md). ``param-learning`` is structurally preserved
 but stubbed — the ParamLearningMeasurement is deferred to a later v0.13 phase.
 See issue #109 for status.
@@ -189,60 +190,22 @@ def main(argv: list[str] | None = None) -> int:
             _run_cells(cfg)
 
             # ── post-run pipeline ──────────────────────────────────────────
-            # JSONL is already on disk from the runner.  Produce parquet +
-            # tables + figures so callers get the same output package as
-            # v0.12.  Each step is independent: a failure logs the error and
-            # sets rc=1 but does not prevent the remaining steps from running.
+            # JSONL is already on disk from the runner; convert it to the
+            # parquet that is the single canonical artifact of a run. Paper
+            # figures + LaTeX tables are produced ON DEMAND by the separate
+            # `nbn-bench plot <run-dir>` command (benchmarking/_paper_figures),
+            # never auto-generated here -- the old post-run figures/ + tables/
+            # were stale (old-schema) and have been removed (v0.14).
             rc = 0
 
-            # Step 1: JSONL → parquet
+            # JSONL → parquet
             try:
                 from benchmarking.core.output import jsonl_to_parquet
                 jsonl_to_parquet(cfg.jsonl_path, parquet_path)
                 logger.info("Wrote parquet: %s", parquet_path)
             except Exception as exc:
-                logger.error("Post-run step 1 (jsonl_to_parquet) failed: %s", exc)
+                logger.error("Post-run step (jsonl_to_parquet) failed: %s", exc)
                 rc = 1
-
-            # Step 2+3: aggregate → tables (independent of figures)
-            if parquet_path.exists():
-                try:
-                    from benchmarking._aggregate import aggregate
-                    from benchmarking._tables import write_all
-                    aggregated = aggregate(parquet_path)
-                    table_paths = write_all(
-                        aggregated,
-                        output_dir=results_dir,
-                        output_prefix=config_name,
-                    )
-                    logger.info(
-                        "Wrote %d table files to: %s",
-                        len(table_paths), results_dir / "tables",
-                    )
-                except Exception as exc:
-                    logger.error(
-                        "Post-run step 2 (aggregate/tables) failed: %s", exc,
-                    )
-                    rc = 1
-
-                # Step 4: figures
-                try:
-                    from benchmarking._plot_v2 import render_figures
-                    figure_paths = render_figures(
-                        parquet_path=parquet_path,
-                        output_dir=results_dir,
-                        output_prefix=config_name,
-                    )
-                    n_figs = sum(len(v) for v in figure_paths.values())
-                    logger.info(
-                        "Wrote %d figure files to: %s",
-                        n_figs, results_dir / "figures",
-                    )
-                except Exception as exc:
-                    logger.error(
-                        "Post-run step 3 (render_figures) failed: %s", exc,
-                    )
-                    rc = 1
 
             return rc
         except Exception:

@@ -116,7 +116,7 @@ def test_n_parameters_lookup_keyed_by_problem_and_family():
     assert lut[("10", "hybrid")] == 72.0          # NOT collapsed to 256
     assert lut[("10", "continuous_lg")] == 0.0
     assert lut[("5", "discrete")] == 44.0
-    # family-scoped flatten (mirrors process_cell) yields the right x-lookup
+    # family-scoped flatten (mirrors process_family) yields the right x-lookup
     hybrid = {p: v for (p, f), v in lut.items() if f == "hybrid"}
     assert hybrid == {"10": 72.0}
 
@@ -154,6 +154,143 @@ def test_run_plot_accepts_directory(tmp_path):
     rc = run_plot(parquet=results_dir, output_dir=out_dir, aggregation="iqm_iqr")
     assert rc == 0
     assert list(out_dir.rglob("*.pdf"))
+
+
+def test_per_family_output_layout(tmp_path):
+    """run_plot produces the flat per-family layout under <bench>/{plots,tables}/
+    with <family>_* filenames (PR-2)."""
+    from benchmarking._paper_figures import run_plot
+
+    parquet = _make_minimal_parquet(tmp_path)   # bnlearn / discrete / asia,alarm
+    out_dir = tmp_path / "figs"
+    assert run_plot(parquet=parquet, output_dir=out_dir, aggregation="iqm_iqr") == 0
+
+    plots = out_dir / "bnlearn" / "plots"
+    tables = out_dir / "bnlearn" / "tables"
+    assert (plots / "discrete_tv_per_node_vs_n_nodes.pdf").exists()
+    assert (plots / "discrete_jsd_per_node_vs_n_nodes.pdf").exists()
+    assert (plots / "discrete_success_rate.pdf").exists()
+    assert (plots / "discrete_total_query_time_vs_n_nodes.pdf").exists()
+    assert (plots / "discrete_fit_time_vs_n_nodes.pdf").exists()
+    # Tables: overall + per-kind + per-role (decision beta keeps per-role).
+    assert (tables / "discrete_table_overall.tex").exists()
+    assert (tables / "discrete_table_kind_diagnosis.tex").exists()
+    assert (tables / "discrete_table_kind_prediction.tex").exists()
+    assert (tables / "discrete_table_role_hub.tex").exists()
+    # Float wrapper + label present (PR #189 universal table format).
+    overall = (tables / "discrete_table_overall.tex").read_text()
+    assert "\\pm" in overall and "\\label{tab:bnlearn_discrete_overall}" in overall
+    # No old per-(family, size) cell tree.
+    assert not (out_dir / "bnlearn" / "discrete").exists()
+    # discrete skips w1 entirely.
+    assert not list(plots.glob("*w1_per_node*"))
+
+
+def _make_allzero_nparams_parquet(tmp_path: Path) -> Path:
+    """A continuous_gauss-like family with an n_nodes column and all-zero
+    n_parameters (the bnlearn gaussian case)."""
+    rows = []
+    for baseline in ["nbn-flow-lw", "pyro-mle-lw"]:
+        for problem_id, n_nodes in [("ecoli70", 46), ("arth150", 107)]:
+            for seed in [0, 1]:
+                for kind in ["diagnosis", "prediction"]:
+                    for metric, value in [
+                        ("tv_per_node", 0.05),
+                        ("w1_per_node", 0.2),
+                        ("fit_time_s", 0.5),
+                        ("query_time_s", 0.01),
+                        ("metrics_time_s", 0.001),
+                    ]:
+                        rows.append({
+                            "benchmark": "bnlearn",
+                            "family": "continuous_gauss",
+                            "problem_id": problem_id,
+                            "seed": seed,
+                            "baseline": baseline,
+                            "query_role": "random",
+                            "query_kind": kind,
+                            "evidence_strategy": "random",
+                            "evidence_mode": "full",
+                            "metric": metric,
+                            "value": value,
+                            "status": "ok",
+                            "fit_time_s": 0.5,
+                            "query_time_s": 0.01,
+                            "metrics_time_s": 0.001,
+                            "error_msg": None,
+                            "n_nodes": n_nodes,
+                            "n_parameters": 0,      # gaussian: all-zero (decision alpha)
+                        })
+    out = tmp_path / "allzero_metrics.parquet"
+    pd.DataFrame(rows).to_parquet(out)
+    return out
+
+
+def test_all_zero_n_parameters_skips_that_axis(tmp_path):
+    """A family whose n_parameters are all zero (continuous_gauss) still gets
+    the n_nodes axis, but the degenerate *_vs_n_parameters file is skipped
+    (decision alpha)."""
+    from benchmarking._paper_figures import run_plot
+
+    parquet = _make_allzero_nparams_parquet(tmp_path)
+    out_dir = tmp_path / "figs_allzero"
+    assert run_plot(parquet=parquet, output_dir=out_dir, aggregation="iqm_iqr") == 0
+
+    plots = out_dir / "bnlearn" / "plots"
+    assert (plots / "continuous_gauss_tv_per_node_vs_n_nodes.pdf").exists()
+    assert not list(plots.glob("*_vs_n_parameters*")), (
+        "all-zero n_parameters family must skip the degenerate n_parameters axis"
+    )
+
+
+def test_resolve_n_nodes_column_wins(tmp_path, caplog):
+    """resolve_n_nodes prefers the parquet column over the fallback."""
+    from benchmarking._paper_figures import resolve_n_nodes
+
+    df = pd.DataFrame([
+        # asia is 8 in _NETWORKS, but the column says 99 → column wins.
+        {"benchmark": "bnlearn", "problem_id": "asia", "n_nodes": 99},
+        {"benchmark": "bnlearn", "problem_id": "asia", "n_nodes": 99},
+    ])
+    assert resolve_n_nodes(df, "bnlearn") == {"asia": 99}
+
+
+def test_resolve_n_nodes_falls_back_to_networks(tmp_path, caplog):
+    """No n_nodes column → _NETWORKS fallback for bnlearn, with an info log."""
+    import logging
+
+    from benchmarking._paper_figures import resolve_n_nodes
+
+    df = pd.DataFrame([
+        {"benchmark": "bnlearn", "problem_id": "asia"},
+        {"benchmark": "bnlearn", "problem_id": "alarm"},
+    ])
+    with caplog.at_level(logging.INFO):
+        out = resolve_n_nodes(df, "bnlearn")
+    assert out == {"asia": 8, "alarm": 37}        # from _NETWORKS
+    assert any("predates PR-1" in r.message for r in caplog.records)
+
+
+def test_resolve_n_nodes_synthetic_numeric_fallback():
+    """Synthetic problem_id is n_nodes as a string."""
+    from benchmarking._paper_figures import resolve_n_nodes
+
+    df = pd.DataFrame([{"benchmark": "synthetic", "problem_id": "100"}])
+    assert resolve_n_nodes(df, "synthetic") == {"100": 100}
+
+
+def test_resolve_n_nodes_drops_unknown(caplog):
+    """An unknown bnlearn network (no column, not in _NETWORKS) is omitted and
+    a warning is emitted."""
+    import logging
+
+    from benchmarking._paper_figures import resolve_n_nodes
+
+    df = pd.DataFrame([{"benchmark": "bnlearn", "problem_id": "not_a_real_net"}])
+    with caplog.at_level(logging.WARNING):
+        out = resolve_n_nodes(df, "bnlearn")
+    assert out == {}
+    assert any("unresolved" in r.message for r in caplog.records)
 
 
 def test_deprecated_shim_still_works_and_warns(tmp_path):
