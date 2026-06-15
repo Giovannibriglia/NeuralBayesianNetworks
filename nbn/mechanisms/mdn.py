@@ -8,55 +8,12 @@ import torch.nn as nn
 from torch.distributions import Categorical, Independent, MixtureSameFamily, Normal
 
 from nbn.mechanisms.base import Mechanism
-from nbn.utils.batching import ensure_2d, flatten_samples
+# _sanitise_parents was promoted to nbn.utils.batching (v0.14) so the flow
+# mechanism can share the identical guard; re-exported via this import for the
+# existing ``from nbn.mechanisms.mdn import _sanitise_parents`` callers/tests.
+from nbn.utils.batching import _sanitise_parents, ensure_2d, flatten_samples  # noqa: F401
 
 logger = logging.getLogger(__name__)
-
-
-def _sanitise_parents(
-    parents: torch.Tensor, *, mech_name: str = "MDN",
-) -> torch.Tensor:
-    """Replace NaN/Inf entries in ``parents`` with ``0``.
-
-    Defensive guard against upstream numerical drift in deep
-    ancestral sampling chains.  v0.6c-A Finding 2 surfaced one
-    specific case: at ``continuous_nongauss n=5000 seed=0``, a
-    single row out of 2000 in the parent input becomes ``NaN``,
-    which propagates through the MDN's zero-weight logit projection
-    (because PyTorch's ``0 * NaN = NaN``) and trips
-    ``Categorical(probs=softmax(NaN))``'s simplex check.
-
-    This is a band-aid.  The upstream NaN's origin — whichever
-    mechanism in the chain produces it first at scale n=5000 — is
-    tracked in v0.7 issue #24.  The sanitiser logs a warning the
-    first time it triggers per ``(mech_name, order-of-magnitude
-    count)`` so silent corruption is visible in run logs without
-    flooding them.
-
-    Pure no-op on already-finite input.
-    """
-    if torch.isfinite(parents).all():
-        return parents
-    invalid = ~torch.isfinite(parents)
-    n_invalid = int(invalid.sum().item())
-    warned = getattr(_sanitise_parents, "_warned_keys", None)
-    if warned is None:
-        warned = set()
-        _sanitise_parents._warned_keys = warned  # type: ignore[attr-defined]
-    # Deduplicate by (mech_name, decade of count) so we surface the
-    # first occurrence per order of magnitude but don't spam.
-    decade = 0 if n_invalid <= 0 else len(str(n_invalid)) - 1
-    key = (mech_name, decade)
-    if key not in warned:
-        warned.add(key)
-        logger.warning(
-            "%s: sanitised %d non-finite parent values (NaN/Inf) at "
-            "method entry.  Defensive guard for v0.6c-A Finding 2; "
-            "upstream root cause tracked in a separate v0.7 issue.  "
-            "(Suppressing further warnings of similar magnitude.)",
-            mech_name, n_invalid,
-        )
-    return torch.where(invalid, torch.zeros_like(parents), parents)
 
 
 def _build_mlp(
