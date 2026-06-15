@@ -74,9 +74,16 @@ class TestSweepDispatch:
             "query_role", "metric", "value", "status", "fit_time_s",
             "query_time_s", "metrics_time_s", "error_msg", "query_kind",
             "evidence_strategy", "evidence_mode", "n_parameters",
-            "device", "batch_size",
+            "n_nodes", "device", "batch_size",
         }
         assert expected.issubset(set(sweep_df.columns))
+
+    def test_n_nodes_populated_on_ok_rows(self, sweep_df):
+        """n_nodes is injected per-problem (parallel to n_parameters) and is
+        populated for every ok row — 8 for the 8-node fixture DAG."""
+        ok = sweep_df[sweep_df.status == "ok"]
+        assert ok["n_nodes"].notna().all()
+        assert set(ok["n_nodes"].unique()) == {8}
 
     def test_n_batch_queries_row_count(self, sweep_df):
         """K×16 query rows per (problem, seed, baseline, batch_size)."""

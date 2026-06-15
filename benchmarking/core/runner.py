@@ -35,7 +35,10 @@ from benchmarking.core.config import BaselineSpec, RunnerConfig, build_adapter
 from benchmarking.core.output import JsonlWriter
 from benchmarking.core.results import CellResult
 from benchmarking.domains.base import FailedProblem
-from benchmarking.domains._n_parameters import n_parameters_from_problem
+from benchmarking.domains._n_parameters import (
+    n_nodes_from_problem,
+    n_parameters_from_problem,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -649,6 +652,7 @@ class Runner:
                                 evidence_strategy="",
                                 evidence_mode="full",
                                 n_parameters=None,
+                                n_nodes=None,
                                 # Problem never loaded, so no adapter ran;
                                 # record the would-be device for this baseline.
                                 device=resolve_device(spec.device),
@@ -690,6 +694,7 @@ class Runner:
                             if to_skip:
                                 dev = resolve_device(spec.device)
                                 n_params = n_parameters_from_problem(problem)
+                                n_nodes = n_nodes_from_problem(problem)
                                 for b in to_skip:
                                     code = failed_configs[
                                         (problem.family, problem.problem_id, name, b)
@@ -701,6 +706,9 @@ class Runner:
                                     if n_params is not None and row.n_parameters is None:
                                         row = dataclasses.replace(
                                             row, n_parameters=n_params)
+                                    if n_nodes is not None and row.n_nodes is None:
+                                        row = dataclasses.replace(
+                                            row, n_nodes=n_nodes)
                                     writer.write(row)
                                     yield row
                                 logger.info(
@@ -838,11 +846,15 @@ class Runner:
         # Computed once per cell from problem.variables + problem.dag and
         # injected here -- the single choke point all rows (measurement rows,
         # every sentinel, subprocess-reconstructed rows) pass through -- rather
-        # than threaded through the ~12 CellResult construction sites.
+        # than threaded through the ~12 CellResult construction sites. n_nodes
+        # (variable count) is injected the same way, in parallel.
         n_params = n_parameters_from_problem(problem)
+        n_nodes = n_nodes_from_problem(problem)
 
         for row in _rows_to_cellresults(result.rows, problem, spec, cfg.benchmark):
             if n_params is not None and row.n_parameters is None:
                 row = dataclasses.replace(row, n_parameters=n_params)
+            if n_nodes is not None and row.n_nodes is None:
+                row = dataclasses.replace(row, n_nodes=n_nodes)
             writer.write(row)
             yield row

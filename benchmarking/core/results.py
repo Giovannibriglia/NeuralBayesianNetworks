@@ -61,6 +61,13 @@ class CellResult:
     # runner, so it's identical across all rows of a given problem.
     n_parameters: int | None = None
 
+    # Problem-level metadata: number of variables (nodes) in the problem, a
+    # structural size proxy. None when the problem can't supply structure.
+    # Injected once per cell by the runner (parallel to n_parameters), so it's
+    # identical across all rows of a given problem. Additive — older parquets
+    # lacking this column fall back to n_nodes_lookup in the paper figures.
+    n_nodes: int | None = None
+
     # Device the baseline actually ran on ("cpu" | "cuda" | "cuda:N").
     # Stamped per cell by the worker from the adapter's resolved device
     # (cell_worker._emit); error/sentinel rows emitted before an adapter
