@@ -8,18 +8,24 @@ deprecation shim.
 Supports the ``iqm_iqr`` (default) and ``mean_std`` aggregation flags,
 propagated uniformly to every numeric aggregation (accuracy AND time).
 
-Per (benchmark x family x size) cell it produces:
-  - 1 success-rate bar chart (always shown; spec 5.1)
-  - accuracy scaling figures: {tv,jsd,w1,log_likelihood}_per_node x
-    {n_nodes, n_parameters}; w1 skipped for family==discrete (spec 5.2/5.4)
-  - total-query-time scaling: vs {n_nodes, n_parameters} (spec 3.4/5.3)
-  - fit_time_s scaling: vs {n_nodes, n_parameters}
-and, per (benchmark x family x size):
-  - 1 headline LaTeX table (rows=baselines, cols=metric x role cross)
-  - per-role and per-kind supplementary tables
+Output layout is per-FAMILY (one set of files across all problems in a
+family), flat under ``<output_dir>/<bench>/{plots,tables}/``:
 
-n_parameters is read from the parquet if a column exists; otherwise the
-corresponding figures are log-skipped.
+  plots/<family>_success_rate.pdf
+  plots/<family>_<metric>_vs_<axis>.pdf   metric in {tv,jsd,w1,log_likelihood}
+                                          _per_node; axis in {n_nodes,
+                                          n_parameters}; w1 skipped for
+                                          family==discrete (spec 5.2/5.4)
+  plots/<family>_{total_query_time,fit_time}_vs_<axis>.pdf
+  tables/<family>_table_overall.tex       rows=baselines, cols=metric x role
+  tables/<family>_table_kind_<k>.tex      per query_kind
+  tables/<family>_table_role_<r>.tex      per query_role
+
+x-axes: ``n_nodes`` is resolved from the parquet column (#195) with a
+``_NETWORKS`` / synthetic-int fallback for older parquets (resolve_n_nodes).
+``n_parameters`` is read from the parquet if present; the per-family
+``*_vs_n_parameters`` file is skipped when that family's n_parameters are
+all zero (continuous_gauss) -- a degenerate x=0 axis (decision alpha).
 
 Reference: docs/v0.13-paper-figures.md
 """
@@ -88,26 +94,6 @@ STATUS_COLORS = {
     "oom": "#8c564b",            # brown (memory failure)
 }
 STATUS_ORDER = ("ok", "not_supported", "timeout", "error", "oom")
-
-# Collapse the 5 registry size_class buckets to 3 headline buckets (spec 4.1).
-SIZE_COLLAPSE = {
-    "small": "small",
-    "medium": "medium",
-    "large": "large+",
-    "very_large": "large+",
-    "massive": "large+",
-}
-HEADLINE_SIZES = ("small", "medium", "large+", "overall")
-
-# Provisional synthetic size thresholds on n_nodes (spec 4.2: synthetic
-# taxonomy is TBD; this lets the per-size decomposition run until it lands).
-def _synthetic_size_bucket(n_nodes: int) -> str:
-    if n_nodes < 20:
-        return "small"
-    if n_nodes < 60:
-        return "medium"
-    return "large+"
-
 
 # --- Pure helpers -------------------------------------------------------------
 
@@ -200,15 +186,53 @@ def n_nodes_lookup(benchmark: str, problem_ids) -> dict[str, int]:
     return out
 
 
-def size_bucket_lookup(benchmark: str, problem_ids, n_nodes: dict[str, int]) -> dict[str, str]:
-    if benchmark == "bnlearn":
-        from benchmarking.problems.bnlearn import _NETWORKS
-        return {
-            p: SIZE_COLLAPSE[_NETWORKS[p]["size_class"]]
-            for p in problem_ids if p in _NETWORKS
-        }
-    # synthetic: provisional threshold on n_nodes (spec 4.2 defers this)
-    return {p: _synthetic_size_bucket(n_nodes[p]) for p in problem_ids if p in n_nodes}
+def resolve_n_nodes(dfb: pd.DataFrame, benchmark: str) -> dict[str, int]:
+    """Map ``problem_id -> n_nodes`` for a benchmark slice.
+
+    Priority:
+      1. the parquet ``n_nodes`` column (post-PR-1 #195): used for any
+         problem_id with at least one non-null value;
+      2. ``n_nodes_lookup`` fallback for the rest -- ``_NETWORKS`` for
+         bnlearn, ``int(problem_id)`` for synthetic (older parquets that
+         predate the column still plot);
+      3. anything still unresolved is omitted, so the scaling helpers
+         simply skip those problems rather than crashing.
+
+    Backward-compat diagnostics are gentle (this is "older parquet, here's
+    what we did", not an error): one ``info`` when a fallback fired, one
+    ``warning`` when some problem_id could not be resolved at all.
+    """
+    pids = sorted(dfb["problem_id"].dropna().unique())
+
+    from_col: dict[str, int] = {}
+    if "n_nodes" in dfb.columns:
+        sub = dfb[["problem_id", "n_nodes"]].dropna(subset=["n_nodes"])
+        if not sub.empty:
+            g = sub.groupby("problem_id")["n_nodes"].first()
+            from_col = {str(p): int(v) for p, v in g.items()}
+
+    missing = [p for p in pids if p not in from_col]
+    fallback = n_nodes_lookup(benchmark, missing) if missing else {}
+
+    resolved = {**fallback, **from_col}  # column wins over fallback
+    out = {p: resolved[p] for p in pids if p in resolved}
+
+    if missing:
+        src = "_NETWORKS" if benchmark == "bnlearn" else "problem_id"
+        logger.info(
+            "n_nodes: %d/%d problem(s) lacked the parquet column (predates "
+            "PR-1 #195); resolved via %s fallback", len(missing), len(pids), src,
+        )
+    unresolved = [p for p in pids if p not in out]
+    if unresolved:
+        logger.warning(
+            "n_nodes unresolved for %d problem(s) (no column, not in %s); "
+            "these will be skipped in scaling figures: %s",
+            len(unresolved),
+            "_NETWORKS" if benchmark == "bnlearn" else "synthetic-int",
+            unresolved,
+        )
+    return out
 
 
 def n_parameters_lookup(df: pd.DataFrame) -> dict[tuple[str, str], float] | None:
@@ -540,46 +564,78 @@ def _table_scoped(df_cell, family, aggregation, scope_col, scope_val, out_path, 
 
 # --- Orchestration ------------------------------------------------------------
 
-def process_cell(df_cell, benchmark, family, size, aggregation, n_nodes, n_params, cell_dir):
-    cell_dir.mkdir(parents=True, exist_ok=True)
-    title = f"{benchmark}/{family}/{size}"
-    # x-axes available. n_params is keyed by (problem_id, family); scope it to
-    # this cell's family and flatten to {problem_id: value} so the scaling
-    # helpers can look up by problem_id as for n_nodes.
+def process_family(
+    dff,
+    benchmark,
+    family,
+    aggregation,
+    n_nodes,
+    n_params,
+    plots_dir,
+    tables_dir,
+):
+    """Per-family orchestrator (replaces the old per-(family, size) cell).
+
+    Produces, across ALL problems in this family at once:
+
+    Plots in ``plots_dir`` (``<family>_*.pdf``):
+      - ``<family>_success_rate.pdf``
+      - ``<family>_<metric>_vs_n_nodes.pdf`` (per applicable metric)
+      - ``<family>_<metric>_vs_n_parameters.pdf`` (SKIPPED when this family's
+        n_parameters are all zero/absent -- decision alpha: a degenerate x=0
+        axis carries no information)
+      - ``<family>_{total_query_time,fit_time}_vs_<axis>.pdf``
+
+    Tables in ``tables_dir`` (``<family>_*.tex``, PR #189 float wrapper):
+      - ``<family>_table_overall.tex`` (whole family, metric x role cross)
+      - ``<family>_table_kind_<k>.tex`` (per query_kind)
+      - ``<family>_table_role_<r>.tex`` (per query_role -- kept, decision beta)
+    """
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    title = f"{benchmark}/{family}"
+
+    # x-axes. n_params is keyed by (problem_id, family); scope to this family
+    # and flatten to {problem_id: value}. Decision alpha: include the
+    # n_parameters axis only when at least one problem has a positive value
+    # (continuous_gauss is all-zero -> n_nodes axis only).
     axes = [("n_nodes", n_nodes)]
     if n_params is not None:
         n_params_family = {p: v for (p, f), v in n_params.items() if f == family}
-        if n_params_family:
+        if any(v and v > 0 for v in n_params_family.values()):
             axes.append(("n_parameters", n_params_family))
 
-    fig_status_stacked(df_cell, cell_dir / "success_rate.pdf", title)
+    fig_status_stacked(dff, plots_dir / f"{family}_success_rate.pdf", title)
 
     for metric in ACCURACY_METRICS:
         if family in DISCRETE_FAMILIES and metric == "w1_per_node":
             continue
         for x_axis, lookup in axes:
-            fig_accuracy_scaling(df_cell, metric, x_axis, lookup, aggregation,
-                                 cell_dir / f"{metric}_vs_{x_axis}.pdf", title)
+            fig_accuracy_scaling(dff, metric, x_axis, lookup, aggregation,
+                                 plots_dir / f"{family}_{metric}_vs_{x_axis}.pdf",
+                                 title)
 
     for time_kind, stem in [("query_total", "total_query_time"), ("fit", "fit_time")]:
         for x_axis, lookup in axes:
-            fig_time_scaling(df_cell, time_kind, x_axis, lookup, aggregation,
-                             cell_dir / f"{stem}_vs_{x_axis}.pdf", title)
+            fig_time_scaling(dff, time_kind, x_axis, lookup, aggregation,
+                             plots_dir / f"{family}_{stem}_vs_{x_axis}.pdf", title)
 
-    # Tables. Labels are unique across the output tree:
-    # tab:<bench>_<family>_<size>_<scope> (size sanitized: "large+" -> "largeplus").
-    roles = sorted(df_cell["query_role"].dropna().unique())
-    kinds = sorted(df_cell["query_kind"].dropna().unique())
-    lbl = f"tab:{_table_slug(benchmark)}_{_table_slug(family)}_{_table_slug(size)}"
-    table_headline(df_cell, family, size, aggregation, roles,
-                   cell_dir / "table_headline.tex", label=f"{lbl}_headline")
+    # Tables. Labels unique per family: tab:<bench>_<family>_<scope>.
+    roles = sorted(dff["query_role"].dropna().unique())
+    kinds = sorted(dff["query_kind"].dropna().unique())
+    lbl = f"tab:{_table_slug(benchmark)}_{_table_slug(family)}"
+    table_headline(dff, family, "overall", aggregation, roles,
+                   tables_dir / f"{family}_table_overall.tex",
+                   label=f"{lbl}_overall")
     for r in roles:
-        _table_scoped(df_cell, family, aggregation, "query_role", r,
-                      cell_dir / f"table_role_{r}.tex", f"role={r} {family}/{size}",
+        _table_scoped(dff, family, aggregation, "query_role", r,
+                      tables_dir / f"{family}_table_role_{r}.tex",
+                      f"role={r} {family}",
                       label=f"{lbl}_role_{_table_slug(r)}")
     for k in kinds:
-        _table_scoped(df_cell, family, aggregation, "query_kind", k,
-                      cell_dir / f"table_kind_{k}.tex", f"kind={k} {family}/{size}",
+        _table_scoped(dff, family, aggregation, "query_kind", k,
+                      tables_dir / f"{family}_table_kind_{k}.tex",
+                      f"kind={k} {family}",
                       label=f"{lbl}_kind_{_table_slug(k)}")
 
 
@@ -859,7 +915,8 @@ def run_plot(
     Args:
         parquet: path to a ``*_metrics.parquet`` file, or a directory
             containing one (output of ``nbn-bench inference``).
-        output_dir: where to write the ``<benchmark>/<family>/<size>/`` tree.
+        output_dir: where to write the ``<benchmark>/{plots,tables}/`` tree
+            (one set of per-family files across all problems in each family).
         aggregation: ``"iqm_iqr"`` (default) or ``"mean_std"``.
         benchmark: restrict to one benchmark; default processes every
             benchmark present in the parquet.
@@ -891,23 +948,21 @@ def run_plot(
         dfb = df[df["benchmark"] == bench].copy()
         if dfb.empty:
             continue
-        pids = sorted(dfb["problem_id"].dropna().unique())
-        n_nodes = n_nodes_lookup(bench, pids)
-        size_bucket = size_bucket_lookup(bench, pids, n_nodes)
-        dfb["__size"] = dfb["problem_id"].map(size_bucket)
+        # n_nodes per problem: parquet column (#195) preferred, _NETWORKS /
+        # synthetic-int fallback for older parquets (resolve_n_nodes).
+        n_nodes = resolve_n_nodes(dfb, bench)
+        plots_dir = output_dir / bench / "plots"
+        tables_dir = output_dir / bench / "tables"
 
         for family in sorted(dfb["family"].dropna().unique()):
             dff = dfb[dfb["family"] == family]
-            for size in HEADLINE_SIZES:
-                cell = dff if size == "overall" else dff[dff["__size"] == size]
-                if cell.empty:
-                    skipped.append(f"{bench}/{family}/{size}")
-                    logger.info("skip empty cell: %s/%s/%s", bench, family, size)
-                    continue
-                process_cell(cell, bench, family, size, aggregation,
-                             n_nodes, n_params_global,
-                             output_dir / bench / family / size)
-                produced += 1
+            if dff.empty:
+                skipped.append(f"{bench}/{family}")
+                logger.info("skip empty family: %s/%s", bench, family)
+                continue
+            process_family(dff, bench, family, aggregation,
+                           n_nodes, n_params_global, plots_dir, tables_dir)
+            produced += 1
 
         # Batch-speed figure (v0.14 #148): auto-detected — rendered when
         # the parquet carries batched rows (batch_size > 1 anywhere),

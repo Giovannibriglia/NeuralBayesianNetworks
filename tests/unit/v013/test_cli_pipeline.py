@@ -1,10 +1,10 @@
-"""Slow integration test: nbn-bench inference must produce all four output
-types after a successful run (JSONL + parquet + figures + tables).
+"""Slow integration test: nbn-bench inference must produce the canonical run
+artifacts after a successful run (JSONL + parquet).
 
-Regression for the gap discovered during PR #119 manual verification:
-the v0.13 CLI was draining the Runner iterator and writing JSONL but not
-invoking the post-run pipeline (jsonl_to_parquet, aggregate, write_all,
-render_figures).  v0.12 produced all four automatically.
+The post-run pipeline writes JSONL → parquet only. Paper figures + LaTeX
+tables are produced on demand by the separate `nbn-bench plot` command; the
+old auto-generated post-run figures/ + tables/ dirs were stale (old-schema)
+and were removed in v0.14 (PR-2). This test pins JSONL + parquet presence.
 
 Marked @pytest.mark.slow — excluded from the fast CI gate.
 """
@@ -63,10 +63,12 @@ _MINIMAL_CONFIG = {
 
 @pytest.mark.slow
 def test_cli_inference_produces_all_outputs(tmp_path: Path) -> None:
-    """nbn-bench inference must produce JSONL + parquet + figures + tables.
+    """nbn-bench inference must produce JSONL + parquet (the canonical run
+    artifacts).
 
-    Regression for PR #119 gap: CLI only wrote JSONL; no parquet, no figures,
-    no tables.  This test pins the full post-run pipeline.
+    Regression for PR #119 gap: CLI only wrote JSONL; no parquet.  Figures +
+    tables are NOT produced post-run anymore (v0.14 PR-2) — they come from
+    `nbn-bench plot`; this test asserts they are ABSENT from the run dir.
     """
     # Write the minimal config to a temp file.
     cfg_path = tmp_path / "cfg.yaml"
@@ -102,27 +104,18 @@ def test_cli_inference_produces_all_outputs(tmp_path: Path) -> None:
     # 2. Parquet
     parquet_files = list(run_dir.glob("*.parquet"))
     assert parquet_files, (
-        f"no *.parquet in {run_dir}; post-run step 1 (jsonl_to_parquet) "
+        f"no *.parquet in {run_dir}; post-run step (jsonl_to_parquet) "
         f"did not run or failed.  stderr: {result.stderr[-500:]}"
     )
 
-    # 3. Tables
-    tables_dir = run_dir / "tables"
-    assert tables_dir.exists(), (
-        f"tables/ dir absent in {run_dir}; post-run step 2 (write_all) "
-        f"did not run or failed."
+    # 3. No stale figures/ or tables/ — removed in v0.14 (PR-2); these are
+    #    produced on demand by `nbn-bench plot`, not auto-generated post-run.
+    assert not (run_dir / "tables").exists(), (
+        f"tables/ dir should NOT be created post-run (v0.14 PR-2); found in {run_dir}"
     )
-    csv_files = list(tables_dir.glob("*.csv"))
-    assert csv_files, f"no *.csv in {tables_dir}"
-
-    # 4. Figures
-    figures_dir = run_dir / "figures"
-    assert figures_dir.exists(), (
-        f"figures/ dir absent in {run_dir}; post-run step 3 (render_figures) "
-        f"did not run or failed."
+    assert not (run_dir / "figures").exists(), (
+        f"figures/ dir should NOT be created post-run (v0.14 PR-2); found in {run_dir}"
     )
-    png_files = list(figures_dir.glob("*.png"))
-    assert png_files, f"no *.png in {figures_dir}"
 
 
 @pytest.mark.slow
