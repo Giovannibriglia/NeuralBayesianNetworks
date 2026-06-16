@@ -33,6 +33,12 @@ class Posterior:
     # distributions and filter out unreliable posteriors (X1).
     ess: float | None = None
 
+    # Per-query PSIS k̂ tail diagnostic for IS engines (LW / AIS); None for
+    # exact / non-IS engines and where degenerate (near-uniform weights). A
+    # better per-query reliability signal than ESS — tracks TV more faithfully;
+    # k̂<0.5 reliable, 0.5-0.7 usable, 0.7-1 unreliable, ≥1 broken (X2).
+    khat: float | None = None
+
     def __post_init__(self) -> None:
         if (self.probs is None) == (self.samples is None):
             raise ValueError(

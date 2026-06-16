@@ -353,10 +353,11 @@ class AccuracyAndTiming:
                     error_msg=None,
                     batch_size=query_bsizes[i],
                 ))
-            # Stamp the per-query ESS fraction onto every row of this query
-            # (float for lw/ais; None for ve/avi and other engines).
+            # Stamp the per-query diagnostics (ESS fraction X1, PSIS k̂ X2) onto
+            # every row of this query (float for lw/ais; None for ve/avi/others).
             q_ess = posterior.ess
-            rows.extend(dataclasses.replace(r, ess=q_ess) for r in query_rows)
+            q_khat = posterior.khat
+            rows.extend(dataclasses.replace(r, ess=q_ess, khat=q_khat) for r in query_rows)
 
         # ---- Timeout rows for groups that never started ----
         # One row-set per unstarted GROUP (not per query), carrying the
