@@ -155,8 +155,15 @@ def _run_cell(ctx: dict) -> list[dict]:
         # measurements and sentinel helpers. `adapter` is always built before
         # any _emit() call (late-binding closure).
         dev = str(getattr(adapter, "device", "cpu"))
+        # Per-cell AIS methodology flag (#185 follow-up): stamped here, the same
+        # adapter-fact choke point as `device`, because the adapter only exists
+        # in this worker — the parent runner reconstructs rows from dicts and
+        # never sees it. None for engines without a learned proposal.
+        proposal_used = getattr(adapter, "proposal_used", None)
         return [
-            dataclasses.asdict(dataclasses.replace(r, device=dev))
+            dataclasses.asdict(
+                dataclasses.replace(r, device=dev, proposal_used=proposal_used)
+            )
             for r in results
         ]
 

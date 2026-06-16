@@ -83,6 +83,17 @@ class CellResult:
     # Additive — existing data reads as null → 1 on the consumer side.
     batch_size: int = 1
 
+    # AIS proposal provenance (#185 follow-up): which proposal the amortized-IS
+    # engine actually used for this cell — "learned" (the recognition net
+    # cleared the fit-time ESS gate) or "lw_fallback" (ESS too low → engine fell
+    # back to likelihood weighting). None for engines without a learned proposal
+    # (ve / lw) and for legacy parquets predating this column. Stamped once per
+    # cell by the worker from the adapter (cell_worker._emit), so it is
+    # identical across all rows of a given cell. Additive — downstream readers
+    # select columns by name. Lets the paper report "learned proposal used on N
+    # of M AIS cells" quantitatively.
+    proposal_used: str | None = None
+
 
 # Valid status values (for validation in implementations)
 VALID_STATUSES = frozenset({"ok", "timeout", "oom", "error", "not_supported"})

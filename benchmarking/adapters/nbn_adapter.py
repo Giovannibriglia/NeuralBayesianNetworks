@@ -120,6 +120,10 @@ class NBNAdapter:
         self.model: Any | None = None
         self._engine_obj: Any | None = None
         self.problem: BenchmarkProblem | None = None
+        # Per-cell methodology flag (#185 follow-up): which proposal the AIS
+        # engine actually used — "learned" or "lw_fallback" (low fit-time ESS).
+        # None for engines without a learned proposal (ve / lw) and until fit.
+        self.proposal_used: str | None = None
 
     # -------------------------------------------------------------------------
     # Internal mechanism factory — mirrors old NBNAdapter._make_mech()
@@ -272,7 +276,11 @@ class NBNAdapter:
             # once, here, so it is reused across all query/query_batch calls
             # within the fit-once-query-many cell (compatible with PR #176).
             self._engine_obj = AmortizedISEngine(n_samples=self.n_samples)
-            self._engine_obj.train_proposal(self.model, device=str(self.device))
+            metrics = self._engine_obj.train_proposal(
+                self.model, device=str(self.device))
+            # Record which proposal survived the fit-time ESS gate so the
+            # parquet can report "learned proposal used on N of M cells".
+            self.proposal_used = metrics.get("proposal_used")
         elif engine_spec == "avi":
             # Amortized VI (#182): train the variational posterior network
             # once, here, so it is reused across all query/query_batch calls

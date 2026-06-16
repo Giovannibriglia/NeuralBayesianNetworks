@@ -3,7 +3,7 @@
 Stage (a) coverage: B=1 correctness vs VE, convergence to VE as the
 particle count grows, the batching-speedup contract (per-query time
 falls as B grows), per-mechanism training (cat / neuralcat / mdn), the
-under-trained-proposal diagnostic, and the fit-once contract (the
+low-ESS proposal-rejection fallback to LW, and the fit-once contract (the
 proposal trains exactly once and is reused across query_batch calls).
 
 Stage (b) appends lg / flow / hybrid coverage.
@@ -182,11 +182,17 @@ def test_mdn_continuous_matches_lw(continuous_problem):
     assert abs(float(lw_samp.mean()) - float(ais_samp.mean())) < 0.25
 
 
-# ---- 7. Under-trained proposal → warning, no crash ---------------------------
+# ---- 7. Low fit-time ESS → reject proposal, fall back to LW ------------------
 
 @pytest.mark.slow
-def test_undertrained_proposal_warns(discrete_problem, caplog):
-    """A low held-out ESS triggers the diagnostic warning but not a failure."""
+def test_low_ess_triggers_fallback(discrete_problem, caplog):
+    """A low held-out ESS rejects the learned proposal → engine falls back to LW.
+
+    Was ``test_undertrained_proposal_warns``: pre-fallback the engine kept the
+    proposal and only warned.  This PR makes the warning actionable — the same
+    forced-low-ESS fixture now drives the fallback path (recognition_net unset),
+    addressing the discrete-network accuracy catastrophe from the June 12 run.
+    """
     fitted = _fit_adapter("cat", "ve", discrete_problem, epochs=5)
     model = fitted.model
 
@@ -197,14 +203,62 @@ def test_undertrained_proposal_warns(discrete_problem, caplog):
         metrics = eng.train_proposal(
             model, n_training_samples=500, n_epochs=2, device="cpu"
         )
-    assert eng.recognition_net is not None  # still produced a usable proposal
-    assert any(
-        "under-trained" in rec.getMessage() for rec in caplog.records
-    ), "expected under-trained ESS warning"
-    # And the engine still answers a query without crashing.
+    # Proposal rejected → recognition_net unset → _run takes the inherited LW
+    # path; the engine still answers a query without crashing.
+    assert eng.recognition_net is None
+    assert metrics["proposal_used"] == "lw_fallback"
     torch.manual_seed(0)
     p = eng.query(model, ["X2"], {"X0": torch.tensor([0])})
     assert torch.isfinite(p).all()
+
+
+@pytest.mark.slow
+def test_good_ess_keeps_learned_proposal(discrete_problem):
+    """A proposal that clears the ESS gate is retained (no fallback)."""
+    fitted = _fit_adapter("cat", "ve", discrete_problem, epochs=5)
+    model = fitted.model
+
+    eng = AmortizedISEngine(n_samples=256)
+    # Real training on the trivial 4-node fixture clears the 10% ESS gate.
+    metrics = eng.train_proposal(model, device="cpu")
+    assert metrics["ess_fraction"] is None or metrics["ess_fraction"] >= 0.1
+    assert eng.recognition_net is not None
+    assert metrics["proposal_used"] == "learned"
+
+
+@pytest.mark.slow
+def test_fallback_logged(discrete_problem, caplog):
+    """The fallback action logs a message distinct from the low-ESS diagnostic."""
+    fitted = _fit_adapter("cat", "ve", discrete_problem, epochs=5)
+    model = fitted.model
+
+    eng = AmortizedISEngine(n_samples=256)
+    eng._estimate_ess_fraction = lambda *a, **k: 0.01  # type: ignore[assignment]
+    with caplog.at_level(logging.WARNING):
+        eng.train_proposal(model, n_training_samples=500, n_epochs=2, device="cpu")
+    msgs = [rec.getMessage() for rec in caplog.records]
+    # Diagnostic ("why") and action ("what we did") are distinct log records.
+    assert any("under-trained" in m for m in msgs), "expected ESS diagnostic"
+    assert any("falling back to LW" in m for m in msgs), "expected fallback action"
+    assert not any(
+        "under-trained" in m and "falling back to LW" in m for m in msgs
+    ), "diagnostic and action should be distinct records"
+
+
+@pytest.mark.slow
+def test_proposal_used_column(discrete_problem):
+    """train_proposal reports proposal_used in both the learned and fallback branches."""
+    fitted = _fit_adapter("cat", "ve", discrete_problem, epochs=5)
+    model = fitted.model
+
+    good = AmortizedISEngine(n_samples=256)
+    assert good.train_proposal(model, device="cpu")["proposal_used"] == "learned"
+
+    bad = AmortizedISEngine(n_samples=256)
+    bad._estimate_ess_fraction = lambda *a, **k: 0.01  # type: ignore[assignment]
+    m_bad = bad.train_proposal(
+        model, n_training_samples=500, n_epochs=2, device="cpu")
+    assert m_bad["proposal_used"] == "lw_fallback"
 
 
 # ---- 8. Fit-once: proposal trains once, reused across batch sizes -------------

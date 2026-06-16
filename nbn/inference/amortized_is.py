@@ -44,6 +44,13 @@ from nbn.utils.batching import ensure_2d
 
 logger = logging.getLogger(__name__)
 
+# Fit-time held-out ESS-fraction below which the learned proposal is rejected
+# and the engine falls back to its LW path (recognition_net unset).  Shared by
+# the diagnostic warning and the fallback action so "warning fires" and "action
+# taken" stay consistent (#185 follow-up; addresses the discrete-network
+# accuracy catastrophe surfaced in the June 12 bnlearn_complete run).
+_ESS_FALLBACK_THRESHOLD = 0.1
+
 
 class AmortizedISEngine(LikelihoodWeightingEngine):
     """Amortized importance-sampling engine with a learned proposal.
@@ -132,15 +139,31 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
         net.eval()
 
         ess_frac = self._estimate_ess_fraction(model)
-        if ess_frac is not None and ess_frac < 0.1:
+        proposal_used = "learned"
+        if ess_frac is not None and ess_frac < _ESS_FALLBACK_THRESHOLD:
+            # Diagnostic: why the proposal is being rejected.
             logger.warning(
                 "AmortizedISEngine proposal appears under-trained "
-                "(held-out ESS ≈ %.1f%% of particles, threshold 10%%). "
-                "Inference will still run but quality may approach LW. "
+                "(held-out ESS ≈ %.1f%% of particles, threshold %.0f%%). "
                 "Consider more training samples/epochs.",
-                100.0 * ess_frac,
+                100.0 * ess_frac, 100.0 * _ESS_FALLBACK_THRESHOLD,
             )
-        return {"final_loss": last_loss, "ess_fraction": ess_frac}
+            # Action: unset the proposal so ``_run`` takes the inherited LW
+            # path (recognition_net is None).  A bad learned proposal is worse
+            # than LW's prior proposal (June 12: AIS TV/node ≈ 0.53 vs LW
+            # ≈ 0.035 on discrete), so falling back is strictly safer.
+            logger.warning(
+                "AIS proposal rejected (fit-time ESS-fraction %.3f < threshold "
+                "%.2f); falling back to LW for this engine.",
+                ess_frac, _ESS_FALLBACK_THRESHOLD,
+            )
+            self.recognition_net = None
+            proposal_used = "lw_fallback"
+        return {
+            "final_loss": last_loss,
+            "ess_fraction": ess_frac,
+            "proposal_used": proposal_used,
+        }
 
     @staticmethod
     def _stack_values(samples, node_order, dev) -> torch.Tensor:
