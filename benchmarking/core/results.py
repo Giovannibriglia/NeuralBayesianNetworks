@@ -103,6 +103,14 @@ class CellResult:
     # posteriors, e.g. df[(df.metric=="tv_per_node") & (df.ess>=0.1)] (X1).
     ess: float | None = None
 
+    # Per-query PSIS k̂ tail diagnostic for IS engines (LW / AIS); stamped per
+    # query like ess. None for exact / non-IS engines, failure rows, degenerate
+    # (near-uniform) weights, and legacy parquets. A better per-query reliability
+    # signal than ESS — tracks TV more faithfully; k̂<0.5 reliable, 0.5-0.7
+    # usable, 0.7-1 unreliable, ≥1 broken (X2). Diagnostic only — the fit-time
+    # fallback gate (P1) is unchanged.
+    khat: float | None = None
+
 
 # Valid status values (for validation in implementations)
 VALID_STATUSES = frozenset({"ok", "timeout", "oom", "error", "not_supported"})

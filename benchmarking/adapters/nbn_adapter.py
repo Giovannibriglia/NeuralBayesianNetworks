@@ -63,6 +63,13 @@ _ENGINE_SPEC: dict[str, str] = {
 }
 
 
+def _nan_to_none(v) -> float | None:
+    """Per-query PSIS k̂ is NaN where degenerate (near-uniform weights); the
+    parquet stores that as None (X2)."""
+    f = float(v)
+    return None if f != f else f   # NaN != NaN
+
+
 class NBNAdapter:
     """Stateful NBN adapter implementing the v0.13 BaselineAdapter protocol.
 
@@ -325,16 +332,18 @@ class NBNAdapter:
             )
 
         ev = self._prep_evidence(q.evidence)
-        # IS engines (lw / ais) report a per-query ESS fraction; others don't.
-        want_ess = _ENGINE_SPEC[self.engine] in ("lw", "ais")
+        # IS engines (lw / ais) report per-query ESS (X1) and PSIS k̂ (X2).
+        want_diag = _ENGINE_SPEC[self.engine] in ("lw", "ais")
         result = self._engine_obj.query(
             self.model, list(q.targets), ev,
-            **({"return_ess": True} if want_ess else {}),
+            **({"return_ess": True, "return_psis_k": True} if want_diag else {}),
         )
         ess: float | None = None
-        if want_ess:
-            result, ess_t = result            # unwrap (payload, ess_frac [B])
+        khat: float | None = None
+        if want_diag:
+            result, ess_t, khat_t = result    # (payload, ess_frac [B], khat [B])
             ess = float(ess_t.reshape(-1)[0])  # single query → B=1
+            khat = _nan_to_none(khat_t.reshape(-1)[0])
 
         if isinstance(result, tuple):
             # LW continuous path: (weights[1, S], samples[1, S, D])
@@ -345,11 +354,11 @@ class NBNAdapter:
             idx = torch.multinomial(w, num_samples=w.shape[0], replacement=True)
             # Single target → column 0 of the sample tensor
             samples = s[idx, 0].detach().cpu()       # [S]
-            return Posterior(samples=samples, ess=ess)
+            return Posterior(samples=samples, ess=ess, khat=khat)
 
         # Discrete / VE path: probability vector [1, K] or [K]
         probs = result.squeeze(0) if result.dim() > 1 else result
-        return Posterior(probs=probs.detach().cpu(), ess=ess)
+        return Posterior(probs=probs.detach().cpu(), ess=ess, khat=khat)
 
     def query_batch(self, queries: list[Query]) -> list[Posterior]:
         """Library-level batching via the nbn engine's ``query_batch`` API.
@@ -416,19 +425,21 @@ class NBNAdapter:
         if not stacked_evidence:
             return default_query_batch(self, queries)
 
-        want_ess = _ENGINE_SPEC[self.engine] in ("lw", "ais")
+        want_diag = _ENGINE_SPEC[self.engine] in ("lw", "ais")
         result = self._engine_obj.query_batch(
             self.model, list(targets), stacked_evidence,
-            **({"return_ess": True} if want_ess else {}),
+            **({"return_ess": True, "return_psis_k": True} if want_diag else {}),
         )
         ess_b: torch.Tensor | None = None
-        if want_ess:
-            result, ess_b = result      # unwrap (payload, ess_frac [B])
+        khat_b: torch.Tensor | None = None
+        if want_diag:
+            result, ess_b, khat_b = result   # (payload, ess_frac [B], khat [B])
             ess_b = ess_b.reshape(-1)
+            khat_b = khat_b.reshape(-1)
 
         if isinstance(result, tuple):
             # LW continuous path: (weights [B, S], samples [B, S, D])
-            return self._unpack_lw_continuous_batch(*result, ess_b=ess_b)
+            return self._unpack_lw_continuous_batch(*result, ess_b=ess_b, khat_b=khat_b)
 
         # Discrete / VE path: probability matrix [B, K]
         if result.dim() != 2 or result.shape[0] != b:
@@ -440,6 +451,7 @@ class NBNAdapter:
             Posterior(
                 probs=result[i].detach().cpu(),
                 ess=(float(ess_b[i]) if ess_b is not None else None),
+                khat=(_nan_to_none(khat_b[i]) if khat_b is not None else None),
             )
             for i in range(b)
         ]
@@ -448,7 +460,8 @@ class NBNAdapter:
         self,
         weights: torch.Tensor,   # [B, S], softmax-normalised per row
         samples: torch.Tensor,   # [B, S, D]
-        ess_b: torch.Tensor | None = None,  # [B] per-query ESS fraction, or None
+        ess_b: torch.Tensor | None = None,   # [B] per-query ESS fraction, or None
+        khat_b: torch.Tensor | None = None,  # [B] per-query PSIS k̂ (NaN→None)
     ) -> list[Posterior]:
         """Per-row multinomial resampling for batched LW continuous output.
 
@@ -467,6 +480,7 @@ class NBNAdapter:
             Posterior(
                 samples=resampled[i].detach().cpu(),
                 ess=(float(ess_b[i]) if ess_b is not None else None),
+                khat=(_nan_to_none(khat_b[i]) if khat_b is not None else None),
             )
             for i in range(resampled.shape[0])
         ]
