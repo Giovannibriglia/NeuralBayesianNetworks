@@ -113,6 +113,7 @@ class LikelihoodWeightingEngine(InferenceEngine):
         evidence: Dict[str, torch.Tensor] | None = None,
         do: Dict[str, torch.Tensor] | None = None,
         n_samples: int | None = None,
+        return_ess: bool = False,
         **kwargs,
     ) -> torch.Tensor:
         s = n_samples or self.n_samples
@@ -120,6 +121,15 @@ class LikelihoodWeightingEngine(InferenceEngine):
 
         # Normalise weights
         weights = torch.softmax(log_w, dim=-1)  # [B, S]
+
+        # Per-query effective-sample-size fraction (X1).  ESS = (Σw)²/Σw² =
+        # 1/Σw² after softmax; the fraction ESS/S ∈ (0, 1] is comparable across
+        # configs with different particle counts.  Computed only when requested
+        # so default callers are unchanged.
+        ess_frac = None
+        if return_ess:
+            # Detached: a pure diagnostic, never part of any autograd graph.
+            ess_frac = (1.0 / (weights.pow(2).sum(dim=-1) * s)).detach()  # [B]
 
         if len(targets) == 1:
             tgt = targets[0]
@@ -142,20 +152,23 @@ class LikelihoodWeightingEngine(InferenceEngine):
                     mask = (samp_vals == int(cv[ci])).float()
                     probs[:, ci] = (weights * mask).sum(dim=-1)
                 probs = probs / probs.sum(-1, keepdim=True).clamp_min(1e-12)
-                return probs.squeeze(0) if b == 1 else probs
+                out = probs.squeeze(0) if b == 1 else probs
+                return (out, ess_frac) if return_ess else out
 
         state = get_inference_state(model, targets, tuple(sorted((evidence or {}).keys())),
                                      tuple(sorted((do or {}).keys())), self._cache)
         tgt_slices = [state.node_slices[state.node_to_idx[t]] for t in targets]
         samps = [buf[..., sl] for sl in tgt_slices]
-        return weights, torch.cat(samps, dim=-1)
+        out = (weights, torch.cat(samps, dim=-1))
+        return (out, ess_frac) if return_ess else out
 
     def query_batch(
         self,
         model,
         targets: List[str],
         evidence: Dict[str, torch.Tensor],
+        return_ess: bool = False,
         **kwargs,
     ) -> torch.Tensor:
         """Batched query — all B evidence rows processed in a single GPU launch."""
-        return self.query(model, targets, evidence, **kwargs)
+        return self.query(model, targets, evidence, return_ess=return_ess, **kwargs)

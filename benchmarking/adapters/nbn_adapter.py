@@ -325,7 +325,16 @@ class NBNAdapter:
             )
 
         ev = self._prep_evidence(q.evidence)
-        result = self._engine_obj.query(self.model, list(q.targets), ev)
+        # IS engines (lw / ais) report a per-query ESS fraction; others don't.
+        want_ess = _ENGINE_SPEC[self.engine] in ("lw", "ais")
+        result = self._engine_obj.query(
+            self.model, list(q.targets), ev,
+            **({"return_ess": True} if want_ess else {}),
+        )
+        ess: float | None = None
+        if want_ess:
+            result, ess_t = result            # unwrap (payload, ess_frac [B])
+            ess = float(ess_t.reshape(-1)[0])  # single query → B=1
 
         if isinstance(result, tuple):
             # LW continuous path: (weights[1, S], samples[1, S, D])
@@ -336,11 +345,11 @@ class NBNAdapter:
             idx = torch.multinomial(w, num_samples=w.shape[0], replacement=True)
             # Single target → column 0 of the sample tensor
             samples = s[idx, 0].detach().cpu()       # [S]
-            return Posterior(samples=samples)
+            return Posterior(samples=samples, ess=ess)
 
         # Discrete / VE path: probability vector [1, K] or [K]
         probs = result.squeeze(0) if result.dim() > 1 else result
-        return Posterior(probs=probs.detach().cpu())
+        return Posterior(probs=probs.detach().cpu(), ess=ess)
 
     def query_batch(self, queries: list[Query]) -> list[Posterior]:
         """Library-level batching via the nbn engine's ``query_batch`` API.
@@ -407,13 +416,19 @@ class NBNAdapter:
         if not stacked_evidence:
             return default_query_batch(self, queries)
 
+        want_ess = _ENGINE_SPEC[self.engine] in ("lw", "ais")
         result = self._engine_obj.query_batch(
-            self.model, list(targets), stacked_evidence
+            self.model, list(targets), stacked_evidence,
+            **({"return_ess": True} if want_ess else {}),
         )
+        ess_b: torch.Tensor | None = None
+        if want_ess:
+            result, ess_b = result      # unwrap (payload, ess_frac [B])
+            ess_b = ess_b.reshape(-1)
 
         if isinstance(result, tuple):
             # LW continuous path: (weights [B, S], samples [B, S, D])
-            return self._unpack_lw_continuous_batch(*result)
+            return self._unpack_lw_continuous_batch(*result, ess_b=ess_b)
 
         # Discrete / VE path: probability matrix [B, K]
         if result.dim() != 2 or result.shape[0] != b:
@@ -421,12 +436,19 @@ class NBNAdapter:
                 f"Unexpected engine.query_batch output for {self.name}: "
                 f"shape {tuple(result.shape)}, expected [{b}, K]."
             )
-        return [Posterior(probs=result[i].detach().cpu()) for i in range(b)]
+        return [
+            Posterior(
+                probs=result[i].detach().cpu(),
+                ess=(float(ess_b[i]) if ess_b is not None else None),
+            )
+            for i in range(b)
+        ]
 
     def _unpack_lw_continuous_batch(
         self,
         weights: torch.Tensor,   # [B, S], softmax-normalised per row
         samples: torch.Tensor,   # [B, S, D]
+        ess_b: torch.Tensor | None = None,  # [B] per-query ESS fraction, or None
     ) -> list[Posterior]:
         """Per-row multinomial resampling for batched LW continuous output.
 
@@ -442,7 +464,10 @@ class NBNAdapter:
         # Single target → column 0 of the sample tensor (as in query()).
         resampled = torch.gather(samples[..., 0], 1, idx)  # [B, S]
         return [
-            Posterior(samples=resampled[i].detach().cpu())
+            Posterior(
+                samples=resampled[i].detach().cpu(),
+                ess=(float(ess_b[i]) if ess_b is not None else None),
+            )
             for i in range(resampled.shape[0])
         ]
 
