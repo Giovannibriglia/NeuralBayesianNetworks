@@ -14,8 +14,9 @@ for the research context.
 """
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -274,18 +275,65 @@ class ParentConditionedProposal(nn.Module):
                     )
 
         self.d_ctx = d_ctx
+        self.head_hidden = head_hidden
         # Shared evidence trunk: [evidence values | mask] → context.
         self.trunk = _build_mlp(2 * n, tuple(trunk_hidden), d_ctx, activation)
-        # Independent per-node heads, indexed by topo position.  A ModuleList
-        # (not ModuleDict) sidesteps the dotted-node-name ModuleDict bug (#200).
-        self.head_mlps = nn.ModuleList()
-        self.parent_enc_dim: List[int] = []
+
+        self.parent_enc_dim: List[int] = [
+            sum(_enc_width(self.heads[self.node_order[p]]) for p in self.parents_idx[i])
+            for i in range(n)
+        ]
+
+        # --- Strategy F grouped storage (β Phase D, #207) ---------------------
+        # Group nodes by EXACT signature (kind, ordered parent cards, out_dim):
+        # within a group all nodes share input/output width AND parent layout, so
+        # the parent-gather and head forward batch cleanly.  The stacked per-group
+        # head weights are the SOLE trainable storage (registered nn.Parameters,
+        # not restacked per step); the per-node ``node_params`` path reads slices
+        # of them (inference _run + the test oracle), so there is no duplicate
+        # storage.  Weights are stacked from transiently-built per-node heads so
+        # the initialization matches the pre-Phase-D per-node net exactly.
+        sig_to_nodes: Dict[tuple, List[int]] = defaultdict(list)
         for i, node in enumerate(self.node_order):
-            enc = sum(_enc_width(self.heads[self.node_order[p]]) for p in self.parents_idx[i])
-            self.parent_enc_dim.append(enc)
-            self.head_mlps.append(
-                _build_mlp(d_ctx + enc, (head_hidden,), self.heads[node].param_size, activation)
+            pcards = tuple(
+                self.heads[self.node_order[p]].k if self.heads[self.node_order[p]].kind == "discrete"
+                else -self.heads[self.node_order[p]].d_x
+                for p in self.parents_idx[i]
             )
+            sig_to_nodes[(self.heads[node].kind, pcards, self.heads[node].param_size)].append(i)
+
+        self._group_nodes: List[List[int]] = list(sig_to_nodes.values())
+        self._group_kind: List[str] = [self.heads[self.node_order[ns[0]]].kind for ns in self._group_nodes]
+        self._node_to_group: List[Tuple[int, int]] = [(-1, -1)] * n
+        self.gW1 = nn.ParameterList(); self.gb1 = nn.ParameterList()
+        self.gW2 = nn.ParameterList(); self.gb2 = nn.ParameterList()
+        for gi, nodes in enumerate(self._group_nodes):
+            for pos, i in enumerate(nodes):
+                self._node_to_group[i] = (gi, pos)
+            in_dim = d_ctx + self.parent_enc_dim[nodes[0]]
+            out_dim = self.heads[self.node_order[nodes[0]]].param_size
+            tmp = [_build_mlp(in_dim, (head_hidden,), out_dim, activation) for _ in nodes]
+            self.gW1.append(nn.Parameter(torch.stack([t[0].weight.t().detach() for t in tmp])))  # [G,in,H]
+            self.gb1.append(nn.Parameter(torch.stack([t[0].bias.detach() for t in tmp])))         # [G,H]
+            self.gW2.append(nn.Parameter(torch.stack([t[2].weight.t().detach() for t in tmp])))  # [G,H,out]
+            self.gb2.append(nn.Parameter(torch.stack([t[2].bias.detach() for t in tmp])))         # [G,out]
+            # Index buffers (move with the module's device): node columns and,
+            # for non-root groups, the parent columns to gather.
+            self.register_buffer(f"_npos_{gi}", torch.tensor(nodes, dtype=torch.long), persistent=False)
+            if self.parents_idx[nodes[0]]:
+                self.register_buffer(
+                    f"_pidx_{gi}",
+                    torch.tensor([self.parents_idx[i] for i in nodes], dtype=torch.long),
+                    persistent=False,
+                )
+
+    # ------------------------------------------------------------------
+    # Forward pieces — trunk once per query, heads in the sampling loop
+    # ------------------------------------------------------------------
+
+    def _head_weights(self, node_i: int):
+        gi, pos = self._node_to_group[node_i]
+        return self.gW1[gi][pos], self.gb1[gi][pos], self.gW2[gi][pos], self.gb2[gi][pos]
 
     # ------------------------------------------------------------------
     # Forward pieces — trunk once per query, heads in the sampling loop
@@ -319,12 +367,64 @@ class ParentConditionedProposal(nn.Module):
     ) -> torch.Tensor:
         """``q(x_{node_i} | context, parents)`` parameters → ``[M, param_size]``.
 
-        ``context`` is ``[M, d_ctx]`` (already broadcast to the M=B·S particles
-        by the caller); ``parent_values`` is ``[M, n_parents]`` or ``None``.
+        Per-node path (inference ``_run`` + the differential-test oracle): reads
+        this node's slice of its group's stacked weights.  ``context`` is
+        ``[M, d_ctx]`` (broadcast to the M=B·S particles by the caller);
+        ``parent_values`` is ``[M, n_parents]`` or ``None``.
         """
         enc = self.encode_parents(node_i, parent_values)
         inp = context if enc is None else torch.cat([context, enc], dim=-1)
-        return self.head_mlps[node_i](inp)
+        w1, b1, w2, b2 = self._head_weights(node_i)
+        return torch.relu(inp @ w1 + b1) @ w2 + b2
+
+    # ------------------------------------------------------------------
+    # Grouped batched training (Strategy F) — the fast path
+    # ------------------------------------------------------------------
+
+    def grouped_nll(self, context: torch.Tensor, xb: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Mean NLL of unobserved entries, batched per signature group.
+
+        Equivalent to a per-node loop over ``node_params`` + ``log_prob_target``
+        (the differential test enforces this to float32 tol), but processes each
+        group's G nodes in one batched gather + bmm.  Discrete groups use a fully
+        batched categorical NLL; non-discrete groups (lg/mdn — out of v1's
+        vectorized scope) fall back to the per-node path so mixed nets stay
+        correct.  ``context`` ``[B, d_ctx]``; ``xb`` / ``mask`` ``[B, n]``.
+        """
+        total = context.new_zeros(())
+        count = context.new_zeros(())
+        B = context.shape[0]
+        for gi, nodes in enumerate(self._group_nodes):
+            npos = getattr(self, f"_npos_{gi}")              # [G]
+            G = npos.shape[0]
+            unobs = (1.0 - mask[:, npos]).t()                # [G, B]
+            if self._group_kind[gi] != "discrete":
+                # Per-node fallback (correct, not vectorized) for lg/mdn.
+                for pos, i in enumerate(nodes):
+                    pv = xb[:, self.parents_idx[i]] if self.parents_idx[i] else None
+                    params = self.node_params(i, context, pv)
+                    lp = self.log_prob_target(self.node_order[i], params, xb[:, i])
+                    total = total - (lp * unobs[pos]).sum()
+                count = count + unobs.sum()
+                continue
+            # Batched discrete group: gather parents → one-hot → bmm → categorical.
+            pidx = getattr(self, f"_pidx_{gi}", None)
+            if pidx is not None:
+                pv = xb[:, pidx]                             # [B, G, arity]
+                cards = [self.heads[self.node_order[p]].k
+                         for p in self.parents_idx[nodes[0]]]
+                ohs = [F.one_hot(pv[..., j].long(), c).float() for j, c in enumerate(cards)]
+                enc = torch.cat(ohs, dim=-1).permute(1, 0, 2)        # [G, B, sum_c]
+                X = torch.cat([context.unsqueeze(0).expand(G, B, -1), enc], dim=-1)
+            else:
+                X = context.unsqueeze(0).expand(G, B, -1)            # [G, B, d_ctx]
+            h = torch.relu(torch.bmm(X, self.gW1[gi]) + self.gb1[gi].unsqueeze(1))
+            logits = torch.bmm(h, self.gW2[gi]) + self.gb2[gi].unsqueeze(1)   # [G, B, k]
+            tgt = xb[:, npos].t().long()                                      # [G, B]
+            lp = F.log_softmax(logits, dim=-1).gather(2, tgt.unsqueeze(-1)).squeeze(-1)
+            total = total - (lp * unobs).sum()
+            count = count + unobs.sum()
+        return total / count.clamp_min(1.0)
 
     # ------------------------------------------------------------------
     # Per-node distribution construction (mirrors RecognitionNetwork)
