@@ -201,7 +201,7 @@ def test_low_ess_triggers_fallback(discrete_problem, caplog):
     eng._estimate_ess_fraction = lambda *a, **k: 0.01  # type: ignore[assignment]
     with caplog.at_level(logging.WARNING):
         metrics = eng.train_proposal(
-            model, n_training_samples=500, n_epochs=2, device="cpu"
+            model, n_training_samples=500, steps_per_node=1, device="cpu"
         )
     # Proposal rejected → recognition_net unset → _run takes the inherited LW
     # path; the engine still answers a query without crashing.
@@ -235,7 +235,7 @@ def test_fallback_logged(discrete_problem, caplog):
     eng = AmortizedISEngine(n_samples=256)
     eng._estimate_ess_fraction = lambda *a, **k: 0.01  # type: ignore[assignment]
     with caplog.at_level(logging.WARNING):
-        eng.train_proposal(model, n_training_samples=500, n_epochs=2, device="cpu")
+        eng.train_proposal(model, n_training_samples=500, steps_per_node=1, device="cpu")
     msgs = [rec.getMessage() for rec in caplog.records]
     # Diagnostic ("why") and action ("what we did") are distinct log records.
     assert any("under-trained" in m for m in msgs), "expected ESS diagnostic"
@@ -257,7 +257,7 @@ def test_proposal_used_column(discrete_problem):
     bad = AmortizedISEngine(n_samples=256)
     bad._estimate_ess_fraction = lambda *a, **k: 0.01  # type: ignore[assignment]
     m_bad = bad.train_proposal(
-        model, n_training_samples=500, n_epochs=2, device="cpu")
+        model, n_training_samples=500, steps_per_node=1, device="cpu")
     assert m_bad["proposal_used"] == "lw_fallback"
 
 

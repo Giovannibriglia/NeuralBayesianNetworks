@@ -136,3 +136,46 @@ def test_trained_proposal_query_finite_and_budget_reported():
     # A query through the production engine path returns a valid posterior.
     p = eng.query(model, ["X2"], {"X0": torch.tensor([0])})
     assert torch.isfinite(p).all() and abs(float(p.sum()) - 1.0) < 1e-4
+
+
+@pytest.mark.slow
+def test_ais_end_to_end_via_adapter_competitive_with_lw():
+    """Production pipeline (NBNAdapter fit→query) on a diagnostic query:
+    parent-conditioned AIS is finite, normalized, and not worse than LW vs the
+    exact VE posterior (no regression; the β win regime is downstream evidence)."""
+    from nbn.inference.tensor_ve import TensorVariableElimination
+
+    # Build the problem inline (X0,X1->X2 ; X0->X3) and fit AIS + LW adapters.
+    g = torch.Generator().manual_seed(1)
+    dag = [("X0", "X2"), ("X1", "X2"), ("X0", "X3")]
+    n = 600
+    x0 = torch.randint(0, 2, (n,), generator=g)
+    x1 = torch.randint(0, 3, (n,), generator=g)
+    x2 = (x0 + x1) % 4
+    x3 = torch.where(torch.rand(n, generator=g) < 0.2, 1 - x0, x0)
+    data = {"X0": x0, "X1": x1, "X2": x2, "X3": x3}
+    variables = {"X0": ("discrete", 2), "X1": ("discrete", 3),
+                 "X2": ("discrete", 4), "X3": ("discrete", 2)}
+    prob = BenchmarkProblem(name="mp", dag=dag, variables=variables,
+                            train_data=data, test_data=data, queries=[],
+                            family="discrete", problem_id="mp", seed=1)
+
+    ais = NBNAdapter(mechanism="cat", engine="ais", device="cpu", n_samples=4096)
+    lw = NBNAdapter(mechanism="cat", engine="lw", device="cpu", n_samples=4096)
+    ais.fit(prob, epochs=1)
+    lw.fit(prob, epochs=1)
+    ve = TensorVariableElimination()
+
+    # Diagnostic query: target root X0 given downstream descendants X2, X3.
+    q = Query(targets=("X0",), evidence={"X2": torch.tensor(1), "X3": torch.tensor(0)},
+              kind="marginal")
+    p_ve = ve.query(ais.model, ["X0"],
+                    {"X2": torch.tensor([1.0]), "X3": torch.tensor([0.0])}).reshape(-1)
+    p_ais = ais.query(q).probs
+    p_lw = lw.query(q).probs
+    assert p_ais is not None and torch.isfinite(p_ais).all()
+    assert abs(float(p_ais.sum()) - 1.0) < 1e-4
+    tv = lambda a, b: 0.5 * float((a.reshape(-1) - b.reshape(-1)).abs().sum())  # noqa: E731
+    tv_ais, tv_lw = tv(p_ais, p_ve), tv(p_lw, p_ve)
+    # No regression: AIS within a small slack of LW vs the exact posterior.
+    assert tv_ais <= tv_lw + 0.05, f"AIS TV {tv_ais:.3f} >> LW TV {tv_lw:.3f}"
