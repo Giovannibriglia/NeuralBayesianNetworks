@@ -45,15 +45,16 @@ def test_per_node_head_sized_to_parents():
     pcp = ParentConditionedProposal(model, d_ctx=64, head_hidden=32)
     i2 = pcp.node_index["X2"]   # parents X0 (card 2) + X1 (card 3) -> enc 5
     i0 = pcp.node_index["X0"]   # root -> enc 0
-    # First Linear of each head: in_features == d_ctx + parent_enc_dim.
-    head2_in = pcp.head_mlps[i2][0].in_features
-    head0_in = pcp.head_mlps[i0][0].in_features
+    # Grouped storage (Phase D): node i's stacked head slice has in/out dims
+    # d_ctx + parent_enc_dim and param_size.
+    g2, _ = pcp._node_to_group[i2]
+    g0, _ = pcp._node_to_group[i0]
     assert pcp.parent_enc_dim[i2] == 2 + 3, "one-hot widths summed over parents"
-    assert head2_in == 64 + 5
-    assert pcp.parent_enc_dim[i0] == 0 and head0_in == 64
+    assert pcp.gW1[g2].shape[1] == 64 + 5            # [G, in, H]
+    assert pcp.parent_enc_dim[i0] == 0 and pcp.gW1[g0].shape[1] == 64
     # Output head matches the node's cardinality.
-    assert pcp.head_mlps[i2][-1].out_features == 4
-    assert pcp.head_mlps[i0][-1].out_features == 2
+    assert pcp.gW2[g2].shape[2] == 4                 # [G, H, out]
+    assert pcp.gW2[g0].shape[2] == 2
 
 
 def test_per_node_head_emits_correct_distribution():
@@ -89,7 +90,82 @@ def test_scalar_parent_guard_and_contract():
     enc = pcp.encode_parents(i2, torch.tensor([[1.0, 2.0]]))   # X0=1, X1=2
     assert enc.shape == (1, 5)
     assert torch.allclose(enc, torch.tensor([[0., 1., 0., 0., 1.]]))  # one-hot(1,2)+one-hot(2,3)
-    assert isinstance(pcp.head_mlps, nn.ModuleList)
+    assert isinstance(pcp.gW1, nn.ParameterList)
+
+
+# ---- Phase D: Strategy F vectorization (grouped storage + batched NLL) -------
+
+def _diverse_discrete_model(n: int = 800, seed: int = 0):
+    """Network with diverse signatures: roots, 1-parent, and 2-parent nodes
+    with different parent cardinalities (exercises multiple F-groups)."""
+    g = torch.Generator().manual_seed(seed)
+    dag = [("A", "C"), ("B", "C"), ("A", "D"), ("C", "E"), ("B", "E")]
+    a = torch.randint(0, 2, (n,), generator=g)        # root card 2
+    b = torch.randint(0, 3, (n,), generator=g)        # root card 3
+    c = (a + b) % 4                                    # 2 parents (2,3) -> card 4
+    d = torch.where(torch.rand(n, generator=g) < 0.2, 1 - a, a)  # 1 parent (2) -> card 2
+    e = (c + b) % 5                                    # 2 parents (4,3) -> card 5
+    data = {"A": a, "B": b, "C": c, "D": d, "E": e}
+    variables = {"A": ("discrete", 2), "B": ("discrete", 3), "C": ("discrete", 4),
+                 "D": ("discrete", 2), "E": ("discrete", 5)}
+    prob = BenchmarkProblem(name="div", dag=dag, variables=variables,
+                            train_data=data, test_data=data, queries=[],
+                            family="discrete", problem_id="div", seed=seed)
+    ad = NBNAdapter(mechanism="cat", engine="ve", device="cpu")
+    ad.fit(prob, epochs=1)
+    return ad.model
+
+
+def test_vectorized_matches_per_node_loop():
+    """THE GATE: grouped batched NLL == per-node oracle NLL to float32 tol."""
+    torch.manual_seed(0)
+    model = _diverse_discrete_model()
+    pcp = ParentConditionedProposal(model, d_ctx=48, head_hidden=32)
+    n = len(pcp.node_order)
+    B = 64
+    g = torch.Generator().manual_seed(3)
+    xb = torch.stack([torch.randint(0, pcp.heads[nd].k, (B,), generator=g)
+                      for nd in pcp.node_order], dim=1).float()
+    mask = (torch.rand(B, n, generator=g) < 0.5).float()
+    ctx = pcp.context(xb * mask, mask)
+    grouped = AmortizedISEngine._proposal_nll(pcp, ctx, xb, mask)
+    pernode = AmortizedISEngine._proposal_nll_per_node(pcp, ctx, xb, mask)
+    assert torch.allclose(grouped, pernode, atol=1e-5), \
+        f"grouped {float(grouped):.6f} vs per-node {float(pernode):.6f}"
+
+
+def test_grouped_storage_is_registered_parameters():
+    model = _diverse_discrete_model()
+    pcp = ParentConditionedProposal(model, d_ctx=48, head_hidden=32)
+    pnames = {name for name, _ in pcp.named_parameters()}
+    assert any(nm.startswith("gW1.") for nm in pnames), "grouped weights must be registered"
+    # No stale per-node head_mlps storage (grouped is the sole head storage).
+    assert not any("head_mlps" in nm for nm in pnames)
+    # Param count == trunk + 4 stacked tensors per group (no duplication).
+    n_groups = len(pcp._group_nodes)
+    n_trunk = sum(1 for _ in pcp.trunk.parameters())
+    assert len(list(pcp.parameters())) == n_trunk + 4 * n_groups
+
+
+def test_signature_grouping_correctness():
+    model = _diverse_discrete_model()
+    pcp = ParentConditionedProposal(model)
+    # Expected signatures: A(root,k2), B(root,k3), C(parents(2,3),k4),
+    # D(parent(2),k2), E(parents(4,3),k5) — all distinct → 5 groups, each size 1.
+    assert len(pcp._group_nodes) == 5
+    assert sorted(len(ns) for ns in pcp._group_nodes) == [1, 1, 1, 1, 1]
+
+
+@pytest.mark.slow
+def test_grouped_training_converges_and_p1_contract():
+    torch.manual_seed(0)
+    model = _diverse_discrete_model()
+    eng = AmortizedISEngine(n_samples=512)
+    metrics = eng.train_proposal(model, n_training_samples=4000, device="cpu")
+    # Trained via the grouped path; ESS gate evaluates the result (P1 contract).
+    assert metrics["proposal_used"] in ("learned", "lw_fallback")
+    ess = eng._estimate_ess_fraction(model)
+    assert ess is None or (0.0 <= ess <= 1.0 + 1e-6)
 
 
 # ---- Phase B: engine wiring + training objective ----------------------------

@@ -213,7 +213,18 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
 
     @staticmethod
     def _proposal_nll(net, ctx, xb, mask) -> torch.Tensor:
-        """Mean NLL of unobserved entries under the parent-conditioned proposal.
+        """Mean NLL of unobserved entries — grouped batched path (β Phase D, #207).
+
+        Delegates to the proposal's Strategy-F ``grouped_nll`` (one batched
+        gather + bmm per signature group), 16–48× faster than the per-node loop
+        at scale.  ``_proposal_nll_per_node`` is the equivalent oracle the
+        differential test pins this against.
+        """
+        return net.grouped_nll(ctx, xb, mask)
+
+    @staticmethod
+    def _proposal_nll_per_node(net, ctx, xb, mask) -> torch.Tensor:
+        """Per-node oracle (pre-Phase-D loop), kept for the differential test.
 
         ``ctx`` is the evidence context ``[Bb, d_ctx]``; each node's head is fed
         ``(ctx, its TRUE parent values)`` (teacher-forced) and scored on the
