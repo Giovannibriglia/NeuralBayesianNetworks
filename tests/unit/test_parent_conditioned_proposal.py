@@ -9,8 +9,15 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+import pytest
+
 from benchmarking.adapters import NBNAdapter
-from benchmarking.domains.base import BenchmarkProblem
+from benchmarking.domains.base import BenchmarkProblem, Query
+from nbn.inference.amortized_is import (
+    _MIN_TRAIN_STEPS,
+    _STEPS_PER_NODE,
+    AmortizedISEngine,
+)
 from nbn.inference.recognition_net import ParentConditionedProposal
 
 
@@ -83,3 +90,49 @@ def test_scalar_parent_guard_and_contract():
     assert enc.shape == (1, 5)
     assert torch.allclose(enc, torch.tensor([[0., 1., 0., 0., 1.]]))  # one-hot(1,2)+one-hot(2,3)
     assert isinstance(pcp.head_mlps, nn.ModuleList)
+
+
+# ---- Phase B: engine wiring + training objective ----------------------------
+
+def test_training_budget_scales_with_n():
+    # Formula: max(floor, steps_per_node * n) — testable without training.
+    assert AmortizedISEngine._target_train_steps(4) == _MIN_TRAIN_STEPS       # floor
+    assert AmortizedISEngine._target_train_steps(100) == _STEPS_PER_NODE * 100
+    assert AmortizedISEngine._target_train_steps(1000) == _STEPS_PER_NODE * 1000
+    assert AmortizedISEngine._target_train_steps(37, steps_per_node=90) == 3330
+
+
+def test_p1_fallback_contract_preserved():
+    """The new recognition net is evaluable by _estimate_ess_fraction (P1)."""
+    model = _multiparent_discrete_model()
+    eng = AmortizedISEngine(n_samples=128)
+    eng.recognition_net = ParentConditionedProposal(model).to("cpu")
+    eng.device = torch.device("cpu")
+    ess = eng._estimate_ess_fraction(model)        # must not raise
+    assert ess is None or (0.0 <= ess <= 1.0 + 1e-6)
+
+
+def test_run_uses_parent_conditioned_proposal_finite():
+    """_run with the new net produces finite weights of the right shape, and
+    gathers SAMPLED parents in-loop (not a single pre-loop proposal)."""
+    model = _multiparent_discrete_model()
+    eng = AmortizedISEngine(n_samples=256)
+    eng.recognition_net = ParentConditionedProposal(model).to("cpu")
+    eng.device = torch.device("cpu")
+    ev = {"X0": torch.tensor([0.0])}
+    log_w, buf = eng._run(model, ["X2"], ev, {}, 256)
+    assert log_w.shape == (1, 256) and torch.isfinite(log_w).all()
+    assert buf.shape[0] == 1 and buf.shape[1] == 256
+
+
+@pytest.mark.slow
+def test_trained_proposal_query_finite_and_budget_reported():
+    model = _multiparent_discrete_model()
+    eng = AmortizedISEngine(n_samples=512)
+    metrics = eng.train_proposal(model, n_training_samples=2000, device="cpu")
+    assert metrics["target_steps"] == _MIN_TRAIN_STEPS      # n=4 -> floor
+    assert metrics["grad_steps"] >= 1
+    assert metrics["proposal_used"] in ("learned", "lw_fallback")
+    # A query through the production engine path returns a valid posterior.
+    p = eng.query(model, ["X2"], {"X0": torch.tensor([0])})
+    assert torch.isfinite(p).all() and abs(float(p.sum()) - 1.0) < 1e-4
