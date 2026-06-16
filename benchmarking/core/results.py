@@ -94,6 +94,15 @@ class CellResult:
     # of M AIS cells" quantitatively.
     proposal_used: str | None = None
 
+    # Per-query effective-sample-size fraction ∈ (0, 1] for importance-sampling
+    # engines (LW / AIS), stamped onto every row of a query by the measurement
+    # (parallel to query_time_s, which is also per-query). None for exact / non-IS
+    # engines (ve / avi / pgmpy / pyro / pomegranate), failure rows, and legacy
+    # parquets predating this column. Additive — downstream readers select by
+    # name. Enables ESS distributions and post-hoc filtering of unreliable
+    # posteriors, e.g. df[(df.metric=="tv_per_node") & (df.ess>=0.1)] (X1).
+    ess: float | None = None
+
 
 # Valid status values (for validation in implementations)
 VALID_STATUSES = frozenset({"ok", "timeout", "oom", "error", "not_supported"})

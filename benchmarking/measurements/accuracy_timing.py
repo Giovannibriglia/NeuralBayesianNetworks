@@ -45,6 +45,7 @@ Reference: docs/v0.13-benchmark-redesign.md §3, §4.1
 """
 from __future__ import annotations
 
+import dataclasses
 import time
 from typing import Any
 
@@ -235,6 +236,10 @@ class AccuracyAndTiming:
             )
         ):
             q_time = query_times[i]
+            # Collect this query's rows locally so the per-query ESS fraction
+            # can be stamped onto all of them in one place (mirrors the
+            # cell_worker._emit device/proposal_used stamping pattern).
+            query_rows: list[CellResult] = []
 
             if posterior is None or mdict is None:
                 # Query failed: one row per metric. Status is the classified
@@ -243,7 +248,7 @@ class AccuracyAndTiming:
                 # "error" (#127 Stage 4).
                 fail_status = query_statuses[i] if posterior is None else "error"
                 for mk in _METRIC_KEYS:
-                    rows.append(CellResult(
+                    query_rows.append(CellResult(
                         benchmark=benchmark,
                         family=family,
                         problem_id=problem_id,
@@ -268,7 +273,7 @@ class AccuracyAndTiming:
                     ("query_time_s", float("nan")),
                     ("metrics_time_s", metrics_time_s),
                 ]:
-                    rows.append(CellResult(
+                    query_rows.append(CellResult(
                         benchmark=benchmark,
                         family=family,
                         problem_id=problem_id,
@@ -287,6 +292,8 @@ class AccuracyAndTiming:
                         error_msg=err_msg or "query failed",
                         batch_size=query_bsizes[i],
                     ))
+                # Failure rows carry no meaningful ESS (ess stays None).
+                rows.extend(query_rows)
                 continue
 
             # Success: one row per metric.
@@ -301,7 +308,7 @@ class AccuracyAndTiming:
                 else:
                     status = "ok"
                     value = float(val)
-                rows.append(CellResult(
+                query_rows.append(CellResult(
                     benchmark=benchmark,
                     family=family,
                     problem_id=problem_id,
@@ -327,7 +334,7 @@ class AccuracyAndTiming:
                 ("query_time_s", q_time),
                 ("metrics_time_s", metrics_time_s),
             ]:
-                rows.append(CellResult(
+                query_rows.append(CellResult(
                     benchmark=benchmark,
                     family=family,
                     problem_id=problem_id,
@@ -346,6 +353,10 @@ class AccuracyAndTiming:
                     error_msg=None,
                     batch_size=query_bsizes[i],
                 ))
+            # Stamp the per-query ESS fraction onto every row of this query
+            # (float for lw/ais; None for ve/avi and other engines).
+            q_ess = posterior.ess
+            rows.extend(dataclasses.replace(r, ess=q_ess) for r in query_rows)
 
         # ---- Timeout rows for groups that never started ----
         # One row-set per unstarted GROUP (not per query), carrying the
