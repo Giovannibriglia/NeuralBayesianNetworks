@@ -24,7 +24,6 @@ optional.)
 from __future__ import annotations
 
 import math
-from typing import Tuple
 
 import torch
 from torch.distributions import Categorical, Distribution
@@ -41,7 +40,7 @@ class _KNNContinuousDistribution(Distribution):
     has_rsample = False
     arg_constraints: dict = {}
 
-    def __init__(self, mech: "KNNConditionalMechanism", parents: torch.Tensor | None, b: int) -> None:
+    def __init__(self, mech: KNNConditionalMechanism, parents: torch.Tensor | None, b: int) -> None:
         self._mech = mech
         self._parents = parents
         super().__init__(

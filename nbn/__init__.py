@@ -65,9 +65,7 @@ from nbn.mechanisms import (  # noqa: E402
     FlexCodeMechanism,
 )
 
-try:
-    __all__
-except NameError:
+if "__all__" not in globals():
     __all__ = []
 __all__ += [
     "ConditionalKDEMechanism",

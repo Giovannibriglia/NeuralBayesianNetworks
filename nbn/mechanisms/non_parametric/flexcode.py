@@ -40,7 +40,7 @@ class _FlexCodeDistribution(Distribution):
     has_rsample = False
     arg_constraints: dict = {}
 
-    def __init__(self, mech: "FlexCodeMechanism", parents: torch.Tensor | None, b: int) -> None:
+    def __init__(self, mech: FlexCodeMechanism, parents: torch.Tensor | None, b: int) -> None:
         self._mech = mech
         self._parents = parents
         super().__init__(batch_shape=torch.Size([b]), event_shape=torch.Size([1]), validate_args=False)

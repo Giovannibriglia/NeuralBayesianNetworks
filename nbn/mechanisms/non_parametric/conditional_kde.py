@@ -36,7 +36,6 @@ log_prob → ``[B]`` or ``[B, S]``;   sample → ``[B, n, D_x]``.
 from __future__ import annotations
 
 import math
-from typing import Tuple
 
 import torch
 from torch.distributions import Distribution
@@ -57,7 +56,7 @@ class _KDEConditionalDistribution(Distribution):
     has_rsample = False
     arg_constraints: dict = {}
 
-    def __init__(self, mech: "ConditionalKDEMechanism", parents: torch.Tensor | None, b: int) -> None:
+    def __init__(self, mech: ConditionalKDEMechanism, parents: torch.Tensor | None, b: int) -> None:
         self._mech = mech
         self._parents = parents
         super().__init__(
