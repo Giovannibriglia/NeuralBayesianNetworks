@@ -76,7 +76,8 @@ class FlexCodeMechanism(Mechanism):
         observed support sits strictly inside ``[0, 1]``.
     sharpen:
         FlexZBoost sharpening exponent ``alpha`` applied to the clipped
-        density before renormalisation (``1.0`` = none).
+        density before renormalisation (``1.0`` = none). Pass ``"auto"`` to
+        select it by held-out negative log-likelihood at fit time.
     min_density:
         Floor for the density (numerical-stability / finite log-prob).
     """
@@ -93,10 +94,12 @@ class FlexCodeMechanism(Mechanism):
         batch_size: int = 512,
         grid_size: int = 256,
         margin: float = 0.05,
-        sharpen: float = 1.0,
+        sharpen: float | str = 1.0,
         min_density: float = 1e-6,
     ) -> None:
         super().__init__()
+        if isinstance(sharpen, str) and sharpen != "auto":
+            raise ValueError(f"sharpen must be a float or 'auto', got {sharpen!r}")
         self.n_basis = int(n_basis)
         self.hidden = tuple(hidden)
         self.activation = activation
@@ -105,7 +108,7 @@ class FlexCodeMechanism(Mechanism):
         self.batch_size = int(batch_size)
         self.grid_size = int(grid_size)
         self.margin = float(margin)
-        self.sharpen = float(sharpen)
+        self.sharpen = sharpen if sharpen == "auto" else float(sharpen)
         self.min_density = float(min_density)
         self.output_dim = 1
         self._d_pa = 0
@@ -136,6 +139,49 @@ class FlexCodeMechanism(Mechanism):
     # Fitting
     # ------------------------------------------------------------------
     def fit_local(self, x: torch.Tensor, parents: torch.Tensor | None, **kwargs) -> dict:
+        if self.sharpen == "auto":
+            best = self._select_sharpen(x, parents, **kwargs)
+            info = self._fit_core(x, parents, **kwargs)  # final coeffs on full data
+            self.sharpen = best
+            return info
+        return self._fit_core(x, parents, **kwargs)
+
+    def _select_sharpen(
+        self,
+        x: torch.Tensor,
+        parents: torch.Tensor | None,
+        candidates: tuple[float, ...] = (1.0, 1.25, 1.5, 1.75, 2.0, 2.5),
+        val_frac: float = 0.25,
+        **kwargs,
+    ) -> float:
+        """Pick ``sharpen`` by held-out NLL: fit coeffs on a sub-split, score the
+        exponent on the held-out points (sharpen is post-hoc, so no refitting)."""
+        y = ensure_2d(x).float()
+        if y.shape[1] != 1:
+            return 1.0  # multivariate is rejected by _fit_core anyway
+        n = y.shape[0]
+        gen = torch.Generator(device="cpu").manual_seed(0)
+        perm = torch.randperm(n, generator=gen)
+        n_val = max(8, int(round(val_frac * n)))
+        if n_val >= n:
+            return 1.0
+        val_idx, fit_idx = perm[:n_val], perm[n_val:]
+        has_pa = parents is not None and parents.shape[-1] > 0
+        pa = ensure_2d(parents).float() if has_pa else None
+        self.sharpen = 1.0
+        self._fit_core(y[fit_idx], pa[fit_idx] if has_pa else None, **kwargs)
+        best_s, best_nll = 1.0, float("inf")
+        for s in candidates:
+            self.sharpen = float(s)
+            with torch.no_grad():
+                nll = float((-self.log_prob(
+                    y[val_idx], pa[val_idx] if has_pa else None)).mean())
+            if nll == nll and nll < best_nll:  # nll == nll rejects NaN
+                best_nll, best_s = nll, float(s)
+        self.sharpen = "auto"  # restore request; caller resolves to best_s
+        return best_s
+
+    def _fit_core(self, x: torch.Tensor, parents: torch.Tensor | None, **kwargs) -> dict:
         y = ensure_2d(x).float()
         if y.shape[1] != 1:
             raise NotImplementedError(
