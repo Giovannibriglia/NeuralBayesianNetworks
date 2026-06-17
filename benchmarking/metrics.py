@@ -122,8 +122,28 @@ def mmd_rbf(x: torch.Tensor, y: torch.Tensor, sigma: float | None = None) -> Met
 
 # ── prediction metrics ──────────────────────────────────────────────────────
 
-def held_out_nll(log_probs: torch.Tensor) -> MetricResult:
-    return MetricResult("held_out_nll", float(-log_probs.mean()))
+def log_likelihood(log_probs: torch.Tensor) -> MetricResult:
+    """Mean held-out joint log-probability (higher is better).
+
+    Parameters
+    ----------
+    log_probs : torch.Tensor
+        Per-ROW joint log-probs of held-out test rows under the fitted
+        model — each element is already summed over the graph's nodes.
+        The topological per-node assembly over ``test_data`` lives in the
+        ParamLearningMeasurement (issue #109), not here: this primitive
+        stays free of model/graph internals, mirroring the purity of the
+        other functions in this module.
+
+    Returns
+    -------
+    MetricResult
+        ``name == "log_likelihood"`` (no ``_per_node`` suffix — this is a
+        single joint score, not a per-node average), ``value`` the POSITIVE
+        mean log-prob. Higher-is-better, matching
+        ``_paper_figures.HIGHER_IS_BETTER``.
+    """
+    return MetricResult("log_likelihood", float(log_probs.mean()))
 
 
 def map_accuracy(pred: torch.Tensor, true: torch.Tensor) -> MetricResult:
