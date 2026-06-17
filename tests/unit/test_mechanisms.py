@@ -9,11 +9,11 @@ import math
 import pytest
 import torch
 
-from nbn.mechanisms.categorical_table import CategoricalTableMechanism
-from nbn.mechanisms.deterministic import DeterministicMechanism
-from nbn.mechanisms.linear_gaussian import LinearGaussianMechanism
-from nbn.mechanisms.mdn import MDNMechanism
-from nbn.mechanisms.neural_categorical import NeuralCategoricalMechanism
+from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
+from nbn.mechanisms.parametric.deterministic import DeterministicMechanism
+from nbn.mechanisms.parametric.linear_gaussian import LinearGaussianMechanism
+from nbn.mechanisms.parametric.mdn import MDNMechanism
+from nbn.mechanisms.parametric.neural_categorical import NeuralCategoricalMechanism
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -185,7 +185,7 @@ class TestNormalizingFlowLongParents:
     every seed/kind, used to fail here)."""
 
     def _fit(self):
-        from nbn.mechanisms.normalizing_flow import NormalizingFlowMechanism
+        from nbn.mechanisms.parametric.normalizing_flow import NormalizingFlowMechanism
         mech = NormalizingFlowMechanism()
         x = torch.randn(96, 1)
         pa = torch.randint(0, 3, (96, 1))   # Long, NOT cast by the caller
@@ -215,7 +215,7 @@ class TestNormalizingFlowSanitiseParents:
     guard. Output stays finite on the happy path and under non-finite parents."""
 
     def _fit(self):
-        from nbn.mechanisms.normalizing_flow import NormalizingFlowMechanism
+        from nbn.mechanisms.parametric.normalizing_flow import NormalizingFlowMechanism
         mech = NormalizingFlowMechanism()
         x = torch.randn(96, 1)
         pa = torch.randn(96, 2)             # continuous parents
@@ -241,6 +241,6 @@ class TestNormalizingFlowSanitiseParents:
 
     def test_shared_guard_is_mdn_guard(self):
         # The flow guard is the very same helper MDN uses (promoted to utils).
-        from nbn.mechanisms.mdn import _sanitise_parents as mdn_sp
+        from nbn.mechanisms.parametric.mdn import _sanitise_parents as mdn_sp
         from nbn.utils.batching import _sanitise_parents as util_sp
         assert mdn_sp is util_sp

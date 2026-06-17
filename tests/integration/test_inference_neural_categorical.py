@@ -34,8 +34,8 @@ import torch
 from nbn.core.network import NeuralBayesianNetwork
 from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
 from nbn.inference.tensor_ve import TensorVariableElimination
-from nbn.mechanisms.categorical_table import CategoricalTableMechanism
-from nbn.mechanisms.neural_categorical import NeuralCategoricalMechanism
+from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
+from nbn.mechanisms.parametric.neural_categorical import NeuralCategoricalMechanism
 
 
 # Hand-picked CPTs for the analytical-truth side of the comparison.

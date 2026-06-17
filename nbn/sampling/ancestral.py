@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Dict, Mapping
 
 import torch
 
-from nbn.mechanisms.deterministic import DeterministicMechanism
+from nbn.mechanisms.parametric.deterministic import DeterministicMechanism
 
 if TYPE_CHECKING:
     from nbn.core.network import NeuralBayesianNetwork

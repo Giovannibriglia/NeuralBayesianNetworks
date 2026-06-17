@@ -9,9 +9,9 @@ import torch.nn as nn
 from nbn.core.dag import DAG
 from nbn.core.variables import Variable
 from nbn.mechanisms.base import Mechanism
-from nbn.mechanisms.categorical_table import CategoricalTableMechanism
-from nbn.mechanisms.linear_gaussian import LinearGaussianMechanism
-from nbn.mechanisms.mdn import MDNMechanism
+from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
+from nbn.mechanisms.parametric.linear_gaussian import LinearGaussianMechanism
+from nbn.mechanisms.parametric.mdn import MDNMechanism
 from nbn.utils.device import resolve_device, to_device
 
 logger = logging.getLogger(__name__)
@@ -163,7 +163,7 @@ class NeuralBayesianNetwork(nn.Module):
                 if default_discrete == "categorical_table":
                     mech: Mechanism = CategoricalTableMechanism()
                 else:
-                    from nbn.mechanisms.neural_categorical import NeuralCategoricalMechanism
+                    from nbn.mechanisms.parametric.neural_categorical import NeuralCategoricalMechanism
                     mech = NeuralCategoricalMechanism(n_classes=var.cardinality or 2)
             else:
                 if default_continuous == "mdn":
@@ -377,8 +377,8 @@ class NeuralBayesianNetwork(nn.Module):
         """
         import copy
 
-        from nbn.mechanisms.deterministic import DeterministicMechanism
-        from nbn.mechanisms.dirac_gaussian import DiracGaussianMechanism
+        from nbn.mechanisms.parametric.deterministic import DeterministicMechanism
+        from nbn.mechanisms.parametric.dirac_gaussian import DiracGaussianMechanism
 
         new_model = copy.deepcopy(self)
         new_model._do_targets = set(do.keys())

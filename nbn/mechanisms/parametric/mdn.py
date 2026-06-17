@@ -10,7 +10,7 @@ from torch.distributions import Categorical, Independent, MixtureSameFamily, Nor
 from nbn.mechanisms.base import Mechanism
 # _sanitise_parents was promoted to nbn.utils.batching (v0.14) so the flow
 # mechanism can share the identical guard; re-exported via this import for the
-# existing ``from nbn.mechanisms.mdn import _sanitise_parents`` callers/tests.
+# existing ``from nbn.mechanisms.parametric.mdn import _sanitise_parents`` callers/tests.
 from nbn.utils.batching import _sanitise_parents, ensure_2d, flatten_samples  # noqa: F401
 
 logger = logging.getLogger(__name__)

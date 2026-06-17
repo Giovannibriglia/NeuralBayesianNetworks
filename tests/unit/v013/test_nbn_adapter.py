@@ -240,7 +240,7 @@ class TestNeuralCatRootNode:
     """
 
     def test_root_node_logits_reflect_empirical_frequency(self) -> None:
-        from nbn.mechanisms.neural_categorical import NeuralCategoricalMechanism
+        from nbn.mechanisms.parametric.neural_categorical import NeuralCategoricalMechanism
 
         # Biased training data: 80% class 0, 15% class 1, 5% class 2.
         biased_x = torch.cat([

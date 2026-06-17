@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import torch
 
-from nbn.mechanisms.categorical_table import CategoricalTableMechanism
+from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
 
 
 class TestDeclaredCardinality:

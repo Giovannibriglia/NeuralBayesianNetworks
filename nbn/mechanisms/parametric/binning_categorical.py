@@ -19,7 +19,7 @@ from typing import List, Sequence, Tuple
 
 import torch
 
-from nbn.mechanisms.categorical_table import CategoricalTableMechanism
+from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
 
 
 class BinningCategoricalTable(CategoricalTableMechanism):

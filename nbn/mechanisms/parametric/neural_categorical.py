@@ -7,7 +7,7 @@ import torch.nn as nn
 from torch.distributions import Categorical
 
 from nbn.mechanisms.base import Mechanism
-from nbn.mechanisms.mdn import _build_mlp
+from nbn.mechanisms.parametric.mdn import _build_mlp
 from nbn.utils.batching import ensure_2d, flatten_samples
 
 
