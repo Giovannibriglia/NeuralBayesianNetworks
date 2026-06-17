@@ -149,7 +149,7 @@ def test_lg_fitter_recovers_true_weights_within_tolerance() -> None:
     )
     x = bn.train_data[target].reshape(-1, 1).float()
 
-    from nbn.mechanisms.linear_gaussian import LinearGaussianMechanism
+    from nbn.mechanisms.parametric.linear_gaussian import LinearGaussianMechanism
     fitted = LinearGaussianMechanism(ridge=1e-4)
     fitted.fit_local(x, pa)
 

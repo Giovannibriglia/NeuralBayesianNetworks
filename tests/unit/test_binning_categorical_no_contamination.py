@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import torch
 
-from nbn.mechanisms.binning_categorical import BinningCategoricalTable
+from nbn.mechanisms.parametric.binning_categorical import BinningCategoricalTable
 
 
 def test_thresholds_match_train_quantiles_not_truth() -> None:

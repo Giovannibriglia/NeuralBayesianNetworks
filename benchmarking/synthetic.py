@@ -33,9 +33,9 @@ import torch
 import torch.nn as nn
 
 from nbn.core.network import NeuralBayesianNetwork
-from nbn.mechanisms.categorical_table import CategoricalTableMechanism
-from nbn.mechanisms.linear_gaussian import LinearGaussianMechanism
-from nbn.mechanisms.mdn import MDNMechanism, _build_mlp
+from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
+from nbn.mechanisms.parametric.linear_gaussian import LinearGaussianMechanism
+from nbn.mechanisms.parametric.mdn import MDNMechanism, _build_mlp
 
 Family = Literal["discrete", "continuous_lg", "continuous_nongauss", "hybrid"]
 _FAMILIES: tuple[Family, ...] = (

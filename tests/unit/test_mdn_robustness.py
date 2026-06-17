@@ -17,7 +17,7 @@ import logging
 import pytest
 import torch
 
-from nbn.mechanisms.mdn import _sanitise_parents
+from nbn.mechanisms.parametric.mdn import _sanitise_parents
 
 
 def _reset_sanitise_warned() -> None:
@@ -144,7 +144,7 @@ def test_mdn_extreme_parents_no_nan_after_fit() -> None:
     produce NaN parameters after fit_local.  Pre-fix, the MLP's linear
     projection turned extreme inputs into inf log_scale → loss=1e14 →
     backward overflow → NaN grads → NaN params → CUDA assert at LW."""
-    from nbn.mechanisms.mdn import MDNMechanism
+    from nbn.mechanisms.parametric.mdn import MDNMechanism
     torch.manual_seed(0)
     mdn = MDNMechanism(num_components=3)
     N = 100
@@ -166,7 +166,7 @@ def test_mdn_constant_parent_column_no_crash() -> None:
     to 1e-3, _params_from_parents received (0 - pa_mean) / 1e-3 = -5000
     during the training forward pass, which overflowed to NaN in the MLP.
     """
-    from nbn.mechanisms.mdn import MDNMechanism
+    from nbn.mechanisms.parametric.mdn import MDNMechanism
     mdn = MDNMechanism(num_components=3)
     N = 80
     x = torch.randn(N, 1)
@@ -189,7 +189,7 @@ def test_mdn_training_inference_consistency() -> None:
     standardization would evaluate at a completely different input range
     and produce degenerate (constant) log_prob values.
     """
-    from nbn.mechanisms.mdn import MDNMechanism
+    from nbn.mechanisms.parametric.mdn import MDNMechanism
     torch.manual_seed(42)
     N = 300
     # parents with large mean/std — training and inference must agree
@@ -231,7 +231,7 @@ def test_mdn_extreme_inference_parents_no_nan_bug_c() -> None:
     sample=Inf → downstream Categorical(NaN) crash (follow-up to Bug B /
     PR #90).
     """
-    from nbn.mechanisms.mdn import MDNMechanism
+    from nbn.mechanisms.parametric.mdn import MDNMechanism
 
     torch.manual_seed(7)
     N = 200
@@ -265,7 +265,7 @@ def test_mdn_log_scale_output_clamp_issue_95() -> None:
     it holds.
     """
     import math
-    from nbn.mechanisms.mdn import MDNMechanism
+    from nbn.mechanisms.parametric.mdn import MDNMechanism
 
     torch.manual_seed(13)
     N = 200

@@ -29,10 +29,10 @@ from torch.distributions import (
     Normal,
 )
 
-from nbn.mechanisms.categorical_table import CategoricalTableMechanism
-from nbn.mechanisms.linear_gaussian import LinearGaussianMechanism
-from nbn.mechanisms.mdn import MDNMechanism, _build_mlp
-from nbn.mechanisms.neural_categorical import NeuralCategoricalMechanism
+from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
+from nbn.mechanisms.parametric.linear_gaussian import LinearGaussianMechanism
+from nbn.mechanisms.parametric.mdn import MDNMechanism, _build_mlp
+from nbn.mechanisms.parametric.neural_categorical import NeuralCategoricalMechanism
 
 # Numerical guards mirrored from the mechanisms (issue #95 / Bug C lineage):
 # bound log-scale before exp() to keep float32 finite on pathological inputs.
@@ -102,7 +102,7 @@ def _flow_head(mech) -> _Head | None:
     which merely needs matching support (all of R^{d_x}).
     """
     try:
-        from nbn.mechanisms.normalizing_flow import NormalizingFlowMechanism
+        from nbn.mechanisms.parametric.normalizing_flow import NormalizingFlowMechanism
     except Exception:  # pragma: no cover - zuko optional
         return None
     if isinstance(mech, NormalizingFlowMechanism):

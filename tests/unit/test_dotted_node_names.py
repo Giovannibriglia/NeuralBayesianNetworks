@@ -8,7 +8,7 @@ so all call sites keep using the original node name.
 import torch
 
 from nbn.core.network import NeuralBayesianNetwork, _AliasModuleDict
-from nbn.mechanisms.categorical_table import CategoricalTableMechanism
+from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
 
 
 class TestAliasModuleDict:

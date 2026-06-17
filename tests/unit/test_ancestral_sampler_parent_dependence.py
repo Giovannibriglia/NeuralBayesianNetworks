@@ -18,8 +18,8 @@ import torch
 import torch.nn as nn
 
 from nbn.core.network import NeuralBayesianNetwork
-from nbn.mechanisms.categorical_table import CategoricalTableMechanism
-from nbn.mechanisms.linear_gaussian import LinearGaussianMechanism
+from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
+from nbn.mechanisms.parametric.linear_gaussian import LinearGaussianMechanism
 
 
 def test_non_root_lg_sampler_recovers_parent_slope() -> None:

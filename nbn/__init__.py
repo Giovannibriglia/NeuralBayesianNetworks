@@ -55,3 +55,21 @@ __all__ = [
     # Version
     "__version__",
 ]
+
+
+# --- non-parametric mechanisms (added by apply_nonparametric_mechanisms) ---
+from nbn.mechanisms import (  # noqa: E402
+    ConditionalKDEMechanism,
+    KNNConditionalMechanism,
+    SmoothedEmpiricalCategoricalMechanism,
+    FlexCodeMechanism,
+)
+
+if "__all__" not in globals():
+    __all__ = []
+__all__ += [
+    "ConditionalKDEMechanism",
+    "KNNConditionalMechanism",
+    "SmoothedEmpiricalCategoricalMechanism",
+    "FlexCodeMechanism",
+]
