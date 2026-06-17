@@ -312,3 +312,53 @@ def test_public_reexports_are_identical():
     assert _KNN_reexport is KNNConditionalMechanism
     assert _FC_reexport is FlexCodeMechanism
     assert _SEC_reexport is SmoothedEmpiricalCategoricalMechanism
+
+
+# ── auto hyper-parameter selection ────────────────────────────────────────────
+
+class TestAutoSelection:
+    def test_kde_auto_resolves_to_float(self):
+        _seed(0)
+        x, pa = _linear_scm(n=400)
+        mech = ConditionalKDEMechanism(bw_factor="auto")
+        mech.fit_local(x, pa)
+        assert mech.is_fitted
+        assert isinstance(mech.bw_factor, float)
+        assert mech.bw_factor > 0
+        assert torch.isfinite(mech.log_prob(x[:5], pa[:5])).all()
+        assert mech.sample(pa[:4], n=8).shape == (4, 8, 1)
+
+    def test_kde_auto_integrates_to_one(self):
+        _seed(0)
+        x, pa = _linear_scm(n=400)
+        mech = ConditionalKDEMechanism(bw_factor="auto")
+        mech.fit_local(x, pa)
+        z = _grid_integral(mech, pa[:1], lo=-8.0, hi=8.0)
+        assert z == pytest.approx(1.0, abs=0.06)
+
+    def test_kde_rejects_bad_bw_factor_string(self):
+        with pytest.raises(ValueError):
+            ConditionalKDEMechanism(bw_factor="nope")
+
+    def test_kde_auto_root_node(self):
+        _seed(0)
+        x = torch.randn(400, 1)
+        mech = ConditionalKDEMechanism(bw_factor="auto")
+        mech.fit_local(x, None)
+        assert isinstance(mech.bw_factor, float)
+        assert mech.sample(None, n=8).shape[-1] == 1
+
+    def test_flexcode_auto_resolves_to_float(self):
+        _seed(0)
+        x, pa = _linear_scm(n=400)
+        mech = FlexCodeMechanism(sharpen="auto", epochs=40, n_basis=21)
+        mech.fit_local(x, pa)
+        assert mech.is_fitted
+        assert isinstance(mech.sharpen, float)
+        assert mech.sharpen >= 1.0
+        assert torch.isfinite(mech.log_prob(x[:5], pa[:5])).all()
+        assert mech.sample(pa[:4], n=8).shape == (4, 8, 1)
+
+    def test_flexcode_rejects_bad_sharpen_string(self):
+        with pytest.raises(ValueError):
+            FlexCodeMechanism(sharpen="nope")

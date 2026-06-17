@@ -86,7 +86,8 @@ class ConditionalKDEMechanism(Mechanism):
         Rule for the rule-of-thumb bandwidth: ``"scott"`` or ``"silverman"``.
     bw_factor:
         Scalar multiplier applied to every bandwidth (tune for over/under
-        smoothing; cross-validate externally if desired).
+        smoothing). Pass ``"auto"`` to select it by held-out negative
+        log-likelihood at fit time (resolves to a float on the first ``fit_local``).
     min_bandwidth:
         Floor on every bandwidth, preventing degenerate zero-width kernels.
     train_chunk:
@@ -101,7 +102,7 @@ class ConditionalKDEMechanism(Mechanism):
     def __init__(
         self,
         bandwidth: str = "scott",
-        bw_factor: float = 1.0,
+        bw_factor: float | str = 1.0,
         min_bandwidth: float = 1e-3,
         train_chunk: int = 8192,
         query_chunk: int = 1024,
@@ -109,8 +110,10 @@ class ConditionalKDEMechanism(Mechanism):
         super().__init__()
         if bandwidth not in ("scott", "silverman"):
             raise ValueError(f"bandwidth must be 'scott' or 'silverman', got {bandwidth!r}")
+        if isinstance(bw_factor, str) and bw_factor != "auto":
+            raise ValueError(f"bw_factor must be a float or 'auto', got {bw_factor!r}")
         self.bandwidth = bandwidth
-        self.bw_factor = float(bw_factor)
+        self.bw_factor = bw_factor if bw_factor == "auto" else float(bw_factor)
         self.min_bandwidth = float(min_bandwidth)
         self.train_chunk = int(train_chunk)
         self.query_chunk = int(query_chunk)
@@ -148,6 +151,41 @@ class ConditionalKDEMechanism(Mechanism):
     # Fitting
     # ------------------------------------------------------------------
     def fit_local(self, x: torch.Tensor, parents: torch.Tensor | None, **kwargs) -> dict:
+        if self.bw_factor == "auto":
+            self.bw_factor = self._select_bw_factor(x, parents)
+        return self._fit_core(x, parents, **kwargs)
+
+    def _select_bw_factor(
+        self,
+        x: torch.Tensor,
+        parents: torch.Tensor | None,
+        candidates: tuple[float, ...] = (0.2, 0.3, 0.45, 0.6, 0.8, 1.0),
+        val_frac: float = 0.25,
+    ) -> float:
+        """Pick ``bw_factor`` by held-out negative log-likelihood (lower better)."""
+        y = ensure_2d(x).float()
+        n = y.shape[0]
+        gen = torch.Generator(device="cpu").manual_seed(0)
+        perm = torch.randperm(n, generator=gen)
+        n_val = max(8, int(round(val_frac * n)))
+        if n_val >= n:  # too few points to split — fall back to the rule-of-thumb
+            return 1.0
+        val_idx, fit_idx = perm[:n_val], perm[n_val:]
+        has_pa = parents is not None and parents.shape[-1] > 0
+        pa = ensure_2d(parents).float() if has_pa else None
+        best_c, best_nll = 1.0, float("inf")
+        for c in candidates:
+            self.bw_factor = float(c)
+            self._fit_core(y[fit_idx], pa[fit_idx] if has_pa else None)
+            with torch.no_grad():
+                nll = float((-self.log_prob(
+                    y[val_idx], pa[val_idx] if has_pa else None)).mean())
+            if nll == nll and nll < best_nll:  # nll == nll rejects NaN
+                best_nll, best_c = nll, float(c)
+        self.bw_factor = "auto"  # restore the request; caller resolves to best_c
+        return best_c
+
+    def _fit_core(self, x: torch.Tensor, parents: torch.Tensor | None, **kwargs) -> dict:
         y = ensure_2d(x).float()  # [N, D_x]
         n, d_x = y.shape
         device = y.device
