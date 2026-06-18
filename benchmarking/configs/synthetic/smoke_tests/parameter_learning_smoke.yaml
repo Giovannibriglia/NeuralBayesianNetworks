@@ -67,6 +67,7 @@ baselines:
   - {library: pgmpy,       mechanism: discrete, param_method: bayes}
   - {library: pgmpy,       mechanism: lg,       param_method: mle}
   - {library: pomegranate, mechanism: discrete, param_method: mle}
+  - {library: pyro,        mechanism: empirical, param_method: mle}
   - {library: nbn,   mechanism: cat,      param_method: mle}
   - {library: nbn,   mechanism: neuralcat, param_method: mle}
   - {library: nbn,   mechanism: lg,       param_method: mle}

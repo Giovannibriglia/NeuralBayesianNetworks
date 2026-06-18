@@ -84,6 +84,13 @@ class PyroAdapter:
     # helper) — the speed-benchmark sweep runs this once at batch_size=1.
     supports_batched_queries: bool = False
 
+    # Parameter-recovery capability (#109 PR 5): exposes learned discrete CPTs
+    # via extract_learned_cpts. Pyro is MIXED-applicable (discrete, continuous_lg,
+    # hybrid), so unlike pomegranate the family gate's not_applicable path IS
+    # reachable — continuous/hybrid cells get not_applicable. (Precedent: flag=True
+    # when the adapter implements extraction; the cell-level gate decides.)
+    supports_param_recovery: bool = True
+
     def __init__(
         self,
         mechanism: str,
@@ -463,3 +470,73 @@ class PyroAdapter:
         if entry is None:
             return False
         return family in entry.families
+
+    def extract_learned_cpts(self) -> dict[str, torch.Tensor]:
+        """Learned discrete CPTs in the canonical layout (param-recovery, #109).
+
+        Returns ``{node: probs[n_parent_configs, K]}`` for each discrete node, in
+        the canonical layout the recovery metric compares cell-by-cell against
+        the true model (parents sorted lex, configs row-major with the first
+        parent slowest, classes ``0..K-1``, each row a distribution).
+
+        READS the stored ``self._cpts`` — no re-estimation, no fill, no clamp.
+        ``_fit_discrete_cpt`` builds the full declared grid with Laplace
+        smoothing (alpha=1): ``(counts + 1) / (counts.sum() + K)``. That single
+        ``+1`` structurally avoids BOTH pathologies the earlier adapters hit —
+        the hard zeros that make pgmpy-mle's KL diverge, and the ``0/0 = NaN``
+        on unseen parent configs that bit pomegranate (#218): an unseen config
+        smooths to uniform ``1/K``, a zero-count class to a small positive mass.
+        So no NaN-fill and no zero-clamp are needed here, and pyro's recovery KL
+        is always finite (it joins the smoothed bucket with pgmpy-bayes / NBN).
+
+        The stored ``self._cpts[node]`` is ``[n_parent_configs, K]`` with the
+        config index flattened over ``self._cpt_parents[node]`` (dag-edge order,
+        first parent slowest). Extraction unflattens that into per-parent axes,
+        permutes them into canonical lex order, and reshapes back.
+
+        Hybrid-scope note: pyro is mixed-applicable, and in a hybrid problem a
+        discrete node's continuous parents are filtered out of
+        ``self._cpt_parents`` by ``_fit_discrete_cpt`` (which conditions on
+        discrete parents only). Recovery is confined by the measurement's family
+        gate to FULLY-DISCRETE problems, where ``self._cpt_parents`` equals the
+        full parent set — so the filtering is identity-equivalent in scope, and
+        reading ``self._cpt_parents`` directly (no hybrid special-casing) is safe.
+
+        Integer class indices ⇒ no state reindex. The only defensive check is a
+        row-sum validation (everything else is structurally guaranteed by the
+        Laplace fit); a row not summing to 1 raises -> status="error".
+        """
+        if not self._fitted or self.problem is None:
+            raise RuntimeError(
+                "Adapter not fitted. Call fit() before extract_learned_cpts()."
+            )
+        out: dict[str, torch.Tensor] = {}
+        for node in self._topo:
+            kind, k = self.problem.variables[node]
+            if kind != "discrete":
+                continue
+            k = int(k)
+            cpt_parents = self._cpt_parents[node]
+            flat = self._cpts[node].detach().cpu().float()  # [n_configs, K]
+
+            if not cpt_parents:
+                cpt = flat.reshape(1, k)
+            else:
+                pa_cards = [int(self._cards[p]) for p in cpt_parents]
+                raw = flat.reshape(*pa_cards, k)            # [*pa_cards(dag), K]
+                canon = sorted(cpt_parents)
+                perm = [cpt_parents.index(p) for p in canon] + [len(cpt_parents)]
+                n_configs = 1
+                for p in canon:
+                    n_configs *= int(self._cards[p])
+                cpt = raw.permute(*perm).reshape(n_configs, k)
+
+            row_sums = cpt.sum(dim=-1)
+            if not torch.allclose(row_sums, torch.ones_like(row_sums), atol=1e-5):
+                i = int((row_sums - 1.0).abs().argmax())
+                raise ValueError(
+                    f"node {node!r}: extracted CPT row {i} does not sum to 1 "
+                    f"(sum={float(row_sums[i]):.6f})"
+                )
+            out[node] = cpt
+        return out
