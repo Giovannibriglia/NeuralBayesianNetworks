@@ -63,6 +63,13 @@ class ParamLearningMeasurement:
     ``query_groups`` are ignored (PL scores ``problem.test_data``).
     """
 
+    # Fit-only signal (#109): PL scores via score_data and never queries, so
+    # the cell worker builds adapters with require_engine=False — a baseline
+    # may omit inference_method (the PL configs do). The query-centric
+    # measurements lack this flag (getattr default False -> require_engine=True),
+    # so inference cells still reject a missing inference_method early.
+    fit_only: bool = True
+
     def measure(
         self,
         problem: BenchmarkProblem,

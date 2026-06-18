@@ -124,16 +124,28 @@ def test_cli_param_learning_produces_parquet(tmp_path: Path) -> None:
 
     Un-stubs the former informational stub: the command now constructs
     ParamLearningMeasurement and drives the same JSONL → parquet pipeline as
-    inference. Asserts a clean exit + a parquet carrying log_likelihood rows.
-    Row STATUS is intentionally not asserted here — NBN scoring lands in the
-    next commit; this pins that the pipe is connected and emits the metric.
+    inference. Asserts a clean exit + a parquet carrying log_likelihood rows
+    with at least one NBN row status="ok" and a finite value, and the pgmpy
+    baseline status="not_supported".
+
+    PL-realistic config: the baselines OMIT inference_method (PL never queries),
+    exercising the fit-only build path (require_engine=False). The earlier
+    version inherited _MINIMAL_CONFIG's inference_method and so missed the
+    build_adapter regression that CI caught.
     """
+    import math
+
     import pandas as pd
 
     cfg_path = tmp_path / "cfg.yaml"
     d = dict(_MINIMAL_CONFIG)
     d["config_name"] = "pl_run_test"
     d["metrics"] = "log_likelihood"   # required by the param-learning command
+    # Drop inference_method from every baseline — PL specs declare none.
+    d["baselines"] = [
+        {k: v for k, v in b.items() if k != "inference_method"}
+        for b in _MINIMAL_CONFIG["baselines"]
+    ]
     cfg_path.write_text(yaml.safe_dump(d))
 
     result = subprocess.run(
@@ -160,7 +172,24 @@ def test_cli_param_learning_produces_parquet(tmp_path: Path) -> None:
     )
 
     df = pd.read_parquet(parquet_files[0])
-    assert (df["metric"] == "log_likelihood").any(), (
+    ll = df[df["metric"] == "log_likelihood"]
+    assert not ll.empty, (
         f"no log_likelihood rows in parquet; metrics present: "
         f"{sorted(df['metric'].unique())}"
+    )
+
+    # NBN implements score_data -> at least one ok row with a finite value.
+    nbn_ok = ll[(ll["baseline"].str.startswith("nbn-")) & (ll["status"] == "ok")]
+    assert not nbn_ok.empty, (
+        f"expected an NBN log_likelihood ok row; got:\n"
+        f"{ll[['baseline', 'status', 'value']].to_string(index=False)}"
+    )
+    assert all(math.isfinite(v) for v in nbn_ok["value"]), nbn_ok["value"].tolist()
+
+    # pgmpy does not implement score_data yet -> not_supported.
+    pgmpy_rows = ll[ll["baseline"].str.startswith("pgmpy-")]
+    assert not pgmpy_rows.empty
+    assert (pgmpy_rows["status"] == "not_supported").all(), (
+        f"pgmpy should be not_supported in PR 1; got:\n"
+        f"{pgmpy_rows[['baseline', 'status']].to_string(index=False)}"
     )

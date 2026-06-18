@@ -135,7 +135,10 @@ def _ctx(*, batch_sizes, adapter, n_queries=16, per_cell_timeout_s=1e9,
 def patch_build_adapter(monkeypatch):
     """Return a helper that pins build_adapter to a given fake instance."""
     def _install(adapter):
-        monkeypatch.setattr(config_mod, "build_adapter", lambda spec: adapter)
+        # Accept the keyword-only require_engine the cell worker now passes (#109).
+        monkeypatch.setattr(
+            config_mod, "build_adapter", lambda spec, **_kw: adapter,
+        )
         return adapter
     return _install
 

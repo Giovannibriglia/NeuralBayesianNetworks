@@ -126,7 +126,7 @@ class RunnerConfig:
     batch_sizes: list[int] | None = None
 
 
-def build_adapter(spec: BaselineSpec) -> Any:
+def build_adapter(spec: BaselineSpec, *, require_engine: bool = False) -> Any:
     """Dispatch BaselineSpec → v0.13 adapter instance.
 
     Instantiates a fresh adapter for each cell.  Adapters are stateful
@@ -136,7 +136,18 @@ def build_adapter(spec: BaselineSpec) -> Any:
     ----------
     spec:
         BaselineSpec with at minimum ``library``, ``mechanism``,
-        ``param_method``, and (for most libraries) ``inference_method``.
+        ``param_method``, and (for query/inference) ``inference_method``.
+    require_engine:
+        Whether ``inference_method`` is mandatory. ``True`` on the
+        inference (query) path: a spec missing ``inference_method`` is a
+        misconfiguration and is rejected early, here, before any fit (the
+        long-standing safety). ``False`` (default) on the parameter-learning
+        / fit-only path (#109): the adapter is queried by nobody — it is fit
+        and scored via ``score_data`` — so it is constructed WITHOUT an
+        inference engine and carries an engine-less name (``"nbn-cat"``,
+        ``"pgmpy-mle"`` …, the keys the applicability table already uses).
+        ``False`` is also correct for the runner's name/probe call sites,
+        which never query.
 
     Returns
     -------
@@ -146,7 +157,8 @@ def build_adapter(spec: BaselineSpec) -> Any:
     Raises
     ------
     ValueError
-        Unknown ``library`` or required field is None.
+        Unknown ``library``, or ``inference_method`` is None while
+        ``require_engine`` is True.
     """
     from benchmarking.adapters import NBNAdapter, PgmpyAdapter, PomegranateAdapter, PyroAdapter
 
@@ -157,26 +169,27 @@ def build_adapter(spec: BaselineSpec) -> Any:
     device = spec.device
     kw = spec.extra_kwargs
 
-    if lib == "nbn":
-        if spec.inference_method is None:
+    def _need_engine(adapter_name: str) -> None:
+        if require_engine and spec.inference_method is None:
             raise ValueError(
-                f"NBNAdapter requires inference_method; got None in spec {spec!r}"
+                f"{adapter_name} requires inference_method on the inference "
+                f"path; got None in spec {spec!r}"
             )
+
+    if lib == "nbn":
+        _need_engine("NBNAdapter")
         return NBNAdapter(
             mechanism=spec.mechanism,
-            engine=spec.inference_method,
+            engine=spec.inference_method,   # None -> fit-only, engine-less
             device=device,
             **kw,
         )
 
     if lib == "pgmpy":
-        if spec.inference_method is None:
-            raise ValueError(
-                f"PgmpyAdapter requires inference_method; got None in spec {spec!r}"
-            )
+        _need_engine("PgmpyAdapter")
         return PgmpyAdapter(
             param_method=spec.param_method,
-            inference_method=spec.inference_method,
+            inference_method=spec.inference_method,   # None -> fit-only
             device=device,
             **kw,
         )
@@ -185,13 +198,10 @@ def build_adapter(spec: BaselineSpec) -> Any:
         return PomegranateAdapter(device=device, **kw)
 
     if lib == "pyro":
-        if spec.inference_method is None:
-            raise ValueError(
-                f"PyroAdapter requires inference_method; got None in spec {spec!r}"
-            )
+        _need_engine("PyroAdapter")
         return PyroAdapter(
             mechanism=spec.mechanism,
-            inference_method=spec.inference_method,
+            inference_method=spec.inference_method,   # None -> fit-only
             device=device,
             **kw,
         )

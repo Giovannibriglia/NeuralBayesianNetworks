@@ -109,7 +109,7 @@ class NBNAdapter:
     def __init__(
         self,
         mechanism: str,
-        engine: str,
+        engine: str | None,
         device: str | None = None,
         n_samples: int = 1024,
         **kwargs: Any,
@@ -119,7 +119,10 @@ class NBNAdapter:
                 f"Unknown mechanism {mechanism!r}. "
                 f"Valid: {sorted(_DISCRETE_MECH)}"
             )
-        if engine not in _ENGINE_SPEC:
+        # engine=None is the fit-only / parameter-learning construction (#109):
+        # the adapter is fit and scored via score_data, never queried, so it
+        # carries no inference engine and an engine-less name (e.g. "nbn-cat").
+        if engine is not None and engine not in _ENGINE_SPEC:
             raise ValueError(
                 f"Unknown engine {engine!r}. Valid: {sorted(_ENGINE_SPEC)}"
             )
@@ -128,7 +131,10 @@ class NBNAdapter:
         # None / "auto" -> cuda-if-available-else-cpu; concrete passes through.
         self.device = torch.device(resolve_device(device))
         self.n_samples = int(n_samples)
-        self.name = f"nbn-{mechanism}-{engine}"
+        self.name = (
+            f"nbn-{mechanism}-{engine}" if engine is not None
+            else f"nbn-{mechanism}"
+        )
 
         # State populated by fit()
         self.model: Any | None = None
@@ -274,6 +280,15 @@ class NBNAdapter:
         downstream. NEVER shared across inference methods — each baseline builds
         its own engine (and, for ais/avi, trains its own proposal).
         """
+        # Fit-only / parameter-learning construction (#109): no inference
+        # engine was requested (engine=None), so there is nothing to attach.
+        # fit() and load_base_and_attach() both reach here; score_data needs
+        # only self.model, and query()/query_batch() are never called.
+        if self.engine is None:
+            self._engine_obj = None
+            self.proposal_used = None
+            return
+
         from nbn.inference.amortized_is import AmortizedISEngine
         from nbn.inference.amortized_vi import AmortizedVIEngine
         from nbn.inference.hybrid import HybridRouter
