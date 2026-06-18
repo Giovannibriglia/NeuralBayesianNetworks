@@ -46,6 +46,64 @@ _VALID_PARAM_METHODS = frozenset({"mle", "bayes", "lg"})
 _VALID_INFERENCE_METHODS = frozenset({"ve", "predict"})
 
 
+def _state_axis_index(var: str, states: list, card: int) -> list[int]:
+    """Map declared class values ``0..card-1`` to their pgmpy axis positions.
+
+    ``states`` is ``cpd.state_names[var]`` (the axis order). Returns a list
+    ``idx`` such that ``idx[v]`` is the axis position of declared value ``v``.
+    Fails loudly (the failure mode that would silently corrupt every pgmpy
+    recovery number) if a state is not an integer covering ``[0, card)``.
+    """
+    import numpy as np
+
+    pos: dict[int, int] = {}
+    for axis_p, s in enumerate(states):
+        if not isinstance(s, (int, np.integer)) or not (0 <= int(s) < card):
+            raise ValueError(
+                f"node {var!r}: state {s!r} is not an integer in [0, {card})"
+            )
+        pos[int(s)] = axis_p
+    if set(pos) != set(range(card)):
+        raise ValueError(
+            f"node {var!r}: learned states {sorted(pos)} do not cover "
+            f"[0, {card}) — expected the full declared grid"
+        )
+    return [pos[v] for v in range(card)]
+
+
+def _tabular_cpd_to_canonical(cpd, child: str, k: int, variables: dict) -> torch.Tensor:
+    """Reshape+permute a pgmpy TabularCPD to the canonical [n_configs, K] layout.
+
+    ``cpd.values`` is multi-dim ``[K, *parent_cards]`` with axis 0 = child and
+    axes 1.. = parents in ``cpd.variables[1:]`` order (each axis ordered by
+    ``cpd.state_names``). We transpose the parent axes into canonical lex order
+    (class axis last), reindex every axis from state position to declared value
+    order, then C-order reshape so the first canonical parent varies SLOWEST.
+    """
+    import numpy as np
+
+    parents_cpd = list(cpd.variables[1:])
+    canon = sorted(parents_cpd)
+    values = np.asarray(cpd.values, dtype=np.float64)
+
+    # Transpose: canonical parent axes first, class axis last.
+    perm = [1 + parents_cpd.index(p) for p in canon] + [0]
+    m = np.transpose(values, perm)  # [*canon_parent_cards(axis order), K(axis order)]
+
+    # Reindex each canonical parent axis to declared 0..card-1 order...
+    for i, p in enumerate(canon):
+        pcard = int(variables[p][1])
+        m = np.take(m, _state_axis_index(p, cpd.state_names[p], pcard), axis=i)
+    # ...and the (last) class axis to declared 0..K-1 order.
+    m = np.take(m, _state_axis_index(child, cpd.state_names[child], k), axis=m.ndim - 1)
+
+    n_configs = 1
+    for p in canon:
+        n_configs *= int(variables[p][1])
+    flat = np.ascontiguousarray(m).reshape(n_configs, k)
+    return torch.from_numpy(flat).to(torch.float32)
+
+
 class PgmpyAdapter:
     """Stateful pgmpy adapter implementing the v0.13 BaselineAdapter protocol.
 
@@ -69,6 +127,15 @@ class PgmpyAdapter:
     # v0.14 (#148) §5.6: sequential-only (query_batch is the default
     # helper) — the speed-benchmark sweep runs this once at batch_size=1.
     supports_batched_queries: bool = False
+
+    # Parameter-recovery capability (#109 PR 3): the mle/bayes paths expose
+    # their learned discrete CPTs via extract_learned_cpts. Class flag = True
+    # means this adapter class implements CPT extraction. Per-cell applicability
+    # (the continuous lg path returns {} → not_applicable via the measurement's
+    # family gate) is independent of the flag. Precedent for PR 4/5: use
+    # flag=False ONLY when the adapter literally cannot extract; otherwise use
+    # flag=True and let the cell-level gate decide.
+    supports_param_recovery: bool = True
 
     def __init__(
         self,
@@ -420,3 +487,88 @@ class PgmpyAdapter:
         if entry is None:
             return False
         return family in entry.families
+
+    def extract_learned_cpts(self) -> dict[str, torch.Tensor]:
+        """Learned discrete CPTs in the canonical layout (param-recovery, #109).
+
+        Returns ``{node: probs[n_parent_configs, K]}`` for each discrete node
+        with all-discrete parents, in the canonical layout the recovery metric
+        compares cell-by-cell against the true model (parents sorted lex,
+        configs row-major with the first parent slowest, classes ``0..K-1``,
+        each row a distribution). The lg (continuous) path returns ``{}`` — its
+        cells are ``not_applicable`` via the measurement's family gate.
+
+        Why RE-ESTIMATE instead of reading the stored CPDs? pgmpy infers
+        ``state_names`` from the observed data, so a globally-unobserved state
+        is dropped from the fitted grid. Padding zeros for such states would
+        CORRUPT the bayes path (BDeu assigns prior mass to unseen states by
+        design, not zero). Re-estimating with the DECLARED ``state_names``
+        yields the full declared grid identically for mle (unseen class → 0,
+        unseen parent config → uniform) and bayes (every cell gets prior mass).
+        The re-estimation is deterministic (closed-form counting, no RNG) and
+        agrees with ``self._model`` on every observed state — the stored model
+        and the inference path are left untouched.
+
+        The estimator family matches the original fit (BayesianEstimator for
+        ``bayes``, MaximumLikelihoodEstimator otherwise); the extraction logic
+        below does NOT branch on the method — both produce TabularCPDs read
+        identically. Only mle can yield ``+inf`` recovery KL (hard zeros);
+        bayes never zeros.
+
+        Raises ValueError (→ measurement ``status="error"``) if any learned
+        state name is not an integer covering ``[0, K)`` — silent mis-alignment
+        is the failure mode that would corrupt every pgmpy recovery number.
+        """
+        if self._kind != "discrete":
+            return {}
+        if self.problem is None:
+            raise RuntimeError(
+                "Adapter not fitted. Call fit() before extract_learned_cpts()."
+            )
+        import pandas as pd
+        from pgmpy.models import DiscreteBayesianNetwork
+
+        variables = self.problem.variables
+        df = pd.DataFrame({
+            k: v.cpu().long().reshape(-1).numpy()
+            for k, v in self.problem.train_data.items()
+        })
+        bn = DiscreteBayesianNetwork(self.problem.dag)
+        # Re-seed isolated nodes exactly as _fit_discrete does, so every
+        # declared node gets a (marginal) CPD.
+        for node in variables:
+            if node not in bn.nodes():
+                bn.add_node(node)
+
+        # Declared full grid: forces pgmpy to span 0..card-1 for every discrete
+        # node regardless of what the training data happened to observe.
+        state_names = {
+            n: list(range(c)) for n, (kind, c) in variables.items()
+            if kind == "discrete"
+        }
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            if self.param_method == "bayes":
+                from pgmpy.estimators import BayesianEstimator
+
+                cpds = BayesianEstimator(
+                    model=bn, data=df, state_names=state_names,
+                ).get_parameters()
+            else:
+                from pgmpy.estimators import MaximumLikelihoodEstimator
+
+                cpds = MaximumLikelihoodEstimator(
+                    model=bn, data=df, state_names=state_names,
+                ).get_parameters()
+
+        cpd_by_node = {cpd.variable: cpd for cpd in cpds}
+        out: dict[str, torch.Tensor] = {}
+        for node, (kind, card) in variables.items():
+            if kind != "discrete":
+                continue
+            cpd = cpd_by_node[node]
+            parents = list(cpd.variables[1:])
+            if any(variables[p][0] != "discrete" for p in parents):
+                continue  # discrete node with a continuous parent — omit
+            out[node] = _tabular_cpd_to_canonical(cpd, node, int(card), variables)
+        return out
