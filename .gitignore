@@ -27,6 +27,9 @@ docs/_build/
 .ipynb_checkpoints/
 *.ipynb_checkpoints
 ScalabilityImages
+# Local paper-prep figure script (writes to the gitignored ScalabilityImages/);
+# root-level one-off, not part of the benchmarking package.
+make_bottleneck_figures.py
 .idea/
 
 # v0.13 benchmark run outputs — untracked by default; archive lives in benchmarking/results/v0.12_archive/
