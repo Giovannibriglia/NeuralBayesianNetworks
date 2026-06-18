@@ -277,13 +277,15 @@ def load_runner_config(
 
 _SYNTHETIC_SOURCE_KEYS = frozenset({
     "families", "n_nodes_list", "seeds",
-    "n_train", "n_test", "n_reference",
+    "n_train", "n_train_sweep", "n_test", "n_reference",
     "edge_density", "max_in_degree", "cardinality",
     "fraction_continuous", "device",
 })
+# n_train is NOT listed required here — exactly one of n_train / n_train_sweep
+# must be set (learning-curve sweep, #109 PR 6), validated explicitly below.
 _SYNTHETIC_SOURCE_REQUIRED = frozenset({
     "families", "n_nodes_list", "seeds",
-    "n_train", "n_reference",
+    "n_reference",
     "edge_density", "max_in_degree", "cardinality",
     "fraction_continuous",
 })
@@ -309,11 +311,41 @@ def _parse_synthetic_config(src: Any, path: Any) -> SyntheticConfig:
             f"Config {str(path)!r}: source missing required fields: "
             f"{sorted(missing)}."
         )
+
+    # n_train vs n_train_sweep: exactly one (learning-curve sweep, #109 PR 6).
+    has_scalar = "n_train" in src
+    has_sweep = "n_train_sweep" in src
+    if has_scalar and has_sweep:
+        raise ValueError(
+            f"Config {str(path)!r}: source.n_train and source.n_train_sweep "
+            f"are mutually exclusive; set exactly one."
+        )
+    if not has_scalar and not has_sweep:
+        raise ValueError(
+            f"Config {str(path)!r}: source requires exactly one of n_train "
+            f"or n_train_sweep."
+        )
+    n_train_sweep: list[int] | None = None
+    if has_sweep:
+        raw = src["n_train_sweep"]
+        if not isinstance(raw, (list, tuple)) or len(raw) == 0:
+            raise ValueError(
+                f"Config {str(path)!r}: source.n_train_sweep must be a "
+                f"non-empty list of ints, got {raw!r}."
+            )
+        n_train_sweep = [int(v) for v in raw]
+        if any(v < 1 for v in n_train_sweep):
+            raise ValueError(
+                f"Config {str(path)!r}: source.n_train_sweep values must be "
+                f">= 1, got {n_train_sweep}."
+            )
+
     return SyntheticConfig(
         families=list(src["families"]),
         n_nodes_list=[int(n) for n in src["n_nodes_list"]],
         seeds=[int(s) for s in src["seeds"]],
-        n_train=int(src["n_train"]),
+        n_train=int(src["n_train"]) if has_scalar else 10_000,
+        n_train_sweep=n_train_sweep,
         n_test=int(src.get("n_test", 2000)),
         n_reference=int(src["n_reference"]),
         edge_density=float(src["edge_density"]),
@@ -337,6 +369,11 @@ def _parse_bnlearn_config(src: Any, path: Any):
         raise ValueError(
             f"Config {str(path)!r}: 'source' must be a mapping, "
             f"got {type(src).__name__}."
+        )
+    if "n_train_sweep" in src:
+        raise ValueError(
+            f"Config {str(path)!r}: n_train_sweep is synthetic-only; bnlearn "
+            f"networks use fixed real-world n_train and do not accept this field."
         )
     unknown = set(src.keys()) - _BNLEARN_SOURCE_KEYS
     if unknown:

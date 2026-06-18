@@ -1,0 +1,47 @@
+# =============================================================================
+# synthetic learning-curves smoke — parameter recovery vs n_train (#109 PR 6).
+# =============================================================================
+#
+# Sweeps the TRAINING-SET SIZE (source.n_train_sweep) as an extra problem axis:
+# one fit per (family, n_nodes, seed, n_train) cell, emitting the standard
+# parameter-learning metrics (log_likelihood, param_recovery_tv,
+# param_recovery_kl) once per cell. Each n_train carries its own fit — there is
+# NO fit-cache reuse across n_train (unlike the cell-internal batch_sizes sweep).
+#
+# The (seed, n_nodes, family) fix the true_model; only the sampled train_data
+# size varies — so this is a well-posed learning curve (same recovery target,
+# growing data). n_train_sweep is mutually exclusive with the scalar n_train and
+# is synthetic-only.
+#
+# Run with: nbn-bench param-learning --config <this file>
+# Expected pattern: unsmoothed-MLE baselines (pgmpy-mle, pomegranate) show +inf
+# recovery KL at the smallest n_train, trending finite as configs fill in;
+# smoothed baselines (pgmpy-bayes, pyro, nbn-cat) finite throughout with TV/KL
+# decreasing as n_train grows.
+version: "v0.13"
+benchmark: synthetic
+config_name: learning_curves_smoke
+metrics: log_likelihood
+selector: uniform_random
+
+source:
+  families: [discrete]
+  n_nodes_list: [6]
+  seeds: [0]
+  n_train_sweep: [30, 100, 300, 1000]
+  n_test: 512
+  n_reference: 5000
+  edge_density: 0.30
+  max_in_degree: 2
+  cardinality: 4
+  fraction_continuous: 0.0
+
+baselines:
+  - {library: pgmpy,       mechanism: discrete, param_method: mle}
+  - {library: pgmpy,       mechanism: discrete, param_method: bayes}
+  - {library: pomegranate, mechanism: discrete, param_method: mle}
+  - {library: pyro,        mechanism: empirical, param_method: mle}
+  - {library: nbn,         mechanism: cat,      param_method: mle}
+
+n_queries_per_cell: 2
+per_cell_timeout_s: 120.0

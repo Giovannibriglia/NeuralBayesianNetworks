@@ -68,6 +68,15 @@ class CellResult:
     # lacking this column fall back to n_nodes_lookup in the paper figures.
     n_nodes: int | None = None
 
+    # Problem-level metadata: training-set size (rows in problem.train_data).
+    # The swept axis of the learning-curves benchmark (#109 PR 6,
+    # source.n_train_sweep): with a sweep, otherwise-identical cells differ ONLY
+    # here, so this column is what distinguishes (and plots) the curve. Injected
+    # once per cell by the runner (parallel to n_nodes); constant for non-sweep
+    # configs. None for legacy rows / fixtures predating this column. Additive —
+    # downstream readers select columns by name.
+    n_train: int | None = None
+
     # Device the baseline actually ran on ("cpu" | "cuda" | "cuda:N").
     # Stamped per cell by the worker from the adapter's resolved device
     # (cell_worker._emit); error/sentinel rows emitted before an adapter

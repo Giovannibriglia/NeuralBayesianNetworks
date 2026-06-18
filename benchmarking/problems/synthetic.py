@@ -81,6 +81,11 @@ class SyntheticConfig:
     cardinality: int = 4
     fraction_continuous: float = 0.5
     n_train: int = 10_000
+    # n_train sensitivity sweep (#109 PR 6, learning curves): when set, the
+    # source iterates these training-set sizes as an extra problem axis (one
+    # fit per value), mutually exclusive with the scalar n_train. None = no
+    # sweep (every existing config). yaml_config validates exactly one is set.
+    n_train_sweep: list[int] | None = None
     n_test: int = 2_000
     n_reference: int = 50_000
     device: str = "cpu"
@@ -127,15 +132,32 @@ class SyntheticProblemSource:
         Iteration order: outer → families, middle → n_nodes_list,
         inner → seeds.  This matches the v0.12 runner's loop nesting.
 
+        n_train sensitivity sweep (#109 PR 6): when ``cfg.n_train_sweep`` is set,
+        an INNERMOST axis iterates the training-set sizes, yielding one problem
+        per ``(family, n_nodes, seed, n_train)`` — each its own fit downstream
+        (the runner fits once per problem; there is no fit-cache reuse across
+        n_train, unlike the cell-internal ``batch_sizes`` sweep). The INVARIANT
+        that makes a learning curve well-posed: ``(seed, n_nodes, family)``
+        alone determine the ``true_model`` — ``make_synthetic_bn`` builds the
+        DAG + CPTs from the seeded RNG *before* drawing samples, so n_train only
+        varies how many training rows are sampled, never the ground truth.
+        (Verified empirically: same seed, n_train=50 vs 5000 → bit-identical true
+        CPTs and DAG.) So across a sweep the recovery target is fixed and only
+        the data grows — "how does method M's recovery improve with more data on
+        THIS model?".
+
         Parameters
         ----------
         cfg:
             A ``SyntheticConfig`` instance.
         """
+        n_train_values = cfg.n_train_sweep or [cfg.n_train]
         for family in cfg.families:
             for n_nodes in cfg.n_nodes_list:
                 for seed in cfg.seeds:
-                    yield self._make_problem(cfg, family, n_nodes, seed)
+                    for n_train in n_train_values:
+                        yield self._make_problem(
+                            cfg, family, n_nodes, seed, n_train=n_train)
 
     # -----------------------------------------------------------------------
     # Internal helpers
@@ -147,8 +169,14 @@ class SyntheticProblemSource:
         family: str,
         n_nodes: int,
         seed: int,
+        n_train: int | None = None,
     ) -> BenchmarkProblem:
-        """Generate and adapt one synthetic BN into a ``BenchmarkProblem``."""
+        """Generate and adapt one synthetic BN into a ``BenchmarkProblem``.
+
+        ``n_train`` overrides ``cfg.n_train`` for the learning-curve sweep
+        (#109 PR 6); the seed/n_nodes/family still fix the true_model, so only
+        the sampled training-set size changes.
+        """
         sbn = make_synthetic_bn(
             family=family,
             n_nodes=n_nodes,
@@ -156,7 +184,7 @@ class SyntheticProblemSource:
             max_in_degree=cfg.max_in_degree,
             cardinality=cfg.cardinality,
             fraction_continuous=cfg.fraction_continuous,
-            n_train=cfg.n_train,
+            n_train=cfg.n_train if n_train is None else int(n_train),
             n_test=cfg.n_test,
             n_reference=cfg.n_reference,
             seed=seed,
