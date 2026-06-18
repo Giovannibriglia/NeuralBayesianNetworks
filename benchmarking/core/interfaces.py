@@ -155,6 +155,43 @@ class BaselineAdapter(Protocol):
     ``status="not_supported"`` and ``score_data`` is never called on
     them. NBNAdapter is the first implementer (#109 PR 1); pgmpy /
     pomegranate / pyro scoring land in later PRs of the series.
+
+    Optional capability — parameter recovery (#109 PR 2)
+    ----------------------------------------------------
+    Adapters MAY additionally expose their LEARNED discrete CPTs so the PL
+    benchmark can measure how well parameter learning recovers the true
+    CPDs (``param_recovery_tv`` headline, ``param_recovery_kl`` companion).
+    Same OPT-IN / non-structural design as scoring above (mirrors
+    ``supports_batched_queries``). An adapter opts in by declaring BOTH, as
+    concrete-class members:
+
+        supports_param_recovery: bool = True
+
+        def extract_learned_cpts(self) -> dict[str, torch.Tensor]:
+            '''Learned discrete CPTs, one entry per DISCRETE node whose
+            parents are all discrete. Each value is a dense probability
+            tensor of shape ``[n_parent_configs, K]`` in a CANONICAL,
+            adapter-internal-order-INDEPENDENT layout so tables from any
+            adapter (and the true model) compare cell-by-cell:
+
+              * parents sorted lexicographically by name;
+              * parent configs in row-major order (first parent slowest),
+                each parent ranging over ``0..card-1``;
+              * columns are classes ``0..K-1``.
+
+            Each row is a proper distribution (sums to 1). Nodes that are
+            continuous, or discrete-with-continuous-parents, are OMITTED —
+            recovery is a fully-discrete-network metric.'''
+
+    ``ParamLearningMeasurement`` gates on ``getattr(adapter,
+    "supports_param_recovery", False)``: adapters without it get
+    ``param_recovery_*`` rows with ``status="not_supported"`` and
+    ``extract_learned_cpts`` is never called. Even when supported, the
+    rows are ``status="not_applicable"`` for non-fully-discrete problems
+    (continuous / hybrid, or a problem with no NBN ``true_model``). The
+    measurement extracts the TRUE CPTs from ``problem.true_model`` with the
+    SAME canonical layout, so the two align. NBNAdapter is the first
+    implementer (#109 PR 2); pgmpy / pomegranate / pyro land in later PRs.
     """
 
     name: str  # e.g., "nbn-cat-lw", "pgmpy-mle-ve"
