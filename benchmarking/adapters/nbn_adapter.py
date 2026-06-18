@@ -99,6 +99,13 @@ class NBNAdapter:
     # real override from a sequential opt-in wrapper.)
     supports_batched_queries: bool = True
 
+    # Parameter-learning capability (#109): this adapter implements score_data
+    # (held-out joint log-likelihood over self.model), so ParamLearningMeasurement
+    # scores it instead of emitting status="not_supported". Concrete-class flag,
+    # getattr-gated by the measurement — mirrors supports_batched_queries above
+    # and the opt-in contract documented on the BaselineAdapter protocol.
+    supports_scoring: bool = True
+
     def __init__(
         self,
         mechanism: str,
@@ -517,3 +524,68 @@ class NBNAdapter:
         if entry is None:
             return False
         return family in entry.families
+
+    def score_data(self, test_data: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Per-row joint log-prob ``[B]`` of held-out rows (param-learning, #109).
+
+        Assembles the joint log-likelihood the same way ``nbn.learning.fit``
+        forms its training loss: walk the DAG in topological order and sum each
+        node's conditional ``mechanism.log_prob(x, parents)`` (the 2-arg
+        ``(x, parents)`` overload — NOT the 1-arg ``log_prob(value)`` some
+        mechanisms also expose). Per the locked convention (#109): the per-row
+        joint is the SUM over nodes; ``ParamLearningMeasurement`` then takes the
+        MEAN over rows via ``metrics.log_likelihood``. Zero-probability handling
+        is left to each mechanism's source-of-truth floor (e.g. the categorical
+        CPT clamps at ``log(1e-12)``); no second clamp here.
+
+        ``test_data`` columns are moved onto the model's device first (mirrors
+        ``fit``). ``pack_parents`` gathers each node's parent columns into a
+        ``[B, D_pa]`` tensor (``None`` for roots), exactly as the fit loop does.
+
+        Discrete node values are guarded against the declared cardinality before
+        scoring, so an out-of-support test row raises a clean ``ValueError``
+        (classified ``status="error"`` by the measurement) rather than an opaque
+        index error from the categorical CPT lookup. Topological order
+        guarantees a node is validated before any child uses it as a parent, so
+        out-of-range discrete parents are caught too.
+
+        Returns
+        -------
+        torch.Tensor
+            Shape ``[B]`` — one joint log-probability per test row.
+        """
+        if self.model is None:
+            raise RuntimeError(
+                "Adapter not fitted. Call fit() before score_data()."
+            )
+        from nbn.utils.batching import pack_parents
+
+        # Move held-out columns onto the model's device (mirrors fit()).
+        data = {
+            k: torch.as_tensor(v).to(self.device) for k, v in test_data.items()
+        }
+
+        node_lps: list[torch.Tensor] = []
+        for node in self.model.dag.topological_order():
+            mech = self.model.mechanisms[node]
+            x = data[node]
+
+            # Guard discrete values against the declared cardinality.
+            var = self.model.variables.get(node)
+            if var is not None and var.is_discrete and var.cardinality is not None:
+                k = int(var.cardinality)
+                idx = x.long()
+                if idx.numel() and (int(idx.min()) < 0 or int(idx.max()) >= k):
+                    raise ValueError(
+                        f"score_data: discrete node {node!r} has a test value "
+                        f"out of range [0, {k}); cannot score out-of-support rows."
+                    )
+
+            parents = self.model.dag.parents(node)
+            pa_tensor = pack_parents(data, parents)   # [B, D_pa] or None
+            lp = mech.log_prob(x, pa_tensor)          # [B]
+            node_lps.append(lp.reshape(-1))
+
+        # Per-row joint = sum over nodes -> [B]. Detached + on CPU to match the
+        # query() path's return convention (the metric only needs the values).
+        return torch.stack(node_lps, dim=0).sum(dim=0).detach().cpu()
