@@ -1,5 +1,5 @@
 # =============================================================================
-# synthetic parameter-learning smoke (param-learning measurement stubbed; see #109).
+# synthetic parameter-learning smoke (held-out joint log-likelihood; #109).
 # =============================================================================
 #
 # Schema reference (benchmarking/core/yaml_config.py):
@@ -8,7 +8,8 @@
 #   version                   required, must be "v0.13"
 #   benchmark                 required, "bnlearn" | "synthetic"
 #   config_name               required, used as the output-artifact prefix
-#   metrics                   default: "all"  ("all" | "timing")
+#   metrics                   default: "all"  ("all" | "timing");
+#                             param-learning configs MUST set "log_likelihood"
 #   selector                  default: "uniform_random"
 #                             ("uniform_random" | {type: topological, ...}
 #                              | {type: heaviest_by_role, ...})
@@ -38,14 +39,15 @@
 # =============================================================================
 
 # Smoke config for parameter learning.
-# NOTE: parameter-learning measurement is not yet implemented in v0.13.
-# This config is syntactically valid and will load cleanly, but the
-# param-learning CLI subcommand is stubbed pending a ParamLearningMeasurement.
-# See issue #109 for status.
+# Run with: nbn-bench param-learning --config <this file>
+# The param-learning command scores each fitted model's held-out joint
+# log-likelihood on problem.test_data (ParamLearningMeasurement, #109) and
+# requires metrics: log_likelihood. Adapters that do not implement scoring
+# (supports_scoring unset) are reported status="not_supported".
 version: "v0.13"
 benchmark: synthetic
 config_name: param_learning_smoke
-metrics: all
+metrics: log_likelihood
 selector: uniform_random
 
 source:

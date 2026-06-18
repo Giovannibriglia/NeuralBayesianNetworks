@@ -94,13 +94,48 @@ def test_inference_config_loads_cleanly(cfg_name: str, tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("cfg_name", _PARAM_CONFIGS)
 def test_param_learning_config_loads_cleanly(cfg_name: str, tmp_path: Path) -> None:
-    """Each param-learning config is syntactically valid for v0.13."""
+    """Each param-learning config loads via the PL command path (#109).
+
+    PL configs declare ``metrics: log_likelihood`` and are loaded with a
+    ``measurement_override`` (what the ``param-learning`` command supplies);
+    the override is authoritative and the config carries it through.
+    """
+    from benchmarking.measurements import ParamLearningMeasurement
+
     cfg = load_runner_config(
         _CONFIG_DIR / cfg_name,
         jsonl_path=tmp_path / "out.jsonl",
+        measurement_override=ParamLearningMeasurement(),
     )
     assert cfg.benchmark == "synthetic"
     assert cfg.baselines
+    assert type(cfg.measurement).__name__ == "ParamLearningMeasurement"
+
+
+def test_param_learning_metrics_field_guardrail(tmp_path: Path) -> None:
+    """metrics='log_likelihood' is valid ONLY under the PL override path.
+
+    Locks the structural-dispatch contract (#109): the metrics field cannot
+    swap command behavior. Without an override (the inference path), a
+    'log_likelihood' metrics field is rejected; with an override, a non-
+    'log_likelihood' metrics field is rejected.
+    """
+    from benchmarking.measurements import ParamLearningMeasurement
+
+    pl_cfg = _CONFIG_DIR / "synthetic/smoke_tests/parameter_learning_smoke.yaml"
+
+    # Inference path (no override) must reject metrics=log_likelihood.
+    with pytest.raises(ValueError, match="unknown metrics"):
+        load_runner_config(pl_cfg, jsonl_path=tmp_path / "a.jsonl")
+
+    # PL override path requires the config to declare log_likelihood: an
+    # inference config (metrics=all) passed with an override is rejected.
+    inf_cfg = _CONFIG_DIR / "synthetic/smoke_tests/inference_smoke.yaml"
+    with pytest.raises(ValueError, match="metrics='log_likelihood'"):
+        load_runner_config(
+            inf_cfg, jsonl_path=tmp_path / "b.jsonl",
+            measurement_override=ParamLearningMeasurement(),
+        )
 
 
 # ---------------------------------------------------------------------------

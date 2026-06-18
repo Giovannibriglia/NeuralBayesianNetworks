@@ -139,18 +139,80 @@ def _run_cells(cfg) -> None:
         pass
 
 
+def _execute_run(cfg, *, what: str = "inference") -> int:
+    """Drive a configured run to its parquet artifact.
+
+    Shared by the ``inference`` and ``param-learning`` commands — the only
+    difference between them is how ``cfg`` is built (which Measurement it
+    carries); everything downstream (warning suppression, run.log, cell loop,
+    JSONL → parquet) is identical. Returns the process exit code.
+
+    ``what`` names the command for the crash-log line only, so each command's
+    run.log message stays accurate ("Unhandled exception during <what> run").
+    """
+    # Console noise from dependencies stays out of the terminal; the subprocess
+    # re-emits it to stderr -> captured to run.log per cell.
+    _suppress_library_warnings()
+
+    # The run.log lives in the results dir alongside the parquet and captures
+    # the full INFO stream (incl. per-cell subprocess stderr), regardless of the
+    # console level. Detached in `finally` so it closes even on crash.
+    results_dir = cfg.jsonl_path.parent
+    parquet_path = results_dir / f"{cfg.config_name}_metrics.parquet"
+    log_handler = _attach_run_log(results_dir)
+    try:
+        # ── cell loop (v0.14: sweeps batch_sizes when configured) ──────────
+        _run_cells(cfg)
+
+        # ── post-run pipeline ──────────────────────────────────────────────
+        # JSONL is already on disk from the runner; convert it to the parquet
+        # that is the single canonical artifact of a run. Paper figures + LaTeX
+        # tables are produced ON DEMAND by the separate `nbn-bench plot
+        # <run-dir>` command (benchmarking/_paper_figures), never auto-generated
+        # here.
+        rc = 0
+        try:
+            from benchmarking.core.output import jsonl_to_parquet
+            jsonl_to_parquet(cfg.jsonl_path, parquet_path)
+            logger.info("Wrote parquet: %s", parquet_path)
+        except Exception as exc:
+            logger.error("Post-run step (jsonl_to_parquet) failed: %s", exc)
+            rc = 1
+        return rc
+    except Exception:
+        # Route any uncaught exception to run.log *before* the finally block
+        # detaches the FileHandler. Python's default excepthook only fires at
+        # interpreter top-level — after this finally runs — so a traceback would
+        # otherwise miss run.log entirely (the "silent stop" seen 2026-06-04).
+        # Re-raised so the exit code / stderr traceback are unchanged.
+        logger.critical("Unhandled exception during %s run", what,
+                        exc_info=True)
+        raise
+    finally:
+        logging.getLogger().removeHandler(log_handler)
+        log_handler.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     _setup_console_logging(args.verbose, inference=(args.cmd == "inference"))
 
     if args.cmd == "param-learning":
-        print(
-            "param-learning is not yet implemented in v0.13.\n"
-            "The parameter-learning Measurement is deferred to a later phase.\n"
-            "See issue #109 for status. Use `nbn-bench inference` for now.",
-            file=sys.stderr,
+        from benchmarking.core.yaml_config import load_runner_config
+        from benchmarking.measurements import ParamLearningMeasurement
+
+        # The param-learning command constructs and injects the PL measurement
+        # STRUCTURALLY and un-bypassably (#109): load_runner_config uses this
+        # override regardless of the config's `metrics` field, which it instead
+        # validates must equal "log_likelihood". The metrics field cannot swap
+        # command behavior — inference never passes an override.
+        device = args.device
+        cfg = load_runner_config(
+            args.config,
+            device_override=device,
+            measurement_override=ParamLearningMeasurement(),
         )
-        return 0
+        return _execute_run(cfg, what="param-learning")
 
     if args.cmd == "plot":
         from pathlib import Path
@@ -172,55 +234,7 @@ def main(argv: list[str] | None = None) -> int:
         # build_adapter — so every nbn baseline silently ran on CPU.)
         device = args.device
         cfg = load_runner_config(args.config, device_override=device)
-
-        # Console noise from dependencies stays out of the terminal; the
-        # subprocess re-emits it to stderr -> captured to run.log per cell.
-        _suppress_library_warnings()
-
-        # The run.log lives in the results dir alongside the parquet and
-        # captures the full INFO stream (incl. per-cell subprocess stderr),
-        # regardless of the console level. Detached in `finally` so it closes
-        # even on crash.
-        results_dir = cfg.jsonl_path.parent
-        config_name = cfg.config_name
-        parquet_path = results_dir / f"{config_name}_metrics.parquet"
-        log_handler = _attach_run_log(results_dir)
-        try:
-            # ── cell loop (v0.14: sweeps batch_sizes when configured) ──────
-            _run_cells(cfg)
-
-            # ── post-run pipeline ──────────────────────────────────────────
-            # JSONL is already on disk from the runner; convert it to the
-            # parquet that is the single canonical artifact of a run. Paper
-            # figures + LaTeX tables are produced ON DEMAND by the separate
-            # `nbn-bench plot <run-dir>` command (benchmarking/_paper_figures),
-            # never auto-generated here -- the old post-run figures/ + tables/
-            # were stale (old-schema) and have been removed (v0.14).
-            rc = 0
-
-            # JSONL → parquet
-            try:
-                from benchmarking.core.output import jsonl_to_parquet
-                jsonl_to_parquet(cfg.jsonl_path, parquet_path)
-                logger.info("Wrote parquet: %s", parquet_path)
-            except Exception as exc:
-                logger.error("Post-run step (jsonl_to_parquet) failed: %s", exc)
-                rc = 1
-
-            return rc
-        except Exception:
-            # Route any uncaught exception to run.log *before* the finally
-            # block detaches the FileHandler.  Python's default excepthook
-            # only fires at interpreter top-level — after this finally runs —
-            # so a traceback would otherwise miss run.log entirely, leaving it
-            # ending on its last INFO line (the "silent stop" seen 2026-06-04).
-            # Re-raised so the exit code / stderr traceback are unchanged.
-            logger.critical("Unhandled exception during inference run",
-                            exc_info=True)
-            raise
-        finally:
-            logging.getLogger().removeHandler(log_handler)
-            log_handler.close()
+        return _execute_run(cfg)
 
     raise AssertionError(f"unhandled subcommand {args.cmd!r}")  # pragma: no cover
 

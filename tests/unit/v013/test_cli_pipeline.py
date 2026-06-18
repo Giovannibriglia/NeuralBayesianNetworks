@@ -119,11 +119,21 @@ def test_cli_inference_produces_all_outputs(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
-def test_cli_param_learning_stub_exits_zero(tmp_path: Path) -> None:
-    """param-learning stub must exit 0 (informational, not an error)."""
+def test_cli_param_learning_produces_parquet(tmp_path: Path) -> None:
+    """nbn-bench param-learning runs end-to-end and writes the parquet (#109).
+
+    Un-stubs the former informational stub: the command now constructs
+    ParamLearningMeasurement and drives the same JSONL → parquet pipeline as
+    inference. Asserts a clean exit + a parquet carrying log_likelihood rows.
+    Row STATUS is intentionally not asserted here — NBN scoring lands in the
+    next commit; this pins that the pipe is connected and emits the metric.
+    """
+    import pandas as pd
+
     cfg_path = tmp_path / "cfg.yaml"
     d = dict(_MINIMAL_CONFIG)
-    d["config_name"] = "pl_stub_test"
+    d["config_name"] = "pl_run_test"
+    d["metrics"] = "log_likelihood"   # required by the param-learning command
     cfg_path.write_text(yaml.safe_dump(d))
 
     result = subprocess.run(
@@ -134,10 +144,23 @@ def test_cli_param_learning_stub_exits_zero(tmp_path: Path) -> None:
         cwd=tmp_path,
     )
     assert result.returncode == 0, (
-        f"param-learning stub must exit 0; got {result.returncode}\n"
-        f"stderr: {result.stderr}"
+        f"param-learning exited {result.returncode}\n"
+        f"stdout: {result.stdout[-1000:]}\n"
+        f"stderr: {result.stderr[-1000:]}"
     )
-    assert "not yet implemented" in result.stderr.lower(), (
-        "expected 'not yet implemented' message in stderr; "
-        f"got: {result.stderr!r}"
+
+    results_root = tmp_path / "benchmarking" / "results"
+    run_dirs = list(results_root.glob("benchmark_synthetic_pl_run_test_*"))
+    assert len(run_dirs) == 1, (
+        f"expected exactly 1 run dir, found: {[d.name for d in run_dirs]}"
+    )
+    parquet_files = list(run_dirs[0].glob("*.parquet"))
+    assert parquet_files, (
+        f"no *.parquet in {run_dirs[0]}; stderr: {result.stderr[-500:]}"
+    )
+
+    df = pd.read_parquet(parquet_files[0])
+    assert (df["metric"] == "log_likelihood").any(), (
+        f"no log_likelihood rows in parquet; metrics present: "
+        f"{sorted(df['metric'].unique())}"
     )

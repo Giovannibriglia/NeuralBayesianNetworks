@@ -64,6 +64,7 @@ def load_runner_config(
     *,
     device_override: str | None = None,
     jsonl_path: Path | None = None,
+    measurement_override: Any | None = None,
 ) -> RunnerConfig:
     """Parse a v0.13 YAML config file into a ``RunnerConfig``.
 
@@ -143,7 +144,21 @@ def load_runner_config(
 
     # ── metrics dispatch ─────────────────────────────────────────────────────
     metrics = d.get("metrics", "all")
-    if metrics == "all":
+    if measurement_override is not None:
+        # Parameter-learning command path: the COMMAND supplies the measurement
+        # structurally and authoritatively (ParamLearningMeasurement). The
+        # config's `metrics` field does NOT select behavior here — it is only
+        # validated for hygiene: a PL config must declare `metrics:
+        # log_likelihood`. This keeps the metrics field from being able to swap
+        # command behavior (the inference command never passes an override, so
+        # `metrics: log_likelihood` stays rejected for inference below).
+        if metrics != "log_likelihood":
+            raise ValueError(
+                f"Config {str(path)!r}: parameter-learning requires "
+                f"metrics='log_likelihood', got {metrics!r}."
+            )
+        measurement = measurement_override
+    elif metrics == "all":
         measurement = AccuracyAndTiming()
     elif metrics == "timing":
         measurement = TimingOnly()
