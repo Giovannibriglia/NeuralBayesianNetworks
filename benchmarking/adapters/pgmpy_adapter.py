@@ -71,7 +71,7 @@ def _state_axis_index(var: str, states: list, card: int) -> list[int]:
     return [pos[v] for v in range(card)]
 
 
-def _tabular_cpd_to_canonical(cpd, child: str, k: int, variables: dict) -> "torch.Tensor":
+def _tabular_cpd_to_canonical(cpd, child: str, k: int, variables: dict) -> torch.Tensor:
     """Reshape+permute a pgmpy TabularCPD to the canonical [n_configs, K] layout.
 
     ``cpd.values`` is multi-dim ``[K, *parent_cards]`` with axis 0 = child and
