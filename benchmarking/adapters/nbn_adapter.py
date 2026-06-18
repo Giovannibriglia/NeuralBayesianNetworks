@@ -106,6 +106,13 @@ class NBNAdapter:
     # and the opt-in contract documented on the BaselineAdapter protocol.
     supports_scoring: bool = True
 
+    # Parameter-recovery capability (#109 PR 2): this adapter exposes its
+    # learned discrete CPTs via extract_learned_cpts, so ParamLearningMeasurement
+    # compares them against the true CPDs (param_recovery_tv / _kl) instead of
+    # not_supported. Same concrete-class getattr-gated flag precedent; declared
+    # alongside its method so the two never drift out of sync.
+    supports_param_recovery: bool = True
+
     def __init__(
         self,
         mechanism: str,
@@ -604,3 +611,27 @@ class NBNAdapter:
         # Per-row joint = sum over nodes -> [B]. Detached + on CPU to match the
         # query() path's return convention (the metric only needs the values).
         return torch.stack(node_lps, dim=0).sum(dim=0).detach().cpu()
+
+    def extract_learned_cpts(self) -> dict[str, torch.Tensor]:
+        """Learned discrete CPTs in the canonical layout (param-recovery, #109).
+
+        Delegates to the SHARED extractor (``benchmarking.core.cpt_extraction``)
+        so the learned tables use the exact same enumeration and column-order
+        handling the measurement applies to ``problem.true_model`` — that is
+        what lets true and learned CPTs compare cell-by-cell. The extractor
+        builds each ``[n_parent_configs, K]`` table via batched
+        ``mech.forward(configs).probs`` (works for both ``cat`` table CPTs and
+        ``neuralcat`` MLPs), and OMITS continuous nodes and discrete nodes with
+        any continuous parent (recovery is a fully-discrete-network metric).
+
+        ``self.problem.variables`` (stored at fit) supplies node kinds and
+        cardinalities — the adapter already retains the fitting problem, so no
+        extra plumbing from the measurement is needed.
+        """
+        if self.model is None or self.problem is None:
+            raise RuntimeError(
+                "Adapter not fitted. Call fit() before extract_learned_cpts()."
+            )
+        from benchmarking.core.cpt_extraction import extract_discrete_cpts
+
+        return extract_discrete_cpts(self.model, self.problem.variables)

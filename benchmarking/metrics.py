@@ -146,6 +146,126 @@ def log_likelihood(log_probs: torch.Tensor) -> MetricResult:
     return MetricResult("log_likelihood", float(log_probs.mean()))
 
 
+# ── parameter-recovery metrics (#109 PR 2) ──────────────────────────────────
+#
+# How well a fitted model recovers the TRUE discrete CPDs. Per discrete node we
+# compare the true CPT P_true(node | parents) against the learned CPT, one row
+# per parent configuration, frequency-weighted by the TRUE parent-config
+# probability (so configs the data never visits — where everyone estimates
+# badly — don't dominate). The per-cell scalar is the simple mean over nodes.
+# Inputs are PURE tensors (no model/graph objects): the per-node CPT extraction
+# and the canonical [n_parent_configs, K] layout live in ParamLearningMeasurement
+# / the adapters. ``true_cpts``/``learned_cpts``/``weights`` are aligned lists,
+# one entry per discrete node; entry i is [n_configs_i, K_i] / [n_configs_i].
+
+def frequency_weights(counts: torch.Tensor) -> torch.Tensor:
+    """Normalize parent-config counts to weights that sum to 1.
+
+    ``counts[c]`` is the number of TRUE-model samples landing in parent config
+    ``c`` for one node. Returns ``counts / counts.sum()``. The denominator is
+    clamped at 1 purely to avoid division by zero in the degenerate all-zero
+    case (no samples) — with any real sample every row carries a count, so the
+    clamp never bites and the weights sum to exactly 1.
+    """
+    counts = counts.to(torch.float64)
+    return counts / counts.sum().clamp_min(1.0)
+
+
+def _kl_rows_unclamped(p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+    """Per-row KL(p ‖ q), summed over the last (class) dim. q is NOT clamped.
+
+    Conventions (locked #109): ``0 * log(0) = 0`` for true zeros; ``p`` (the
+    TRUE distribution) is clamped at 1e-12 ONLY so ``log(p)`` is finite, never
+    ``q`` — a learned zero on a class the truth supports must yield ``+inf``,
+    not a clamped finite number (that is the whole point of the companion KL,
+    and the signal pgmpy MLE hard zeros will produce in a later PR).
+    """
+    p = p.to(torch.float64)
+    q = q.to(torch.float64)
+    log_p = torch.log(p.clamp_min(1e-12))          # safe log(p); masked where p==0
+    log_q = torch.log(q)                            # UNCLAMPED: q==0 -> -inf -> +inf KL
+    per_class = p * (log_p - log_q)
+    # Enforce 0*log(0)=0 exactly: where p==0 the term is 0 regardless of q
+    # (kills the 0*inf -> nan that arises when both p and q are 0).
+    per_class = torch.where(p > 0, per_class, torch.zeros_like(per_class))
+    return per_class.sum(dim=-1)
+
+
+def _weighted_node_reduce(
+    rows: torch.Tensor, weights: torch.Tensor
+) -> torch.Tensor:
+    """Frequency-weighted sum of per-config ``rows`` for one node.
+
+    ``where(weights > 0, ...)`` so a zero-weight config contributes exactly 0
+    even if its row is ``+inf`` (a 0*inf would otherwise NaN). A config with
+    POSITIVE weight whose row is ``+inf`` correctly propagates ``+inf``.
+    """
+    weights = weights.to(torch.float64)
+    contrib = torch.where(
+        weights > 0, weights * rows.to(torch.float64), torch.zeros_like(rows, dtype=torch.float64)
+    )
+    return contrib.sum()
+
+
+def param_recovery_tv(
+    true_cpts: list[torch.Tensor],
+    learned_cpts: list[torch.Tensor],
+    weights: list[torch.Tensor],
+) -> MetricResult:
+    """Frequency-weighted total-variation parameter-recovery error (headline).
+
+    Per discrete node: weighted mean of ``tv_distance`` over parent configs,
+    weighted by the true parent-config probability. Per-cell value: simple
+    mean over nodes. Lower is better; TV ∈ [0, 1] so this is bounded and
+    robust cross-baseline (the reason it, not KL, is the headline).
+
+    ``true_cpts[i]`` and ``learned_cpts[i]`` are ``[n_configs_i, K_i]`` aligned
+    in the canonical layout; ``weights[i]`` is ``[n_configs_i]`` summing to 1.
+    Empty input (no discrete nodes) returns ``nan`` — callers gate that as
+    ``status="not_applicable"`` upstream.
+    """
+    if not true_cpts:
+        return MetricResult("param_recovery_tv", float("nan"))
+    node_vals = [
+        _weighted_node_reduce(tv_distance(pt, pl), w)
+        for pt, pl, w in zip(true_cpts, learned_cpts, weights)
+    ]
+    return MetricResult(
+        "param_recovery_tv", float(torch.stack(node_vals).mean())
+    )
+
+
+def param_recovery_kl(
+    true_cpts: list[torch.Tensor],
+    learned_cpts: list[torch.Tensor],
+    weights: list[torch.Tensor],
+) -> MetricResult:
+    """Frequency-weighted KL(true ‖ learned) parameter-recovery error (companion).
+
+    ASYMMETRIC by construction — ``KL(true ‖ learned)``, i.e. expectation under
+    the TRUE CPD of the log-ratio. Per discrete node: weighted mean of the
+    unclamped per-config KL (see ``_kl_rows_unclamped``); per-cell value: simple
+    mean over nodes. Lower is better.
+
+    May be ``+inf``: a learned CPT that puts zero mass on a class the truth
+    supports (e.g. MLE hard zeros) diverges. This is a real signal, emitted as
+    ``value=float('inf')`` — NOT clamped. Downstream aggregation across cells
+    must therefore use a MEDIAN or clipped-mean, never a plain mean, or one
+    diverged cell poisons the statistic.
+
+    Same input contract as ``param_recovery_tv``.
+    """
+    if not true_cpts:
+        return MetricResult("param_recovery_kl", float("nan"))
+    node_vals = [
+        _weighted_node_reduce(_kl_rows_unclamped(pt, pl), w)
+        for pt, pl, w in zip(true_cpts, learned_cpts, weights)
+    ]
+    return MetricResult(
+        "param_recovery_kl", float(torch.stack(node_vals).mean())
+    )
+
+
 def map_accuracy(pred: torch.Tensor, true: torch.Tensor) -> MetricResult:
     """Exact-match accuracy for argmax MAP predictions."""
     if pred.shape != true.shape:
