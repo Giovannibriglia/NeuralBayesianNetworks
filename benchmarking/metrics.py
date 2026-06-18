@@ -266,6 +266,94 @@ def param_recovery_kl(
     )
 
 
+# ── calibration metrics (#109 PR 7, continuous-only) ────────────────────────
+#
+# How well a fitted model's PREDICTIVE distribution for a continuous node is
+# calibrated. Both are sample-based — the measurement / adapter supply S
+# predictive samples per test row per continuous node; PIT-KS additionally uses
+# the held-out test value, sd_ratio additionally uses oracle samples from
+# problem.true_model. The two are ORTHOGONAL axes of miscalibration: PIT-KS
+# (distributional uniformity) and sd_ratio (sharpness vs truth). A model can be
+# PIT-uniform yet over/under-confident at the variance scale, and vice versa.
+# Inputs are PURE tensors; per-node extraction + the canonical layout live in
+# the adapter / ParamLearningMeasurement. The per-cell scalar is the mean over
+# continuous nodes (mirrors the parameter-recovery aggregation).
+
+def _pit_ks_single(predictive_samples: torch.Tensor, y: torch.Tensor) -> float:
+    """KS distance of one node's PIT distribution from Uniform(0, 1).
+
+    ``predictive_samples`` is ``[N, S]`` (S predictive draws per test row); ``y``
+    is ``[N]`` held-out values. The probability-integral transform is the
+    sample-empirical CDF ``PIT_i = mean_s(samples[i, s] <= y[i])``; the statistic
+    is ``max_i |sorted(PIT) - i/N|`` (one-sample KS vs the uniform grid). 0 is
+    perfectly calibrated; larger is worse.
+    """
+    samples = predictive_samples.detach().double()
+    yv = y.detach().double().reshape(-1, 1)
+    pit = (samples <= yv).double().mean(dim=1)          # [N]
+    pit_sorted = torch.sort(pit).values
+    n = pit_sorted.shape[0]
+    unif = torch.arange(1, n + 1, dtype=torch.float64) / n
+    return float((pit_sorted - unif).abs().max())
+
+
+def _sd_ratio_single(
+    predictive_samples: torch.Tensor, oracle_samples: torch.Tensor
+) -> float:
+    """Mean per-row ratio of predictive SD to oracle (true-conditional) SD.
+
+    Both ``[N, S]``. Per row: ``std(predictive) / std(oracle)``; reduced by the
+    mean over rows (matching the calibration_diagnostic harness). ~1 is the right
+    sharpness, <1 over-confident (too narrow), >1 under-confident. The oracle SD
+    is clamped at 1e-12 purely as a divide-by-zero numerical guard (a degenerate
+    point-mass true conditional) — NOT a distributional smoothing clamp.
+    """
+    pred_std = predictive_samples.detach().double().std(dim=1)
+    true_std = oracle_samples.detach().double().std(dim=1).clamp_min(1e-12)
+    return float((pred_std / true_std).mean())
+
+
+def calibration_pit_ks(
+    predictive_samples: list[torch.Tensor],
+    y: list[torch.Tensor],
+) -> MetricResult:
+    """PIT-KS calibration error, mean over continuous nodes (headline).
+
+    ``predictive_samples[i]`` is node i's ``[N, S]`` predictive draws and
+    ``y[i]`` its ``[N]`` held-out values. Per-cell value = mean over nodes of the
+    per-node PIT-KS. Lower is better (0 = perfectly calibrated). Empty input (no
+    continuous nodes) returns ``nan`` — callers gate that as
+    ``status="not_applicable"`` upstream.
+    """
+    if not predictive_samples:
+        return MetricResult("calibration_pit_ks", float("nan"))
+    node_vals = [_pit_ks_single(s, yy) for s, yy in zip(predictive_samples, y)]
+    return MetricResult(
+        "calibration_pit_ks", float(torch.tensor(node_vals).mean())
+    )
+
+
+def calibration_sd_ratio(
+    predictive_samples: list[torch.Tensor],
+    oracle_samples: list[torch.Tensor],
+) -> MetricResult:
+    """Sharpness ratio (predictive SD / true SD), mean over continuous nodes.
+
+    Companion to PIT-KS. ``predictive_samples[i]`` and ``oracle_samples[i]`` are
+    node i's ``[N, S]`` fitted and true-conditional draws. Per-cell value = mean
+    over nodes of the per-node mean SD ratio. ~1 is right sharpness; <1
+    over-confident, >1 under-confident. Empty input returns ``nan``.
+    """
+    if not predictive_samples:
+        return MetricResult("calibration_sd_ratio", float("nan"))
+    node_vals = [
+        _sd_ratio_single(s, o) for s, o in zip(predictive_samples, oracle_samples)
+    ]
+    return MetricResult(
+        "calibration_sd_ratio", float(torch.tensor(node_vals).mean())
+    )
+
+
 def map_accuracy(pred: torch.Tensor, true: torch.Tensor) -> MetricResult:
     """Exact-match accuracy for argmax MAP predictions."""
     if pred.shape != true.shape:
