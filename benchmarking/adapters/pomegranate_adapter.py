@@ -63,6 +63,14 @@ class PomegranateAdapter:
     # this is an explicit flag.
     supports_batched_queries: bool = True
 
+    # Parameter-recovery capability (#109 PR 4): exposes learned discrete CPTs
+    # via extract_learned_cpts. Pomegranate is discrete-only via is_applicable;
+    # the family gate's not_applicable path is structurally unreachable here, so
+    # extraction returns a non-empty dict on every applicable cell. (Precedent
+    # from PR 3: flag=True when the adapter implements extraction; the cell-level
+    # gate decides applicability.)
+    supports_param_recovery: bool = True
+
     def __init__(self, device: str | None = None, **kwargs: Any) -> None:
         # None / "auto" -> cuda-if-available-else-cpu; concrete passes through.
         # pomegranate 1.x is torch-based: CPTs are built on CPU (counting is
@@ -340,3 +348,73 @@ class PomegranateAdapter:
         if entry is None:
             return False
         return family in entry.families
+
+    def extract_learned_cpts(self) -> dict[str, torch.Tensor]:
+        """Learned discrete CPTs in the canonical layout (param-recovery, #109).
+
+        Returns ``{node: probs[n_parent_configs, K]}`` for every node, in the
+        canonical layout the recovery metric compares cell-by-cell against the
+        true model (parents sorted lex, configs row-major with the first parent
+        slowest, classes ``0..K-1``, each row a distribution).
+
+        READS the stored distributions rather than re-estimating. The adapter
+        builds the FULL declared grid by counting at fit time
+        (``_fit_discrete`` sizes every CPT to the declared cardinalities), so
+        the stored ``Categorical`` / ``ConditionalCategorical`` parameters
+        already span ``0..card-1`` on every axis — reading them reflects the
+        deployed model's actual parameters. Re-estimation would re-run identical
+        arithmetic: pure cost, zero correctness gain. (Contrast PR 3's pgmpy
+        path, which re-estimates because pgmpy's ``bn.fit`` truncates the grid
+        to observed states.)
+
+        Unseen-parent-config fill: a parent configuration with zero training
+        observations is stored as ``NaN`` in the fitted distribution
+        (``counts.sum() == 0`` → ``0/0``; a known adapter artifact, filed
+        separately as #218). Extraction fills those rows with uniform ``1/K`` to
+        match pgmpy-mle's fit-time uniform-fill under the same condition, keeping
+        cross-adapter recovery numbers directly comparable. If the fit-time NaN
+        is fixed in the adapter, this extraction-time fill can be removed.
+
+        Hard zeros (a class with zero count under an OBSERVED parent config) are
+        preserved — pomegranate is unsmoothed MLE, so they yield ``+inf``
+        recovery KL by the locked no-second-clamp rule, exactly like pgmpy-mle.
+        """
+        if self.model is None or self.problem is None:
+            raise RuntimeError(
+                "Adapter not fitted. Call fit() before extract_learned_cpts()."
+            )
+        variables = self.problem.variables
+        out: dict[str, torch.Tensor] = {}
+        for node in self._topo:
+            k = int(self._cards[node])
+            parents_dag = [p for p, c in self.problem.dag if c == node]
+            dist = self.model.distributions[self._node_to_idx[node]]
+
+            if not parents_dag:
+                cpt = dist.probs.detach().cpu().reshape(1, k).float()
+            else:
+                raw = dist.probs[0].detach().cpu().float()  # [*pa_cards(dag), K]
+                canon = sorted(parents_dag)
+                # Permute parent axes dag-order -> canonical lex; class axis last.
+                perm = [parents_dag.index(p) for p in canon] + [len(parents_dag)]
+                n_configs = 1
+                for p in canon:
+                    n_configs *= int(variables[p][1])
+                cpt = raw.permute(*perm).reshape(n_configs, k)
+
+            # Unseen-config rows (0/0 -> NaN) -> uniform 1/K (pgmpy convention).
+            bad = torch.isnan(cpt).any(dim=-1)
+            if bool(bad.any()):
+                cpt = cpt.clone()
+                cpt[bad] = 1.0 / k
+
+            # Loud validation: every row must be a distribution.
+            row_sums = cpt.sum(dim=-1)
+            if not torch.allclose(row_sums, torch.ones_like(row_sums), atol=1e-5):
+                i = int((row_sums - 1.0).abs().argmax())
+                raise ValueError(
+                    f"node {node!r}: extracted CPT row {i} does not sum to 1 "
+                    f"(sum={float(row_sums[i]):.6f})"
+                )
+            out[node] = cpt
+        return out
