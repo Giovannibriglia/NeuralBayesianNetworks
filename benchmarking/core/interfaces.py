@@ -126,6 +126,35 @@ class BaselineAdapter(Protocol):
 
     Concrete implementations: NBNAdapter, PgmpyAdapter, PyroAdapter,
     GpytorchAdapter, PomegranateAdapter (all Phase 1b).
+
+    Optional capability — parameter-learning scoring (#109)
+    -------------------------------------------------------
+    Adapters MAY additionally support parameter-learning (PL) mode, in
+    which a fitted model is scored on held-out ``problem.test_data``
+    rather than queried. This capability is OPT-IN and deliberately NOT a
+    structural member of this protocol — adding a required method would
+    break ``isinstance(adapter, BaselineAdapter)`` for adapters that do
+    not (yet) implement it. It mirrors the ``supports_batched_queries``
+    flag precedent (a concrete-class attribute checked via ``getattr``,
+    never declared here).
+
+    An adapter opts in by declaring BOTH, as concrete-class members:
+
+        supports_scoring: bool = True
+
+        def score_data(self, test_data: dict[str, torch.Tensor]) -> torch.Tensor:
+            '''Per-row joint log-prob of held-out rows under the fitted
+            model. Returns a 1-D tensor of shape ``[B]`` (one joint
+            log-probability per test row, summed over the graph's nodes).
+            ``ParamLearningMeasurement`` feeds this straight into
+            ``metrics.log_likelihood`` (mean over rows).'''
+
+    ``ParamLearningMeasurement`` gates on the flag:
+    ``getattr(adapter, "supports_scoring", False)``. Adapters that do not
+    set it (the default — flag absent → ``False``) are reported with
+    ``status="not_supported"`` and ``score_data`` is never called on
+    them. NBNAdapter is the first implementer (#109 PR 1); pgmpy /
+    pomegranate / pyro scoring land in later PRs of the series.
     """
 
     name: str  # e.g., "nbn-cat-lw", "pgmpy-mle-ve"

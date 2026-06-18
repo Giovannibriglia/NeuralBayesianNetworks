@@ -186,7 +186,14 @@ def _run_cell(ctx: dict) -> list[dict]:
             )
         ]
 
-    adapter = build_adapter(spec)
+    # require_engine on the inference (query) path only: fit-only measurements
+    # (ParamLearningMeasurement, #109) score via score_data and need no engine,
+    # so PL specs may omit inference_method. Inference measurements lack the
+    # fit_only flag -> require_engine=True -> a missing inference_method is
+    # rejected here, before any fit (the long-standing safety, unchanged).
+    adapter = build_adapter(
+        spec, require_engine=not getattr(measurement, "fit_only", False),
+    )
 
     # --- Applicability gate ---
     # §5.2 step 2: one not_supported sentinel per batch_size (no fit

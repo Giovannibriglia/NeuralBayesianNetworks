@@ -119,11 +119,33 @@ def test_cli_inference_produces_all_outputs(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
-def test_cli_param_learning_stub_exits_zero(tmp_path: Path) -> None:
-    """param-learning stub must exit 0 (informational, not an error)."""
+def test_cli_param_learning_produces_parquet(tmp_path: Path) -> None:
+    """nbn-bench param-learning runs end-to-end and writes the parquet (#109).
+
+    Un-stubs the former informational stub: the command now constructs
+    ParamLearningMeasurement and drives the same JSONL → parquet pipeline as
+    inference. Asserts a clean exit + a parquet carrying log_likelihood rows
+    with at least one NBN row status="ok" and a finite value, and the pgmpy
+    baseline status="not_supported".
+
+    PL-realistic config: the baselines OMIT inference_method (PL never queries),
+    exercising the fit-only build path (require_engine=False). The earlier
+    version inherited _MINIMAL_CONFIG's inference_method and so missed the
+    build_adapter regression that CI caught.
+    """
+    import math
+
+    import pandas as pd
+
     cfg_path = tmp_path / "cfg.yaml"
     d = dict(_MINIMAL_CONFIG)
-    d["config_name"] = "pl_stub_test"
+    d["config_name"] = "pl_run_test"
+    d["metrics"] = "log_likelihood"   # required by the param-learning command
+    # Drop inference_method from every baseline — PL specs declare none.
+    d["baselines"] = [
+        {k: v for k, v in b.items() if k != "inference_method"}
+        for b in _MINIMAL_CONFIG["baselines"]
+    ]
     cfg_path.write_text(yaml.safe_dump(d))
 
     result = subprocess.run(
@@ -134,10 +156,40 @@ def test_cli_param_learning_stub_exits_zero(tmp_path: Path) -> None:
         cwd=tmp_path,
     )
     assert result.returncode == 0, (
-        f"param-learning stub must exit 0; got {result.returncode}\n"
-        f"stderr: {result.stderr}"
+        f"param-learning exited {result.returncode}\n"
+        f"stdout: {result.stdout[-1000:]}\n"
+        f"stderr: {result.stderr[-1000:]}"
     )
-    assert "not yet implemented" in result.stderr.lower(), (
-        "expected 'not yet implemented' message in stderr; "
-        f"got: {result.stderr!r}"
+
+    results_root = tmp_path / "benchmarking" / "results"
+    run_dirs = list(results_root.glob("benchmark_synthetic_pl_run_test_*"))
+    assert len(run_dirs) == 1, (
+        f"expected exactly 1 run dir, found: {[d.name for d in run_dirs]}"
+    )
+    parquet_files = list(run_dirs[0].glob("*.parquet"))
+    assert parquet_files, (
+        f"no *.parquet in {run_dirs[0]}; stderr: {result.stderr[-500:]}"
+    )
+
+    df = pd.read_parquet(parquet_files[0])
+    ll = df[df["metric"] == "log_likelihood"]
+    assert not ll.empty, (
+        f"no log_likelihood rows in parquet; metrics present: "
+        f"{sorted(df['metric'].unique())}"
+    )
+
+    # NBN implements score_data -> at least one ok row with a finite value.
+    nbn_ok = ll[(ll["baseline"].str.startswith("nbn-")) & (ll["status"] == "ok")]
+    assert not nbn_ok.empty, (
+        f"expected an NBN log_likelihood ok row; got:\n"
+        f"{ll[['baseline', 'status', 'value']].to_string(index=False)}"
+    )
+    assert all(math.isfinite(v) for v in nbn_ok["value"]), nbn_ok["value"].tolist()
+
+    # pgmpy does not implement score_data yet -> not_supported.
+    pgmpy_rows = ll[ll["baseline"].str.startswith("pgmpy-")]
+    assert not pgmpy_rows.empty
+    assert (pgmpy_rows["status"] == "not_supported").all(), (
+        f"pgmpy should be not_supported in PR 1; got:\n"
+        f"{pgmpy_rows[['baseline', 'status']].to_string(index=False)}"
     )

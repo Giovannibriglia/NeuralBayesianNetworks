@@ -73,7 +73,7 @@ class PgmpyAdapter:
     def __init__(
         self,
         param_method: str,
-        inference_method: str,
+        inference_method: str | None,
         n_samples: int = 1024,
         device: str | None = None,
         **kwargs: Any,
@@ -83,7 +83,12 @@ class PgmpyAdapter:
                 f"Unknown param_method {param_method!r}. "
                 f"Valid: {sorted(_VALID_PARAM_METHODS)}"
             )
-        if inference_method not in _VALID_INFERENCE_METHODS:
+        # inference_method=None is the fit-only / parameter-learning
+        # construction (#109): the adapter is fit and scored, never queried,
+        # so it carries no inference engine and an engine-less name
+        # (e.g. "pgmpy-mle"). fit() is independent of inference_method.
+        if (inference_method is not None
+                and inference_method not in _VALID_INFERENCE_METHODS):
             raise ValueError(
                 f"Unknown inference_method {inference_method!r}. "
                 f"Valid: {sorted(_VALID_INFERENCE_METHODS)}"
@@ -103,7 +108,10 @@ class PgmpyAdapter:
                 "running on cpu.", resolved,
             )
         self.device = "cpu"
-        self.name = f"pgmpy-{param_method}-{inference_method}"
+        self.name = (
+            f"pgmpy-{param_method}-{inference_method}"
+            if inference_method is not None else f"pgmpy-{param_method}"
+        )
 
         # State populated by fit()
         self._kind: str = "unfit"               # "discrete" | "continuous_lg"

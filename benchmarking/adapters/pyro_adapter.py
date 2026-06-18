@@ -87,7 +87,7 @@ class PyroAdapter:
     def __init__(
         self,
         mechanism: str,
-        inference_method: str,
+        inference_method: str | None,
         n_samples: int = 50,
         device: str | None = None,
         **kwargs: Any,
@@ -97,7 +97,11 @@ class PyroAdapter:
                 f"Unknown mechanism {mechanism!r}. "
                 f"Valid: {sorted(_VALID_MECHANISMS)}"
             )
-        if inference_method not in _VALID_INFERENCE_METHODS:
+        # inference_method=None is the fit-only / parameter-learning
+        # construction (#109): the adapter is fit (and scored where supported),
+        # never queried, so it carries an engine-less name (e.g. "pyro-empirical").
+        if (inference_method is not None
+                and inference_method not in _VALID_INFERENCE_METHODS):
             raise ValueError(
                 f"Unknown inference_method {inference_method!r}. "
                 f"Valid: {sorted(_VALID_INFERENCE_METHODS)}"
@@ -110,7 +114,10 @@ class PyroAdapter:
         # that self.device.startswith("cuda") works for the lstsq driver
         # check below (gels on CUDA, gelsd on CPU).
         self.device: str = resolve_device(device)
-        self.name = f"pyro-{mechanism}-{inference_method}"
+        self.name = (
+            f"pyro-{mechanism}-{inference_method}"
+            if inference_method is not None else f"pyro-{mechanism}"
+        )
 
         # State populated by fit()
         self._cpts: dict[str, torch.Tensor] = {}

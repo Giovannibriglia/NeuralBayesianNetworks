@@ -11,7 +11,8 @@ v0.13 surface (post-Phase 1c cutover):
     - Metrics          : ``benchmarking.metrics.{wasserstein_1d, …}``
 
 CLI entry: ``nbn-bench {inference, param-learning} --config <yaml>``.
-``param-learning`` is stubbed pending a ParamLearningMeasurement (see #109).
+``param-learning`` scores held-out joint log-likelihood via
+ParamLearningMeasurement (#109); adapters opt in with ``supports_scoring``.
 """
 from benchmarking.core import (
     BASELINE_FAMILY_APPLICABILITY,

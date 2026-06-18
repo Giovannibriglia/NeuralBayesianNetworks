@@ -165,7 +165,7 @@ class TestRunnerPhase2Wiring:
 
     def test_topological_metadata_in_results(self, monkeypatch):
         """TopologicalAllocator → cell → measure() preserves metadata."""
-        monkeypatch.setattr(config_mod, "build_adapter", lambda spec: _FakeAdapter())
+        monkeypatch.setattr(config_mod, "build_adapter", lambda spec, **_kw: _FakeAdapter())
 
         problem = _asia_problem()
         selector = TopologicalAllocator()
@@ -194,7 +194,7 @@ class TestRunnerPhase2Wiring:
 
     def test_uniform_random_selector_unchanged(self, monkeypatch):
         """UniformRandomSelector queries carry default metadata; cell doesn't crash."""
-        monkeypatch.setattr(config_mod, "build_adapter", lambda spec: _FakeAdapter())
+        monkeypatch.setattr(config_mod, "build_adapter", lambda spec, **_kw: _FakeAdapter())
 
         problem = _asia_problem()
         selector = UniformRandomSelector()

@@ -376,15 +376,40 @@ class TestBuildAdapter:
         adapter = build_adapter(spec)
         assert str(adapter.device) == "cpu"
 
-    def test_nbn_missing_inference_method_raises(self):
+    def test_nbn_missing_inference_method_requires_engine_on_inference_path(self):
+        # Inference path (require_engine=True): a missing inference_method is a
+        # misconfiguration rejected early, before any fit (#109, unchanged).
         spec = BaselineSpec("nbn", "cat", "mle", inference_method=None)
         with pytest.raises(ValueError, match="inference_method"):
-            build_adapter(spec)
+            build_adapter(spec, require_engine=True)
 
-    def test_pgmpy_missing_inference_method_raises(self):
+    def test_pgmpy_missing_inference_method_requires_engine_on_inference_path(self):
         spec = BaselineSpec("pgmpy", "discrete", "mle", inference_method=None)
         with pytest.raises(ValueError, match="inference_method"):
-            build_adapter(spec)
+            build_adapter(spec, require_engine=True)
+
+    def test_nbn_fit_only_builds_engineless_adapter(self):
+        # Fit-only / PL path (default require_engine=False): construct WITHOUT
+        # an inference engine; engine-less name matches the applicability key.
+        spec = BaselineSpec("nbn", "cat", "mle", inference_method=None)
+        adapter = build_adapter(spec)
+        assert isinstance(adapter, NBNAdapter)
+        assert adapter.name == "nbn-cat"
+        assert adapter.engine is None
+
+    def test_pgmpy_fit_only_builds_engineless_adapter(self):
+        spec = BaselineSpec("pgmpy", "discrete", "mle", inference_method=None)
+        adapter = build_adapter(spec)
+        assert isinstance(adapter, PgmpyAdapter)
+        assert adapter.name == "pgmpy-mle"
+        assert adapter.inference_method is None
+
+    def test_pyro_fit_only_builds_engineless_adapter(self):
+        spec = BaselineSpec("pyro", "empirical", "empirical", inference_method=None)
+        adapter = build_adapter(spec)
+        assert isinstance(adapter, PyroAdapter)
+        assert adapter.name == "pyro-empirical"
+        assert adapter.inference_method is None
 
     def test_unknown_library_raises(self):
         spec = BaselineSpec("unknown", "cat", "mle", "lw")
