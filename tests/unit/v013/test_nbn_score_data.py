@@ -130,9 +130,10 @@ def test_score_data_matches_independent_logits_recomputation():
         problem, adapter, [], fit_time_s=0.0, benchmark="synthetic",
         seed=problem.seed,
     )
-    assert len(rows) == 1
-    cell = rows[0]
-    assert cell.metric == "log_likelihood" and cell.status == "ok"
+    # The measurement now emits log_likelihood + the two recovery rows (#109
+    # PR 2); this test concerns the log_likelihood scoring only.
+    cell = next(r for r in rows if r.metric == "log_likelihood")
+    assert cell.status == "ok"
     assert math.isclose(cell.value, float(ref.mean()), rel_tol=1e-5, abs_tol=1e-5)
 
 
@@ -173,8 +174,10 @@ def test_out_of_range_test_value_surfaces_as_error():
         bad_problem, adapter, [], fit_time_s=0.0, benchmark="synthetic",
         seed=problem.seed,
     )
-    assert len(rows) == 1
-    cell = rows[0]
+    # The out-of-range value corrupts held-out scoring, so the log_likelihood
+    # row is the error row (recovery rows are independent — bad_problem has no
+    # true_model, so they are not_applicable).
+    cell = next(r for r in rows if r.metric == "log_likelihood")
     # Classified as a real error (not "not_supported", not an uncaught crash).
     assert cell.status == "error", cell
     assert math.isnan(cell.value)

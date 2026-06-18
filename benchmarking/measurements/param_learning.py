@@ -261,6 +261,15 @@ class ParamLearningMeasurement:
 
         Cached per problem so the true-CPT extraction + the weight sample run
         once, not once per baseline scored on the problem.
+
+        Cache-key contract: ``(name, problem_id, seed)`` must uniquely identify
+        a problem. Present sources populate all three (and ``name`` already
+        encodes family/size/seed for synthetic), so distinct problems never
+        alias. NOTE there is intentionally no "non-default" assertion here:
+        ``seed=0`` is a legitimate seed (the smoke config uses it) and
+        ``problem_id`` defaults to ``""`` only for source-less unit fixtures —
+        a future source that leaves both unset would alias problems, so any new
+        source MUST set ``problem_id``.
         """
         key = (problem.name, problem.problem_id, problem.seed)
         cached = self._recovery_cache.get(key)
