@@ -199,7 +199,13 @@ def test_not_supported_gate_holds_for_non_scoring_adapter():
         problem, _NoScore(), [], fit_time_s=0.0, benchmark="synthetic",
         seed=problem.seed,
     )
-    assert len(rows) == 1
-    assert rows[0].metric == "log_likelihood"
-    assert rows[0].status == "not_supported"
-    assert math.isnan(rows[0].value)
+    # The measurement emits the log_likelihood row plus the two
+    # parameter-recovery rows (#109 PR 2); _NoScore opts into none, so every
+    # row is not_supported with a NaN value.
+    by_metric = {r.metric: r for r in rows}
+    assert set(by_metric) == {
+        "log_likelihood", "param_recovery_tv", "param_recovery_kl"
+    }
+    for r in rows:
+        assert r.status == "not_supported"
+        assert math.isnan(r.value)
