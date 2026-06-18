@@ -1,0 +1,47 @@
+# =============================================================================
+# synthetic learning-curves complete — paper-grade recovery vs n_train (#109 PR 6).
+# =============================================================================
+#
+# Sweeps source.n_train_sweep as an extra problem axis: one fit per
+# (family, n_nodes, seed, n_train) cell. Each n_train carries its OWN fit (no
+# fit-cache reuse, unlike the cell-internal batch_sizes sweep) — total fit cost
+# multiplies by the number of sweep points.
+#
+# Cost: 7 n_train points x 1 n_nodes x 3 seeds x 6 baselines = 126 fits. The
+# heaviest single fit is nbn-neuralcat at n_train=30000 (~29s measured, < the
+# 60s/cell budget); counting baselines (nbn-cat, pgmpy-bayes/mle, pomegranate,
+# pyro) are seconds or less. The recovery weight draw is cached per (seed)
+# since the true_model is fixed across the sweep. Full run ~5 min.
+#
+# The (seed, n_nodes, family) fix the true_model; only train_data size varies.
+# Paper figure: param_recovery_tv vs n_train (one line per baseline), median KL
+# vs n_train, +inf-rate vs n_train (unsmoothed baselines), log_likelihood vs
+# n_train. n_train is a column on every row.
+version: "v0.13"
+benchmark: synthetic
+config_name: learning_curves
+metrics: log_likelihood
+selector: uniform_random
+
+source:
+  families: [discrete]
+  n_nodes_list: [10]
+  seeds: [0, 1, 2]
+  n_train_sweep: [30, 100, 300, 1000, 3000, 10000, 30000]
+  n_test: 2000
+  n_reference: 20000
+  edge_density: 0.20
+  max_in_degree: 2
+  cardinality: 4
+  fraction_continuous: 0.0
+
+baselines:
+  - {library: pgmpy,       mechanism: discrete,  param_method: mle}
+  - {library: pgmpy,       mechanism: discrete,  param_method: bayes}
+  - {library: pomegranate, mechanism: discrete,  param_method: mle}
+  - {library: pyro,        mechanism: empirical, param_method: mle}
+  - {library: nbn,         mechanism: cat,       param_method: mle}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle}
+
+n_queries_per_cell: 2
+per_cell_timeout_s: 300.0

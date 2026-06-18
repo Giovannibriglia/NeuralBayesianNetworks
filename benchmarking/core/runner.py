@@ -38,6 +38,7 @@ from benchmarking.domains.base import FailedProblem
 from benchmarking.domains._n_parameters import (
     n_nodes_from_problem,
     n_parameters_from_problem,
+    n_train_from_problem,
 )
 
 logger = logging.getLogger(__name__)
@@ -695,6 +696,7 @@ class Runner:
                                 dev = resolve_device(spec.device)
                                 n_params = n_parameters_from_problem(problem)
                                 n_nodes = n_nodes_from_problem(problem)
+                                n_train = n_train_from_problem(problem)
                                 for b in to_skip:
                                     code = failed_configs[
                                         (problem.family, problem.problem_id, name, b)
@@ -709,6 +711,9 @@ class Runner:
                                     if n_nodes is not None and row.n_nodes is None:
                                         row = dataclasses.replace(
                                             row, n_nodes=n_nodes)
+                                    if n_train is not None and row.n_train is None:
+                                        row = dataclasses.replace(
+                                            row, n_train=n_train)
                                     writer.write(row)
                                     yield row
                                 logger.info(
@@ -850,11 +855,14 @@ class Runner:
         # (variable count) is injected the same way, in parallel.
         n_params = n_parameters_from_problem(problem)
         n_nodes = n_nodes_from_problem(problem)
+        n_train = n_train_from_problem(problem)
 
         for row in _rows_to_cellresults(result.rows, problem, spec, cfg.benchmark):
             if n_params is not None and row.n_parameters is None:
                 row = dataclasses.replace(row, n_parameters=n_params)
             if n_nodes is not None and row.n_nodes is None:
                 row = dataclasses.replace(row, n_nodes=n_nodes)
+            if n_train is not None and row.n_train is None:
+                row = dataclasses.replace(row, n_train=n_train)
             writer.write(row)
             yield row

@@ -91,3 +91,21 @@ def n_nodes_from_problem(problem: Any) -> int | None:
     if not variables:
         return None
     return len(variables)
+
+
+def n_train_from_problem(problem: Any) -> int | None:
+    """Training-set size of a problem; per-problem constant.
+
+    Reads the row count of ``problem.train_data`` (the swept axis of the
+    learning-curves benchmark, #109 PR 6). Returns ``None`` when the problem has
+    no train_data, mirroring the None-on-missing contract of the sibling
+    helpers so the runner's inject sites stay parallel.
+    """
+    train_data = getattr(problem, "train_data", None)
+    if not train_data:
+        return None
+    first = next(iter(train_data.values()))
+    shape = getattr(first, "shape", None)
+    if not shape:
+        return None
+    return int(shape[0])
