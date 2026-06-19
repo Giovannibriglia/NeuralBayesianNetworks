@@ -74,6 +74,11 @@ baselines:
   - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: ve}
   - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance}
   - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router}
+  # Non-parametric -lw baselines (#228) — kde + knn only (sub-second/cell on CPU
+  # at this scale, n_train=1024, n_nodes <= 100). FlexCode is out: its 200-epoch
+  # MLP per continuous node is CPU-intractable, and scalability_smoke runs on CI.
+  - {library: nbn,         mechanism: kde,       param_method: mle, inference_method: lw,     extra_kwargs: {n_samples: 1024}}
+  - {library: nbn,         mechanism: knn,       param_method: mle, inference_method: lw,     extra_kwargs: {n_samples: 1024}}
 
 # Ignored by heaviest_by_role (see selector note above); required by the loader.
 n_queries_per_cell: 12

@@ -95,6 +95,21 @@ baselines:
   - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  n_samples: 1024}}
   - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  n_samples: 1024}}
   - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  n_samples: 1024}}
+  # Non-parametric -lw baselines (#228). TWO distinct cost mechanisms gate these
+  # at scale (PR 10 GPU cost probe on continuous_lg = worst case, all nodes
+  # continuous), each tripping a different budget:
+  #   - kde / knn: per-QUERY cost trips per_cell_timeout_s=60 (the QUERY budget).
+  #     kde query is O(n_nodes x n_train x n_samples); its 12-query time is ~32s
+  #     at n_nodes=1000, so kde query-times-out around n_nodes ~2000. knn is
+  #     ~5x cheaper per query -> wall around n_nodes ~8000.
+  #   - flexcode: per-FIT cost trips fit_timeout_s=1200 (the FIT budget); its
+  #     queries stay cheap. The 200-epoch MLP per continuous node makes fit ~154s
+  #     at n_nodes=1000, walling around n_nodes ~7000.
+  # Cells past each wall emit status=timeout — that IS the scalability finding
+  # (where each non-parametric estimator stops scaling), not a config error.
+  - {library: nbn,         mechanism: kde,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  n_samples: 1024}, device: cuda}
+  - {library: nbn,         mechanism: knn,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  n_samples: 1024}, device: cuda}
+  - {library: nbn,         mechanism: flexcode,  param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  n_samples: 1024}, device: cuda}
   # nbn-hybrid (hybrid router)
   - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router,    extra_kwargs: {epochs: 100,  n_samples: 1024}}
   # other libraries
