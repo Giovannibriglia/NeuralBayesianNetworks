@@ -44,6 +44,7 @@ Reference: docs/v0.13-benchmark-redesign.md §3; issue #109.
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -53,6 +54,8 @@ from benchmarking.core.results import CellResult
 from benchmarking.domains.base import BenchmarkProblem, Query
 from benchmarking.measurements.accuracy_timing import _infer_family
 from benchmarking.metrics import (
+    calibration_pit_ks,
+    calibration_sd_ratio,
     frequency_weights,
     log_likelihood,
     param_recovery_kl,
@@ -63,13 +66,53 @@ from benchmarking.metrics import (
 # semantics, so a dedicated sentinel rather than a borrowed query role.
 _PL_QUERY_ROLE = "param_learning"
 
-# Salt for the deterministic recovery-weight sample seed (golden-ratio constant,
-# arbitrary but stable): sample_seed = problem.seed ^ _RECOVERY_SEED_SALT. Keeps
-# the weights reproducible and identical across all baselines on a problem.
-_RECOVERY_SEED_SALT = 0x9E3779B9
+# Salts for the two deterministic oracle draws (arbitrary-but-stable constants),
+# seed = problem.seed ^ salt, so each draw is reproducible and identical across
+# all baselines on a problem. The two MUST remain distinct so the recovery weight
+# draw and the calibration oracle-sample draw never share an RNG seed.
+_RECOVERY_SEED_SALT = 0x9E3779B9       # recovery: _compute_weights (20k joint draw)
+_CALIBRATION_SEED_SALT = 0x517CC1B7    # calibration: oracle predictive-sample draw
 
 # True-CPT row-sum sanity tolerance.
 _CPT_ROW_SUM_TOL = 1e-5
+
+# Predictive samples per (continuous node, test row) for calibration. MUST match
+# NBNAdapter.N_CALIBRATION_SAMPLES — the oracle (true_model) draw here and the
+# fitted (adapter) draw are compared in sd_ratio, so a mismatch would estimate
+# the two SDs from different sample counts.
+_N_CALIBRATION_SAMPLES = 400
+
+
+@dataclass
+class ProblemResources:
+    """Per-problem cached resources for ONE measurement instance, #109 PR 7.
+
+    Both contexts are LAZILY populated — ``recovery_ctx`` on the first recovery
+    scoring of the problem, ``calibration_ctx`` on the first calibration scoring
+    — so the expensive true-CPT extraction + 20k weight draw and the oracle
+    calibration draw run ONCE per (problem, measurement-instance), reused across
+    repeated ``measure()`` calls on this instance. A discrete-only problem
+    populates recovery_ctx (ok) + calibration_ctx (not_applicable); a
+    continuous-only problem the reverse; a hybrid both.
+
+    SCOPE: the cache lives on the measurement instance, so it only spans repeated
+    in-process ``measure()`` calls (e.g. tests). The production runner executes
+    each cell in its own SUBPROCESS (cell_runner.run_cell_in_subprocess) with a
+    freshly-unpickled measurement, so across baselines / an n_train sweep each
+    cell rebuilds these — but RESULTS ARE IDENTICAL because the draws are
+    seeded off problem.seed (cache = perf only; correctness/determinism = seed).
+
+    Each field caches the FULL tagged context (status + data), not just the data,
+    because the not_applicable / error reason cannot be reconstructed from a bare
+    None-vs-populated data field:
+      * recovery_ctx     — ("ok", true_cpts, weights) | ("not_applicable", reason)
+                           | ("error", message)
+      * calibration_ctx  — ("ok", oracle_samples) | ("not_applicable", reason)
+                           | ("error", message)
+    """
+
+    recovery_ctx: tuple | None = None
+    calibration_ctx: tuple | None = None
 
 
 class ParamLearningMeasurement:
@@ -91,11 +134,12 @@ class ParamLearningMeasurement:
     N_WEIGHT_SAMPLES: int = 20_000
 
     def __init__(self) -> None:
-        # Per-problem recovery context cache (true CPTs + weights, or a
-        # not_applicable / error sentinel). Keyed by problem identity; baseline-
-        # independent, so all baselines on a problem share it. Bounded by the
-        # number of problems in a run.
-        self._recovery_cache: dict[tuple, tuple] = {}
+        # Per-problem resource cache (recovery + calibration contexts, lazily
+        # populated). Keyed by problem identity; reused across repeated measure()
+        # calls on THIS instance (see ProblemResources for the scope caveat — the
+        # production runner is subprocess-per-cell, so this caches within a cell,
+        # not across cells). Bounded by the number of problems an instance sees.
+        self._problem_resources: dict[tuple, ProblemResources] = {}
 
     def measure(
         self,
@@ -143,6 +187,7 @@ class ParamLearningMeasurement:
         rows: list[CellResult] = []
         rows.extend(self._log_likelihood_row(problem, adapter, _row))
         rows.extend(self._param_recovery_rows(problem, adapter, _row))
+        rows.extend(self._calibration_rows(problem, adapter, _row))
         return rows
 
     # -----------------------------------------------------------------------
@@ -249,6 +294,114 @@ class ParamLearningMeasurement:
                  query_time_s=nan, metrics_time_s=mt, error_msg=None),
         ]
 
+    # -----------------------------------------------------------------------
+    # calibration (PR 7) — continuous-only, complementary to recovery
+    # -----------------------------------------------------------------------
+
+    def _calibration_rows(self, problem, adapter, _row) -> list[CellResult]:
+        nan = float("nan")
+
+        def _pair(status, pit_val, sd_val, mt, err) -> list[CellResult]:
+            return [
+                _row(metric="calibration_pit_ks", value=pit_val, status=status,
+                     query_time_s=nan, metrics_time_s=mt, error_msg=err),
+                _row(metric="calibration_sd_ratio", value=sd_val, status=status,
+                     query_time_s=nan, metrics_time_s=mt, error_msg=err),
+            ]
+
+        # Gate 1: adapter capability (highest precedence).
+        if not getattr(adapter, "supports_calibration", False):
+            return _pair("not_supported", nan, nan, nan,
+                         f"{adapter.name} does not support calibration")
+
+        t0 = time.perf_counter()
+        kind, *ctx = self._calibration_context(problem)
+        if kind == "not_applicable":
+            return _pair("not_applicable", nan, nan,
+                         time.perf_counter() - t0, ctx[0])
+        if kind == "error":
+            return _pair("error", nan, nan, time.perf_counter() - t0, ctx[0])
+
+        # kind == "ok": draw fitted predictive samples (seeded for reproducible
+        # parquet values — the calibration salt, distinct from recovery's), then
+        # compare against the cached oracle samples node-by-node.
+        oracle_samples = ctx[0]
+        from benchmarking.core.runner import _classify_exception
+        seed = int(problem.seed) ^ _CALIBRATION_SEED_SALT
+        try:
+            with torch.random.fork_rng(devices=[]):
+                torch.manual_seed(seed)
+                predictive = adapter.predictive_samples(problem.test_data)
+        except Exception as exc:
+            return _pair(_classify_exception(exc), nan, nan,
+                         time.perf_counter() - t0, repr(exc))
+
+        pred_list, y_list, oracle_list = [], [], []
+        for node in oracle_samples:
+            if node not in predictive:
+                return _pair("error", nan, nan, time.perf_counter() - t0,
+                             f"predictive samples missing continuous node {node!r}")
+            pred_list.append(predictive[node])
+            oracle_list.append(oracle_samples[node])
+            y_list.append(torch.as_tensor(problem.test_data[node]).reshape(-1))
+
+        pit = calibration_pit_ks(pred_list, y_list)
+        sd = calibration_sd_ratio(pred_list, oracle_list)
+        mt = time.perf_counter() - t0
+        return [
+            _row(metric="calibration_pit_ks", value=pit.value, status="ok",
+                 query_time_s=nan, metrics_time_s=mt, error_msg=None),
+            _row(metric="calibration_sd_ratio", value=sd.value, status="ok",
+                 query_time_s=nan, metrics_time_s=mt, error_msg=None),
+        ]
+
+    def _calibration_context(self, problem) -> tuple:
+        """Baseline-independent calibration context for ``problem`` (cached).
+
+        One of ``("ok", oracle_samples)`` | ``("not_applicable", reason)`` |
+        ``("error", message)``. ``oracle_samples`` is ``{node: [N_test, S]}``
+        drawn from ``true_model`` for the continuous nodes — the sd_ratio
+        denominator. Cached in ``_problem_resources.calibration_ctx`` so the
+        oracle draw runs once per (problem, measurement-instance); the draw is
+        seeded off problem.seed, so the production subprocess-per-cell runner
+        rebuilds it per cell with identical results (see ProblemResources).
+        """
+        res = self._resources(problem)
+        if res.calibration_ctx is None:
+            res.calibration_ctx = self._build_calibration_context(problem)
+        return res.calibration_ctx
+
+    def _build_calibration_context(self, problem) -> tuple:
+        if problem.true_model is None:
+            return ("not_applicable",
+                    "no true_model available for calibration")
+        # Calibration is continuous-only (complement of recovery's discrete-only).
+        has_continuous = any(
+            kind == "continuous" for kind, _ in problem.variables.values()
+        )
+        if not has_continuous:
+            return ("not_applicable",
+                    "calibration is defined for problems with at least one "
+                    "continuous node")
+
+        from benchmarking.core.predictive_sampling import (
+            continuous_predictive_samples,
+        )
+        seed = int(problem.seed) ^ _CALIBRATION_SEED_SALT
+        try:
+            with torch.random.fork_rng(devices=[]):
+                torch.manual_seed(seed)
+                oracle = continuous_predictive_samples(
+                    problem.true_model, problem.variables, problem.test_data,
+                    _N_CALIBRATION_SAMPLES,
+                )
+        except Exception as exc:  # oracle sampling is the generator's contract
+            return ("error", f"oracle calibration sampling failed: {exc!r}")
+        if not oracle:
+            return ("not_applicable",
+                    "no continuous nodes to calibrate")
+        return ("ok", oracle)
+
     # -- per-problem recovery context (cached) -------------------------------
 
     def _recovery_context(self, problem) -> tuple:
@@ -259,25 +412,36 @@ class ParamLearningMeasurement:
           ``("not_applicable", reason)`` |
           ``("error", message)``
 
-        Cached per problem so the true-CPT extraction + the weight sample run
-        once, not once per baseline scored on the problem.
+        Cached in ``_problem_resources.recovery_ctx`` (see ``_resources`` for the
+        key contract) so the true-CPT extraction + the 20k weight sample run once
+        per problem, not once per baseline scored on it.
+        """
+        res = self._resources(problem)
+        if res.recovery_ctx is None:
+            res.recovery_ctx = self._build_recovery_context(problem)
+        return res.recovery_ctx
+
+    def _resources(self, problem) -> ProblemResources:
+        """Get-or-create the per-problem resource cache entry.
 
         Cache-key contract: ``(name, problem_id, seed)`` must uniquely identify
         a problem. Present sources populate all three (and ``name`` already
         encodes family/size/seed for synthetic), so distinct problems never
-        alias. NOTE there is intentionally no "non-default" assertion here:
-        ``seed=0`` is a legitimate seed (the smoke config uses it) and
-        ``problem_id`` defaults to ``""`` only for source-less unit fixtures —
-        a future source that leaves both unset would alias problems, so any new
-        source MUST set ``problem_id``.
+        alias. The key omits n_train, so within ONE measurement instance an
+        n_train sweep would reuse a single entry per (seed, n_nodes) — though in
+        the production subprocess-per-cell runner each n_train cell rebuilds it
+        (identical results via the seed; see ProblemResources). NOTE there is
+        intentionally no "non-default" assertion: ``seed=0`` is a legitimate seed
+        (the smoke config uses it) and ``problem_id`` defaults to ``""`` only for
+        source-less unit fixtures — a future source that leaves both unset would
+        alias problems, so any new source MUST set ``problem_id``.
         """
         key = (problem.name, problem.problem_id, problem.seed)
-        cached = self._recovery_cache.get(key)
-        if cached is not None:
-            return cached
-        ctx = self._build_recovery_context(problem)
-        self._recovery_cache[key] = ctx
-        return ctx
+        res = self._problem_resources.get(key)
+        if res is None:
+            res = ProblemResources()
+            self._problem_resources[key] = res
+        return res
 
     def _build_recovery_context(self, problem) -> tuple:
         if problem.true_model is None:
