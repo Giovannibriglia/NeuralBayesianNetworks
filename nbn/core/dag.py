@@ -72,12 +72,31 @@ class DAG:
         return list(nx.descendants(self._g, node))
 
     def induced_width(self) -> int:
-        """Approximate induced width via greedy min-fill triangulation."""
-        moral = nx.moral_graph(self._g.to_undirected())
-        order, _ = nx.minimum_fill_in(moral)
+        """Approximate induced width via greedy min-fill triangulation.
+
+        Moralises the DAG, then repeatedly eliminates the node whose
+        removal introduces the fewest fill-in edges among its neighbours
+        (ties broken by smallest neighbourhood), tracking the largest
+        neighbourhood seen — an upper bound on the treewidth that
+        ``HybridRouter`` uses to choose exact VE versus likelihood
+        weighting.  ``nx.moral_graph`` requires the *directed* graph
+        (it is ``@not_implemented_for("undirected")``); moralising the
+        DiGraph directly also adds the parent-marrying edges that an
+        undirected projection would omit.
+        """
+        g = nx.moral_graph(self._g)
         width = 0
-        g = moral.copy()
-        for node in order:
+        while g.number_of_nodes():
+            def _fill_cost(node: str) -> tuple[int, int]:
+                nbrs = list(g.neighbors(node))
+                fill = sum(
+                    not g.has_edge(nbrs[i], nbrs[j])
+                    for i in range(len(nbrs))
+                    for j in range(i + 1, len(nbrs))
+                )
+                return (fill, len(nbrs))
+
+            node = min(g.nodes, key=_fill_cost)
             nbrs = list(g.neighbors(node))
             width = max(width, len(nbrs))
             for i in range(len(nbrs)):
