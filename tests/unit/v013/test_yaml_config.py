@@ -373,7 +373,8 @@ def test_scalability_complete_config_loads(tmp_path: Path) -> None:
     )
     assert isinstance(cfg.selector, HeaviestQueryByRole)
     assert cfg.per_cell_timeout_s == 60.0
-    assert len(cfg.baselines) == 23
+    # 23 + 3 non-parametric -lw baselines (kde/knn/flexcode, #228 / PR 10).
+    assert len(cfg.baselines) == 26
 
 
 def _bnlearn_source(**overrides) -> dict:
