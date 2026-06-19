@@ -77,6 +77,11 @@ baselines:
   - {library: nbn,   mechanism: lg,       param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 1024}}
   - {library: nbn,   mechanism: mdn,      param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 1024}}
   - {library: nbn,   mechanism: flow,     param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 1024}}
+  # Non-parametric continuous mechanisms (#224 / PR 9) — LW only (ais/avi blocked
+  # at recognition_net._head_for, deferred to #227). KDE + KNN here (sub-second on
+  # CPU); flexcode is complete-config / GPU only.
+  - {library: nbn,   mechanism: kde,      param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 1024}}
+  - {library: nbn,   mechanism: knn,      param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 1024}}
   - {library: nbn,   mechanism: hybrid,   param_method: mle,   inference_method: router}
 
 # Larger than inference_smoke.yaml (2) so the topological buckets and

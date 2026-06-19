@@ -68,6 +68,14 @@ baselines:
   - {library: nbn,   mechanism: lg,       param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 4096}}
   - {library: nbn,   mechanism: mdn,      param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 4096}}
   - {library: nbn,   mechanism: flow,     param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 4096}}
+  # Non-parametric continuous mechanisms (#224 / PR 9) — LW only (ais/avi blocked
+  # at recognition_net._head_for, deferred to #227). All three carry device: cuda:
+  # KDE-lw's per-query O(n_train) density eval is ~19.5s/query on CPU at this scale
+  # (n_train=10000, n_samples=4096) -> ~5.5h/cell at n_queries_per_cell=1024;
+  # 0.24s/query on GPU. Scalability/speed configs deferred to #228.
+  - {library: nbn,   mechanism: kde,      param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 4096}, device: cuda}
+  - {library: nbn,   mechanism: knn,      param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 4096}, device: cuda}
+  - {library: nbn,   mechanism: flexcode, param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 4096}, device: cuda}
   - {library: nbn,   mechanism: hybrid,   param_method: mle,   inference_method: router}
 
   # Paper-only libraries.  Non-applicable cells are gated by is_applicable.
