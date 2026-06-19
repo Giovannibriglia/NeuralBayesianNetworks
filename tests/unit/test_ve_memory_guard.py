@@ -247,16 +247,24 @@ def test_query_batch_oom_guard_raises_on_constrained_cuda_device() -> None:
     fake_device = torch.device("cuda:0")
     model_cls = type(bn.true_model)
     # Bug 2 / PR #131: disable pruning so the guard sees the full 20-node
-    # elimination peak (~256 MiB) this test calibrates against; with pruning
-    # the relevant scope shrinks below the 64 MiB threshold and the guard
-    # correctly would not fire (pruning solves the OOM rather than guarding it).
+    # elimination peak this test calibrates against; with pruning the relevant
+    # scope shrinks and the guard correctly would not fire (pruning solves the
+    # OOM rather than guarding it).
+    #
+    # PR 11 (#226): query_batch defaults to order="min_fill"; the realised
+    # min-fill peak for this scale is ~48 MiB (= ~16 MiB bare × 3.0
+    # _LIVESET_MULTIPLIER from #179, after #131 pruning shrank the old ~256 MiB
+    # topological-shaped estimate).  The original mock (64 MiB free → 57.6 MiB
+    # threshold) sat *above* that peak, so the guard would not have fired even
+    # once reached.  Mock 32 MiB free (0.9 × 32 = 28.8 MiB threshold < 48 MiB)
+    # so the guard correctly rejects the query at the default order.
     with patch.object(ve_mod, "relevant_subnetwork", _all_nodes), \
          patch.object(model_cls, "device",
                       new_callable=PropertyMock,
                       return_value=fake_device), \
          patch("torch.cuda.mem_get_info",
-               return_value=(64 * 1024 ** 2, 8 * 1024 ** 3)):
-        # 64 MiB free; min-fill peak at this scale is ~256 MiB → guard
+               return_value=(32 * 1024 ** 2, 8 * 1024 ** 3)):
+        # 32 MiB free; min-fill peak at this scale is ~48 MiB → guard
         # should reject the query pre-allocation.
         with pytest.raises(
             (torch.cuda.OutOfMemoryError, RuntimeError),
