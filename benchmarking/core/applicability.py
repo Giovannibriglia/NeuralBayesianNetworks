@@ -65,6 +65,15 @@ BASELINE_FAMILY_APPLICABILITY: dict[str, BaselineApplicability] = {
         frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
     "nbn-flow-lw":             BaselineApplicability(
         frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
+    # Non-parametric continuous mechanisms (#224 / PR 9) — LW only. The amortized
+    # engines (ais/avi) have no RecognitionNetwork proposal head for these
+    # mechanism types (recognition_net._head_for raises); deferred to #227.
+    "nbn-kde-lw":              BaselineApplicability(
+        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
+    "nbn-knn-lw":              BaselineApplicability(
+        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
+    "nbn-flexcode-lw":         BaselineApplicability(
+        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
     "nbn-hybrid-router":       BaselineApplicability(frozenset({"hybrid"})),
 
     # Amortized neural-proposal IS (v0.14, #181) — same accuracy class /

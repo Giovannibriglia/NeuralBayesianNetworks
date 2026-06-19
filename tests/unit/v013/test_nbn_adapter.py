@@ -268,3 +268,51 @@ class TestNeuralCatRootNode:
             f"v0.7-#43 audit's #52 finding); got fitted={fitted_probs.tolist()} "
             f"(max diff from uniform={max_diff_from_uniform:.6e})"
         )
+
+
+class TestNonParametricInferenceLW:
+    """Non-parametric continuous mechanisms as LW inference baselines (#224/PR 9).
+
+    Only Likelihood Weighting works: the amortized engines (ais/avi) have no
+    RecognitionNetwork proposal head for these mechanism types
+    (recognition_net._head_for raises), deferred to #227.
+    """
+
+    def test_nonparametric_lw_registered_ais_avi_not(self):
+        # Documents the structural deferral: lw is registered, ais/avi are not
+        # (so they return not_supported). If a future PR adds ais/avi proposal
+        # heads (#227), this test signals the coverage extension.
+        from benchmarking.core.applicability import BASELINE_FAMILY_APPLICABILITY
+        for mech in ("kde", "knn", "flexcode"):
+            assert f"nbn-{mech}-lw" in BASELINE_FAMILY_APPLICABILITY
+            assert f"nbn-{mech}-ais" not in BASELINE_FAMILY_APPLICABILITY
+            assert f"nbn-{mech}-avi" not in BASELINE_FAMILY_APPLICABILITY
+
+    @pytest.mark.slow
+    @pytest.mark.parametrize("mechanism", ["kde", "knn"])
+    def test_nonparametric_lw_query_valid_posterior(self, mechanism):
+        adapter = NBNAdapter(mechanism=mechanism, engine="lw", device="cpu")
+        problem = _make_small_continuous_problem(n_samples=500, seed=42)
+        adapter.fit(problem)
+        q = Query(targets=("X2",), evidence={"X0": torch.tensor(0.5)}, kind="marginal")
+        posterior = adapter.query(q)
+        assert isinstance(posterior, Posterior)
+        assert posterior.samples is not None
+        assert posterior.samples.shape[0] > 0
+        assert torch.isfinite(posterior.samples).all()
+        # non-trivial diversity (not a degenerate point mass)
+        assert posterior.samples.reshape(-1).unique().numel() > 1
+
+    @pytest.mark.gpu
+    def test_flexcode_lw_query_valid_posterior_gpu(self):
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA required for the flexcode baseline")
+        adapter = NBNAdapter(mechanism="flexcode", engine="lw", device="cuda")
+        problem = _make_small_continuous_problem(n_samples=500, seed=42)
+        adapter.fit(problem)
+        q = Query(targets=("X2",), evidence={"X0": torch.tensor(0.5)}, kind="marginal")
+        posterior = adapter.query(q)
+        assert isinstance(posterior, Posterior)
+        assert posterior.samples is not None
+        assert torch.isfinite(posterior.samples).all()
+        assert posterior.samples.reshape(-1).unique().numel() > 1
