@@ -74,6 +74,11 @@ baselines:
   - {library: nbn,   mechanism: mdn,      param_method: mle}
   - {library: nbn,   mechanism: flow,     param_method: mle}
   - {library: nbn,   mechanism: hybrid,   param_method: mle}
+  # Non-parametric continuous baselines (#223 / PR 8). KDE + KNN only — both are
+  # sub-second per node on CPU. FlexCode (200-epoch MLP, CPU-intractable) is
+  # complete-config / GPU only.
+  - {library: nbn,   mechanism: kde,      param_method: mle}
+  - {library: nbn,   mechanism: knn,      param_method: mle}
 
 n_queries_per_cell: 2
 per_cell_timeout_s: 60.0

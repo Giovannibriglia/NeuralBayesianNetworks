@@ -72,6 +72,13 @@ baselines:
   - {library: nbn,   mechanism: mdn,      param_method: mle}
   - {library: nbn,   mechanism: flow,     param_method: mle}
   - {library: nbn,   mechanism: hybrid,   param_method: mle}
+  # Non-parametric continuous baselines (#223 / PR 8) — parametric-vs-non-
+  # parametric calibration comparison. KDE + KNN are cheap; flexcode trains a
+  # 200-epoch MLP per continuous node, so it carries a per-baseline device: cuda
+  # override (the global default stays CPU; mdn/flow are a separate device call).
+  - {library: nbn,   mechanism: kde,      param_method: mle}
+  - {library: nbn,   mechanism: knn,      param_method: mle}
+  - {library: nbn,   mechanism: flexcode, param_method: mle, device: cuda}
   - {library: gpytorch,    mechanism: gp,       param_method: mle}
   - {library: pomegranate, mechanism: discrete, param_method: mle}
   - {library: pyro, mechanism: empirical, param_method: mle, device: cpu}

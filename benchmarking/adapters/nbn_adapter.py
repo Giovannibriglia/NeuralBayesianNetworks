@@ -41,6 +41,12 @@ _DISCRETE_MECH: dict[str, str] = {
     "mdn":       "categorical_table",
     "flow":      "categorical_table",
     "hybrid":    "categorical_table",   # HybridRouter default
+    # Non-parametric continuous mechanisms (#223 / PR 8) — continuous-only, so
+    # categorical_table is the discrete-node fallback (mirrors lg/mdn/flow). The
+    # keys here are ALSO the unified valid-mechanism set for __init__ validation.
+    "kde":       "categorical_table",
+    "knn":       "categorical_table",
+    "flexcode":  "categorical_table",
 }
 
 # Which continuous mechanism to use for nodes with kind="continuous"
@@ -51,6 +57,10 @@ _CONTINUOUS_MECH: dict[str, str] = {
     "mdn":       "mdn",
     "flow":      "flow",
     "hybrid":    "mdn",                 # HybridRouter default
+    # Non-parametric continuous mechanisms (#223 / PR 8).
+    "kde":       "conditional_kde",
+    "knn":       "knn_conditional",
+    "flexcode":  "flexcode",
 }
 
 # Maps the `engine` arg to the engine_spec string used internally
@@ -208,6 +218,22 @@ class NBNAdapter:
             # actually requested.  Mirrors old adapter v0.6c-C-1b comment.
             from nbn.mechanisms import NormalizingFlowMechanism
             return NormalizingFlowMechanism()
+        # Non-parametric mechanisms (#223 / PR 8) — lazy imports, defaults only
+        # (bw_factor=1.0 / k=auto / n_basis=31 + sharpen=1.0; the "auto" tuning
+        # flags are opt-in and deferred).
+        if continuous_mech == "conditional_kde":
+            from nbn.mechanisms.non_parametric.conditional_kde import (
+                ConditionalKDEMechanism,
+            )
+            return ConditionalKDEMechanism()
+        if continuous_mech == "knn_conditional":
+            from nbn.mechanisms.non_parametric.knn_conditional import (
+                KNNConditionalMechanism,
+            )
+            return KNNConditionalMechanism()
+        if continuous_mech == "flexcode":
+            from nbn.mechanisms.non_parametric.flexcode import FlexCodeMechanism
+            return FlexCodeMechanism()
         # Default: MDN
         return MDNMechanism(num_components=3, hidden=(32,))
 

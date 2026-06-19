@@ -42,11 +42,11 @@ jobs:
 
       - name: Parameter-learning smoke
         run: nbn-bench param-learning --config benchmarking/configs/synthetic/smoke_tests/parameter_learning_smoke.yaml
-        timeout-minutes: 5
+        timeout-minutes: 10
 
       - name: Inference smoke
         run: nbn-bench inference --config benchmarking/configs/synthetic/smoke_tests/inference_smoke.yaml
-        timeout-minutes: 5
+        timeout-minutes: 10
 
       - name: Upload smoke figures
         if: always()

@@ -51,16 +51,32 @@ def _by_metric(rows):
     return {r.metric: r for r in rows}
 
 
-@pytest.mark.slow
-def test_calibration_ok_on_continuous():
-    prob = _problem("continuous_lg")
-    rows = _measure(ParamLearningMeasurement(), prob, _fitted(prob, "lg"))
-    by = _by_metric(rows)
+def _assert_calibration_ok(prob, adapter):
+    by = _by_metric(_measure(ParamLearningMeasurement(), prob, adapter))
     pit, sd = by["calibration_pit_ks"], by["calibration_sd_ratio"]
     assert pit.status == "ok" and math.isfinite(pit.value) and pit.value >= 0.0
     assert sd.status == "ok" and math.isfinite(sd.value) and sd.value > 0.0
     # recovery is the complement: not_applicable on a continuous problem.
     assert by["param_recovery_tv"].status == "not_applicable"
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("mechanism", ["lg", "mdn", "kde", "knn"])
+def test_calibration_ok_on_continuous(mechanism):
+    # Parametric (lg/mdn) + non-parametric (kde/knn, #223) — all CPU-tractable.
+    prob = _problem("continuous_lg")
+    _assert_calibration_ok(prob, _fitted(prob, mechanism))
+
+
+@pytest.mark.gpu
+def test_calibration_ok_flexcode_gpu():
+    # FlexCode is gpu-only at benchmark scale (#223); CI skips via `not gpu`.
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required for the flexcode baseline")
+    prob = _problem("continuous_lg")
+    adapter = NBNAdapter(mechanism="flexcode", engine=None, device="cuda")
+    adapter.fit(prob, epochs=8)
+    _assert_calibration_ok(prob, adapter)
 
 
 @pytest.mark.slow
