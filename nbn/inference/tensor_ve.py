@@ -337,15 +337,6 @@ class TensorVariableElimination(InferenceEngine):
         # final factor product re-forms the giant joint.
         factors = {n: f for n, f in factors.items() if n in relevant}
 
-        # Condition each factor batchwise.
-        # `conditioned` holds tuples `(log_values_tensor, vars, has_batch)`.
-        conditioned: list[tuple[torch.Tensor, list[str], bool]] = []
-        for f in factors.values():
-            lv, vars_, has_b = _condition_factor_batched(
-                f.log_values, f.variables, ev_norm,
-            )
-            conditioned.append((lv, vars_, has_b))
-
         # v0.6b round-2: pre-allocation memory-budget guard.  Estimate
         # the peak intermediate-factor size by walking the plan
         # algebraically (same algebra as the diagnostic in
@@ -357,6 +348,15 @@ class TensorVariableElimination(InferenceEngine):
         # ``run_with_guard`` (v0.5b round-2) classifies this as
         # ``status='oom'`` so paper-config cells fail cleanly with a
         # DNF triangle rather than crashing the harness.
+        #
+        # The guard runs *before* the conditioning loop below: that loop
+        # is itself the first tensor op that touches ``device`` (it slices
+        # each factor by the device-resident evidence), so a query whose
+        # elimination peak will not fit must be rejected before any cuda
+        # allocation happens — otherwise conditioning can OOM before the
+        # guard ever fires.  The estimate depends only on the plan, the
+        # pruned factor scopes, the evidence keys and ``B``, all of which
+        # are known here.
         if device.type == "cuda":
             msg = _memory_budget_message(
                 to_eliminate, factors,
@@ -365,6 +365,15 @@ class TensorVariableElimination(InferenceEngine):
             )
             if msg is not None:
                 raise torch.cuda.OutOfMemoryError(msg)
+
+        # Condition each factor batchwise.
+        # `conditioned` holds tuples `(log_values_tensor, vars, has_batch)`.
+        conditioned: list[tuple[torch.Tensor, list[str], bool]] = []
+        for f in factors.values():
+            lv, vars_, has_b = _condition_factor_batched(
+                f.log_values, f.variables, ev_norm,
+            )
+            conditioned.append((lv, vars_, has_b))
 
         for var in to_eliminate:
             relevant = [f for f in conditioned if var in f[1]]
