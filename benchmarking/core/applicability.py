@@ -43,6 +43,14 @@ BASELINE_FAMILY_APPLICABILITY: dict[str, BaselineApplicability] = {
     "nbn-flow":                BaselineApplicability(
         frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
     "nbn-hybrid":              BaselineApplicability(frozenset({"hybrid"})),
+    # Non-parametric continuous mechanisms (#223 / PR 8) — general conditional
+    # density estimators, applicable to every continuous family like mdn/flow.
+    "nbn-kde":                 BaselineApplicability(
+        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
+    "nbn-knn":                 BaselineApplicability(
+        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
+    "nbn-flexcode":            BaselineApplicability(
+        frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
 
     # --- Inference ---
     "pgmpy-mle-ve":            BaselineApplicability(frozenset({"discrete"})),

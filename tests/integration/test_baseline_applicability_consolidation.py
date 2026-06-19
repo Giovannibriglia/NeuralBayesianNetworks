@@ -76,6 +76,20 @@ _EXPECTED_APPLICABILITY: dict[tuple[str, str], bool] = {
     ("nbn-hybrid", "continuous_lg"): False,
     ("nbn-hybrid", "continuous_nongauss"): False,
     ("nbn-hybrid", "hybrid"): True,
+    # Non-parametric continuous mechanisms (#223 / PR 8) — every continuous
+    # family, like nbn-mdn / nbn-flow.
+    ("nbn-kde", "discrete"): False,
+    ("nbn-kde", "continuous_lg"): True,
+    ("nbn-kde", "continuous_nongauss"): True,
+    ("nbn-kde", "hybrid"): True,
+    ("nbn-knn", "discrete"): False,
+    ("nbn-knn", "continuous_lg"): True,
+    ("nbn-knn", "continuous_nongauss"): True,
+    ("nbn-knn", "hybrid"): True,
+    ("nbn-flexcode", "discrete"): False,
+    ("nbn-flexcode", "continuous_lg"): True,
+    ("nbn-flexcode", "continuous_nongauss"): True,
+    ("nbn-flexcode", "hybrid"): True,
     # Inference labels
     ("pgmpy-mle-ve", "discrete"): True,
     ("pgmpy-mle-ve", "continuous_lg"): False,
