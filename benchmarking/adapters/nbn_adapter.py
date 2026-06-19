@@ -113,6 +113,18 @@ class NBNAdapter:
     # alongside its method so the two never drift out of sync.
     supports_param_recovery: bool = True
 
+    # Calibration capability (#109 PR 7). True if the adapter implements
+    # ``predictive_samples(test_data) -> dict[node, Tensor[N, S]]``, returning S
+    # predictive samples per test row per CONTINUOUS node. ParamLearningMeasurement
+    # compares these against the held-out test values (PIT-KS) and against oracle
+    # true-conditional samples from problem.true_model (sd_ratio). Discrete-only
+    # adapters do not set this flag → their calibration rows are not_supported;
+    # continuous-capable adapters that have not implemented predictive_samples yet
+    # (currently pgmpy-lg, pyro-empirical on continuous) also leave it unset. The
+    # caller (the measurement) is responsible for seeding the predictive draws for
+    # reproducibility — the method itself is intentionally stochastic.
+    supports_calibration: bool = True
+
     def __init__(
         self,
         mechanism: str,
@@ -635,3 +647,49 @@ class NBNAdapter:
         from benchmarking.core.cpt_extraction import extract_discrete_cpts
 
         return extract_discrete_cpts(self.model, self.problem.variables)
+
+    # Predictive samples per continuous node for calibration (#109 PR 7). S
+    # matches the calibration_diagnostic harness default.
+    N_CALIBRATION_SAMPLES: int = 400
+
+    def predictive_samples(
+        self, test_data: dict[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        """Predictive samples per CONTINUOUS node for calibration (#109 PR 7).
+
+        Returns ``{node: samples[N, S]}`` for each continuous node, where
+        ``samples[i]`` are ``S = N_CALIBRATION_SAMPLES`` draws from the fitted
+        mechanism's predictive distribution conditioned on test row ``i``'s
+        parent values. Discrete nodes are OMITTED — calibration is a
+        continuous-node metric (PIT is defined on continuous predictive CDFs).
+
+        Root continuous nodes (no parents) have one unconditional predictive
+        distribution; the returned ``[N_test, S]`` is the same S samples expanded
+        across all test rows (``mech.sample(parents=None, n=S)`` returns
+        ``[1, S, D]``). Non-root nodes get N_test independent predictive
+        distributions, one per test row's parent assignment. This is the correct
+        semantics for both — root predictives are inherently row-invariant;
+        non-root predictives are row-conditional — and matters because PIT-KS at
+        a root node then asks "do the y values look like draws from this one
+        unconditional predictive?" rather than "are the y values each calibrated
+        against their own predictive."
+
+        Delegates to ``continuous_predictive_samples`` — the SAME helper the
+        measurement uses to draw oracle samples from ``true_model`` — so the
+        fitted (PIT-KS / sharpness numerator) and oracle (sd_ratio denominator)
+        draws are sampled by identical logic. INTENTIONALLY STOCHASTIC: the
+        caller (ParamLearningMeasurement) wraps this in a seeded ``fork_rng``
+        scope for reproducible parquet values; calling it bare gives fresh draws.
+        """
+        if self.model is None or self.problem is None:
+            raise RuntimeError(
+                "Adapter not fitted. Call fit() before predictive_samples()."
+            )
+        from benchmarking.core.predictive_sampling import (
+            continuous_predictive_samples,
+        )
+
+        return continuous_predictive_samples(
+            self.model, self.problem.variables, test_data,
+            self.N_CALIBRATION_SAMPLES, self.device,
+        )
