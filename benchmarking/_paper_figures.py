@@ -119,11 +119,17 @@ _NON_BATCHABLE_LIBRARIES = frozenset({"pyro", "pgmpy"})
 STATUS_COLORS = {
     "ok": "#2ca02c",             # green
     "not_supported": "#7f7f7f",  # gray (neutral — applicability, not failure)
+    "not_applicable": "#b0b0b0",  # lighter gray (PL-mode applicability; #233/#236)
     "timeout": "#ff7f0e",        # orange (over budget)
     "error": "#d62728",          # red (genuine failure)
     "oom": "#8c564b",            # brown (memory failure)
 }
-STATUS_ORDER = ("ok", "not_supported", "timeout", "error", "oom")
+# not_applicable ordered next to not_supported: both are "applicability, not
+# failure" (spec 3.3). Registration only — PL parquets emit not_applicable on
+# per-metric rows that per_query_status_counts does not yet count, so this adds
+# no visible segment today; the PL-mode applicability breakdown is tracked in
+# #236.
+STATUS_ORDER = ("ok", "not_supported", "not_applicable", "timeout", "error", "oom")
 
 # --- Pure helpers -------------------------------------------------------------
 
