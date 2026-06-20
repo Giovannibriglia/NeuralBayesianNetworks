@@ -682,3 +682,70 @@ def test_multi_parquet_cli_nargs(tmp_path):
     assert result.returncode == 0, f"script failed: {result.stderr[-800:]}"
     assert list((out_dir / "bnlearn").rglob("*.pdf"))
     assert list((out_dir / "synthetic").rglob("*.pdf"))
+
+
+# --- divergence panel (#235) --------------------------------------------------
+
+def test_mechanism_key_suffix_aware():
+    """_mechanism_key strips a trailing engine suffix to align PL and inference
+    baselines for the same mechanism, and preserves everything else."""
+    from benchmarking._paper_figures import _mechanism_key
+
+    assert _mechanism_key("nbn-mdn-lw") == "nbn-mdn"      # inference -> mechanism
+    assert _mechanism_key("nbn-mdn") == "nbn-mdn"         # PL form preserved
+    assert _mechanism_key("nbn-cat") == "nbn-cat"         # no engine suffix
+    assert _mechanism_key("pgmpy-mle") == "pgmpy-mle"     # param-method, not engine
+    assert _mechanism_key("nbn-cat-ve") == "nbn-cat"      # ve is an engine
+    assert _mechanism_key("pyro-empirical-importance") == "pyro-empirical"
+
+
+def _make_divergence_parquet(tmp_path: Path) -> Path:
+    """A nongauss union parquet: calibration_pit_ks rows (PL-form baselines,
+    no engine suffix) + w1_per_node rows (inference-form baselines, -lw suffix)
+    for the SAME two mechanisms, so the panel must align them by mechanism key."""
+    rows = []
+    pit = {"nbn-mdn": 0.13, "nbn-kde": 0.06}      # PIT-KS: kde best, mdn worst
+    w1 = {"nbn-mdn-lw": 0.07, "nbn-kde-lw": 0.09}  # w1: mdn best (the disagreement)
+    common = dict(benchmark="synthetic", family="continuous_nongauss",
+                  problem_id="5", seed=0, query_role="", query_kind="prediction",
+                  evidence_strategy="random", evidence_mode="full",
+                  fit_time_s=float("nan"), query_time_s=float("nan"),
+                  metrics_time_s=0.01, error_msg=None, n_nodes=5, n_train=None)
+    for b, v in pit.items():
+        rows.append({**common, "baseline": b, "metric": "calibration_pit_ks",
+                     "value": v, "status": "ok"})
+    for b, v in w1.items():
+        rows.append({**common, "baseline": b, "metric": "w1_per_node",
+                     "value": v, "status": "ok"})
+    out = tmp_path / "div_metrics.parquet"
+    pd.DataFrame(rows).to_parquet(out)
+    return out
+
+
+def test_divergence_panel_renders_and_aligns_mechanisms(tmp_path):
+    """run_plot emits the divergence panel on a family with both metrics, and
+    the panel aligns nbn-mdn (PL) with nbn-mdn-lw (inference) as one mechanism."""
+    from benchmarking._paper_figures import run_plot, fig_divergence, _mechanism_key
+
+    parquet = _make_divergence_parquet(tmp_path)
+    out_dir = tmp_path / "figs_div"
+    assert run_plot(parquet=parquet, output_dir=out_dir, aggregation="mean_std") == 0
+    panel = (out_dir / "synthetic" / "continuous_nongauss" / "all" / "plots"
+             / "divergence_calibration_pit_ks_vs_w1_per_node.pdf")
+    assert panel.exists()
+    # The suffix-mismatched baselines collapse to the same two mechanism keys.
+    df = pd.read_parquet(parquet)
+    keys = {_mechanism_key(b) for b in df.baseline.unique()}
+    assert keys == {"nbn-mdn", "nbn-kde"}
+
+
+def test_divergence_panel_skipped_without_both_metrics(tmp_path):
+    """A family with only one of the pair's metrics renders no divergence panel."""
+    from benchmarking._paper_figures import run_plot
+
+    # _make_learning_curve_parquet has calibration (not_applicable) + recovery,
+    # but no w1_per_node ok rows -> the (pit_ks, w1) pair is incomplete.
+    parquet = _make_learning_curve_parquet(tmp_path)
+    out_dir = tmp_path / "figs_nodiv"
+    assert run_plot(parquet=parquet, output_dir=out_dir, aggregation="mean_std") == 0
+    assert not list(out_dir.rglob("divergence_*.pdf"))
