@@ -472,11 +472,50 @@ def fig_status_stacked(df_cell, out_path: Path, title: str) -> None:
     _savefig(fig, out_path)
 
 
-def _scaling_plot(points_by_baseline, x_label, y_label, title, out_path, metric_kind):
-    """points_by_baseline: {baseline: [(x, center, lo, hi), ...]}."""
+_DNF_STATUSES = ("timeout", "oom", "error")
+
+
+def _dnf_cells(df_cell, metric_name, x_lookup):
+    """Detect partial-wall cells (#233): (baseline, x) cells that have BOTH ok
+    rows AND timeout/oom/error rows for ``metric_name``.
+
+    This 'saw both states' signal marks where a baseline scaled to a wall — some
+    queries finished within budget, some hit it — as opposed to a baseline that
+    never ran at this scale (timeout-only, no ok point on the curve to mark).
+    The distinction matters: the ok-only filter in the scaling plots keeps the
+    finished (cheap-tail) queries, so a partial-wall cell still plots a finite
+    point that UNDERSTATES cost; the marker flags that point as a wall.
+
+    Returns ``{baseline: {x_value: {status: count}}}`` (empty when no such cell)."""
+    sub = df_cell[df_cell["metric"] == metric_name]
+    if sub.empty:
+        return {}
+    out: dict[str, dict] = {}
+    for (b, p), g in sub.groupby(["baseline", "problem_id"]):
+        if p not in x_lookup:
+            continue
+        statuses = g["status"]
+        if not (statuses == "ok").any():
+            continue  # no ok point on the curve to mark (never-ran, not a wall)
+        fails = statuses[statuses.isin(_DNF_STATUSES)]
+        if not fails.empty:
+            out.setdefault(b, {})[x_lookup[p]] = fails.value_counts().to_dict()
+    return out
+
+
+def _scaling_plot(points_by_baseline, x_label, y_label, title, out_path, metric_kind,
+                  dnf_by_baseline=None):
+    """points_by_baseline: {baseline: [(x, center, lo, hi), ...]}.
+
+    dnf_by_baseline (#233): {baseline: {x: {status: count}}} of partial-wall
+    cells. Each marked point gets a hollow ring overlay (same color / x / y as
+    the underlying ok point) so the scaling wall reads directly off the curve;
+    a ``*_dnf.txt`` sidecar + corner note list the cells. Dormant (byte-identical
+    rendering) when no DNF cells exist."""
     if not points_by_baseline:
         logger.info("skip empty (no conditioned data): %s", out_path.name)
         return
+    dnf_by_baseline = dnf_by_baseline or {}
     colors = baseline_colors(points_by_baseline.keys())
     fig, ax = plt.subplots(figsize=(6, 4))
     all_x, all_y = [], []
@@ -514,10 +553,36 @@ def _scaling_plot(points_by_baseline, x_label, y_label, title, out_path, metric_
             labeled.add(b)
         ax.text(0.99, 0.99, "↑ = +∞", transform=ax.transAxes, ha="right",
                 va="top", fontsize=7, alpha=0.7)
+    # Partial-wall markers (#233): a hollow ring on each ok point whose cell also
+    # had timeout/oom/error rows — the asymmetric scaling wall reads off the
+    # curve (kde rings appear where it walls; knn/lg have none). One legend entry.
+    dnf_lines: list[str] = []
+    ring_labeled = False
+    for b in sorted(dnf_by_baseline):
+        ys = {p[0]: p[1] for p in points_by_baseline.get(b, [])}
+        for x in sorted(dnf_by_baseline[b]):
+            if x in ys and np.isfinite(ys[x]):
+                ax.plot([x], [ys[x]], marker="o", markerfacecolor="none",
+                        markeredgecolor=colors[b], markeredgewidth=1.6,
+                        markersize=11, linestyle="None",
+                        label=None if ring_labeled else "○ partial-timeout cell")
+                ring_labeled = True
+            for st, n in sorted(dnf_by_baseline[b][x].items()):
+                dnf_lines.append(f"  baseline={b}, x={x:g}, status={st}, count={n}")
+    if dnf_lines:
+        ax.text(0.99, 0.02, f"DNF: {len(dnf_lines)} cells (see *_dnf.txt)",
+                transform=ax.transAxes, ha="right", va="bottom",
+                fontsize=7, alpha=0.7)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
     ax.set_title(title)
     ax.legend(fontsize=7, loc="best")
+    if dnf_lines:
+        sidecar = out_path.with_name(out_path.stem + "_dnf.txt")
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text(
+            "Partial-wall cells (ok + timeout/oom/error in the same cell):\n"
+            + "\n".join(dnf_lines) + "\n", encoding="utf-8")
     _savefig(fig, out_path)
 
 
@@ -553,7 +618,8 @@ def fig_accuracy_scaling(df_cell, metric, x_axis, x_lookup, aggregation, out_pat
         if rows:
             points[b] = rows
     _scaling_plot(points, x_axis, f"{METRIC_LABEL[metric]} ({_direction(metric)})",
-                  f"{title} — {METRIC_LABEL[metric]} vs {x_axis}", out_path, metric)
+                  f"{title} — {METRIC_LABEL[metric]} vs {x_axis}", out_path, metric,
+                  dnf_by_baseline=_dnf_cells(df_cell, metric, x_lookup))
 
 
 def fig_accuracy_vs_n_train(df_cell, metric, aggregation, out_path, title):
@@ -664,7 +730,16 @@ def fig_time_scaling(df_cell, time_kind, x_axis, x_lookup, aggregation, out_path
         if rows:
             points[b] = rows
     label = "Total query time (s)" if time_kind == "query_total" else "Fit time (s)"
-    _scaling_plot(points, x_axis, label, f"{title} — {label} vs {x_axis}", out_path, "time")
+    # Partial-wall markers apply only to the query-time plot. A query timeout's
+    # status is replicated onto every metric row of that attempt (incl fit_time_s),
+    # so running DNF detection on fit_time_s would mislabel a QUERY-budget wall
+    # (kde/knn) as a fit wall. A genuine FIT-budget wall (flexcode) is
+    # all-or-nothing — the fit never completes, so the cell has no ok rows and the
+    # line truncates naturally; there is no partial point to mark. (PR 10: kde/knn
+    # trip the query budget, flexcode trips the fit budget.)
+    dnf = _dnf_cells(df_cell, "query_time_s", x_lookup) if time_kind == "query_total" else None
+    _scaling_plot(points, x_axis, label, f"{title} — {label} vs {x_axis}", out_path,
+                  "time", dnf_by_baseline=dnf)
 
 
 # --- LaTeX tables -------------------------------------------------------------

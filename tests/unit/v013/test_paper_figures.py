@@ -749,3 +749,76 @@ def test_divergence_panel_skipped_without_both_metrics(tmp_path):
     out_dir = tmp_path / "figs_nodiv"
     assert run_plot(parquet=parquet, output_dir=out_dir, aggregation="mean_std") == 0
     assert not list(out_dir.rglob("divergence_*.pdf"))
+
+
+# --- scaling-wall partial-timeout rendering (#233) ----------------------------
+
+def _make_walls_parquet(tmp_path: Path) -> Path:
+    """A scalability-shaped parquet: nbn-kde-lw has partial timeouts at the
+    upper n_nodes (the query-budget wall — some queries finish, some time out);
+    nbn-knn-lw is ok throughout (the asymmetric wall). Per-query rows replicate
+    the attempt's status across query_time_s / fit_time_s / w1_per_node."""
+    rows = []
+    common = dict(benchmark="synthetic", family="continuous_lg",
+                  query_kind="prediction", evidence_strategy="random",
+                  evidence_mode="full", error_msg=None, n_train=None)
+    # (baseline, n_nodes) -> list of per-query statuses
+    grid = {
+        ("nbn-kde-lw", 100): ["ok", "ok"],
+        ("nbn-kde-lw", 200): ["ok", "timeout"],          # partial wall
+        ("nbn-knn-lw", 100): ["ok", "ok"],
+        ("nbn-knn-lw", 200): ["ok", "ok"],               # no wall
+    }
+    for (baseline, n_nodes), statuses in grid.items():
+        for qi, st in enumerate(statuses):
+            for metric in ("query_time_s", "fit_time_s", "w1_per_node"):
+                val = 0.5 if st == "ok" else float("nan")
+                rows.append({**common, "problem_id": str(n_nodes), "n_nodes": n_nodes,
+                             "seed": 0, "baseline": baseline, "query_role": "random",
+                             "metric": metric, "value": val, "status": st,
+                             "fit_time_s": 0.5, "query_time_s": val,
+                             "metrics_time_s": 0.01})
+    out = tmp_path / "walls_metrics.parquet"
+    pd.DataFrame(rows).to_parquet(out)
+    return out
+
+
+def test_dnf_cells_detects_partial_walls(tmp_path):
+    """_dnf_cells flags (baseline, x) cells with BOTH ok and timeout rows, and
+    skips baselines that are ok throughout (the asymmetric-wall signal)."""
+    from benchmarking._paper_figures import _dnf_cells
+
+    df = pd.read_parquet(_make_walls_parquet(tmp_path))
+    dnf = _dnf_cells(df, "query_time_s", {"100": 100, "200": 200})
+    assert set(dnf) == {"nbn-kde-lw"}                 # knn ok throughout -> absent
+    assert set(dnf["nbn-kde-lw"]) == {200}            # wall only at n_nodes=200
+    assert dnf["nbn-kde-lw"][200] == {"timeout": 1}
+
+
+def test_scaling_wall_sidecar_and_query_only(tmp_path):
+    """run_plot writes a *_dnf.txt sidecar for the query-time + accuracy scaling
+    figures (kde's wall), but NOT the fit-time figure (a query timeout's status
+    is replicated onto fit_time_s rows; marking the fit plot would mislabel a
+    query-budget wall as a fit wall)."""
+    from benchmarking._paper_figures import run_plot
+
+    parquet = _make_walls_parquet(tmp_path)
+    out_dir = tmp_path / "figs_walls"
+    assert run_plot(parquet=parquet, output_dir=out_dir, aggregation="mean_std") == 0
+    plots = out_dir / "synthetic" / "continuous_lg" / "all" / "plots"
+    assert (plots / "total_query_time_vs_n_nodes_dnf.txt").exists()
+    assert (plots / "w1_per_node_vs_n_nodes_dnf.txt").exists()
+    assert not (plots / "fit_time_vs_n_nodes_dnf.txt").exists()   # query-wall, not fit
+    body = (plots / "total_query_time_vs_n_nodes_dnf.txt").read_text()
+    assert "nbn-kde-lw" in body and "x=200" in body and "nbn-knn-lw" not in body
+
+
+def test_all_ok_parquet_writes_no_dnf_sidecar(tmp_path):
+    """An all-ok parquet (no partial timeouts) writes no DNF sidecar — the
+    marker path is dormant and rendering is unchanged."""
+    from benchmarking._paper_figures import run_plot
+
+    parquet = _make_minimal_parquet(tmp_path)
+    out_dir = tmp_path / "figs_allok"
+    assert run_plot(parquet=parquet, output_dir=out_dir, aggregation="iqm_iqr") == 0
+    assert not list(out_dir.rglob("*_dnf.txt"))
