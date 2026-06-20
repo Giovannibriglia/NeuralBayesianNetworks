@@ -475,6 +475,17 @@ def _scaling_plot(points_by_baseline, x_label, y_label, title, out_path, metric_
     _savefig(fig, out_path)
 
 
+def _direction(metric) -> str:
+    """The 'good direction' annotation for a metric's axis label. Distances
+    and statistics are lower-better; log_likelihood is higher-better;
+    CLOSER_TO_VALUE metrics (e.g. calibration_sd_ratio) read 'closer to <v>'."""
+    if metric in LOWER_IS_BETTER:
+        return "lower better"
+    if metric in CLOSER_TO_VALUE:
+        return f"closer to {CLOSER_TO_VALUE[metric]:g} better"
+    return "higher better"
+
+
 def fig_accuracy_scaling(df_cell, metric, x_axis, x_lookup, aggregation, out_path, title):
     ok = df_cell[(df_cell["status"] == "ok") & (df_cell["metric"] == metric)]
     if ok.empty:
@@ -495,14 +506,39 @@ def fig_accuracy_scaling(df_cell, metric, x_axis, x_lookup, aggregation, out_pat
             rows.append((x_lookup[p], c, lo, hi))
         if rows:
             points[b] = rows
-    if metric in LOWER_IS_BETTER:
-        direction = "lower better"
-    elif metric in CLOSER_TO_VALUE:
-        direction = f"closer to {CLOSER_TO_VALUE[metric]:g} better"
-    else:
-        direction = "higher better"
-    _scaling_plot(points, x_axis, f"{METRIC_LABEL[metric]} ({direction})",
+    _scaling_plot(points, x_axis, f"{METRIC_LABEL[metric]} ({_direction(metric)})",
                   f"{title} — {METRIC_LABEL[metric]} vs {x_axis}", out_path, metric)
+
+
+def fig_accuracy_vs_n_train(df_cell, metric, aggregation, out_path, title):
+    """Learning-curve sibling of fig_accuracy_scaling: metric vs n_train.
+
+    Structurally different from the n_nodes / n_parameters axes — n_train
+    varies *within* a problem (PR 6's sweep), so values aggregate per
+    (baseline, n_train) ACROSS (problem_id, seed), not per (baseline,
+    problem_id) across seed. The x value is the n_train column itself, not a
+    problem_id lookup. The shared _scaling_plot draws the lines, bands, and
+    +inf sentinels (so e.g. param_recovery_kl=+inf renders identically here)."""
+    ok = df_cell[(df_cell["status"] == "ok") & (df_cell["metric"] == metric)
+                 & df_cell["n_train"].notna()]
+    if ok.empty:
+        logger.info("skip empty (no ok rows for %s): %s", metric, out_path.name)
+        return
+    success = per_query_success(df_cell)
+    points: dict[str, list] = {}
+    for b, gb in ok.groupby("baseline"):
+        if success.get(b, 0.0) <= 0.0:    # Policy 3: condition on success>0
+            continue
+        rows = []
+        for nt, gnt in gb.groupby("n_train"):
+            c, lo, hi = aggregate(gnt["value"], aggregation)   # across problem_id, seed
+            if np.isnan(c):
+                continue
+            rows.append((float(nt), c, lo, hi))
+        if rows:
+            points[b] = rows
+    _scaling_plot(points, "n_train", f"{METRIC_LABEL[metric]} ({_direction(metric)})",
+                  f"{title} — {METRIC_LABEL[metric]} vs n_train", out_path, metric)
 
 
 def fig_time_scaling(df_cell, time_kind, x_axis, x_lookup, aggregation, out_path, title):
@@ -785,12 +821,22 @@ def _render_view(dff, benchmark, family, aggregation, n_nodes, n_params,
     if include_success_rate:
         fig_status_stacked(dff, plots_dir / "success_rate.pdf", title)
 
+    # n_train learning-curve axis: emitted only when the parquet carries a
+    # real sweep (>= 2 distinct n_train values within this view), mirroring
+    # the n_parameters all-zero-skip (decision alpha). Non-sweep parquets
+    # (inference, plain param_learning) get no degenerate single-point curve.
+    has_n_train_sweep = ("n_train" in dff.columns
+                         and dff["n_train"].dropna().nunique() > 1)
+
     for metric in ACCURACY_METRICS:
         if family in DISCRETE_FAMILIES and metric == "w1_per_node":
             continue
         for x_axis, lookup in axes:
             fig_accuracy_scaling(dff, metric, x_axis, lookup, aggregation,
                                  plots_dir / f"{metric}_vs_{x_axis}.pdf", title)
+        if has_n_train_sweep:
+            fig_accuracy_vs_n_train(dff, metric, aggregation,
+                                    plots_dir / f"{metric}_vs_n_train.pdf", title)
 
     for time_kind, stem in [("query_total", "total_query_time"), ("fit", "fit_time")]:
         for x_axis, lookup in axes:
