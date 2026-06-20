@@ -753,7 +753,10 @@ def _fmt(center: float, lo: float, hi: float) -> str:
     return f"{center:.3g}$\\pm${half:.2g}"
 
 
-def _metric_cell(df_cell, baseline, metric, aggregation, role=None, kind=None) -> str:
+def _metric_agg(df_cell, baseline, metric, aggregation, role=None, kind=None):
+    """The (center, lo, hi) for a (baseline, metric) cell, or None if no ok rows.
+    Shared by the formatted cell (_metric_cell) and the bold-best comparison
+    (which needs the raw central)."""
     sub = df_cell[(df_cell["baseline"] == baseline) & (df_cell["metric"] == metric)
                   & (df_cell["status"] == "ok")]
     if role is not None:
@@ -761,16 +764,60 @@ def _metric_cell(df_cell, baseline, metric, aggregation, role=None, kind=None) -
     if kind is not None:
         sub = sub[sub["query_kind"] == kind]
     if sub.empty:
-        return "--"
-    return _fmt(*aggregate(sub["value"], aggregation))
+        return None
+    return aggregate(sub["value"], aggregation)
 
 
-def _time_cell(df_cell, baseline, aggregation) -> str:
+def _metric_cell(df_cell, baseline, metric, aggregation, role=None, kind=None) -> str:
+    agg = _metric_agg(df_cell, baseline, metric, aggregation, role=role, kind=kind)
+    return "--" if agg is None else _fmt(*agg)
+
+
+def _time_agg(df_cell, baseline, aggregation):
+    """The (center, lo, hi) of total query time for a baseline, or None."""
     t = query_time_totals(df_cell)
     t = t[t["baseline"] == baseline]
     if t.empty:
-        return "--"
-    return _fmt(*aggregate(t["total"], aggregation))
+        return None
+    return aggregate(t["total"], aggregation)
+
+
+def _time_cell(df_cell, baseline, aggregation) -> str:
+    agg = _time_agg(df_cell, baseline, aggregation)
+    return "--" if agg is None else _fmt(*agg)
+
+
+def _central(agg):
+    """Pull the central value out of a (center, lo, hi) tuple, or None."""
+    return agg[0] if agg is not None else None
+
+
+def _bold_best(centrals: dict, criterion: str) -> set:
+    """Baselines tied-best on ``criterion`` (to .3g display precision, the same
+    precision _fmt shows the central at).
+
+    ``criterion`` is a metric name or ``"time"``. Lower-is-better metrics and
+    ``"time"`` minimize the central; HIGHER_IS_BETTER (log_likelihood) maximizes
+    it; CLOSER_TO_VALUE (calibration_sd_ratio) minimizes ``|central - target|``
+    (so two baselines equidistant from the target tie even when their displayed
+    centrals differ). None / NaN / +-inf cells are excluded; an all-excluded
+    column bolds nothing."""
+    finite = {b: c for b, c in centrals.items()
+              if c is not None and np.isfinite(c)}
+    if not finite:
+        return set()
+    if criterion in CLOSER_TO_VALUE:
+        keyed = {b: abs(c - CLOSER_TO_VALUE[criterion]) for b, c in finite.items()}
+        higher = False
+    else:
+        keyed = dict(finite)
+        higher = criterion in HIGHER_IS_BETTER
+    best = (max if higher else min)(keyed.values())
+    return {b for b, k in keyed.items() if f"{k:.3g}" == f"{best:.3g}"}
+
+
+def _bold(cell: str) -> str:
+    return cell if cell == "--" else f"\\textbf{{{cell}}}"
 
 
 def _table_slug(value: str) -> str:
@@ -815,22 +862,39 @@ def table_headline(df_cell, family, size, aggregation, roles, out_path, label=""
     metrics = [m for m in _metrics_for_family(family)
                if not df_cell[(df_cell["metric"] == m) & (df_cell["status"] == "ok")].empty]
     success = per_query_success(df_cell)
+    baselines = sorted(success)
     role_order = ["overall"] + sorted(roles)
     header = ["Method", "Succ.\\%"]
     for m in metrics:
         for r in role_order:
             header.append(f"{METRIC_LABEL[m]} ({r})")
     header.append("Time (s)")
+
+    # bold-best per column (each (metric, role) cross + Time); Succ.% is a
+    # coverage indicator, not bolded. Zero-success baselines are excluded.
+    def col_central(getter):
+        return {b: (None if success[b] <= 0.0 else _central(getter(b)))
+                for b in baselines}
+    bold_metric = {
+        (m, r): _bold_best(
+            col_central(lambda b, m=m, r=r: _metric_agg(
+                df_cell, b, m, aggregation, role=None if r == "overall" else r)), m)
+        for m in metrics for r in role_order}
+    bold_time = _bold_best(
+        col_central(lambda b: _time_agg(df_cell, b, aggregation)), "time")
+
     rows = []
-    for b in sorted(success):
+    for b in baselines:
         cells = [b.replace("_", "\\_"), f"{success[b]:.0f}"]
         zero = success[b] <= 0.0
         for m in metrics:
             for r in role_order:
-                cells.append("--" if zero else
-                             _metric_cell(df_cell, b, m, aggregation,
-                                          role=None if r == "overall" else r))
-        cells.append("--" if zero else _time_cell(df_cell, b, aggregation))
+                cell = ("--" if zero else
+                        _metric_cell(df_cell, b, m, aggregation,
+                                     role=None if r == "overall" else r))
+                cells.append(_bold(cell) if b in bold_metric[(m, r)] else cell)
+        tcell = "--" if zero else _time_cell(df_cell, b, aggregation)
+        cells.append(_bold(tcell) if b in bold_time else tcell)
         rows.append(cells)
     _write_table(out_path, header, rows,
                  f"headline {family}/{size}; agg={aggregation}; "
@@ -847,15 +911,28 @@ def _table_scoped(df_cell, family, aggregation, scope_col, scope_val, out_path, 
     if not success:
         return
     header = ["Method", "Succ.\\%"] + [METRIC_LABEL[m] for m in metrics] + ["Time (s)"]
+    baselines = sorted(success)
+    scope_kw = "role" if scope_col == "query_role" else "kind"
+
+    def col_central(getter):
+        return {b: (None if success[b] <= 0.0 else _central(getter(b)))
+                for b in baselines}
+    bold_metric = {
+        m: _bold_best(col_central(
+            lambda b, m=m: _metric_agg(sub, b, m, aggregation, **{scope_kw: scope_val})), m)
+        for m in metrics}
+    bold_time = _bold_best(col_central(lambda b: _time_agg(sub, b, aggregation)), "time")
+
     rows = []
-    for b in sorted(success):
+    for b in baselines:
         zero = success[b] <= 0.0
         cells = [b.replace("_", "\\_"), f"{success[b]:.0f}"]
         for m in metrics:
-            cells.append("--" if zero else
-                         _metric_cell(sub, b, m, aggregation,
-                                      **{("role" if scope_col == "query_role" else "kind"): scope_val}))
-        cells.append("--" if zero else _time_cell(sub, b, aggregation))
+            cell = ("--" if zero else
+                    _metric_cell(sub, b, m, aggregation, **{scope_kw: scope_val}))
+            cells.append(_bold(cell) if b in bold_metric[m] else cell)
+        tcell = "--" if zero else _time_cell(sub, b, aggregation)
+        cells.append(_bold(tcell) if b in bold_time else tcell)
         rows.append(cells)
     _write_table(out_path, header, rows, note, label=label)
 

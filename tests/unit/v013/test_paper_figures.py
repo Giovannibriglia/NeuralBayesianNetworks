@@ -822,3 +822,47 @@ def test_all_ok_parquet_writes_no_dnf_sidecar(tmp_path):
     out_dir = tmp_path / "figs_allok"
     assert run_plot(parquet=parquet, output_dir=out_dir, aggregation="iqm_iqr") == 0
     assert not list(out_dir.rglob("*_dnf.txt"))
+
+
+# --- bold-best per metric column (#241) ---------------------------------------
+
+def test_bold_best_directions():
+    """_bold_best picks the winner per metric direction, excluding NaN/+inf."""
+    from benchmarking._paper_figures import _bold_best
+
+    # lower-better distance: smallest wins.
+    assert _bold_best({"a": 0.05, "b": 0.02, "c": 0.09}, "tv_per_node") == {"b"}
+    # higher-better: largest wins.
+    assert _bold_best({"a": -10.0, "b": -3.0}, "log_likelihood") == {"b"}
+    # closer-to-1: |c-1| minimized (0.9 and 1.1 are equidistant -> tie).
+    assert _bold_best({"a": 0.9, "b": 1.1, "c": 1.4}, "calibration_sd_ratio") == {"a", "b"}
+    # time column (lower-better).
+    assert _bold_best({"a": 5.0, "b": 1.0}, "time") == {"b"}
+
+
+def test_bold_best_excludes_nan_and_inf():
+    """+inf (unsmoothed KL) and None never win; an all-excluded column bolds none."""
+    from benchmarking._paper_figures import _bold_best
+
+    assert _bold_best({"a": float("inf"), "b": 0.5, "c": None}, "param_recovery_kl") == {"b"}
+    assert _bold_best({"a": float("inf"), "b": None}, "param_recovery_kl") == set()
+
+
+def test_bold_best_ties_to_display_precision():
+    """Two centrals that round to the same .3g string bold together."""
+    from benchmarking._paper_figures import _bold_best
+
+    # 0.02961 and 0.02964 both render as "0.0296" at .3g -> tied; 0.10 does not.
+    assert _bold_best({"a": 0.02961, "b": 0.02964, "c": 0.10}, "tv_per_node") == {"a", "b"}
+
+
+def test_headline_table_bolds_best_cell(tmp_path):
+    """A rendered headline table has \\textbf on the best baseline per metric."""
+    from benchmarking._paper_figures import run_plot
+
+    parquet = _make_learning_curve_parquet(tmp_path)   # discrete PL: recovery + LL
+    out_dir = tmp_path / "figs_bold"
+    assert run_plot(parquet=parquet, output_dir=out_dir, aggregation="mean_std") == 0
+    body = (out_dir / "synthetic" / "discrete" / "all" / "tables"
+            / "table_overall.tex").read_text()
+    assert "\\textbf{" in body
