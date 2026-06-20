@@ -298,6 +298,16 @@ def per_query_success(df_cell: pd.DataFrame) -> dict[str, float]:
     A query's execution status is taken from its metric=="query_time_s" row
     (one per executed query); metric=="status" rows are whole-cell unsupported
     units that count as failures.
+
+    PL-mode fallback (#233): parameter-learning cells emit per-cell metric
+    rows (param_recovery_*, calibration_*, log_likelihood) with NO per-query
+    (query_time_s) or sentinel (status) rows, so the inference-mode unit count
+    is zero. For such a baseline, success is binary on metric-row presence:
+    100% when it produced at least one ok accuracy-metric row, else 0%. A
+    not_supported / not_applicable metric is applicability, not failure
+    (spec 3.3) — what matters is whether any usable metric came out. Inference
+    cells (any query_time_s or status row present) keep the path below
+    byte-identical; mixed cells, were they to occur, count as inference.
     """
     out = {}
     for b, g in df_cell.groupby("baseline"):
@@ -305,7 +315,8 @@ def per_query_success(df_cell: pd.DataFrame) -> dict[str, float]:
         sentinel = g[g["metric"] == "status"]
         total = len(executed) + len(sentinel)
         if total == 0:
-            out[b] = 0.0
+            pl = g[g["metric"].isin(ACCURACY_METRICS)]
+            out[b] = 100.0 if bool((pl["status"] == "ok").any()) else 0.0
             continue
         ok = int((executed["status"] == "ok").sum())
         out[b] = 100.0 * ok / total
