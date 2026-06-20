@@ -51,17 +51,41 @@ logger = logging.getLogger(__name__)
 
 # --- Constants from the spec --------------------------------------------------
 
-# Accuracy metrics (spec 5.2). log_likelihood is gated on row existence
-# (PL-mode only) and is higher-is-better.
-ACCURACY_METRICS = ("tv_per_node", "jsd_per_node", "w1_per_node", "log_likelihood")
-LOWER_IS_BETTER = frozenset({"tv_per_node", "jsd_per_node", "w1_per_node"})
+# Accuracy metrics (spec 5.2). The original four are inference-mode
+# (tv/jsd/w1) plus log_likelihood; the four PL-mode primitives
+# (param_recovery_*, calibration_*) come from the param-learning command
+# (#233). All are gated on row existence per (family, cell), so an
+# inference parquet that lacks the PL metrics simply skips them and a PL
+# parquet that lacks tv/jsd/w1 skips those.
+ACCURACY_METRICS = (
+    "tv_per_node", "jsd_per_node", "w1_per_node", "log_likelihood",
+    "param_recovery_tv", "param_recovery_kl",
+    "calibration_pit_ks", "calibration_sd_ratio",
+)
+# Direction conventions. param_recovery_tv/kl and calibration_pit_ks are
+# distances/statistics where 0 is ideal (lower is better). log_likelihood is
+# the lone higher-is-better score. calibration_sd_ratio is neither: it is a
+# ratio of fitted-to-oracle predictive SD whose ideal is 1.0 (under-dispersed
+# < 1, over-dispersed > 1) — a "closer to a target value" metric (#233).
+LOWER_IS_BETTER = frozenset({
+    "tv_per_node", "jsd_per_node", "w1_per_node",
+    "param_recovery_tv", "param_recovery_kl", "calibration_pit_ks",
+})
 HIGHER_IS_BETTER = frozenset({"log_likelihood"})
+# Metrics whose target is a specific value, not a monotone direction. The
+# value is the ideal; the metric is a nonnegative ratio so its band is
+# clipped at 0 like a distance, but axes/labels read "closer to <v>".
+CLOSER_TO_VALUE = {"calibration_sd_ratio": 1.0}
 # Pretty labels for tables / axes.
 METRIC_LABEL = {
     "tv_per_node": "TV",
     "jsd_per_node": "JSD",
     "w1_per_node": "W1",
     "log_likelihood": "LL",
+    "param_recovery_tv": "TV (recovery)",
+    "param_recovery_kl": "KL (recovery)",
+    "calibration_pit_ks": "PIT-KS",
+    "calibration_sd_ratio": "SD-ratio",
 }
 
 # Families that skip w1_per_node (Wasserstein-1 N/A for discrete posteriors).
@@ -95,11 +119,17 @@ _NON_BATCHABLE_LIBRARIES = frozenset({"pyro", "pgmpy"})
 STATUS_COLORS = {
     "ok": "#2ca02c",             # green
     "not_supported": "#7f7f7f",  # gray (neutral — applicability, not failure)
+    "not_applicable": "#b0b0b0",  # lighter gray (PL-mode applicability; #233/#236)
     "timeout": "#ff7f0e",        # orange (over budget)
     "error": "#d62728",          # red (genuine failure)
     "oom": "#8c564b",            # brown (memory failure)
 }
-STATUS_ORDER = ("ok", "not_supported", "timeout", "error", "oom")
+# not_applicable ordered next to not_supported: both are "applicability, not
+# failure" (spec 3.3). Registration only — PL parquets emit not_applicable on
+# per-metric rows that per_query_status_counts does not yet count, so this adds
+# no visible segment today; the PL-mode applicability breakdown is tracked in
+# #236.
+STATUS_ORDER = ("ok", "not_supported", "not_applicable", "timeout", "error", "oom")
 
 # --- Pure helpers -------------------------------------------------------------
 
@@ -115,6 +145,14 @@ def aggregate(values, method: str) -> tuple[float, float, float]:
     values = values[~np.isnan(values)]
     if values.size == 0:
         return float("nan"), float("nan"), float("nan")
+    # +inf sentinel (#234): param_recovery_kl is +inf when the true CPT has a
+    # hard zero an unsmoothed-MLE adapter never covers. Surface it explicitly
+    # BEFORE aggregating — IQM trims values above Q3, so a lone +inf would be
+    # excluded from the interquartile mean and the finding ("this adapter has
+    # hard zeros") would silently vanish. Any +inf in the cell => center +inf,
+    # band undefined. (posinf only: a hypothetical -inf is not this sentinel.)
+    if np.isposinf(values).any():
+        return float("inf"), float("nan"), float("nan")
     if method == "mean_std":
         c = float(np.mean(values))
         s = float(np.std(values, ddof=0))
@@ -136,6 +174,8 @@ def clip_band(metric_kind: str, lower: float, upper: float) -> tuple[float, floa
         return max(0.0, lower), min(1.0, upper)  # bounded [0,1]
     if metric_kind in HIGHER_IS_BETTER:
         return lower, upper                     # log_likelihood: unbounded
+    if metric_kind in CLOSER_TO_VALUE:
+        return max(0.0, lower), upper           # sd_ratio: nonneg, no upper bound
     if metric_kind == "success_rate":
         return max(0.0, lower), min(100.0, upper)
     return lower, upper
@@ -272,6 +312,16 @@ def per_query_success(df_cell: pd.DataFrame) -> dict[str, float]:
     A query's execution status is taken from its metric=="query_time_s" row
     (one per executed query); metric=="status" rows are whole-cell unsupported
     units that count as failures.
+
+    PL-mode fallback (#233): parameter-learning cells emit per-cell metric
+    rows (param_recovery_*, calibration_*, log_likelihood) with NO per-query
+    (query_time_s) or sentinel (status) rows, so the inference-mode unit count
+    is zero. For such a baseline, success is binary on metric-row presence:
+    100% when it produced at least one ok accuracy-metric row, else 0%. A
+    not_supported / not_applicable metric is applicability, not failure
+    (spec 3.3) — what matters is whether any usable metric came out. Inference
+    cells (any query_time_s or status row present) keep the path below
+    byte-identical; mixed cells, were they to occur, count as inference.
     """
     out = {}
     for b, g in df_cell.groupby("baseline"):
@@ -279,7 +329,8 @@ def per_query_success(df_cell: pd.DataFrame) -> dict[str, float]:
         sentinel = g[g["metric"] == "status"]
         total = len(executed) + len(sentinel)
         if total == 0:
-            out[b] = 0.0
+            pl = g[g["metric"].isin(ACCURACY_METRICS)]
+            out[b] = 100.0 if bool((pl["status"] == "ok").any()) else 0.0
             continue
         ok = int((executed["status"] == "ok").sum())
         out[b] = 100.0 * ok / total
@@ -383,18 +434,40 @@ def _scaling_plot(points_by_baseline, x_label, y_label, title, out_path, metric_
     colors = baseline_colors(points_by_baseline.keys())
     fig, ax = plt.subplots(figsize=(6, 4))
     all_x, all_y = [], []
+    inf_points = []           # (x, baseline): +inf sentinels drawn after autoscale
+    labeled = set()           # baselines already carrying a legend entry
     for b in sorted(points_by_baseline):
         pts = sorted(points_by_baseline[b], key=lambda r: r[0])
-        xs = [p[0] for p in pts]
-        cs = [p[1] for p in pts]
-        los = [clip_band(metric_kind, p[2], p[3])[0] for p in pts]
-        his = [clip_band(metric_kind, p[2], p[3])[1] for p in pts]
+        # #234: split finite points (draw the line) from +inf sentinels (drawn
+        # as caret markers at the top edge). Only finite values feed autoscale,
+        # so a +inf never corrupts the log-scale heuristic or the y-range.
+        finite = [p for p in pts if np.isfinite(p[1])]
+        inf_points += [(p[0], b) for p in pts if np.isposinf(p[1])]
+        all_x += [p[0] for p in pts]
+        if not finite:
+            continue
+        xs = [p[0] for p in finite]
+        cs = [p[1] for p in finite]
+        los = [clip_band(metric_kind, p[2], p[3])[0] for p in finite]
+        his = [clip_band(metric_kind, p[2], p[3])[1] for p in finite]
         ax.plot(xs, cs, marker="o", color=colors[b], label=b, markersize=4)
         ax.fill_between(xs, los, his, color=colors[b], alpha=0.2)
-        all_x += xs
+        labeled.add(b)
         all_y += cs + los + his
     _log_or_linear(ax, all_x, "x")
     _log_or_linear(ax, [v for v in all_y if v is not None and v > 0], "y")
+    # +inf sentinels: caret at the top axis edge. An inf-only baseline (no
+    # finite point, e.g. pgmpy-mle KL on a hard-zero CPT) still gets a legend
+    # entry via its marker so it is not silently absent from the figure.
+    if inf_points:
+        y_top = ax.get_ylim()[1]
+        for x, b in inf_points:
+            lbl = b if b not in labeled else None
+            ax.plot([x], [y_top], marker="^", color=colors[b], markersize=9,
+                    linestyle="None", clip_on=False, label=lbl)
+            labeled.add(b)
+        ax.text(0.99, 0.99, "↑ = +∞", transform=ax.transAxes, ha="right",
+                va="top", fontsize=7, alpha=0.7)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
     ax.set_title(title)
@@ -422,7 +495,12 @@ def fig_accuracy_scaling(df_cell, metric, x_axis, x_lookup, aggregation, out_pat
             rows.append((x_lookup[p], c, lo, hi))
         if rows:
             points[b] = rows
-    direction = "lower better" if metric in LOWER_IS_BETTER else "higher better"
+    if metric in LOWER_IS_BETTER:
+        direction = "lower better"
+    elif metric in CLOSER_TO_VALUE:
+        direction = f"closer to {CLOSER_TO_VALUE[metric]:g} better"
+    else:
+        direction = "higher better"
     _scaling_plot(points, x_axis, f"{METRIC_LABEL[metric]} ({direction})",
                   f"{title} — {METRIC_LABEL[metric]} vs {x_axis}", out_path, metric)
 
@@ -457,6 +535,8 @@ def fig_time_scaling(df_cell, time_kind, x_axis, x_lookup, aggregation, out_path
 def _fmt(center: float, lo: float, hi: float) -> str:
     if np.isnan(center):
         return "--"
+    if np.isposinf(center):
+        return "$+\\infty$"          # #234: unsmoothed-MLE recovery KL sentinel
     half = (hi - lo) / 2
     return f"{center:.3g}$\\pm${half:.2g}"
 
