@@ -1170,6 +1170,58 @@ def _render_view(dff, benchmark, family, aggregation, n_nodes, n_params,
         _table_scoped(dff, family, aggregation, "query_kind", k,
                       tables_dir / f"table_kind_{k}.tex", scope,
                       label=f"{lbl}_kind_{_table_slug(k)}")
+    # Sample-efficiency tables: one per (family, metric), n_train as columns
+    # (#241). Same gate as the n_train figure axis (decision alpha).
+    if has_n_train_sweep:
+        n_train_tables(dff, aggregation, tables_dir, family, lbl)
+
+
+def n_train_tables(df_cell, aggregation, tables_dir, family, label_prefix) -> int:
+    """Sample-efficiency tables (#241): one per (family, metric), rows=baselines,
+    cols=n_train values, bold-best per column. Mirrors the batch_speed table
+    (rows=baselines, cols=sweep) but for the n_train sweep.
+
+    Aggregation groups by n_train directly (across problem_id, seed) — the
+    within-problem grouping fig_accuracy_vs_n_train uses (PR 13), NOT the
+    across-problem grouping of table_headline: n_train varies WITHIN a problem.
+
+    Returns the number of tables written."""
+    grid = sorted(int(n) for n in df_cell["n_train"].dropna().unique())
+    written = 0
+    for metric in _metrics_for_family(family):
+        ok = df_cell[(df_cell["metric"] == metric) & (df_cell["status"] == "ok")]
+        if ok.empty:
+            continue
+        baselines = sorted(df_cell["baseline"].dropna().unique())
+        # per (baseline, n_train) central, across (problem_id, seed).
+        kept, centrals = {}, {}
+        for b in baselines:
+            cells, cens = {}, {}
+            for n in grid:
+                sub = ok[(ok["baseline"] == b) & (ok["n_train"] == n)]
+                agg = aggregate(sub["value"], aggregation) if not sub.empty else None
+                cells[n] = "--" if agg is None else _fmt(*agg)
+                cens[n] = _central(agg)
+            if all(cells[n] == "--" for n in grid):
+                continue  # baseline not applicable to this metric
+            kept[b] = cells
+            centrals[b] = cens
+        if not kept:
+            continue
+        bold = {n: _bold_best({b: centrals[b][n] for b in kept}, metric) for n in grid}
+        header = ["Method"] + [f"$n={n}$" for n in grid]
+        rows = []
+        for b in sorted(kept):
+            row = [b.replace("_", "\\_")]
+            for n in grid:
+                cell = kept[b][n]
+                row.append(_bold(cell) if b in bold[n] else cell)
+            rows.append(row)
+        caption = f"{_benchmark_caption(df_cell)} (metric={METRIC_LABEL[metric]}). {family}"
+        _write_table(tables_dir / f"{metric}_vs_n_train.tex", header, rows, caption,
+                     label=f"{label_prefix}_n_train_{_table_slug(metric)}")
+        written += 1
+    return written
 
 
 def process_family(dff, benchmark, family, aggregation, n_nodes, n_params,

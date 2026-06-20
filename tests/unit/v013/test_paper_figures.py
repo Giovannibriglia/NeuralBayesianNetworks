@@ -924,3 +924,46 @@ def test_batch_speed_table_bolds_and_captions(tmp_path):
     body = tex[0].read_text()
     assert "INFERENCE SPEED" in body
     assert "\\textbf{" in body
+
+
+# --- n_train sample-efficiency table (#241) -----------------------------------
+
+def test_n_train_table_renders_with_bold(tmp_path):
+    """A learning-curves parquet renders one <metric>_vs_n_train.tex per metric
+    with n_train columns and a bolded best baseline per column."""
+    from benchmarking._paper_figures import run_plot
+
+    parquet = _make_learning_curve_parquet(tmp_path, n_trains=(50, 200, 800))
+    out_dir = tmp_path / "figs"
+    assert run_plot(parquet=parquet, output_dir=out_dir, aggregation="mean_std") == 0
+    tbl = (out_dir / "synthetic" / "discrete" / "all" / "tables"
+           / "param_recovery_tv_vs_n_train.tex")
+    assert tbl.exists()
+    body = tbl.read_text()
+    assert "$n=50$" in body and "$n=200$" in body and "$n=800$" in body
+    assert "\\textbf{" in body
+
+
+def test_n_train_table_skipped_without_sweep(tmp_path):
+    """A single n_train value is not a sweep -> no n_train table emitted."""
+    from benchmarking._paper_figures import run_plot
+
+    parquet = _make_learning_curve_parquet(tmp_path, n_trains=(200,))
+    out_dir = tmp_path / "figs_nosweep"
+    assert run_plot(parquet=parquet, output_dir=out_dir, aggregation="mean_std") == 0
+    assert not list(out_dir.rglob("*_vs_n_train.tex"))
+
+
+def test_n_train_table_caption_and_metric_skip(tmp_path):
+    """The caption is SAMPLE EFFICIENCY PARAMETER LEARNING; a metric with no ok
+    rows on the family (calibration on discrete) emits no n_train table."""
+    from benchmarking._paper_figures import run_plot
+
+    parquet = _make_learning_curve_parquet(tmp_path)
+    out_dir = tmp_path / "figs_cap"
+    assert run_plot(parquet=parquet, output_dir=out_dir, aggregation="mean_std") == 0
+    tables = out_dir / "synthetic" / "discrete" / "all" / "tables"
+    body = (tables / "param_recovery_tv_vs_n_train.tex").read_text()
+    assert "SAMPLE EFFICIENCY PARAMETER LEARNING" in body
+    # calibration_pit_ks is not_applicable on discrete -> no ok rows -> no table.
+    assert not (tables / "calibration_pit_ks_vs_n_train.tex").exists()
