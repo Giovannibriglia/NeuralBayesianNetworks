@@ -91,6 +91,22 @@ METRIC_LABEL = {
 # Families that skip w1_per_node (Wasserstein-1 N/A for discrete posteriors).
 DISCRETE_FAMILIES = frozenset({"discrete"})
 
+# Divergence panel (#235): metric pairs rendered side-by-side per family when
+# both metrics have ok rows. calibration_pit_ks (PL parquet) vs w1_per_node
+# (inference parquet) is the PR 9 cross-metric finding — they disagree on
+# mdn vs kde for the nongauss family. Extensible: add a pair to render more.
+_DIVERGENCE_PAIRS = (("calibration_pit_ks", "w1_per_node"),)
+
+# Engine / inference-method suffixes appended to INFERENCE baselines but absent
+# on PARAMETER-LEARNING baselines (PL is fit-only, engine-less). Stripped to
+# align the same mechanism across parquet types: nbn-mdn-lw <-> nbn-mdn. The
+# set is deliberately suffix-aware, NOT "strip last token": mechanism and
+# param-method tokens (cat, lg, mdn, mle, bayes, discrete, ...) are not here,
+# so a baseline whose final token is not a known engine passes through
+# unchanged and unrelated mechanisms never collapse together.
+_ENGINE_SUFFIXES = frozenset({"lw", "ve", "ais", "avi", "router", "predict",
+                              "importance"})
+
 # Library -> base color (v0.12 convention).
 LIBRARY_COLORS = {
     "pgmpy": "tab:blue",
@@ -187,6 +203,21 @@ def parse_baseline(baseline: str) -> tuple[str, str]:
     libraries, e.g. pgmpy-mle-ve vs pyro-empirical-importance)."""
     parts = baseline.split("-", 1)
     return (parts[0], parts[1] if len(parts) > 1 else "")
+
+
+def _mechanism_key(baseline: str) -> str:
+    """Normalize a baseline to its mechanism identity for the divergence panel
+    (#235), stripping a trailing engine/inference-method token.
+
+    Inference baselines carry the engine suffix (``nbn-mdn-lw``); the matching
+    parameter-learning baseline does not (``nbn-mdn``) — the panel must align
+    them on one key. Suffix-aware, NOT last-token: a baseline whose final token
+    is not a known engine (``nbn-cat``, ``pgmpy-mle``, ``pomegranate-discrete``)
+    is preserved unchanged, so unrelated mechanisms never collapse together."""
+    head, sep, last = baseline.rpartition("-")
+    if sep and last in _ENGINE_SUFFIXES:
+        return head
+    return baseline
 
 
 def baseline_colors(baselines) -> dict[str, tuple]:
@@ -556,6 +587,61 @@ def fig_accuracy_vs_n_train(df_cell, metric, aggregation, out_path, title):
                   f"{title} — {METRIC_LABEL[metric]} vs n_train", out_path, metric)
 
 
+def fig_divergence(df_cell, metric_a, metric_b, family, aggregation, out_path, title):
+    """Two-panel divergence figure (#235): metric_a (top) over metric_b (bottom),
+    one bar per mechanism, sharing an x-order ranked by metric_a.
+
+    Captures the PR 9 finding that calibration (PIT-KS) and accuracy (w1) can
+    disagree on which mechanism is best: panel A ranks the mechanisms low→high
+    on metric_a, panel B reuses that exact order, so a metric_b disagreement
+    reads visually as out-of-order bars in panel B. The two metrics keep their
+    own y-scales (PIT-KS in [0,1], w1 unbounded — a shared axis would mislead).
+
+    Baselines are normalized to mechanism keys (_mechanism_key) so the same
+    mechanism aligns across PL (nbn-mdn) and inference (nbn-mdn-lw) parquets;
+    a mechanism present for only one metric leaves a gap in the other panel."""
+    def _agg_by_mech(metric):
+        ok = df_cell[(df_cell["family"] == family) & (df_cell["metric"] == metric)
+                     & (df_cell["status"] == "ok")].copy()
+        if ok.empty:
+            return {}
+        ok["_mech"] = ok["baseline"].map(_mechanism_key)
+        out = {}
+        for mech, g in ok.groupby("_mech"):
+            c, lo, hi = aggregate(g["value"], aggregation)
+            if not np.isnan(c):
+                lo, hi = clip_band(metric, lo, hi)
+                out[mech] = (c, lo, hi)
+        return out
+
+    a, b = _agg_by_mech(metric_a), _agg_by_mech(metric_b)
+    if not a or not b:
+        logger.info("skip divergence (a metric has no ok rows): %s", out_path.name)
+        return
+    # x-order ranked by metric_a (ascending; both metrics are lower-better),
+    # tie-broken by name for determinism. Shared across both panels.
+    order = sorted(set(a) | set(b), key=lambda m: (a.get(m, (float("inf"),))[0], m))
+    xs = list(range(len(order)))
+
+    fig, (ax_a, ax_b) = plt.subplots(2, 1, sharex=True,
+                                     figsize=(max(5, 0.9 * len(order)), 6))
+    for ax, vals, metric in ((ax_a, a, metric_a), (ax_b, b, metric_b)):
+        heights = [vals[m][0] if m in vals else np.nan for m in order]
+        lo_err = [vals[m][0] - vals[m][1] if m in vals else 0.0 for m in order]
+        hi_err = [vals[m][2] - vals[m][0] if m in vals else 0.0 for m in order]
+        ax.bar(xs, heights, yerr=[lo_err, hi_err], color="tab:blue",
+               alpha=0.8, capsize=3, edgecolor="white")
+        ax.set_ylabel(f"{METRIC_LABEL[metric]} ({_direction(metric)})")
+        ax.grid(True, axis="y", alpha=0.3)
+    ax_b.set_xticks(xs)
+    ax_b.set_xticklabels(order, rotation=30, ha="right", fontsize=8)
+    ax_a.set_title(
+        f"{title} — {METRIC_LABEL[metric_a]} vs {METRIC_LABEL[metric_b]} divergence\n"
+        f"(x ordered by {METRIC_LABEL[metric_a]}; out-of-order bars below = "
+        f"ranking disagreement)", fontsize=10)
+    _savefig(fig, out_path)
+
+
 def fig_time_scaling(df_cell, time_kind, x_axis, x_lookup, aggregation, out_path, title):
     """time_kind in {'query_total', 'fit'}."""
     totals = query_time_totals(df_cell) if time_kind == "query_total" else fit_times(df_cell)
@@ -852,6 +938,18 @@ def _render_view(dff, benchmark, family, aggregation, n_nodes, n_params,
         if has_n_train_sweep:
             fig_accuracy_vs_n_train(dff, metric, aggregation,
                                     plots_dir / f"{metric}_vs_n_train.pdf", title)
+
+    # Divergence panels (#235): per-family, auto-detected for each configured
+    # metric pair where BOTH metrics have ok rows in this view (e.g. nongauss
+    # carries calibration_pit_ks from a PL parquet and w1_per_node from an
+    # inference parquet once both are passed to `nbn-bench plot`).
+    for metric_a, metric_b in _DIVERGENCE_PAIRS:
+        have_a = not dff[(dff["metric"] == metric_a) & (dff["status"] == "ok")].empty
+        have_b = not dff[(dff["metric"] == metric_b) & (dff["status"] == "ok")].empty
+        if have_a and have_b:
+            fig_divergence(dff, metric_a, metric_b, family, aggregation,
+                           plots_dir / f"divergence_{metric_a}_vs_{metric_b}.pdf",
+                           title)
 
     for time_kind, stem in [("query_total", "total_query_time"), ("fit", "fit_time")]:
         for x_axis, lookup in axes:
@@ -1165,22 +1263,32 @@ def batch_speed_tables(df, aggregation, out_dir: Path, bench: str) -> int:
     return written
 
 
-def _resolve_parquet(parquet: Path) -> Path:
-    """Accept a ``.parquet`` file or a directory; in the latter case find the
-    single ``*_metrics.parquet`` inside (the layout written by
-    ``nbn-bench inference``)."""
-    parquet = Path(parquet)
-    if parquet.is_dir():
-        matches = sorted(parquet.glob("*_metrics.parquet"))
-        if not matches:
-            raise FileNotFoundError(
-                f"no *_metrics.parquet found in directory {parquet}"
-            )
-        if len(matches) > 1:
-            logger.warning("multiple *_metrics.parquet in %s; using %s",
-                           parquet, matches[0].name)
-        return matches[0]
-    return parquet
+def _resolve_parquet(parquet) -> list[Path]:
+    """Resolve a parquet argument to a list of concrete ``.parquet`` files.
+
+    Accepts a single ``.parquet`` file, a directory (find the single
+    ``*_metrics.parquet`` inside, the layout written by ``nbn-bench
+    inference``), or a list/tuple of any of those. Always returns a
+    ``list[Path]`` (one entry per input) so ``run_plot`` can row-concatenate
+    several parquets — e.g. a parameter-learning parquet plus an inference
+    parquet for the divergence panel (#235)."""
+    items = parquet if isinstance(parquet, (list, tuple)) else [parquet]
+    resolved: list[Path] = []
+    for item in items:
+        item = Path(item)
+        if item.is_dir():
+            matches = sorted(item.glob("*_metrics.parquet"))
+            if not matches:
+                raise FileNotFoundError(
+                    f"no *_metrics.parquet found in directory {item}"
+                )
+            if len(matches) > 1:
+                logger.warning("multiple *_metrics.parquet in %s; using %s",
+                               item, matches[0].name)
+            resolved.append(matches[0])
+        else:
+            resolved.append(item)
+    return resolved
 
 
 def run_plot(
@@ -1192,8 +1300,11 @@ def run_plot(
     """Generate figures + LaTeX tables from a benchmark parquet.
 
     Args:
-        parquet: path to a ``*_metrics.parquet`` file, or a directory
-            containing one (output of ``nbn-bench inference``).
+        parquet: a ``*_metrics.parquet`` file, a directory containing one
+            (output of ``nbn-bench inference``), or a list of such paths.
+            Multiple parquets are row-concatenated before plotting (#235) —
+            PL and inference parquets share the CellResult schema, so combining
+            them is a row union, not a relational join.
         output_dir: where to write the ``<benchmark>/{plots,tables}/`` tree
             (one set of per-family files across all problems in each family).
         aggregation: ``"iqm_iqr"`` (default) or ``"mean_std"``.
@@ -1203,10 +1314,14 @@ def run_plot(
     Returns:
         Process exit code (0 on success, 1 if the parquet is missing columns).
     """
-    parquet = _resolve_parquet(parquet)
+    paths = _resolve_parquet(parquet)
     output_dir = Path(output_dir)
 
-    df = pd.read_parquet(parquet)
+    # Row-concatenate in deterministic order (#235). The ess/khat columns may
+    # coalesce object<->float64 when an all-None PL column meets a float
+    # inference column; harmless — the figures never read them.
+    frames = [pd.read_parquet(p) for p in sorted(paths, key=str)]
+    df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
     required = {"benchmark", "family", "problem_id", "seed", "baseline",
                 "metric", "value", "status", "query_role", "query_kind"}
     missing = required - set(df.columns)
