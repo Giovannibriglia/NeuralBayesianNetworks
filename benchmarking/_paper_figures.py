@@ -349,8 +349,23 @@ def per_query_status_counts(df_cell: pd.DataFrame) -> pd.DataFrame:
 
     Returns a DataFrame indexed by baseline with one column per status in
     STATUS_ORDER (counts, reindexed with fill 0); empty if no unit rows exist.
+
+    PL-mode fallback (#236): parameter-learning cells have no per-query
+    (query_time_s) or sentinel (status) rows — they emit per-cell metric rows.
+    When the inference-mode unit is empty, count accuracy-metric rows
+    (metric in ACCURACY_METRICS) by status instead, so the status-stacked
+    figure shows the applicability breakdown (ok vs not_applicable per
+    baseline) rather than skipping. Counting unit = one accuracy-metric row,
+    matching the per-metric rendering of the accuracy plots. This mirrors the
+    per_query_success PL-mode fallback; the inference path (any query_time_s
+    or status row present) is byte-identical. not_supported rows are already
+    dropped upstream by _filter_unsupported_baselines, so a PL bar shows ok +
+    not_applicable (participation vs metric-applicability), never
+    not_supported.
     """
     unit = df_cell[df_cell["metric"].isin(["query_time_s", "status"])]
+    if unit.empty:
+        unit = df_cell[df_cell["metric"].isin(ACCURACY_METRICS)]
     if unit.empty:
         return pd.DataFrame()
     counts = unit.groupby(["baseline", "status"]).size().unstack(fill_value=0)

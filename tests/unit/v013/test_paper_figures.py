@@ -606,3 +606,36 @@ def test_n_train_axis_skipped_without_sweep(tmp_path):
     out_dir = tmp_path / "figs_nosweep"
     assert run_plot(parquet=parquet, output_dir=out_dir, aggregation="mean_std") == 0
     assert not list(out_dir.rglob("*_vs_n_train.pdf"))
+
+
+# --- PL-mode status counting (#236) -------------------------------------------
+
+def test_status_counts_pl_mode_per_metric(tmp_path):
+    """On a PL parquet (no query_time_s / status rows), per_query_status_counts
+    counts accuracy-metric rows by status. Each baseline here has, per n_train,
+    1 recovery-ok + 1 LL-ok + 1 calibration-not_applicable -> 2/3 ok, 1/3 NA."""
+    from benchmarking import _paper_figures as pf
+
+    df = pd.read_parquet(_make_learning_curve_parquet(tmp_path, n_trains=(50, 200, 800)))
+    counts = pf.per_query_status_counts(df)
+    assert set(counts.index) == {"nbn-cat", "pgmpy-bayes"}
+    for b in counts.index:
+        assert counts.loc[b, "ok"] == 6              # 3 recovery + 3 LL
+        assert counts.loc[b, "not_applicable"] == 3  # 3 calibration
+        # not_supported never appears in PL bars (no such rows here).
+        assert counts.loc[b, "not_supported"] == 0
+
+
+def test_status_counts_inference_path_byte_identical(tmp_path):
+    """An inference parquet (query_time_s rows present) routes through the
+    original unit count — the PL fallback does NOT fire, so the w1
+    not_supported accuracy-metric rows are not counted."""
+    from benchmarking import _paper_figures as pf
+
+    df = pd.read_parquet(_make_minimal_parquet(tmp_path))
+    counts = pf.per_query_status_counts(df)
+    # 2 problems x 2 seeds x 4 roles x 2 kinds = 32 ok query_time_s rows/baseline.
+    for b in counts.index:
+        assert counts.loc[b, "ok"] == 32
+        assert counts.loc[b, "not_supported"] == 0   # w1 rows NOT counted (fallback inert)
+        assert counts.loc[b, "not_applicable"] == 0
