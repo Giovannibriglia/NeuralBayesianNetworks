@@ -639,3 +639,46 @@ def test_status_counts_inference_path_byte_identical(tmp_path):
         assert counts.loc[b, "ok"] == 32
         assert counts.loc[b, "not_supported"] == 0   # w1 rows NOT counted (fallback inert)
         assert counts.loc[b, "not_applicable"] == 0
+
+
+# --- multi-parquet input (#235) -----------------------------------------------
+
+def test_single_parquet_list_of_one_unchanged(tmp_path):
+    """run_plot with a one-element list behaves like the single-path call."""
+    from benchmarking._paper_figures import run_plot
+
+    parquet = _make_minimal_parquet(tmp_path)
+    out_dir = tmp_path / "figs_list1"
+    assert run_plot(parquet=[parquet], output_dir=out_dir, aggregation="iqm_iqr") == 0
+    assert list(out_dir.rglob("*.pdf"))
+
+
+def test_multi_parquet_concat_renders_both(tmp_path):
+    """Two parquets (a bnlearn inference parquet + a synthetic PL parquet) are
+    row-concatenated; run_plot processes both benchmarks and renders the
+    metrics each contributed."""
+    from benchmarking._paper_figures import run_plot
+
+    inf = _make_minimal_parquet(tmp_path)                 # bnlearn, tv/jsd
+    pl = _make_learning_curve_parquet(tmp_path)           # synthetic, recovery/LL
+    out_dir = tmp_path / "figs_multi"
+    assert run_plot(parquet=[inf, pl], output_dir=out_dir, aggregation="mean_std") == 0
+    # inference metric from the bnlearn parquet
+    assert list((out_dir / "bnlearn").rglob("tv_per_node_vs_*.pdf"))
+    # PL metric from the synthetic parquet
+    assert list((out_dir / "synthetic").rglob("param_recovery_tv_vs_*.pdf"))
+
+
+def test_multi_parquet_cli_nargs(tmp_path):
+    """The `nbn-bench plot` positional accepts multiple parquets (nargs=+)."""
+    inf = _make_minimal_parquet(tmp_path)
+    pl = _make_learning_curve_parquet(tmp_path)
+    out_dir = tmp_path / "figs_cli_multi"
+    result = subprocess.run(
+        [sys.executable, "-m", "benchmarking.cli", "plot", str(inf), str(pl),
+         "--output-dir", str(out_dir), "--aggregation", "mean_std"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, f"script failed: {result.stderr[-800:]}"
+    assert list((out_dir / "bnlearn").rglob("*.pdf"))
+    assert list((out_dir / "synthetic").rglob("*.pdf"))

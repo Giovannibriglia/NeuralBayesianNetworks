@@ -56,9 +56,12 @@ def _build_parser() -> argparse.ArgumentParser:
             "produce figures + LaTeX tables per docs/v0.13-paper-figures.md."
         ),
     )
-    plot.add_argument("parquet",
-                      help="Path to a *_metrics.parquet file, or a directory "
-                           "containing one (a results dir from `nbn-bench inference`).")
+    plot.add_argument("parquet", nargs="+",
+                      help="One or more *_metrics.parquet files (or directories "
+                           "containing one, a results dir from `nbn-bench "
+                           "inference`). Multiple parquets are row-concatenated "
+                           "before plotting — e.g. a parameter-learning parquet "
+                           "plus an inference parquet for the divergence panel.")
     plot.add_argument("--output-dir", required=True,
                       help="Directory to write figures + LaTeX tables into.")
     plot.add_argument("--aggregation", choices=["iqm_iqr", "mean_std"],
@@ -219,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
 
         from benchmarking._paper_figures import run_plot
         return run_plot(
-            parquet=Path(args.parquet),
+            parquet=[Path(p) for p in args.parquet],
             output_dir=Path(args.output_dir),
             aggregation=args.aggregation,
             benchmark=args.benchmark,

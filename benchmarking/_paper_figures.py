@@ -1165,22 +1165,32 @@ def batch_speed_tables(df, aggregation, out_dir: Path, bench: str) -> int:
     return written
 
 
-def _resolve_parquet(parquet: Path) -> Path:
-    """Accept a ``.parquet`` file or a directory; in the latter case find the
-    single ``*_metrics.parquet`` inside (the layout written by
-    ``nbn-bench inference``)."""
-    parquet = Path(parquet)
-    if parquet.is_dir():
-        matches = sorted(parquet.glob("*_metrics.parquet"))
-        if not matches:
-            raise FileNotFoundError(
-                f"no *_metrics.parquet found in directory {parquet}"
-            )
-        if len(matches) > 1:
-            logger.warning("multiple *_metrics.parquet in %s; using %s",
-                           parquet, matches[0].name)
-        return matches[0]
-    return parquet
+def _resolve_parquet(parquet) -> list[Path]:
+    """Resolve a parquet argument to a list of concrete ``.parquet`` files.
+
+    Accepts a single ``.parquet`` file, a directory (find the single
+    ``*_metrics.parquet`` inside, the layout written by ``nbn-bench
+    inference``), or a list/tuple of any of those. Always returns a
+    ``list[Path]`` (one entry per input) so ``run_plot`` can row-concatenate
+    several parquets — e.g. a parameter-learning parquet plus an inference
+    parquet for the divergence panel (#235)."""
+    items = parquet if isinstance(parquet, (list, tuple)) else [parquet]
+    resolved: list[Path] = []
+    for item in items:
+        item = Path(item)
+        if item.is_dir():
+            matches = sorted(item.glob("*_metrics.parquet"))
+            if not matches:
+                raise FileNotFoundError(
+                    f"no *_metrics.parquet found in directory {item}"
+                )
+            if len(matches) > 1:
+                logger.warning("multiple *_metrics.parquet in %s; using %s",
+                               item, matches[0].name)
+            resolved.append(matches[0])
+        else:
+            resolved.append(item)
+    return resolved
 
 
 def run_plot(
@@ -1192,8 +1202,11 @@ def run_plot(
     """Generate figures + LaTeX tables from a benchmark parquet.
 
     Args:
-        parquet: path to a ``*_metrics.parquet`` file, or a directory
-            containing one (output of ``nbn-bench inference``).
+        parquet: a ``*_metrics.parquet`` file, a directory containing one
+            (output of ``nbn-bench inference``), or a list of such paths.
+            Multiple parquets are row-concatenated before plotting (#235) —
+            PL and inference parquets share the CellResult schema, so combining
+            them is a row union, not a relational join.
         output_dir: where to write the ``<benchmark>/{plots,tables}/`` tree
             (one set of per-family files across all problems in each family).
         aggregation: ``"iqm_iqr"`` (default) or ``"mean_std"``.
@@ -1203,10 +1216,14 @@ def run_plot(
     Returns:
         Process exit code (0 on success, 1 if the parquet is missing columns).
     """
-    parquet = _resolve_parquet(parquet)
+    paths = _resolve_parquet(parquet)
     output_dir = Path(output_dir)
 
-    df = pd.read_parquet(parquet)
+    # Row-concatenate in deterministic order (#235). The ess/khat columns may
+    # coalesce object<->float64 when an all-None PL column meets a float
+    # inference column; harmless — the figures never read them.
+    frames = [pd.read_parquet(p) for p in sorted(paths, key=str)]
+    df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
     required = {"benchmark", "family", "problem_id", "seed", "baseline",
                 "metric", "value", "status", "query_role", "query_kind"}
     missing = required - set(df.columns)
