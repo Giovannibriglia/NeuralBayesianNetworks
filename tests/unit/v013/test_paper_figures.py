@@ -527,3 +527,115 @@ def test_deprecated_shim_still_works_and_warns(tmp_path):
     assert result.returncode == 0, f"shim failed: {result.stderr[-800:]}"
     assert "deprecat" in (result.stdout + result.stderr).lower()
     assert list(out_dir.rglob("*.pdf"))
+
+
+# --- n_train learning-curve axis (PR 13) --------------------------------------
+
+def _make_learning_curve_parquet(tmp_path: Path, n_trains=(50, 200, 800)) -> Path:
+    """A PL-mode learning-curve parquet: one synthetic discrete problem,
+    n_train swept, per-cell metric rows (no query_time_s / status sentinels).
+    param_recovery_tv is ok and decreasing in n_train; log_likelihood ok;
+    calibration_pit_ks not_applicable (discrete) -> must skip its n_train fig."""
+    rows = []
+    # monotonically-decreasing recovery TV per n_train (a real learning curve).
+    tv_by_n = {n: round(0.3 / (i + 1), 4) for i, n in enumerate(sorted(n_trains))}
+    for baseline in ["nbn-cat", "pgmpy-bayes"]:
+        for n_train in n_trains:
+            for metric, value, status in [
+                ("param_recovery_tv", tv_by_n[n_train], "ok"),
+                ("log_likelihood", -10.0 + tv_by_n[n_train], "ok"),
+                ("calibration_pit_ks", float("nan"), "not_applicable"),
+            ]:
+                rows.append({
+                    "benchmark": "synthetic", "family": "discrete",
+                    "problem_id": "6", "seed": 0, "baseline": baseline,
+                    "query_role": "", "query_kind": "prediction",
+                    "evidence_strategy": "random", "evidence_mode": "full",
+                    "metric": metric, "value": value, "status": status,
+                    "fit_time_s": float("nan"), "query_time_s": float("nan"),
+                    "metrics_time_s": 0.01, "error_msg": None,
+                    "n_nodes": 6, "n_train": n_train,
+                })
+    out = tmp_path / "lc_metrics.parquet"
+    pd.DataFrame(rows).to_parquet(out)
+    return out
+
+
+def test_n_train_curve_uses_within_problem_grouping(tmp_path):
+    """fig_accuracy_vs_n_train groups by n_train (within-problem), so a single
+    problem_id with N swept n_train values yields N distinct x-points per
+    baseline -- not one collapsed point (the n_nodes-axis behaviour)."""
+    from benchmarking import _paper_figures as pf
+
+    df = pd.read_parquet(_make_learning_curve_parquet(tmp_path, n_trains=(50, 200, 800)))
+    captured = {}
+    orig = pf._scaling_plot
+    pf._scaling_plot = lambda points, *a, **k: captured.update(points)
+    try:
+        pf.fig_accuracy_vs_n_train(df, "param_recovery_tv", "mean_std",
+                                   tmp_path / "tv_vs_n_train.pdf", "t")
+    finally:
+        pf._scaling_plot = orig
+
+    xs = sorted(p[0] for p in captured["nbn-cat"])
+    assert xs == [50.0, 200.0, 800.0]          # 3 distinct x-points, from n_train
+    ys = [p[1] for p in sorted(captured["nbn-cat"])]
+    assert all(ys[i] > ys[i + 1] for i in range(len(ys) - 1))   # decreasing curve
+
+
+def test_n_train_figure_rendered_and_calibration_skipped(tmp_path):
+    """run_plot emits <metric>_vs_n_train.pdf for metrics with ok rows and
+    skips those without (no degenerate single-point curves)."""
+    from benchmarking._paper_figures import run_plot
+
+    parquet = _make_learning_curve_parquet(tmp_path)
+    out_dir = tmp_path / "figs"
+    assert run_plot(parquet=parquet, output_dir=out_dir, aggregation="mean_std") == 0
+    plots = out_dir / "synthetic" / "discrete" / "all" / "plots"
+    assert (plots / "param_recovery_tv_vs_n_train.pdf").exists()
+    assert (plots / "log_likelihood_vs_n_train.pdf").exists()
+    # calibration is not_applicable on discrete -> no ok rows -> no n_train fig.
+    assert not (plots / "calibration_pit_ks_vs_n_train.pdf").exists()
+
+
+def test_n_train_axis_skipped_without_sweep(tmp_path):
+    """A single n_train value is not a sweep: no n_train figure is emitted."""
+    from benchmarking._paper_figures import run_plot
+
+    parquet = _make_learning_curve_parquet(tmp_path, n_trains=(200,))
+    out_dir = tmp_path / "figs_nosweep"
+    assert run_plot(parquet=parquet, output_dir=out_dir, aggregation="mean_std") == 0
+    assert not list(out_dir.rglob("*_vs_n_train.pdf"))
+
+
+# --- PL-mode status counting (#236) -------------------------------------------
+
+def test_status_counts_pl_mode_per_metric(tmp_path):
+    """On a PL parquet (no query_time_s / status rows), per_query_status_counts
+    counts accuracy-metric rows by status. Each baseline here has, per n_train,
+    1 recovery-ok + 1 LL-ok + 1 calibration-not_applicable -> 2/3 ok, 1/3 NA."""
+    from benchmarking import _paper_figures as pf
+
+    df = pd.read_parquet(_make_learning_curve_parquet(tmp_path, n_trains=(50, 200, 800)))
+    counts = pf.per_query_status_counts(df)
+    assert set(counts.index) == {"nbn-cat", "pgmpy-bayes"}
+    for b in counts.index:
+        assert counts.loc[b, "ok"] == 6              # 3 recovery + 3 LL
+        assert counts.loc[b, "not_applicable"] == 3  # 3 calibration
+        # not_supported never appears in PL bars (no such rows here).
+        assert counts.loc[b, "not_supported"] == 0
+
+
+def test_status_counts_inference_path_byte_identical(tmp_path):
+    """An inference parquet (query_time_s rows present) routes through the
+    original unit count — the PL fallback does NOT fire, so the w1
+    not_supported accuracy-metric rows are not counted."""
+    from benchmarking import _paper_figures as pf
+
+    df = pd.read_parquet(_make_minimal_parquet(tmp_path))
+    counts = pf.per_query_status_counts(df)
+    # 2 problems x 2 seeds x 4 roles x 2 kinds = 32 ok query_time_s rows/baseline.
+    for b in counts.index:
+        assert counts.loc[b, "ok"] == 32
+        assert counts.loc[b, "not_supported"] == 0   # w1 rows NOT counted (fallback inert)
+        assert counts.loc[b, "not_applicable"] == 0
