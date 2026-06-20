@@ -51,17 +51,41 @@ logger = logging.getLogger(__name__)
 
 # --- Constants from the spec --------------------------------------------------
 
-# Accuracy metrics (spec 5.2). log_likelihood is gated on row existence
-# (PL-mode only) and is higher-is-better.
-ACCURACY_METRICS = ("tv_per_node", "jsd_per_node", "w1_per_node", "log_likelihood")
-LOWER_IS_BETTER = frozenset({"tv_per_node", "jsd_per_node", "w1_per_node"})
+# Accuracy metrics (spec 5.2). The original four are inference-mode
+# (tv/jsd/w1) plus log_likelihood; the four PL-mode primitives
+# (param_recovery_*, calibration_*) come from the param-learning command
+# (#233). All are gated on row existence per (family, cell), so an
+# inference parquet that lacks the PL metrics simply skips them and a PL
+# parquet that lacks tv/jsd/w1 skips those.
+ACCURACY_METRICS = (
+    "tv_per_node", "jsd_per_node", "w1_per_node", "log_likelihood",
+    "param_recovery_tv", "param_recovery_kl",
+    "calibration_pit_ks", "calibration_sd_ratio",
+)
+# Direction conventions. param_recovery_tv/kl and calibration_pit_ks are
+# distances/statistics where 0 is ideal (lower is better). log_likelihood is
+# the lone higher-is-better score. calibration_sd_ratio is neither: it is a
+# ratio of fitted-to-oracle predictive SD whose ideal is 1.0 (under-dispersed
+# < 1, over-dispersed > 1) — a "closer to a target value" metric (#233).
+LOWER_IS_BETTER = frozenset({
+    "tv_per_node", "jsd_per_node", "w1_per_node",
+    "param_recovery_tv", "param_recovery_kl", "calibration_pit_ks",
+})
 HIGHER_IS_BETTER = frozenset({"log_likelihood"})
+# Metrics whose target is a specific value, not a monotone direction. The
+# value is the ideal; the metric is a nonnegative ratio so its band is
+# clipped at 0 like a distance, but axes/labels read "closer to <v>".
+CLOSER_TO_VALUE = {"calibration_sd_ratio": 1.0}
 # Pretty labels for tables / axes.
 METRIC_LABEL = {
     "tv_per_node": "TV",
     "jsd_per_node": "JSD",
     "w1_per_node": "W1",
     "log_likelihood": "LL",
+    "param_recovery_tv": "TV (recovery)",
+    "param_recovery_kl": "KL (recovery)",
+    "calibration_pit_ks": "PIT-KS",
+    "calibration_sd_ratio": "SD-ratio",
 }
 
 # Families that skip w1_per_node (Wasserstein-1 N/A for discrete posteriors).
@@ -136,6 +160,8 @@ def clip_band(metric_kind: str, lower: float, upper: float) -> tuple[float, floa
         return max(0.0, lower), min(1.0, upper)  # bounded [0,1]
     if metric_kind in HIGHER_IS_BETTER:
         return lower, upper                     # log_likelihood: unbounded
+    if metric_kind in CLOSER_TO_VALUE:
+        return max(0.0, lower), upper           # sd_ratio: nonneg, no upper bound
     if metric_kind == "success_rate":
         return max(0.0, lower), min(100.0, upper)
     return lower, upper
@@ -422,7 +448,12 @@ def fig_accuracy_scaling(df_cell, metric, x_axis, x_lookup, aggregation, out_pat
             rows.append((x_lookup[p], c, lo, hi))
         if rows:
             points[b] = rows
-    direction = "lower better" if metric in LOWER_IS_BETTER else "higher better"
+    if metric in LOWER_IS_BETTER:
+        direction = "lower better"
+    elif metric in CLOSER_TO_VALUE:
+        direction = f"closer to {CLOSER_TO_VALUE[metric]:g} better"
+    else:
+        direction = "higher better"
     _scaling_plot(points, x_axis, f"{METRIC_LABEL[metric]} ({direction})",
                   f"{title} — {METRIC_LABEL[metric]} vs {x_axis}", out_path, metric)
 
