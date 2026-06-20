@@ -825,6 +825,47 @@ def _table_slug(value: str) -> str:
     return str(value).replace("+", "plus").replace(" ", "_").replace("/", "_")
 
 
+# Metric sets that signal the run's mode for caption naming (#241). Mode is not
+# a parquet column — it is inferred from which metrics are present (the PR-12
+# signal): PL metrics => parameter-learning; inference metrics => inference.
+_PL_METRICS = frozenset({"param_recovery_tv", "param_recovery_kl",
+                         "calibration_pit_ks", "calibration_sd_ratio",
+                         "log_likelihood"})
+_INFERENCE_METRICS = frozenset({"tv_per_node", "jsd_per_node", "w1_per_node"})
+
+
+def _benchmark_caption(df_view) -> str:
+    """The benchmark-named caption bucket (#241), derived in priority order:
+
+      1. INFERENCE SPEED                    — a batch_sizes sweep (batch_size>1).
+      2. SAMPLE EFFICIENCY PARAMETER LEARNING — an n_train sweep + PL metrics.
+      3/4. <BENCHMARK> INFERENCE / PARAMETER LEARNING — mode from the metric set.
+      fall-through. SYNTHETIC INFERENCE — a mixed (PR-14 concat) or timing-only
+        view, where the table is not the deliverable (the divergence panel is).
+
+    Speed and sample-efficiency are mode labels independent of benchmark, so
+    they win over the benchmark-prefixed cases. ``scalability`` reads as
+    SYNTHETIC (the n_nodes axis already carries the scaling story; the spec
+    names no SCALABILITY caption)."""
+    cols = df_view.columns
+    if "batch_size" in cols and (df_view["batch_size"] > 1).any():
+        return "INFERENCE SPEED"
+    ok_metrics = set(df_view.loc[df_view["status"] == "ok", "metric"]) \
+        if "status" in cols else set(df_view["metric"])
+    has_pl = bool(ok_metrics & _PL_METRICS)
+    has_inf = bool(ok_metrics & _INFERENCE_METRICS)
+    if ("n_train" in cols and df_view["n_train"].dropna().nunique() > 1 and has_pl):
+        return "SAMPLE EFFICIENCY PARAMETER LEARNING"
+    benchmark = (df_view["benchmark"].dropna().iloc[0]
+                 if "benchmark" in cols and not df_view["benchmark"].dropna().empty
+                 else "synthetic")
+    bench = "BNLEARN" if str(benchmark).lower() == "bnlearn" else "SYNTHETIC"
+    if has_pl and not has_inf:
+        return f"{bench} PARAMETER LEARNING"
+    # inference, timing-only, or mixed concat (deliverable is the panel) -> INFERENCE.
+    return f"{bench} INFERENCE"
+
+
 def _write_table(out_path: Path, header_cols, rows, caption="", label=""):
     """Emit a full ``table`` float (booktabs). ``caption`` is plain text whose
     underscores are escaped here (it is typeset); ``label`` is used verbatim as
@@ -896,10 +937,10 @@ def table_headline(df_cell, family, size, aggregation, roles, out_path, label=""
         tcell = "--" if zero else _time_cell(df_cell, b, aggregation)
         cells.append(_bold(tcell) if b in bold_time else tcell)
         rows.append(cells)
-    _write_table(out_path, header, rows,
-                 f"headline {family}/{size}; agg={aggregation}; "
-                 f"{len(header)} cols (metric x role cross)",
-                 label=label)
+    # Benchmark-named caption (#241), prominent; diagnostic detail trails it.
+    caption = (f"{_benchmark_caption(df_cell)}. {family}/{size}; "
+               f"agg={aggregation}; {len(header)} cols (metric x role cross)")
+    _write_table(out_path, header, rows, caption, label=label)
 
 
 def _table_scoped(df_cell, family, aggregation, scope_col, scope_val, out_path, note,
@@ -934,7 +975,11 @@ def _table_scoped(df_cell, family, aggregation, scope_col, scope_val, out_path, 
         tcell = "--" if zero else _time_cell(sub, b, aggregation)
         cells.append(_bold(tcell) if b in bold_time else tcell)
         rows.append(cells)
-    _write_table(out_path, header, rows, note, label=label)
+    # Benchmark-named caption (#241) with the scope qualifier; `note` (family /
+    # subset diagnostic) trails it. Mode is derived from the full df_cell, not
+    # the scoped slice, so the metric set is intact.
+    caption = f"{_benchmark_caption(df_cell)} ({scope_kw}={scope_val}). {note}"
+    _write_table(out_path, header, rows, caption, label=label)
 
 
 # --- Orchestration ------------------------------------------------------------
@@ -1115,13 +1160,15 @@ def _render_view(dff, benchmark, family, aggregation, n_nodes, n_params,
     scope = f"{family}/{subset_name}"
     table_headline(dff, family, subset_name, aggregation, roles,
                    tables_dir / "table_overall.tex", label=f"{lbl}_overall")
+    # note = family/subset only; _table_scoped prepends the scope qualifier
+    # (role=/kind=) to the benchmark-named caption itself (#241).
     for r in roles:
         _table_scoped(dff, family, aggregation, "query_role", r,
-                      tables_dir / f"table_role_{r}.tex", f"role={r} {scope}",
+                      tables_dir / f"table_role_{r}.tex", scope,
                       label=f"{lbl}_role_{_table_slug(r)}")
     for k in kinds:
         _table_scoped(dff, family, aggregation, "query_kind", k,
-                      tables_dir / f"table_kind_{k}.tex", f"kind={k} {scope}",
+                      tables_dir / f"table_kind_{k}.tex", scope,
                       label=f"{lbl}_kind_{_table_slug(k)}")
 
 
@@ -1347,6 +1394,19 @@ def _batch_speed_cell(rows: pd.DataFrame, aggregation: str) -> str:
     return "--"
 
 
+def _batch_speed_central(rows: pd.DataFrame, aggregation: str):
+    """Central per-query time for a (baseline, batch_size) slice, or None for a
+    failed / not-run cell (those never win bold-best). Mirrors _batch_speed_cell's
+    failure-first logic so the bolded cell and its value agree."""
+    if not rows[rows["status"].isin(["oom", "timeout", "error"])].empty:
+        return None
+    ok = rows[(rows["status"] == "ok") & (rows["metric"] == "query_time_s")]
+    ok = ok[ok["value"].notna() & (ok["value"] > 0)]
+    if ok.empty:
+        return None
+    return _central(aggregate(ok.groupby("seed")["value"].mean(), aggregation))
+
+
 def _write_batch_speed_table(out_path, grid, rows, family, aggregation, label="") -> None:
     """``table`` float (booktabs): rows=methods, cols=batch sizes. The code
     legend lives in ``\\caption`` (hand-built LaTeX — escaped at construction)."""
@@ -1355,8 +1415,10 @@ def _write_batch_speed_table(out_path, grid, rows, family, aggregation, label=""
     ncol = len(header)
     band = "IQM$\\pm$(Q3$-$Q1)/2" if aggregation == "iqm_iqr" else "mean$\\pm$std"
     agg_tex = aggregation.replace("_", "\\_")  # underscore is math-mode in text
+    # "INFERENCE SPEED" caption (#241); this builder only renders for a
+    # batch_sizes sweep, so the bucket is definitionally INFERENCE SPEED.
     caption = (
-        f"Per-query time [s], {band} over seeds (agg={agg_tex}). "
+        f"INFERENCE SPEED. Per-query time [s], {band} over seeds (agg={agg_tex}). "
         f"\\texttt{{oom}}/\\texttt{{timeout}}/\\texttt{{error}} = cell DNF at "
         f"that batch size (any failed seed fails the cell); "
         f"-- = not run / non-batchable at $B>1$."
@@ -1394,18 +1456,28 @@ def batch_speed_tables(df, aggregation, out_dir: Path, bench: str) -> int:
     written = 0
     for family in sorted(df["family"].dropna().unique()):
         fam = df[df["family"] == family]
-        rows = []
+        kept, centrals = {}, {}     # baseline -> {B: cell} / {B: central or None}
         for bl in sorted(fam["baseline"].dropna().unique()):
             blsub = fam[fam["baseline"] == bl]
-            cells = [
-                _batch_speed_cell(blsub[blsub["batch_size"] == b], aggregation)
-                for b in grid
-            ]
-            if all(c == "--" for c in cells):
+            cells = {b: _batch_speed_cell(blsub[blsub["batch_size"] == b], aggregation)
+                     for b in grid}
+            if all(cells[b] == "--" for b in grid):
                 continue  # baseline not applicable to this family
-            rows.append([bl.replace("_", "\\_")] + cells)
-        if not rows:
+            kept[bl] = cells
+            centrals[bl] = {b: _batch_speed_central(blsub[blsub["batch_size"] == b],
+                                                    aggregation) for b in grid}
+        if not kept:
             continue
+        # bold-best per $B$ column (per-query time is lower-better); the winning
+        # baseline can differ across batch sizes — that is the batching story.
+        bold = {b: _bold_best({bl: centrals[bl][b] for bl in kept}, "time") for b in grid}
+        rows = []
+        for bl in sorted(kept):
+            row = [bl.replace("_", "\\_")]
+            for b in grid:
+                cell = kept[bl][b]
+                row.append(_bold(cell) if bl in bold[b] else cell)
+            rows.append(row)
         out_path = out_dir / f"batch_speed_table_{family}.tex"
         _write_batch_speed_table(
             out_path, grid, rows, family, aggregation,

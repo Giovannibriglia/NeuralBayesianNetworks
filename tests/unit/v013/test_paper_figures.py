@@ -866,3 +866,61 @@ def test_headline_table_bolds_best_cell(tmp_path):
     body = (out_dir / "synthetic" / "discrete" / "all" / "tables"
             / "table_overall.tex").read_text()
     assert "\\textbf{" in body
+
+
+# --- benchmark-named captions (#241) ------------------------------------------
+
+def _mini(metrics, *, benchmark="synthetic", batch_size=None, n_train=None):
+    rows = []
+    for m in metrics:
+        row = {"benchmark": benchmark, "family": "discrete", "metric": m,
+               "status": "ok"}
+        if batch_size is not None:
+            row["batch_size"] = batch_size
+        if n_train is not None:
+            row["n_train"] = n_train
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def test_benchmark_caption_four_buckets():
+    from benchmarking._paper_figures import _benchmark_caption
+
+    # 1. speed dominates (batch_size>1)
+    assert _benchmark_caption(_mini(["query_time_s"], batch_size=4)) == "INFERENCE SPEED"
+    # 2. sample efficiency (n_train sweep + PL) — needs >1 distinct n_train
+    se = pd.concat([_mini(["param_recovery_tv"], n_train=30),
+                    _mini(["param_recovery_tv"], n_train=300)], ignore_index=True)
+    assert _benchmark_caption(se) == "SAMPLE EFFICIENCY PARAMETER LEARNING"
+    # 3. bnlearn inference / PL by metric set
+    assert _benchmark_caption(_mini(["tv_per_node"], benchmark="bnlearn")) == "BNLEARN INFERENCE"
+    assert _benchmark_caption(
+        _mini(["param_recovery_tv"], benchmark="bnlearn")) == "BNLEARN PARAMETER LEARNING"
+    # 4. synthetic fall-through
+    assert _benchmark_caption(_mini(["tv_per_node"])) == "SYNTHETIC INFERENCE"
+    assert _benchmark_caption(_mini(["log_likelihood"])) == "SYNTHETIC PARAMETER LEARNING"
+
+
+def test_benchmark_caption_single_n_train_is_not_sample_efficiency():
+    """One n_train value is not a sweep -> falls through to the mode caption."""
+    from benchmarking._paper_figures import _benchmark_caption
+
+    assert _benchmark_caption(
+        _mini(["param_recovery_tv"], n_train=300)) == "SYNTHETIC PARAMETER LEARNING"
+
+
+def test_batch_speed_table_bolds_and_captions(tmp_path):
+    """The batch-speed table carries the INFERENCE SPEED caption and bolds the
+    fastest baseline per $B$ column."""
+    from benchmarking._paper_figures import run_plot
+
+    BS = sorted(Path("benchmarking/results").glob("*batch_speed_smoke*"))
+    if not BS:
+        pytest.skip("no batch_speed smoke parquet present")
+    out_dir = tmp_path / "figs_bs"
+    assert run_plot(parquet=BS[-1], output_dir=out_dir, aggregation="mean_std") == 0
+    tex = list(out_dir.rglob("batch_speed_table_*.tex"))
+    assert tex
+    body = tex[0].read_text()
+    assert "INFERENCE SPEED" in body
+    assert "\\textbf{" in body
