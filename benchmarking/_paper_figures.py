@@ -139,6 +139,14 @@ def aggregate(values, method: str) -> tuple[float, float, float]:
     values = values[~np.isnan(values)]
     if values.size == 0:
         return float("nan"), float("nan"), float("nan")
+    # +inf sentinel (#234): param_recovery_kl is +inf when the true CPT has a
+    # hard zero an unsmoothed-MLE adapter never covers. Surface it explicitly
+    # BEFORE aggregating — IQM trims values above Q3, so a lone +inf would be
+    # excluded from the interquartile mean and the finding ("this adapter has
+    # hard zeros") would silently vanish. Any +inf in the cell => center +inf,
+    # band undefined. (posinf only: a hypothetical -inf is not this sentinel.)
+    if np.isposinf(values).any():
+        return float("inf"), float("nan"), float("nan")
     if method == "mean_std":
         c = float(np.mean(values))
         s = float(np.std(values, ddof=0))
@@ -420,18 +428,40 @@ def _scaling_plot(points_by_baseline, x_label, y_label, title, out_path, metric_
     colors = baseline_colors(points_by_baseline.keys())
     fig, ax = plt.subplots(figsize=(6, 4))
     all_x, all_y = [], []
+    inf_points = []           # (x, baseline): +inf sentinels drawn after autoscale
+    labeled = set()           # baselines already carrying a legend entry
     for b in sorted(points_by_baseline):
         pts = sorted(points_by_baseline[b], key=lambda r: r[0])
-        xs = [p[0] for p in pts]
-        cs = [p[1] for p in pts]
-        los = [clip_band(metric_kind, p[2], p[3])[0] for p in pts]
-        his = [clip_band(metric_kind, p[2], p[3])[1] for p in pts]
+        # #234: split finite points (draw the line) from +inf sentinels (drawn
+        # as caret markers at the top edge). Only finite values feed autoscale,
+        # so a +inf never corrupts the log-scale heuristic or the y-range.
+        finite = [p for p in pts if np.isfinite(p[1])]
+        inf_points += [(p[0], b) for p in pts if np.isposinf(p[1])]
+        all_x += [p[0] for p in pts]
+        if not finite:
+            continue
+        xs = [p[0] for p in finite]
+        cs = [p[1] for p in finite]
+        los = [clip_band(metric_kind, p[2], p[3])[0] for p in finite]
+        his = [clip_band(metric_kind, p[2], p[3])[1] for p in finite]
         ax.plot(xs, cs, marker="o", color=colors[b], label=b, markersize=4)
         ax.fill_between(xs, los, his, color=colors[b], alpha=0.2)
-        all_x += xs
+        labeled.add(b)
         all_y += cs + los + his
     _log_or_linear(ax, all_x, "x")
     _log_or_linear(ax, [v for v in all_y if v is not None and v > 0], "y")
+    # +inf sentinels: caret at the top axis edge. An inf-only baseline (no
+    # finite point, e.g. pgmpy-mle KL on a hard-zero CPT) still gets a legend
+    # entry via its marker so it is not silently absent from the figure.
+    if inf_points:
+        y_top = ax.get_ylim()[1]
+        for x, b in inf_points:
+            lbl = b if b not in labeled else None
+            ax.plot([x], [y_top], marker="^", color=colors[b], markersize=9,
+                    linestyle="None", clip_on=False, label=lbl)
+            labeled.add(b)
+        ax.text(0.99, 0.99, "↑ = +∞", transform=ax.transAxes, ha="right",
+                va="top", fontsize=7, alpha=0.7)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
     ax.set_title(title)
@@ -499,6 +529,8 @@ def fig_time_scaling(df_cell, time_kind, x_axis, x_lookup, aggregation, out_path
 def _fmt(center: float, lo: float, hi: float) -> str:
     if np.isnan(center):
         return "--"
+    if np.isposinf(center):
+        return "$+\\infty$"          # #234: unsmoothed-MLE recovery KL sentinel
     half = (hi - lo) / 2
     return f"{center:.3g}$\\pm${half:.2g}"
 
