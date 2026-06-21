@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Dict, List
 
+import networkx as nx
 import torch
 
 from nbn.inference.base import InferenceEngine
@@ -46,7 +47,14 @@ class HybridRouter(InferenceEngine):
             return self._lw
         try:
             tw = model.dag.induced_width()
-        except Exception:
+        except (nx.NetworkXError, ValueError):
+            # Treewidth could not be computed for this graph (a malformed DAG
+            # surfaces as nx.NetworkXError; a degenerate greedy min-fill step as
+            # ValueError) -> fall back to LW. Narrowed from a bare `except`
+            # (#232): the bare catch silently masked the induced_width bugs for
+            # months (#226/#231), degrading exact VE to stochastic LW. Other
+            # exceptions (AttributeError / TypeError / RuntimeError) signal real
+            # bugs and must propagate, not silently downgrade the engine.
             tw = self.treewidth_threshold + 1
 
         if tw <= self.treewidth_threshold:
