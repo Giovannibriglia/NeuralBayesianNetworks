@@ -10,6 +10,37 @@ and **2.3× more accurate** on discrete parameter learning at scale, and is
 the only library in our benchmark suite that handles hybrid (mixed
 continuous-discrete) networks at scale.
 
+## Install
+
+```bash
+# NBN library (with neural mechanisms)
+pip install -e ".[neural]"
+
+# NBN + full benchmarking suite (external baselines, figures, tables)
+pip install -e ".[bench,neural,gp,mcmc]"
+```
+
+The `[neural]` extra adds zuko-backed flows/MDNs (NBN's headline mechanisms);
+`bench` pulls in the external-baseline libraries (pgmpy, pomegranate) plus
+plotting (matplotlib, seaborn), and `gp`/`mcmc` add the gpytorch and pyro
+baselines. All of `bench`, `gp`, and `mcmc` are required for paper-grade
+benchmark runs — without them the runner silently skips those baselines
+(cells emit `not_supported` rather than erroring). `gp` and `mcmc` can be
+added to the library install as needed, e.g. `pip install -e ".[neural,gp]"`.
+Add `dev` for the test and docs toolchain.
+
+### Run the benchmark suite
+
+From the repo root, launch the six paper-scale benchmarks. At most three run
+in parallel; the next starts as soon as one finishes:
+
+```bash
+bash benchmarking/run_all_benchmarks.sh
+```
+
+Override the pool size or device via `MAX_PARALLEL=2 bash …` or
+`DEVICE=cpu bash …` (three GPU benchmarks in flight can exceed an 8 GB card).
+
 ## Why NBN
 
 NBN is to Bayesian Networks what GPyTorch is to Gaussian Processes:
@@ -60,15 +91,6 @@ NBN-hybrid handles mixed continuous-discrete networks across all n_nodes
 in our benchmark (n ∈ {10, 50, 100, 500, 1000}). Among the external
 libraries, only pyro covers hybrid inference (Importance sampler); pgmpy,
 gpytorch, and pomegranate have no applicable hybrid baselines.
-
-## Install
-
-    pip install -e ".[dev,bench,neural,gp,mcmc]"
-
-The `gp` and `mcmc` extras install gpytorch and pyro respectively.
-Both are required for paper-grade benchmark runs (`synthetic/complete/inference_complete.yaml`,
-`synthetic/complete/parameter_learning_complete.yaml`). Without them the runner silently skips
-those baselines (cells emit `not_supported` rather than erroring).
 
 ## Quick start
 
