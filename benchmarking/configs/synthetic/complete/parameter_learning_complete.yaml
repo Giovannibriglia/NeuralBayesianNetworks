@@ -52,7 +52,7 @@ selector: uniform_random
 
 source:
   families: [discrete, continuous_lg, continuous_nongauss, hybrid]
-  n_nodes_list: [10, 50, 100, 500, 1000]
+  n_nodes_list: [10, 20, 50, 100, 200, 500, 1000]
   seeds: [0, 1, 2, 3, 4]
   n_train: 10240
   n_test: 1024
@@ -79,9 +79,10 @@ baselines:
   - {library: nbn,   mechanism: kde,      param_method: mle}
   - {library: nbn,   mechanism: knn,      param_method: mle}
   - {library: nbn,   mechanism: flexcode, param_method: mle, device: cuda}
-  - {library: gpytorch,    mechanism: gp,       param_method: mle}
+  # - {library: gpytorch,    mechanism: gp,       param_method: mle}
   - {library: pomegranate, mechanism: discrete, param_method: mle}
   - {library: pyro, mechanism: empirical, param_method: mle, device: cpu}
 
-n_queries_per_cell: 1024
+n_queries_per_cell: 128
 per_cell_timeout_s: 600.0
+fit_timeout_s: 1200

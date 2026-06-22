@@ -25,9 +25,9 @@ selector: uniform_random
 
 source:
   families: [discrete]
-  n_nodes_list: [10]
-  seeds: [0, 1, 2]
-  n_train_sweep: [30, 100, 300, 1000, 3000, 10000, 30000]
+  n_nodes_list: [20]
+  seeds: [0, 1, 2, 3, 4]
+  n_train_sweep: [64, 128, 256, 512, 1024, 4096, 8192, 16384, 32768, 65536]
   n_test: 2000
   n_reference: 20000
   edge_density: 0.20
@@ -36,12 +36,26 @@ source:
   fraction_continuous: 0.0
 
 baselines:
-  - {library: pgmpy,       mechanism: discrete,  param_method: mle}
-  - {library: pgmpy,       mechanism: discrete,  param_method: bayes}
-  - {library: pomegranate, mechanism: discrete,  param_method: mle}
-  - {library: pyro,        mechanism: empirical, param_method: mle}
-  - {library: nbn,         mechanism: cat,       param_method: mle}
-  - {library: nbn,         mechanism: neuralcat, param_method: mle}
+  - {library: pgmpy, mechanism: discrete, param_method: mle}
+  - {library: pgmpy, mechanism: discrete, param_method: bayes}
+  - {library: pgmpy, mechanism: lg,       param_method: mle}
+  - {library: nbn,   mechanism: cat,      param_method: mle}
+  - {library: nbn,   mechanism: neuralcat, param_method: mle}
+  - {library: nbn,   mechanism: lg,       param_method: mle}
+  - {library: nbn,   mechanism: mdn,      param_method: mle}
+  - {library: nbn,   mechanism: flow,     param_method: mle}
+  - {library: nbn,   mechanism: hybrid,   param_method: mle}
+  # Non-parametric continuous baselines (#223 / PR 8) — parametric-vs-non-
+  # parametric calibration comparison. KDE + KNN are cheap; flexcode trains a
+  # 200-epoch MLP per continuous node, so it carries a per-baseline device: cuda
+  # override (the global default stays CPU; mdn/flow are a separate device call).
+  - {library: nbn,   mechanism: kde,      param_method: mle}
+  - {library: nbn,   mechanism: knn,      param_method: mle}
+  - {library: nbn,   mechanism: flexcode, param_method: mle, device: cuda}
+  # - {library: gpytorch,    mechanism: gp,       param_method: mle}
+  - {library: pomegranate, mechanism: discrete, param_method: mle}
+  - {library: pyro, mechanism: empirical, param_method: mle, device: cpu}
 
-n_queries_per_cell: 2
-per_cell_timeout_s: 300.0
+n_queries_per_cell: 12
+per_cell_timeout_s: 600.0
+fit_timeout_s: 1200

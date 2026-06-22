@@ -121,29 +121,37 @@ n_queries_per_cell: 128
 
 baselines:
   # nbn-cat (discrete)
-  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 100,  n_samples: 1024 }}
-  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  n_samples: 1024}}
-  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  n_samples: 1024}}
-  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  n_samples: 1024}}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
   # nbn-neuralcat (discrete)
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 100,  n_samples: 1024}}
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  n_samples: 1024}}
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  n_samples: 1024}}
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  n_samples: 1024}}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
   # nbn-lg (continuous_lg)
-  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  n_samples: 1024}}
-  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  n_samples: 1024}}
-  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  n_samples: 1024}}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
   # nbn-mdn (continuous_lg / continuous_nongauss / hybrid)
-  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  n_samples: 1024}}
-  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  n_samples: 1024}}
-  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  n_samples: 1024}}
+  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
   # nbn-flow (continuous_lg / continuous_nongauss / hybrid)
-  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  n_samples: 1024}}
-  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  n_samples: 1024}}
-  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  n_samples: 1024}}
+  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
   # nbn-hybrid (hybrid router)
-  - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router,    extra_kwargs: {epochs: 100,  n_samples: 1024}}
+  - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  # Non-parametric continuous mechanisms (#224 / PR 9) — LW only (ais/avi blocked
+  # at recognition_net._head_for, deferred to #227). All three carry device: cuda:
+  # KDE-lw's per-query O(n_train) density eval is ~19.5s/query on CPU at this scale
+  # (n_train=10000, n_samples=4096) -> ~5.5h/cell at n_queries_per_cell=1024;
+  # 0.24s/query on GPU. Scalability/speed configs deferred to #228.
+  - { library: nbn,   mechanism: kde,      param_method: mle,   inference_method: lw,      extra_kwargs: { n_samples: 2048 }, device: cuda }
+  - { library: nbn,   mechanism: knn,      param_method: mle,   inference_method: lw,      extra_kwargs: { n_samples: 2048 }, device: cuda }
+  - { library: nbn,   mechanism: flexcode, param_method: mle,   inference_method: lw,      extra_kwargs: { n_samples: 2048 }, device: cuda }
   # other libraries
   - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: ve}
   - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance, device: cpu}
@@ -151,5 +159,5 @@ baselines:
   - {library: pgmpy,       mechanism: discrete,  param_method: bayes, inference_method: ve}
   - {library: pgmpy,       mechanism: lg,        param_method: lg,    inference_method: predict}
 
-per_cell_timeout_s: 128
+per_cell_timeout_s: 600.0
 fit_timeout_s: 1200

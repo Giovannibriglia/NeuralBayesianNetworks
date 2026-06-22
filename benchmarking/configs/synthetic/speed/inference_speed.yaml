@@ -110,4 +110,5 @@ baselines:
 n_queries_per_cell: 12
 # Aggressive per-cell budget (§8.1): batchable baselines finish in
 # seconds; sequential baselines at N=10240 hit this and DNF by design.
-per_cell_timeout_s: 600
+per_cell_timeout_s: 600.0
+fit_timeout_s: 1200
