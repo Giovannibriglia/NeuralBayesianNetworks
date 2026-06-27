@@ -7,6 +7,7 @@ import torch.nn as nn
 from torch.distributions import Independent, Normal
 
 from nbn.mechanisms.base import Mechanism
+from nbn.update import recursive_gaussian
 from nbn.utils.batching import ensure_2d, flatten_samples
 
 
@@ -25,6 +26,7 @@ class LinearGaussianMechanism(Mechanism):
     """
 
     is_discrete: bool = False
+    supports_update: bool = True
 
     def __init__(
         self,
@@ -42,6 +44,13 @@ class LinearGaussianMechanism(Mechanism):
         self._log_scale: nn.Parameter | None = None  # [D_x]
         self.output_dim = 1
         self._input_dim = 0
+        # Persisted normal-equation sufficient statistics for incremental
+        # update (A = Z^T Z, B = Z^T x, c = sum x^2, N).  Buffers so .to(),
+        # state_dict, and intervene()'s deepcopy carry them.  None until fit.
+        self.register_buffer("_neq_A", None)
+        self.register_buffer("_neq_B", None)
+        self.register_buffer("_neq_c", None)
+        self.register_buffer("_neq_N", None)
 
     # ------------------------------------------------------------------
     # Fitting
@@ -98,19 +107,80 @@ class LinearGaussianMechanism(Mechanism):
             std = resid.std(0, unbiased=False).clamp_min(self.min_scale)
             log_s = torch.log(std)
 
+        self._set_params(w, b, log_s)
+
+        # Persist normal-equation sufficient statistics so update_local can
+        # accumulate new data without rehearsal (posterior-as-prior).  Uses the
+        # same design matrix Z = [parents, 1] the closed-form fit solves over.
+        st = recursive_gaussian.batch_statistics(parents, x)
+        self._neq_A = st.A.detach().clone()
+        self._neq_B = st.B.detach().clone()
+        self._neq_c = st.c.detach().clone()
+        self._neq_N = st.N.detach().clone()
+
+        return {"n_params": (w.numel() + b.numel() + log_s.numel())}
+
+    def _set_params(
+        self, w: torch.Tensor, b: torch.Tensor, log_s: torch.Tensor
+    ) -> None:
+        """Write W/b/log_scale back through the learnable-vs-buffer branch.
+
+        Shared by ``fit_local`` and ``update_local`` so both honour the
+        ``learnable`` flag identically.
+        """
         if self.learnable:
             self._weight = nn.Parameter(w)
             self._bias = nn.Parameter(b)
             self._log_scale = nn.Parameter(log_s)
         else:
-            self.register_buffer("_weight_buf", w)
-            self.register_buffer("_bias_buf", b)
-            self.register_buffer("_log_scale_buf", log_s)
+            if "_weight_buf" in self._buffers:
+                self._weight_buf = w
+                self._bias_buf = b
+                self._log_scale_buf = log_s
+            else:
+                self.register_buffer("_weight_buf", w)
+                self.register_buffer("_bias_buf", b)
+                self.register_buffer("_log_scale_buf", log_s)
             self._weight = self._weight_buf      # type: ignore[assignment]
             self._bias = self._bias_buf          # type: ignore[assignment]
             self._log_scale = self._log_scale_buf  # type: ignore[assignment]
 
-        return {"n_params": (w.numel() + b.numel() + log_s.numel())}
+    # ------------------------------------------------------------------
+    # Incremental update
+    # ------------------------------------------------------------------
+
+    def update_local(
+        self,
+        x: torch.Tensor,
+        parents: torch.Tensor | None,
+        *,
+        forgetting: float = 1.0,
+        **kwargs,
+    ) -> dict:
+        """Fold new data into the linear-Gaussian CPD via recursive least sq.
+
+        Accumulates the new-data normal-equation statistics onto the persisted
+        prior and re-solves.  For ``forgetting == 1.0`` a chunked
+        ``fit``→``update`` reproduces a single pooled ridge fit (to solver
+        precision); ``forgetting < 1.0`` fades the older statistics.
+        """
+        assert self._neq_A is not None, "call fit_local before update_local"
+        x = ensure_2d(x)
+        prior = recursive_gaussian.NormalEquationState(
+            self._neq_A, self._neq_B, self._neq_c, self._neq_N, self._input_dim
+        )
+        batch = recursive_gaussian.batch_statistics(parents, x)
+        state = recursive_gaussian.accumulate(prior, batch, forgetting=forgetting)
+        w, b, log_s = recursive_gaussian.solve(
+            state, ridge=self.ridge, min_scale=self.min_scale
+        )
+        self.output_dim = x.shape[1]
+        self._set_params(w, b, log_s)
+        self._neq_A = state.A.detach().clone()
+        self._neq_B = state.B.detach().clone()
+        self._neq_c = state.c.detach().clone()
+        self._neq_N = state.N.detach().clone()
+        return {"method": "recursive_gaussian"}
 
     def _scale(self) -> torch.Tensor:
         return torch.exp(self._log_scale).clamp_min(self.min_scale)

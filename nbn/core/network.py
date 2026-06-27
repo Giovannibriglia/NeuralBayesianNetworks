@@ -220,6 +220,48 @@ class NeuralBayesianNetwork(nn.Module):
             **kwargs,
         )
 
+    def update(
+        self,
+        data: Dict[str, torch.Tensor],
+        *,
+        forgetting: float = 1.0,
+        **kwargs: Any,
+    ):
+        """Fold new data into the fitted CPDs without retraining or rehearsal.
+
+        The graph and cardinalities are fixed; only CPD parameters change.
+        Each mechanism that supports it (set via ``supports_update``) folds in
+        the new data using sufficient statistics it persisted during
+        ``fit`` — the posterior left by ``fit`` becomes the prior for
+        ``update`` (recursive Bayes).  Mechanisms that don't support it are
+        skipped (recorded in the returned ``UpdateHistory``).
+
+        Parameters
+        ----------
+        data:
+            Dict of node_name → tensor ``[N, D]`` or ``[N]``. Auto-moved.
+        forgetting:
+            Exponential-forgetting factor in ``(0, 1]`` applied to each
+            mechanism's persisted prior state (``1.0`` = pure recursive Bayes).
+
+        Returns
+        -------
+        UpdateHistory
+        """
+        if "device" in kwargs:
+            raise TypeError(
+                "device is set at NeuralBayesianNetwork construction time; "
+                "use model.to(new_device) to move."
+            )
+        from nbn.update.orchestrate import update as _update
+        data = to_device(data, self._device)
+        return _update(
+            self, data,
+            forgetting=forgetting,
+            device=str(self._device),
+            **kwargs,
+        )
+
     # ------------------------------------------------------------------
     # Inference
     # ------------------------------------------------------------------

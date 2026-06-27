@@ -28,6 +28,11 @@ class Mechanism(nn.Module, ABC):
 
     is_discrete: bool = False
     output_dim: int = 1
+    # Whether this mechanism supports incremental, no-rehearsal updates via
+    # ``update_local``.  Mechanisms that persist sufficient statistics inside
+    # ``fit_local`` (e.g. categorical counts, linear-Gaussian normal equations)
+    # set this True; ``nbn.update.orchestrate`` skips any node where it is False.
+    supports_update: bool = False
 
     @abstractmethod
     def forward(
@@ -109,6 +114,21 @@ class Mechanism(nn.Module, ABC):
         self, x: torch.Tensor, parents: torch.Tensor | None, **kwargs
     ) -> dict:
         """Closed-form or small-loop local MLE.  Returns a dict of metrics."""
+
+    def update_local(
+        self, x: torch.Tensor, parents: torch.Tensor | None, **kwargs
+    ) -> dict:
+        """Fold new data into the already-fitted CPD (no rehearsal).
+
+        Default implementation raises — only mechanisms that persist the
+        sufficient statistics they need inside ``fit_local`` (and set
+        ``supports_update = True``) override this.  ``nbn.update.orchestrate``
+        never calls this on a mechanism whose ``supports_update`` is False, so
+        this signals a direct mis-call rather than a routing bug.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support incremental update"
+        )
 
     @property
     def is_fitted(self) -> bool:
