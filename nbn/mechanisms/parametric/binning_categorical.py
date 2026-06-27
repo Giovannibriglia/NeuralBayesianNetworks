@@ -41,6 +41,10 @@ class BinningCategoricalTable(CategoricalTableMechanism):
     """
 
     is_discrete: bool = True
+    # Deferred: the inherited Dirichlet updater indexes the CPT with raw parent
+    # values, but this mechanism must bucketise continuous parents first (and
+    # reuse the learned bin edges).  Re-enabled in a later PR.
+    supports_update: bool = False
 
     def __init__(
         self,

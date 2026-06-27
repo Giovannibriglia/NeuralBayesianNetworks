@@ -20,6 +20,7 @@ from nbn.mechanisms import (
     NeuralCategoricalMechanism,
 )
 from nbn.sampling import ancestral_sample
+from nbn.update import UpdateHistory
 from nbn.utils.seed import seed_all
 
 try:
@@ -48,6 +49,8 @@ __all__ = [
     # Learning
     "fit",
     "TrainHistory",
+    # Update (incremental, no-rehearsal)
+    "UpdateHistory",
     # Sampling
     "ancestral_sample",
     # Utils

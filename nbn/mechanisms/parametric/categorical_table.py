@@ -35,6 +35,7 @@ class CategoricalTableMechanism(Mechanism):
     """
 
     is_discrete: bool = True
+    supports_update: bool = True
 
     def __init__(self, alpha: float = 0.0) -> None:
         # ``alpha`` is the per-class Dirichlet pseudo-count for Laplace
@@ -50,6 +51,14 @@ class CategoricalTableMechanism(Mechanism):
         self._parent_strides: List[int] = []
         self._class_values: torch.Tensor | None = None  # [K]
         self.output_dim = 1
+        # Persisted Dirichlet sufficient statistics for incremental update:
+        # the *raw* count table ([n_parent_states, K]).  Smoothing (#127 hack +
+        # alpha) is re-applied per fit/update by _smooth() at presentation time,
+        # never baked into _counts — so incremental update == pooled fit even
+        # when a class first appears in the update chunk.  Registered as a
+        # buffer (not a plain attr) so .to(), state_dict, and intervene()'s
+        # deepcopy carry it along.  None until fit_local runs.
+        self.register_buffer("_counts", None)
 
     # ------------------------------------------------------------------
     # Fitting
@@ -145,25 +154,82 @@ class CategoricalTableMechanism(Mechanism):
         counts.scatter_add_(0, flat_idx, torch.ones(n, device=device))
         counts = counts.reshape(n_parent_states, k)
 
-        # Bug 1a (#127): a declared class that never appears anywhere in
-        # training would otherwise be a structural zero (probability 0 for
-        # every parent configuration). Give such classes a Laplace
-        # pseudo-count of 1.0 so every declared class keeps nonzero
-        # probability. This is a no-op when every declared class is observed,
-        # preserving the pgmpy-MLE parity that ``alpha=0`` provides on
-        # fully-observed networks.
-        unobserved_classes = counts.sum(dim=0) == 0  # [k]
-        if bool(unobserved_classes.any()):
-            counts[:, unobserved_classes] += 1.0
+        # Persist the *raw* count table as the sufficient statistics for
+        # incremental update (posterior-as-prior).  Smoothing (the #127
+        # never-observed +1 hack and Dirichlet alpha) is a presentation
+        # transform re-applied from the current raw counts by _smooth(), so a
+        # chunked fit→update equals a single pooled fit *unconditionally* — a
+        # class first seen in the update chunk is handled identically to one
+        # seen at fit time.
+        self._counts = counts.detach().clone()
 
-        # Dirichlet smoothing
-        counts = counts + self.alpha
-
-        # Store as logits in log space (log of normalised probs)
-        probs = counts / counts.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        # Store as logits in log space (log of normalised, smoothed probs).
+        smoothed = self._smooth(counts)
+        probs = smoothed / smoothed.sum(dim=-1, keepdim=True).clamp_min(1e-12)
         logits_data = torch.log(probs.clamp_min(1e-12))
         self._logits = nn.Parameter(logits_data)
         return {"n_classes": k, "n_parent_states": n_parent_states}
+
+    def _smooth(self, counts: torch.Tensor) -> torch.Tensor:
+        """Presentation smoothing applied to raw accumulated counts.
+
+        Bug 1a (#127): a declared class that never appears anywhere in the
+        accumulated data would otherwise be a structural zero (probability 0
+        for every parent configuration); give such classes a Laplace
+        pseudo-count of 1.0 so every declared class keeps nonzero probability.
+        Then add the Dirichlet ``alpha``.  This is a pure function of the
+        *current* raw counts, applied identically by ``fit_local`` and
+        ``update_local``, so incremental update stays exactly equal to a pooled
+        fit (and stays a no-op — preserving pgmpy-MLE parity at ``alpha=0`` —
+        whenever every declared class is observed).
+        """
+        counts = counts.clone()
+        unobserved = counts.sum(dim=0) == 0  # [k]
+        if bool(unobserved.any()):
+            counts[:, unobserved] = counts[:, unobserved] + 1.0
+        return counts + self.alpha
+
+    # ------------------------------------------------------------------
+    # Incremental update
+    # ------------------------------------------------------------------
+
+    def update_local(
+        self,
+        x: torch.Tensor,
+        parents: torch.Tensor | None,
+        parent_cards: List[int] | None = None,
+        n_classes: int | None = None,
+        *,
+        forgetting: float = 1.0,
+        **kw,
+    ) -> dict:
+        """Fold new data into the CPT via conjugate Dirichlet accumulation.
+
+        Accumulates raw new-data counts onto the persisted raw count table and
+        re-applies smoothing at presentation time (via ``_smooth``), so for
+        ``forgetting == 1.0`` a chunked ``fit``→``update`` reproduces a single
+        fit on the pooled data unconditionally.  ``forgetting < 1.0``
+        geometrically fades the old raw counts, the intended drift-tracking
+        behaviour.
+        """
+        from nbn.update import dirichlet as di
+
+        assert self._counts is not None, "call fit_local before update_local"
+        x = x.long().reshape(-1)
+        if parents is None or parents.shape[-1] == 0:
+            row = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
+        else:
+            row = self._parent_to_row_idx(parents.long().reshape(x.shape[0], -1))
+        r, k = self._counts.shape
+        if x.numel() and (int(x.max()) >= k or int(row.max()) >= r):
+            raise ValueError(
+                "update data has class/parent index beyond the declared "
+                "cardinality the CPT was fit with"
+            )
+        batch = di.new_counts(x, row, r, k)  # raw new counts
+        self._counts = di.accumulate(self._counts, batch, forgetting=forgetting)
+        self._logits = nn.Parameter(di.counts_to_logits(self._smooth(self._counts)))
+        return {"method": "dirichlet_conjugate"}
 
     # ------------------------------------------------------------------
     # Helpers
