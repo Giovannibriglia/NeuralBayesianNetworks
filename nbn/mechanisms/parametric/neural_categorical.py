@@ -8,6 +8,7 @@ from torch.distributions import Categorical
 
 from nbn.mechanisms.base import Mechanism
 from nbn.mechanisms.parametric.mdn import _build_mlp
+from nbn.update import online_laplace
 from nbn.utils.batching import ensure_2d, flatten_samples
 
 
@@ -32,6 +33,7 @@ class NeuralCategoricalMechanism(Mechanism):
     """
 
     is_discrete: bool = True
+    supports_update: bool = True
 
     def __init__(
         self,
@@ -56,6 +58,12 @@ class NeuralCategoricalMechanism(Mechanism):
         self.net: nn.Module | None = None
         self.embeddings: nn.ModuleList | None = None
         self._d_pa = 0
+        # Online-EWC state for incremental update (theta* and diagonal Fisher),
+        # flat concatenations over parameters().  Buffers so .to()/state_dict/
+        # intervene()-deepcopy carry them; populated by online_laplace.consolidate
+        # at the end of fit_local.  None until fitted.
+        self.register_buffer("_ewc_mu", None)
+        self.register_buffer("_ewc_fisher", None)
 
     def fit_local(
         self,
@@ -82,6 +90,7 @@ class NeuralCategoricalMechanism(Mechanism):
             counts = torch.bincount(x, minlength=k).float() + 1e-8
             log_freq = torch.log(counts / counts.sum())
             self._root_logits = nn.Parameter(log_freq.to(device))
+            online_laplace.consolidate(self, x, None)
             return {"n_classes": k}
 
         parents = ensure_2d(parents).to(device=device)
@@ -110,7 +119,45 @@ class NeuralCategoricalMechanism(Mechanism):
                 opt.zero_grad(); loss.backward()
                 opt.step()
         self.eval()
+        online_laplace.consolidate(self, x, parents)
         return {"n_classes": k, "d_pa": d_pa}
+
+    # ------------------------------------------------------------------
+    # Incremental update
+    # ------------------------------------------------------------------
+
+    def update_local(
+        self,
+        x: torch.Tensor,
+        parents: torch.Tensor | None,
+        *,
+        forgetting: float = 1.0,
+        lam: float = online_laplace.DEFAULT_LAM,
+        epochs: int = 100,
+        lr: float = 1e-3,
+        batch_size: int = 512,
+        fisher_batch_size: int = 1,
+        sample_cap: int = 4096,
+        **kw,
+    ) -> dict:
+        """Fold new data in via online EWC (no rehearsal).
+
+        Trains the MLP (or the root logits) on the new data under a Fisher-
+        weighted quadratic anchor to the post-fit weights, then refreshes the
+        running prior.  ``lam`` is the stability↔plasticity knob (see
+        :data:`nbn.update.online_laplace.DEFAULT_LAM`).  ``fisher_batch_size=1``
+        (default) is the exact per-sample empirical Fisher; ``>1`` is a faster,
+        biased-low approximation.
+        """
+        x = x.long().reshape(-1)
+        if parents is not None:
+            parents = ensure_2d(parents).to(device=x.device)
+        return online_laplace.ewc_update(
+            self, x, parents,
+            epochs=epochs, lr=lr, batch_size=batch_size,
+            lam=lam, forgetting=forgetting,
+            fisher_batch_size=fisher_batch_size, sample_cap=sample_cap,
+        )
 
     def _logits_from_parents(self, parents: torch.Tensor) -> torch.Tensor:
         if self.embeddings is not None:

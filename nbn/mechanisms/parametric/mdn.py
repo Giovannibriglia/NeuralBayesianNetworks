@@ -8,6 +8,7 @@ import torch.nn as nn
 from torch.distributions import Categorical, Independent, MixtureSameFamily, Normal
 
 from nbn.mechanisms.base import Mechanism
+from nbn.update import online_laplace
 # _sanitise_parents was promoted to nbn.utils.batching (v0.14) so the flow
 # mechanism can share the identical guard; re-exported via this import for the
 # existing ``from nbn.mechanisms.parametric.mdn import _sanitise_parents`` callers/tests.
@@ -58,6 +59,7 @@ class MDNMechanism(Mechanism):
     """
 
     is_discrete: bool = False
+    supports_update: bool = True
 
     def __init__(
         self,
@@ -98,6 +100,12 @@ class MDNMechanism(Mechanism):
         # physically meaningful but prevents float32 overflow on pathological
         # input combinations that slip past _pa_clamp.  Tunable via _log_scale_clamp.
         self._log_scale_clamp: float = 7.0
+        # Online-EWC state for incremental update (theta* and diagonal Fisher),
+        # flat concatenations over parameters().  Buffers so .to()/state_dict/
+        # intervene()-deepcopy carry them; populated by online_laplace.consolidate
+        # at the end of fit_local.  None until fitted.
+        self.register_buffer("_ewc_mu", None)
+        self.register_buffer("_ewc_fisher", None)
 
     # ------------------------------------------------------------------
     # Fitting
@@ -163,7 +171,48 @@ class MDNMechanism(Mechanism):
                     torch.nn.utils.clip_grad_norm_(self.parameters(), 5.0)
                     opt.step()
             self.eval()
+        # Snapshot theta* + diagonal Fisher for no-rehearsal EWC update.  Runs
+        # for both root and non-root via parameters()+log_prob; parents here is
+        # None (root) or the raw [N, D_pa] tensor (log_prob standardises it).
+        online_laplace.consolidate(self, x, parents)
         return {"d_pa": self._d_pa, "d_x": d_x, "k": k}
+
+    # ------------------------------------------------------------------
+    # Incremental update
+    # ------------------------------------------------------------------
+
+    def update_local(
+        self,
+        x: torch.Tensor,
+        parents: torch.Tensor | None,
+        *,
+        forgetting: float = 1.0,
+        lam: float = online_laplace.DEFAULT_LAM,
+        epochs: int = 200,
+        lr: float = 1e-3,
+        batch_size: int = 512,
+        fisher_batch_size: int = 1,
+        sample_cap: int = 4096,
+        **kw,
+    ) -> dict:
+        """Fold new data in via online EWC (no rehearsal).
+
+        Trains ``net`` (or the root params) on the new data under a Fisher-
+        weighted quadratic anchor to the post-fit weights, then refreshes the
+        running prior.  ``lam`` is the stability↔plasticity knob (see
+        :data:`nbn.update.online_laplace.DEFAULT_LAM`).  ``fisher_batch_size=1``
+        (default) is the exact per-sample empirical Fisher; ``>1`` is a faster,
+        biased-low approximation.
+        """
+        x = ensure_2d(x)
+        if parents is not None:
+            parents = ensure_2d(parents).to(device=x.device, dtype=x.dtype)
+        return online_laplace.ewc_update(
+            self, x, parents,
+            epochs=epochs, lr=lr, batch_size=batch_size,
+            lam=lam, forgetting=forgetting,
+            fisher_batch_size=fisher_batch_size, sample_cap=sample_cap,
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
