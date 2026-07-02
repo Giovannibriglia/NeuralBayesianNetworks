@@ -25,16 +25,16 @@ metrics: log_likelihood
 selector: uniform_random
 
 source:
-  families: [discrete]
+  families: [continuous_lg, continuous_nongauss]
   n_nodes_list: [6]
   seeds: [0]
-  n_train_sweep: [30, 100, 300, 1000]
+  n_train_sweep: [30, 100, 300]
   n_test: 512
   n_reference: 5000
   edge_density: 0.30
   max_in_degree: 2
   cardinality: 4
-  fraction_continuous: 0.0
+  fraction_continuous: 0.5
 
 baselines:
   - {library: pgmpy,       mechanism: discrete, param_method: mle}
@@ -42,6 +42,10 @@ baselines:
   - {library: pomegranate, mechanism: discrete, param_method: mle}
   - {library: pyro,        mechanism: empirical, param_method: mle}
   - {library: nbn,         mechanism: cat,      param_method: mle}
+  - {library: pgmpy, mechanism: lg,       param_method: mle}
+  - { library: nbn,   mechanism: kde,      param_method: mle }
+  - { library: nbn,   mechanism: knn,      param_method: mle }
+  - { library: nbn,   mechanism: flexcode, param_method: mle, device: cuda }
 
 n_queries_per_cell: 2
 per_cell_timeout_s: 120.0

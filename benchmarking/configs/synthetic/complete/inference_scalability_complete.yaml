@@ -61,12 +61,12 @@ selector:
   # articulation points). Ignores n_queries_per_cell.
 
 source:
-  families: [discrete, continuous_lg, continuous_nongauss, hybrid]
-  n_nodes_list: [5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000]
+  families: [discrete, continuous_lg, continuous_nongauss]
+  n_nodes_list: [10, 20, 50, 100, 200, 500, 1000, 5000, 10000, 20000]
   seeds: [0, 1, 2, 3, 4]
-  n_train: 4096
-  n_test: 1024
-  n_reference: 10000
+  n_train: 20480
+  n_test: 4096
+  n_reference: 50000
   edge_density: 0.20
   max_in_degree: 4
   cardinality: 4
@@ -96,7 +96,7 @@ baselines:
   - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
   - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
   # nbn-hybrid (hybrid router)
-  - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  # - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
   # Non-parametric continuous mechanisms (#224 / PR 9) — LW only (ais/avi blocked
   # at recognition_net._head_for, deferred to #227). All three carry device: cuda:
   # KDE-lw's per-query O(n_train) density eval is ~19.5s/query on CPU at this scale
@@ -114,5 +114,5 @@ baselines:
 
 # Ignored by heaviest_by_role; required by the loader.
 n_queries_per_cell: 12
-per_cell_timeout_s: 600.0
+per_cell_timeout_s: 1200.0
 fit_timeout_s: 1200

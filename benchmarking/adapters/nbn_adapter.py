@@ -278,7 +278,7 @@ class NBNAdapter:
             mech = self._make_mech(kind, k, parent_kinds)
             model.set_mechanism(node, mech)
 
-        model.fit(problem.train_data, epochs=epochs, batch_size=512, lr=1e-3)
+        model.fit(problem.train_data, epochs=epochs, batch_size=1024, lr=1e-3)
         self.model = model
         self.problem = problem
         self._attach_engine()

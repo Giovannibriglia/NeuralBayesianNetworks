@@ -51,11 +51,11 @@ metrics: log_likelihood
 selector: uniform_random
 
 source:
-  families: [discrete, continuous_lg, continuous_nongauss, hybrid]
-  n_nodes_list: [10, 20, 50, 100, 200, 500, 1000]
+  families: [discrete, continuous_lg, continuous_nongauss]
+  n_nodes_list: [10, 20, 50, 100, 200, 500, 1000, 5000, 10000, 20000]
   seeds: [0, 1, 2, 3, 4]
-  n_train: 10240
-  n_test: 1024
+  n_train: 20480
+  n_test: 4096
   n_reference: 50000
   edge_density: 0.20
   max_in_degree: 4
@@ -71,7 +71,7 @@ baselines:
   - {library: nbn,   mechanism: lg,       param_method: mle}
   - {library: nbn,   mechanism: mdn,      param_method: mle}
   - {library: nbn,   mechanism: flow,     param_method: mle}
-  - {library: nbn,   mechanism: hybrid,   param_method: mle}
+  # - {library: nbn,   mechanism: hybrid,   param_method: mle}
   # Non-parametric continuous baselines (#223 / PR 8) — parametric-vs-non-
   # parametric calibration comparison. KDE + KNN are cheap; flexcode trains a
   # 200-epoch MLP per continuous node, so it carries a per-baseline device: cuda
@@ -83,6 +83,6 @@ baselines:
   - {library: pomegranate, mechanism: discrete, param_method: mle}
   - {library: pyro, mechanism: empirical, param_method: mle, device: cpu}
 
-n_queries_per_cell: 128
-per_cell_timeout_s: 600.0
+n_queries_per_cell: 12
+per_cell_timeout_s: 1200.0
 fit_timeout_s: 1200

@@ -73,7 +73,7 @@ JOBS=(
   "inference_speed|inference|benchmarking/configs/synthetic/speed/inference_speed.yaml"
   "learning_curves|param-learning|benchmarking/configs/synthetic/learning_curves/learning_curves.yaml"
   "parameter_learning_complete|param-learning|benchmarking/configs/synthetic/complete/parameter_learning_complete.yaml"
-  "inference_complete|inference|benchmarking/configs/synthetic/complete/inference_complete.yaml"
+  # "inference_complete|inference|benchmarking/configs/synthetic/complete/inference_complete.yaml"
   "inference_scalability_complete|inference|benchmarking/configs/synthetic/complete/inference_scalability_complete.yaml"
   "bnlearn_inference_complete|inference|benchmarking/configs/bnlearn/complete/inference_complete.yaml"
 )
