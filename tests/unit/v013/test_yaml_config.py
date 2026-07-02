@@ -364,7 +364,7 @@ def test_yaml_dispatch_heaviest_passes_overrides(tmp_path: Path) -> None:
 
 
 def test_scalability_complete_config_loads(tmp_path: Path) -> None:
-    """The paper config loads and exposes the Phase 3 selector + 600s budget."""
+    """The paper config loads and exposes the Phase 3 selector + 1200s budget."""
     from benchmarking.selectors.heaviest import HeaviestQueryByRole
 
     cfg = load_runner_config(
@@ -372,9 +372,10 @@ def test_scalability_complete_config_loads(tmp_path: Path) -> None:
         jsonl_path=tmp_path / "out.jsonl",
     )
     assert isinstance(cfg.selector, HeaviestQueryByRole)
-    assert cfg.per_cell_timeout_s == 600.0
-    # 23 + 3 non-parametric -lw baselines (kde/knn/flexcode, #228 / PR 10).
-    assert len(cfg.baselines) == 26
+    assert cfg.per_cell_timeout_s == 1200.0
+    # 23 + 3 non-parametric -lw baselines (kde/knn/flexcode, #228 / PR 10),
+    # minus the nbn-hybrid router baseline (commented out in f7984f6).
+    assert len(cfg.baselines) == 25
 
 
 def _bnlearn_source(**overrides) -> dict:

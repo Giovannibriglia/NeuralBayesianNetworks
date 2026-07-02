@@ -1,0 +1,75 @@
+# =============================================================================
+# batch_speed smoke — fast end-to-end check of the batch_sizes sweep (#148).
+# =============================================================================
+#
+# Tiny fixture for CI / local gating of the sweep dispatch path
+# (docs/v0.14-batched-queries-design.md §1.7, §5.6):
+#   - one 8-node discrete problem, 1 seed
+#   - n_batch_queries: 16 (NOT 10240 — keeps every cell sub-second)
+#   - batch_sizes [1, 4]: nbn-cat-ve runs at both values (swept);
+#     pgmpy-mle-ve is pinned to batch_size: 1 and runs once
+#
+# Wall-clock budget: < 30 s on CPU.
+# =============================================================================
+version: "v0.14"
+benchmark: synthetic
+config_name: batch_speed_smoke
+metrics: timing
+
+batch_sizes: [1, 4]
+n_batch_queries: 16
+
+source:
+  families: [discrete, continuous_lg, continuous_nongauss, hybrid]
+  n_nodes_list: [5]
+  seeds: [0]
+  n_train: 100
+  n_test: 50
+  n_reference: 100
+  edge_density: 0.20
+  max_in_degree: 4
+  cardinality: 2
+  fraction_continuous: 0.5
+
+selector:
+  type: heaviest_by_role
+
+baselines:
+  # nbn-cat (discrete)
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 1,  n_samples: 16}}
+  # nbn-neuralcat (discrete)
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 1,  n_samples: 16}}
+  # nbn-lg (continuous_lg)
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 1,  n_samples: 16}}
+  # nbn-mdn (continuous_lg / continuous_nongauss / hybrid)
+  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 1,  n_samples: 16}}
+  # nbn-flow (continuous_lg / continuous_nongauss / hybrid)
+  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 1,  n_samples: 16}}
+  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 1,  n_samples: 16}}
+  # Non-parametric -lw baselines (#228) — n_samples=16 makes per-query latency
+  # trivial; flexcode fit (~9s/cell at n_nodes=50) is well under per_cell_timeout.
+  - {library: nbn,         mechanism: kde,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  n_samples: 16}, device: cuda}
+  - {library: nbn,         mechanism: knn,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  n_samples: 16}, device: cuda}
+  - {library: nbn,         mechanism: flexcode,  param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  n_samples: 16}, device: cuda}
+  # nbn-hybrid (hybrid router)
+  - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router,    extra_kwargs: {epochs: 1,  n_samples: 16}}
+  # other libraries
+  - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: ve}
+  - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance, batch_size: 1}
+  - {library: pgmpy,       mechanism: discrete,  param_method: mle,   inference_method: ve, batch_size: 1}
+  - {library: pgmpy,       mechanism: discrete,  param_method: bayes, inference_method: ve, batch_size: 1}
+  - {library: pgmpy,       mechanism: lg,        param_method: lg,    inference_method: predict, batch_size: 1}
+
+n_queries_per_cell: 12
+per_cell_timeout_s: 60

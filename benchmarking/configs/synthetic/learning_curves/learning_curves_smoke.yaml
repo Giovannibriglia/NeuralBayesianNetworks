@@ -25,7 +25,7 @@ metrics: log_likelihood
 selector: uniform_random
 
 source:
-  families: [continuous_lg, continuous_nongauss]
+  families: [discrete, continuous_lg, continuous_nongauss]
   n_nodes_list: [6]
   seeds: [0]
   n_train_sweep: [30, 100, 300]
@@ -43,9 +43,9 @@ baselines:
   - {library: pyro,        mechanism: empirical, param_method: mle}
   - {library: nbn,         mechanism: cat,      param_method: mle}
   - {library: pgmpy, mechanism: lg,       param_method: mle}
-  - { library: nbn,   mechanism: kde,      param_method: mle }
-  - { library: nbn,   mechanism: knn,      param_method: mle }
-  - { library: nbn,   mechanism: flexcode, param_method: mle, device: cuda }
+  - { library: nbn,   mechanism: kde,      param_method: mle, device: cuda}
+  - { library: nbn,   mechanism: knn,      param_method: mle, device: cuda}
+  - { library: nbn,   mechanism: flexcode, param_method: mle, device: cuda}
 
 n_queries_per_cell: 2
 per_cell_timeout_s: 120.0
