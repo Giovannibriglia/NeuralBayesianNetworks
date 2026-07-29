@@ -36,6 +36,14 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Path to a parameter-learning YAML config.")
     pl.add_argument("--device", default="auto",
                     help="'auto' (default), 'cpu', or 'cuda[:i]'.")
+    pl.add_argument("--results-dir", default=None,
+                    help="Pin the run output directory instead of creating a "
+                         "fresh timestamped one. Required for --resume "
+                         "(SLURM 24h restart chains).")
+    pl.add_argument("--resume", action="store_true",
+                    help="Resume an interrupted run in --results-dir: skip "
+                         "cells recorded in completed_cells.jsonl and re-run "
+                         "only the rest.")
     pl.add_argument("-v", "--verbose", action="store_true")
 
     inf = sub.add_parser(
@@ -46,6 +54,14 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="Path to an inference YAML config.")
     inf.add_argument("--device", default="auto",
                      help="'auto' (default), 'cpu', or 'cuda[:i]'.")
+    inf.add_argument("--results-dir", default=None,
+                     help="Pin the run output directory instead of creating a "
+                          "fresh timestamped one. Required for --resume "
+                          "(SLURM 24h restart chains).")
+    inf.add_argument("--resume", action="store_true",
+                     help="Resume an interrupted run in --results-dir: skip "
+                          "cells recorded in completed_cells.jsonl and re-run "
+                          "only the rest.")
     inf.add_argument("-v", "--verbose", action="store_true")
 
     plot = sub.add_parser(
@@ -97,8 +113,11 @@ def _attach_run_log(results_dir) -> logging.FileHandler:
     """Attach a FileHandler writing all INFO+ logs to <results_dir>/run.log."""
     from pathlib import Path
     Path(results_dir).mkdir(parents=True, exist_ok=True)
+    # Append mode: a resumed run (--resume, SLURM restart chain) reuses the
+    # same results dir, and each restart's log must not truncate the previous
+    # one. Fresh runs get a fresh timestamped dir, so "a" == "w" for them.
     handler = logging.FileHandler(
-        Path(results_dir) / "run.log", mode="w", encoding="utf-8",
+        Path(results_dir) / "run.log", mode="a", encoding="utf-8",
     )
     handler.setLevel(logging.INFO)
     handler.setFormatter(logging.Formatter(
@@ -117,7 +136,33 @@ def _suppress_library_warnings() -> None:
     warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"pyro.*")
 
 
-def _run_cells(cfg) -> None:
+def _resolve_results_dir(args) -> tuple:
+    """Turn ``--results-dir`` / ``--resume`` into (jsonl_path, resume).
+
+    Returns ``(None, False)`` when no dir is pinned (the loader then creates
+    the usual fresh timestamped dir). A pinned dir that already holds a
+    ``metrics.jsonl`` REQUIRES ``--resume`` — silently appending a second run
+    to an existing JSONL would duplicate cells in the parquet.
+    """
+    from pathlib import Path
+
+    if args.resume and not args.results_dir:
+        raise SystemExit(
+            "--resume requires --results-dir (the pinned directory of the "
+            "run to continue).")
+    if not args.results_dir:
+        return None, False
+    results_dir = Path(args.results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    jsonl_path = results_dir / "metrics.jsonl"
+    if jsonl_path.exists() and not args.resume:
+        raise SystemExit(
+            f"{jsonl_path} already exists; pass --resume to continue that "
+            f"run, or choose a fresh --results-dir.")
+    return jsonl_path, args.resume
+
+
+def _run_cells(cfg) -> bool:
     """Drive the cell loop.
 
     v0.14 fit-once query-many (#174, design doc §3.2/§6): a single
@@ -135,11 +180,15 @@ def _run_cells(cfg) -> None:
     unchanged. The final parquet still carries every sweep value with the
     batch_size column distinguishing them (§1.4), stamped per row by the
     measurement layer (PR #168).
+    Returns True when the loop stopped early on a preemption signal
+    (SIGUSR1/SIGTERM — SLURM wall-time warning; checkpoint.py).
     """
     from benchmarking.core.runner import Runner
 
-    for _ in Runner().run(cfg):
+    runner = Runner()
+    for _ in runner.run(cfg):
         pass
+    return runner.preempted
 
 
 def _execute_run(cfg, *, what: str = "inference") -> int:
@@ -157,6 +206,16 @@ def _execute_run(cfg, *, what: str = "inference") -> int:
     # re-emits it to stderr -> captured to run.log per cell.
     _suppress_library_warnings()
 
+    # SLURM 24h wall-time support (checkpoint.py): SIGUSR1 (the
+    # `--signal=B:USR1@900` early warning) / SIGTERM stop the cell loop on the
+    # next cell boundary; the run then exits with PREEMPTED_EXIT_CODE so the
+    # next job in the array chain knows to `--resume`.
+    from benchmarking.core.checkpoint import (
+        PREEMPTED_EXIT_CODE,
+        install_preemption_handlers,
+    )
+    install_preemption_handlers()
+
     # The run.log lives in the results dir alongside the parquet and captures
     # the full INFO stream (incl. per-cell subprocess stderr), regardless of the
     # console level. Detached in `finally` so it closes even on crash.
@@ -165,14 +224,15 @@ def _execute_run(cfg, *, what: str = "inference") -> int:
     log_handler = _attach_run_log(results_dir)
     try:
         # ── cell loop (v0.14: sweeps batch_sizes when configured) ──────────
-        _run_cells(cfg)
+        preempted = _run_cells(cfg)
 
         # ── post-run pipeline ──────────────────────────────────────────────
         # JSONL is already on disk from the runner; convert it to the parquet
         # that is the single canonical artifact of a run. Paper figures + LaTeX
         # tables are produced ON DEMAND by the separate `nbn-bench plot
         # <run-dir>` command (benchmarking/_paper_figures), never auto-generated
-        # here.
+        # here. On preemption the (partial) parquet is still written — it is
+        # simply regenerated from the full JSONL by the final resumed run.
         rc = 0
         try:
             from benchmarking.core.output import jsonl_to_parquet
@@ -181,6 +241,13 @@ def _execute_run(cfg, *, what: str = "inference") -> int:
         except Exception as exc:
             logger.error("Post-run step (jsonl_to_parquet) failed: %s", exc)
             rc = 1
+        if preempted and rc == 0:
+            logger.warning(
+                "run preempted before completion — exiting %d; resume with "
+                "--results-dir %s --resume",
+                PREEMPTED_EXIT_CODE, results_dir,
+            )
+            rc = PREEMPTED_EXIT_CODE
         return rc
     except Exception:
         # Route any uncaught exception to run.log *before* the finally block
@@ -210,10 +277,13 @@ def main(argv: list[str] | None = None) -> int:
         # validates must equal "log_likelihood". The metrics field cannot swap
         # command behavior — inference never passes an override.
         device = args.device
+        jsonl_path, resume = _resolve_results_dir(args)
         cfg = load_runner_config(
             args.config,
             device_override=device,
             measurement_override=ParamLearningMeasurement(),
+            jsonl_path=jsonl_path,
+            resume=resume,
         )
         return _execute_run(cfg, what="param-learning")
 
@@ -236,7 +306,11 @@ def main(argv: list[str] | None = None) -> int:
         # (Was: collapsed to None here, which then collapsed to "cpu" at
         # build_adapter — so every nbn baseline silently ran on CPU.)
         device = args.device
-        cfg = load_runner_config(args.config, device_override=device)
+        jsonl_path, resume = _resolve_results_dir(args)
+        cfg = load_runner_config(
+            args.config, device_override=device,
+            jsonl_path=jsonl_path, resume=resume,
+        )
         return _execute_run(cfg)
 
     raise AssertionError(f"unhandled subcommand {args.cmd!r}")  # pragma: no cover

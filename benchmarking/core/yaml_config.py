@@ -65,6 +65,7 @@ def load_runner_config(
     device_override: str | None = None,
     jsonl_path: Path | None = None,
     measurement_override: Any | None = None,
+    resume: bool = False,
 ) -> RunnerConfig:
     """Parse a v0.13 YAML config file into a ``RunnerConfig``.
 
@@ -79,7 +80,13 @@ def load_runner_config(
         overridden.
     jsonl_path:
         Override the auto-generated output path.  Useful in tests to
-        avoid creating output directories as a side effect.
+        avoid creating output directories as a side effect, and used by
+        the CLI's ``--results-dir`` to pin a stable run dir across
+        SLURM restarts.
+    resume:
+        Cell-level resume (``--resume``, benchmarking/core/checkpoint.py):
+        skip cells recorded in the ``completed_cells.jsonl`` sidecar and
+        compact partial rows out of the metrics JSONL at startup.
 
     Raises
     ------
@@ -268,6 +275,7 @@ def load_runner_config(
         fit_timeout_s=fit_timeout_s,
         jsonl_path=jsonl_path,
         batch_sizes=batch_sizes,
+        resume=resume,
     )
 
 

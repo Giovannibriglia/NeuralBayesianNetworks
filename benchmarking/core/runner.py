@@ -30,6 +30,7 @@ from typing import Any, Iterator
 
 from tqdm import tqdm
 
+from benchmarking.core import checkpoint
 from benchmarking.core._device import resolve_device
 from benchmarking.core.config import BaselineSpec, RunnerConfig, build_adapter
 from benchmarking.core.output import JsonlWriter
@@ -480,7 +481,7 @@ def _fit_cache_filename(key: tuple) -> str:
 
 def _assign_fit_roles(
     cfg: RunnerConfig, problem: Any, failed_configs: dict, seed_skip: bool,
-    fitcache_dir,
+    fitcache_dir, completed: frozenset | set = frozenset(),
 ) -> tuple[list[tuple[str, Any]], dict[int, Any]]:
     """Assign a fit-once-save-reload role to each baseline for this problem.
 
@@ -497,6 +498,11 @@ def _assign_fit_roles(
     every batch_size already failed on an earlier seed is fully skipped (not
     live) and never designated fitter. This is why a seed-skipped fitter cannot
     strand its reloaders — the first LIVE member becomes the fitter.
+
+    ``completed`` (resume, checkpoint.py) filters the same way: a baseline
+    whose cell already finished in a prior run is skipped by run() and must
+    not be designated fitter (its cache file would never be written, stranding
+    reloaders). The first still-to-run member becomes the fitter instead.
 
     Validity across the spec loop: ``failed_configs`` is keyed by baseline NAME,
     and within one problem each baseline has a distinct name, so the failures
@@ -519,6 +525,8 @@ def _assign_fit_roles(
             continue  # non-nbn never groups/caches (standalone)
         adapter = build_adapter(spec)
         name = adapter.name
+        if checkpoint.cell_key(problem, name) in completed:
+            continue  # already completed in a prior run -> not a live member
         batch_sizes = _resolve_batch_sizes(cfg, spec, adapter)
         if seed_skip:
             surviving = [
@@ -560,6 +568,10 @@ class Runner:
     across multiple configs.
     """
 
+    #: True when the last run() stopped early on SIGUSR1/SIGTERM (SLURM
+    #: preemption, checkpoint.py). Reset at the start of every run().
+    preempted: bool = False
+
     def run(self, cfg: RunnerConfig) -> Iterator[CellResult]:
         """Run the full cell loop, yielding CellResult rows as produced.
 
@@ -585,6 +597,31 @@ class Runner:
         # (family, problem_id, baseline, batch_size) -> propagated failure code.
         seed_skip = bool(cfg.batch_sizes)
         failed_configs: dict[tuple, str] = {}
+
+        # Cell-level checkpoint/resume (checkpoint.py). Completed-cell markers
+        # are ALWAYS written (cheap, and they make any interrupted run
+        # resumable after the fact); the skip/compact path only activates on
+        # cfg.resume. self.preempted is read by the CLI after the loop to exit
+        # with PREEMPTED_EXIT_CODE for the SLURM wrapper.
+        self.preempted = False
+        marker_path = checkpoint.completed_cells_path(cfg.jsonl_path)
+        completed: set[tuple] = set()
+        if cfg.resume:
+            completed = checkpoint.load_completed(marker_path)
+            kept, dropped = checkpoint.compact_jsonl(cfg.jsonl_path, completed)
+            logger.info(
+                "resume: %d completed cells recorded; kept %d rows, dropped "
+                "%d partial rows from the interrupted cell(s)",
+                len(completed), kept, dropped,
+            )
+            if seed_skip:
+                failed_configs.update(
+                    checkpoint.rebuild_seed_skip_registry(cfg.jsonl_path))
+                if failed_configs:
+                    logger.info(
+                        "resume: rebuilt seed-skip registry with %d failed "
+                        "configs", len(failed_configs),
+                    )
 
         # Fit-once-save-reload cache (#191 Path 2). nbn baselines sharing a
         # fit-identity reuse a saved base model. The cache lives under the run
@@ -669,10 +706,25 @@ class Runner:
                     # singleton groups -> standalone (unchanged behavior).
                     fit_roles, fit_delete_after = _assign_fit_roles(
                         cfg, problem, failed_configs, seed_skip, fitcache_dir,
+                        completed,
                     )
                     for i, spec in enumerate(cfg.baselines):
+                        # Cooperative preemption (checkpoint.py): SIGUSR1 /
+                        # SIGTERM only set a flag; the stop happens HERE, on
+                        # the cell boundary, so the metrics JSONL + sidecar
+                        # stay consistent and the next job resumes cleanly.
+                        if checkpoint.stop_requested():
+                            logger.warning(
+                                "preemption signal received — stopping before "
+                                "the next cell (resume with --resume)")
+                            self.preempted = True
+                            return
                         adapter_probe = build_adapter(spec)
                         name = adapter_probe.name
+                        cell_id = checkpoint.cell_key(problem, name)
+                        if cell_id in completed:
+                            pbar.update(1)
+                            continue  # finished in a prior run
                         # v0.14 fit-once query-many (#174): resolve the
                         # batch_sizes this cell sweeps. The swept-vs-pinned
                         # decision (formerly cli._run_cells) lives here now,
@@ -723,6 +775,9 @@ class Runner:
                                 batch_sizes = [b for b in batch_sizes
                                                if b not in to_skip]
                                 if not batch_sizes:
+                                    # All sentinels written -> cell complete.
+                                    checkpoint.append_completed(
+                                        marker_path, cell_id)
                                     pbar.update(1)
                                     continue
 
@@ -751,6 +806,10 @@ class Runner:
                                 failed_configs, problem, name,
                                 batch_sizes, cell_rows,
                             )
+                        # Every row of this cell is flushed to the metrics
+                        # JSONL (JsonlWriter flushes per write) -> record the
+                        # cell as complete for cross-job resume.
+                        checkpoint.append_completed(marker_path, cell_id)
                         pbar.update(1)
                         # Eager cache deletion (#191): this baseline is its
                         # group's LAST live member, so every reloader has now

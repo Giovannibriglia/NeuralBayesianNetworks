@@ -124,6 +124,11 @@ class RunnerConfig:
     # value; pinned / non-batchable baselines run once on the first pass.
     # None = no sweep (every existing benchmark).
     batch_sizes: list[int] | None = None
+    # Cell-level resume (SLURM 24h wall-time, benchmarking/core/checkpoint.py):
+    # when True, cells recorded in the completed_cells.jsonl sidecar are
+    # skipped and partial rows from an interrupted cell are compacted out of
+    # the metrics JSONL before the run appends to it.
+    resume: bool = False
 
 
 def build_adapter(spec: BaselineSpec, *, require_engine: bool = False) -> Any:
