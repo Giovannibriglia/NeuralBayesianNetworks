@@ -54,3 +54,66 @@ def test_low_treewidth_still_selects_ve():
     engine = router._select(_model(lambda: 3))
     assert router._last_engine == "tensor_ve"
     assert engine is router._ve
+
+
+def test_ve_oom_falls_back_to_lw(monkeypatch):
+    """A VE out-of-memory error degrades the query to LW, not a failure."""
+    import torch
+
+    router = HybridRouter(treewidth_threshold=25)
+    model = _model(lambda: 3)
+
+    def _oom(*args, **kwargs):
+        raise torch.cuda.OutOfMemoryError("estimated peak exceeds budget")
+
+    monkeypatch.setattr(router._ve, "query", _oom)
+    monkeypatch.setattr(
+        router._lw, "query", lambda *a, **k: "lw-result", raising=False
+    )
+    result = router.query(model, ["a"], None)
+    assert result == "lw-result"
+    assert router._last_engine == "likelihood_weighting"
+
+
+def test_ve_non_oom_error_propagates(monkeypatch):
+    """Only OOM triggers the LW retry — other VE errors still propagate."""
+    router = HybridRouter(treewidth_threshold=25)
+    model = _model(lambda: 3)
+    def _boom(*args, **kwargs):
+        raise RuntimeError("real bug")
+
+    monkeypatch.setattr(router._ve, "query", _boom)
+    with pytest.raises(RuntimeError, match="real bug"):
+        router.query(model, ["a"], None)
+
+
+def test_lw_oom_propagates(monkeypatch):
+    """If LW itself OOMs there is nothing to degrade to — the error surfaces."""
+    import torch
+
+    router = HybridRouter(treewidth_threshold=25)
+    model = _model(lambda: 30)  # above threshold -> LW selected directly
+
+    def _oom(*args, **kwargs):
+        raise torch.cuda.OutOfMemoryError("lw oom")
+
+    monkeypatch.setattr(router._lw, "query", _oom)
+    with pytest.raises(torch.cuda.OutOfMemoryError):
+        router.query(model, ["a"], None)
+
+
+def test_induced_width_is_memoized():
+    """DAG.induced_width computes min-fill once; repeat calls hit the cache.
+
+    The router calls induced_width() on every dispatch, so without the memo
+    a batched sweep pays the O(n * deg^2) greedy pass per query.
+    """
+    from unittest import mock
+
+    from nbn.core.dag import DAG
+
+    dag = DAG([("a", "b"), ("b", "c"), ("a", "c")])
+    first = dag.induced_width()
+    with mock.patch("nbn.core.dag.nx.moral_graph") as moral:
+        assert dag.induced_width() == first  # served from cache
+        moral.assert_not_called()

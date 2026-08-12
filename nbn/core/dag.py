@@ -45,6 +45,12 @@ class DAG:
         self._children: Dict[str, List[str]] = {
             n: list(g.successors(n)) for n in g.nodes
         }
+        # Memoized induced_width() result. The DAG is immutable (class
+        # contract above), so the greedy min-fill pass — O(n * deg^2) pure
+        # Python — need only ever run once. HybridRouter calls
+        # induced_width() on every query/query_batch dispatch; without this
+        # cache the graph work can dominate the actual inference.
+        self._induced_width: int | None = None
 
     # ------------------------------------------------------------------
     # Read-only accessors
@@ -83,7 +89,11 @@ class DAG:
         (it is ``@not_implemented_for("undirected")``); moralising the
         DiGraph directly also adds the parent-marrying edges that an
         undirected projection would omit.
+
+        The result is memoized on first call (the DAG is immutable).
         """
+        if self._induced_width is not None:
+            return self._induced_width
         g = nx.moral_graph(self._g)
         width = 0
         while g.number_of_nodes():
@@ -103,6 +113,7 @@ class DAG:
                 for j in range(i + 1, len(nbrs)):
                     g.add_edge(nbrs[i], nbrs[j])
             g.remove_node(node)
+        self._induced_width = width
         return width
 
     @property

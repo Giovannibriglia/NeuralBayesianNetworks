@@ -66,6 +66,29 @@ class HybridRouter(InferenceEngine):
         self._last_engine = "likelihood_weighting"
         return self._lw
 
+    def _dispatch(self, method: str, model, targets, evidence, kwargs):
+        """Route to the selected engine with a VE→LW out-of-memory safety net.
+
+        VE's memory guard (and CUDA itself) surfaces an over-budget plan as
+        ``torch.cuda.OutOfMemoryError``. For the router that must not be
+        terminal: LW answers the same query in bounded memory, so degrade to
+        it (with a warning) instead of failing the query. Only OOM is caught
+        — any other exception signals a real bug and propagates (#232
+        precedent: broad catches here silently masked engine bugs).
+        """
+        engine = self._select(model)
+        try:
+            return getattr(engine, method)(model, targets, evidence, **kwargs)
+        except torch.cuda.OutOfMemoryError:
+            if engine is self._lw:
+                raise  # LW itself OOMed — nothing further to degrade to.
+            logger.warning(
+                "TensorVE exceeded the memory budget; retrying with "
+                "likelihood weighting."
+            )
+            self._last_engine = "likelihood_weighting"
+            return getattr(self._lw, method)(model, targets, evidence, **kwargs)
+
     def query(
         self,
         model,
@@ -73,7 +96,7 @@ class HybridRouter(InferenceEngine):
         evidence: Dict[str, torch.Tensor] | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        return self._select(model).query(model, targets, evidence, **kwargs)
+        return self._dispatch("query", model, targets, evidence, kwargs)
 
     def query_batch(
         self,
@@ -82,4 +105,4 @@ class HybridRouter(InferenceEngine):
         evidence: Dict[str, torch.Tensor],
         **kwargs,
     ) -> torch.Tensor:
-        return self._select(model).query_batch(model, targets, evidence, **kwargs)
+        return self._dispatch("query_batch", model, targets, evidence, kwargs)

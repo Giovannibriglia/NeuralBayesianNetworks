@@ -67,6 +67,9 @@ baselines:
   - {library: pgmpy, mechanism: discrete, param_method: bayes}
   - {library: pgmpy, mechanism: lg,       param_method: mle}
   - {library: nbn,   mechanism: cat,      param_method: mle}
+  # Laplace-smoothed (alpha=1) CPTs — the estimator class that wins recovery
+  # TV/KL at paper scale (pyro/pgmpy-bayes precedent); mechanism pre-existed.
+  - {library: nbn,   mechanism: cat-bayes, param_method: mle}
   - {library: nbn,   mechanism: neuralcat, param_method: mle}
   - {library: nbn,   mechanism: lg,       param_method: mle}
   - {library: nbn,   mechanism: mdn,      param_method: mle}

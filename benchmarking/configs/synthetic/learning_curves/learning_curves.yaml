@@ -41,6 +41,8 @@ baselines:
   - {library: pgmpy, mechanism: discrete, param_method: bayes}
   - {library: pgmpy, mechanism: lg,       param_method: mle}
   - {library: nbn,   mechanism: cat,      param_method: mle}
+  # alpha=1 smoothing is exactly the small-n_train regime this benchmark probes.
+  - {library: nbn,   mechanism: cat-bayes, param_method: mle}
   - {library: nbn,   mechanism: neuralcat, param_method: mle}
   - {library: nbn,   mechanism: lg,       param_method: mle}
   - {library: nbn,   mechanism: mdn,      param_method: mle}
