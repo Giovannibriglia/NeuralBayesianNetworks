@@ -73,6 +73,7 @@ class NeuralCategoricalMechanism(Mechanism):
         epochs: int = 100,
         lr: float = 1e-3,
         batch_size: int = 512,
+        consolidate: bool = True,
         **kwargs,
     ) -> dict:
         x = x.long().reshape(-1)
@@ -90,7 +91,8 @@ class NeuralCategoricalMechanism(Mechanism):
             counts = torch.bincount(x, minlength=k).float() + 1e-8
             log_freq = torch.log(counts / counts.sum())
             self._root_logits = nn.Parameter(log_freq.to(device))
-            online_laplace.consolidate(self, x, None)
+            if consolidate:
+                online_laplace.consolidate(self, x, None)
             return {"n_classes": k}
 
         parents = ensure_2d(parents).to(device=device)
@@ -119,7 +121,11 @@ class NeuralCategoricalMechanism(Mechanism):
                 opt.zero_grad(); loss.backward()
                 opt.step()
         self.eval()
-        online_laplace.consolidate(self, x, parents)
+        # Opt-out (consolidate=False): the Fisher pass costs up to sample_cap
+        # sequential per-sample backward passes — pure overhead for fit-only
+        # workloads that never call update().
+        if consolidate:
+            online_laplace.consolidate(self, x, parents)
         return {"n_classes": k, "d_pa": d_pa}
 
     # ------------------------------------------------------------------

@@ -227,6 +227,47 @@ class TestBehavioral:
 
 
 # ---------------------------------------------------------------------------
+# Regression: training-budget pass-through (PR A).
+# The adapter used to hardcode epochs=20 / batch_size=1024 / lr=1e-3 into
+# model.fit(), silently starving every neural mechanism's designed budget
+# (flow 300 epochs @ 5e-4 → trained at 20 @ 1e-3 → 652/652 param-learning
+# timeouts + worst continuous calibration). It must now forward None when the
+# config gave no value, and consolidate=False always (benchmarks never call
+# model.update(), so the post-fit EWC Fisher pass is pure overhead).
+# ---------------------------------------------------------------------------
+
+class TestTrainingBudgetPassThrough:
+    def _fit_and_record(self, monkeypatch, **fit_kwargs):
+        from nbn import NeuralBayesianNetwork
+
+        recorded: dict = {}
+        real_fit = NeuralBayesianNetwork.fit
+
+        def spy(self, data, **kw):
+            recorded.update(kw)
+            return real_fit(self, data, **kw)
+
+        monkeypatch.setattr(NeuralBayesianNetwork, "fit", spy)
+        adapter = NBNAdapter(mechanism="cat", engine="ve", device="cpu")
+        adapter.fit(_make_small_discrete_problem(n_samples=100), **fit_kwargs)
+        return recorded
+
+    def test_no_config_values_forward_none(self, monkeypatch):
+        kw = self._fit_and_record(monkeypatch)
+        assert kw["epochs"] is None
+        assert kw["batch_size"] is None
+        assert kw["lr"] is None
+        assert kw["consolidate"] is False
+
+    def test_explicit_config_values_pass_through(self, monkeypatch):
+        kw = self._fit_and_record(monkeypatch, epochs=4, batch_size=64, lr=5e-4)
+        assert kw["epochs"] == 4
+        assert kw["batch_size"] == 64
+        assert kw["lr"] == 5e-4
+        assert kw["consolidate"] is False
+
+
+# ---------------------------------------------------------------------------
 # Regression: NeuralCategoricalMechanism root-node empirical frequency
 # Ported from test_param_learning_dispatch.py assertion 4.
 # ---------------------------------------------------------------------------

@@ -165,9 +165,12 @@ def ewc_update(
     ``F <- forgetting * F_old + F_new`` (F_new re-estimated on the new data).
     """
     if getattr(mech, "_ewc_mu", None) is None:
-        raise AssertionError(
-            "EWC state missing — fit_local (which consolidates) must run before "
-            "update_local"
+        raise RuntimeError(
+            "EWC state missing — this mechanism was fitted with "
+            "consolidate=False (or never fitted), so no theta*/Fisher "
+            "snapshot exists to anchor the update. Refit with "
+            "consolidate=True (the default of model.fit) before calling "
+            "update()."
         )
     params = _trainable_params(mech)
     mu = mech._ewc_mu

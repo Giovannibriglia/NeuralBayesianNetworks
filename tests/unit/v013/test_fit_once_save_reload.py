@@ -96,6 +96,19 @@ class TestFitIdentityKey:
         assert _fit_identity_key(_spec("cat", "ve"), p) != \
                _fit_identity_key(_spec("cat", "ais", epochs=2), p)
 
+    def test_absent_budget_is_distinct_from_explicit(self):
+        # PR A: absent epochs/batch_size/lr = "mechanism-designed budget",
+        # a DISTINCT fit identity from any explicit value (the old key
+        # collapsed absent epochs to 20).
+        p = _problem(0)
+        base = _fit_identity_key(_spec("cat", "ve"), p)
+        assert base != _fit_identity_key(_spec("cat", "ve", epochs=20), p)
+        assert base != _fit_identity_key(_spec("cat", "ve", batch_size=256), p)
+        assert base != _fit_identity_key(_spec("cat", "ve", lr=1e-3), p)
+        # filename formatting tolerates the None fields
+        name = _fit_cache_filename(base)
+        assert name.startswith("fit_") and name.endswith(".pt")
+
     def test_mechanism_and_problem_split_the_key(self):
         p0, p1 = _problem(0), _problem(1)
         base = _fit_identity_key(_spec("cat", "ve"), p0)

@@ -33,11 +33,12 @@ def fit(
     data: Dict[str, torch.Tensor],
     *,
     method: str = "local",
-    epochs: int = 100,
-    batch_size: int = 4096,
-    lr: float = 1e-3,
+    epochs: int | None = None,
+    batch_size: int | None = None,
+    lr: float | None = None,
     device: str | None = None,
     log_every: int = 10,
+    consolidate: bool = True,
     **kwargs: Any,
 ) -> TrainHistory:
     """Fit all node mechanisms to data.
@@ -53,15 +54,30 @@ def fit(
         for each node independently (parallelisable in the future).
         ``"joint"`` — single gradient pass over ``-sum_i log p(x_i | pa_i)``.
     epochs:
-        Number of training epochs (used by neural mechanisms).
+        Number of training epochs (used by neural mechanisms). ``None``
+        (default) means each mechanism uses its own designed budget (e.g.
+        flow 300, MDN 200, neural-categorical 100); an explicit value
+        overrides that budget globally for every mechanism.
+        For ``method="joint"`` there is no per-mechanism budget, so ``None``
+        falls back to 100.
     batch_size:
-        Mini-batch size for gradient-based methods.
+        Mini-batch size for gradient-based methods. ``None`` (default) =
+        per-mechanism default; explicit value overrides globally
+        (``"joint"`` fallback: 4096).
     lr:
-        Learning rate.
+        Learning rate. ``None`` (default) = per-mechanism default; explicit
+        value overrides globally (``"joint"`` fallback: 1e-3).
     device:
         Target device; data is moved here.
     log_every:
         Log progress every N nodes.
+    consolidate:
+        If True (default), neural mechanisms snapshot their post-fit EWC
+        state (theta* + diagonal Fisher) so ``model.update()`` works later.
+        Set False to skip the Fisher pass entirely for fit-only workloads
+        (it costs up to ``sample_cap`` sequential backward passes per node);
+        ``model.update()`` on such a model raises until refit with
+        ``consolidate=True``.
 
     Returns
     -------
@@ -89,10 +105,19 @@ def fit(
             pa_tensor = pack_parents(data_dev, parents)
             x = data_dev[node]
 
+            # None = "no global override": the mechanism keeps its own
+            # designed training budget (flow 300 epochs @ lr 5e-4, MDN 200,
+            # neural-categorical 100, ...). A former setdefault() here always
+            # fired (the keys were function defaults, never missing), silently
+            # flattening every mechanism to one global budget.
             mech_kwargs = dict(kwargs)
-            mech_kwargs.setdefault("epochs", epochs)
-            mech_kwargs.setdefault("lr", lr)
-            mech_kwargs.setdefault("batch_size", batch_size)
+            if epochs is not None:
+                mech_kwargs["epochs"] = epochs
+            if lr is not None:
+                mech_kwargs["lr"] = lr
+            if batch_size is not None:
+                mech_kwargs["batch_size"] = batch_size
+            mech_kwargs["consolidate"] = consolidate
 
             # Bug 1a (#127): thread declared cardinalities so tabular
             # mechanisms span the full declared range rather than truncating
@@ -126,6 +151,11 @@ def fit(
                 )
 
     elif method == "joint":
+        # Joint training has no per-mechanism budget to defer to; None
+        # resolves to the historical joint defaults.
+        epochs = 100 if epochs is None else epochs
+        batch_size = 4096 if batch_size is None else batch_size
+        lr = 1e-3 if lr is None else lr
         opt = torch.optim.Adam(model.parameters(), lr=lr)
         nodes = model.dag.topological_order()
         n = next(iter(data_dev.values())).shape[0]
