@@ -74,17 +74,17 @@ baselines:
   - {library: pgmpy, mechanism: lg,       param_method: mle,   inference_method: predict}
   - {library: nbn,   mechanism: cat,      param_method: mle,   inference_method: ve}
   - {library: nbn,   mechanism: cat,      param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 1024}}
-  - {library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: ve}
-  - {library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: lw,      extra_kwargs: {n_samples: 1024}}
+  - {library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: ve, extra_kwargs: {epochs: 20}}
+  - {library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: lw,      extra_kwargs: {epochs: 20, n_samples: 1024}}
   - {library: nbn,   mechanism: lg,       param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 1024}}
-  - {library: nbn,   mechanism: mdn,      param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 1024}}
-  - {library: nbn,   mechanism: flow,     param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 1024}}
+  - {library: nbn,   mechanism: mdn,      param_method: mle,   inference_method: lw,      extra_kwargs: {epochs: 20, n_samples: 1024}}
+  - {library: nbn,   mechanism: flow,     param_method: mle,   inference_method: lw,      extra_kwargs: {epochs: 20, n_samples: 1024}}
   # Non-parametric continuous mechanisms (#224 / PR 9) — LW only (ais/avi blocked
   # at recognition_net._head_for, deferred to #227). KDE + KNN here (sub-second on
   # CPU); flexcode is complete-config / GPU only.
   - {library: nbn,   mechanism: kde,      param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 1024}}
   - {library: nbn,   mechanism: knn,      param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 1024}}
-  - {library: nbn,   mechanism: hybrid,   param_method: mle,   inference_method: router}
+  - {library: nbn,   mechanism: hybrid,   param_method: mle,   inference_method: router, extra_kwargs: {epochs: 20}}
 
 # Larger than inference_smoke.yaml (2) so the random-only restriction is
 # clearly demonstrated across many queries.
