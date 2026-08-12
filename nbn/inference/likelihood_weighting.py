@@ -173,6 +173,16 @@ class LikelihoodWeightingEngine(InferenceEngine):
 
         return log_w, buf
 
+    # Query-time only: mechanisms are eval()'d but their params still require
+    # grad, so without this every particle's sample()/log_prob() for MDN /
+    # flow / neuralcat builds and retains an autograd graph across the whole
+    # topological sweep — pure waste of query-time compute and memory (VE
+    # already detaches at factor build, see tensor_ve._extract_factors).
+    # ``query_batch`` delegates here and ``AmortizedISEngine`` inherits both,
+    # so this covers every public LW/AIS query entry; proposal TRAINING
+    # (``AmortizedISEngine.train_proposal``) is not routed through ``query``
+    # and keeps its gradients.
+    @torch.inference_mode()
     def query(
         self,
         model,
@@ -216,10 +226,7 @@ class LikelihoodWeightingEngine(InferenceEngine):
 
         if len(targets) == 1:
             tgt = targets[0]
-            idx = model.dag.topological_order().index(tgt)
             mech = model.mechanisms[tgt]
-            sl = slice(sum(model.mechanisms[n].output_dim for n in model.dag.topological_order()[:idx]),
-                       sum(model.mechanisms[n].output_dim for n in model.dag.topological_order()[:idx+1]))
 
             if mech.is_discrete and hasattr(mech, '_class_values') and mech._class_values is not None:
                 # Build weighted histogram over class values [K]

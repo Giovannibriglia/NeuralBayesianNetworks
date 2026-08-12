@@ -222,10 +222,16 @@ def test_estimator_returns_zero_when_plan_is_empty() -> None:
     ),
 )
 def test_query_batch_oom_guard_raises_on_constrained_cuda_device() -> None:
-    """When the estimator predicts a peak above 90% of free cuda memory,
-    ``query_batch`` must raise ``torch.cuda.OutOfMemoryError`` cleanly
-    *before* the elimination loop starts — protecting the cuda
-    allocator from a partial-OOM that would fragment the heap."""
+    """When even a SINGLE evidence row's estimated peak exceeds 90% of free
+    cuda memory, ``query_batch`` must raise ``torch.cuda.OutOfMemoryError``
+    cleanly *before* the elimination loop starts — protecting the cuda
+    allocator from a partial-OOM that would fragment the heap.
+
+    PR C (batch chunking): the guard's contract changed — a batch whose
+    full-B peak exceeds the budget but whose per-row peak fits is now
+    CHUNKED instead of rejected (``_max_chunk_rows``), so this test mocks
+    free memory low enough that B=1 does not fit either, which is the only
+    regime where the guard still raises."""
     bn = make_synthetic_bn(
         family="discrete", n_nodes=20,
         cardinality=4, max_in_degree=4, edge_density=0.20,
@@ -254,18 +260,21 @@ def test_query_batch_oom_guard_raises_on_constrained_cuda_device() -> None:
     # PR 11 (#226): query_batch defaults to order="min_fill"; the realised
     # min-fill peak for this scale is ~48 MiB (= ~16 MiB bare × 3.0
     # _LIVESET_MULTIPLIER from #179, after #131 pruning shrank the old ~256 MiB
-    # topological-shaped estimate).  The original mock (64 MiB free → 57.6 MiB
-    # threshold) sat *above* that peak, so the guard would not have fired even
-    # once reached.  Mock 32 MiB free (0.9 × 32 = 28.8 MiB threshold < 48 MiB)
-    # so the guard correctly rejects the query at the default order.
+    # topological-shaped estimate).
+    #
+    # PR C (batch chunking): 32 MiB free (the previous mock) now triggers
+    # CHUNKING, not rejection — the ~3 MiB per-row peak fits the 28.8 MiB
+    # threshold, so the batch is split rather than refused.  Mock 1 MiB free
+    # (0.9 MiB threshold < per-row peak ≥ 48/16 = 3 MiB) so even B=1 exceeds
+    # the budget and the guard raises the pre-existing error.
     with patch.object(ve_mod, "relevant_subnetwork", _all_nodes), \
          patch.object(model_cls, "device",
                       new_callable=PropertyMock,
                       return_value=fake_device), \
          patch("torch.cuda.mem_get_info",
-               return_value=(32 * 1024 ** 2, 8 * 1024 ** 3)):
-        # 32 MiB free; min-fill peak at this scale is ~48 MiB → guard
-        # should reject the query pre-allocation.
+               return_value=(1 * 1024 ** 2, 8 * 1024 ** 3)):
+        # 1 MiB free; even one row's peak exceeds the 0.9 MiB budget →
+        # guard rejects the query pre-allocation (chunking cannot help).
         with pytest.raises(
             (torch.cuda.OutOfMemoryError, RuntimeError),
             match="pre-allocation guard",
