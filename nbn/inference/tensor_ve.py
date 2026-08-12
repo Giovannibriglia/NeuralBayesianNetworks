@@ -358,13 +358,54 @@ class TensorVariableElimination(InferenceEngine):
         # pruned factor scopes, the evidence keys and ``B``, all of which
         # are known here.
         if device.type == "cuda":
+            ev_keys = tuple(sorted(ev_norm.keys()))
             msg = _memory_budget_message(
                 to_eliminate, factors,
-                evidence_keys=tuple(sorted(ev_norm.keys())),
+                evidence_keys=ev_keys,
                 B=B, device=device, order=order,
             )
             if msg is not None:
-                raise torch.cuda.OutOfMemoryError(msg)
+                # PR C: the peak estimate is linear in B in the regime where
+                # the guard fires (the peak step carries the batch axis; see
+                # ``_estimate_peak_bytes``'s ``prod_has_b`` branch), so
+                # instead of rejecting the whole batch, split it into the
+                # largest row-chunks that fit the SAME budget (0.9 safety and
+                # ``_LIVESET_MULTIPLIER`` unchanged — separately calibrated,
+                # #177/#178).  Paper-scale evidence: nbn-cat-ve and
+                # nbn-neuralcat-ve each lost 10 batch_speed cells to guard
+                # OOM at large B while pomegranate handled B=1024.
+                peak_b = _estimate_peak_bytes(
+                    to_eliminate, factors, evidence_keys=ev_keys, B=B,
+                )
+                peak_1 = _estimate_peak_bytes(
+                    to_eliminate, factors, evidence_keys=ev_keys, B=1,
+                )
+                try:
+                    free_bytes, _ = torch.cuda.mem_get_info(device)
+                except RuntimeError:
+                    free_bytes = None
+                chunk = (
+                    _max_chunk_rows(peak_b, peak_1, B, 0.9 * free_bytes)
+                    if free_bytes is not None else 0
+                )
+                if chunk == 0:
+                    # Even a single row exceeds the budget (or free memory
+                    # became unreadable): the pre-#PR-C rejection, unchanged.
+                    raise torch.cuda.OutOfMemoryError(msg)
+                if chunk < B:
+                    logger.info(
+                        "TensorVariableElimination.query_batch: estimated peak "
+                        "%.2f GiB for B=%d exceeds the memory budget "
+                        "(%.2f GiB); splitting into chunks of %d rows.",
+                        peak_b / 1024 ** 3, B,
+                        0.9 * free_bytes / 1024 ** 3, chunk,
+                    )
+                    return self._query_batch_chunked(
+                        model, targets, ev_norm, B=B, chunk=chunk,
+                        order=order, **kwargs,
+                    )
+                # chunk == B: free memory recovered between the two
+                # ``mem_get_info`` reads — fall through to the single pass.
 
         # Condition each factor batchwise.
         # `conditioned` holds tuples `(log_values_tensor, vars, has_batch)`.
@@ -418,10 +459,69 @@ class TensorVariableElimination(InferenceEngine):
         # prod_lv shape: [B, K]
         return torch.softmax(prod_lv, dim=-1).to(device)
 
+    def _query_batch_chunked(
+        self,
+        model,
+        targets: List[str],
+        ev_norm: Dict[str, torch.Tensor],
+        *,
+        B: int,
+        chunk: int,
+        order: str,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Run ``query_batch`` over row-chunks of ``ev_norm`` and concatenate.
+
+        ``ev_norm`` is the already-normalised evidence (``[B]`` long tensors,
+        broadcast applied), so slicing rows is exact.  Each chunk re-enters
+        ``query_batch`` — plan/factor caches hit, and the guard re-checks each
+        chunk against live free memory (shrinking further or raising if the
+        budget collapsed mid-batch).  Output is ``[B, K]``, row-identical to
+        the single-pass result.
+        """
+        outs = [
+            self.query_batch(
+                model, targets,
+                {k: v[i:i + chunk] for k, v in ev_norm.items()},
+                order=order, **kwargs,
+            )
+            for i in range(0, B, chunk)
+        ]
+        return torch.cat(outs, dim=0)
+
 
 # ---------------------------------------------------------------------- #
 # Memory-budget estimator (v0.6b round-2)
 # ---------------------------------------------------------------------- #
+
+
+def _max_chunk_rows(
+    peak_at_B: int, peak_at_1: int, B: int, budget: float,
+) -> int:
+    """Largest per-chunk row count whose estimated peak fits ``budget``.
+
+    Pure arithmetic over two ``_estimate_peak_bytes`` evaluations (at the
+    requested ``B`` and at ``B=1``) so the chunk decision is unit-testable
+    without a cuda device.  ``_estimate_peak_bytes`` is
+    ``max(A, B·R)·_LIVESET_MULTIPLIER·dtype_bytes`` where ``A`` is the
+    largest batch-free step and ``R`` the largest per-row batched step; in
+    the regime where the guard fires with ``peak_at_1 <= budget``, the peak
+    is batch-dominated (``peak_at_B == B·R``), so the per-row cost is
+    exactly ``peak_at_B / B``.
+
+    Returns
+    -------
+    ``B`` when the full batch already fits (single pass, unchanged
+    behaviour); ``0`` when even a single row exceeds the budget (caller
+    raises the pre-existing guard error); otherwise the largest fitting
+    chunk size in ``[1, B - 1]``.
+    """
+    if peak_at_B <= budget:
+        return B
+    if B <= 1 or peak_at_1 > budget:
+        return 0
+    per_row = peak_at_B / B
+    return max(1, min(int(budget // per_row), B - 1))
 
 
 def _estimate_peak_bytes(
