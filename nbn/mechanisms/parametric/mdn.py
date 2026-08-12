@@ -118,6 +118,7 @@ class MDNMechanism(Mechanism):
         epochs: int = 200,
         lr: float = 1e-3,
         batch_size: int = 512,
+        consolidate: bool = True,
         **kwargs,
     ) -> dict:
         x = ensure_2d(x)  # [N, D_x]
@@ -174,7 +175,11 @@ class MDNMechanism(Mechanism):
         # Snapshot theta* + diagonal Fisher for no-rehearsal EWC update.  Runs
         # for both root and non-root via parameters()+log_prob; parents here is
         # None (root) or the raw [N, D_pa] tensor (log_prob standardises it).
-        online_laplace.consolidate(self, x, parents)
+        # Opt-out (consolidate=False): the Fisher pass costs up to sample_cap
+        # sequential per-sample backward passes — pure overhead for fit-only
+        # workloads that never call update().
+        if consolidate:
+            online_laplace.consolidate(self, x, parents)
         return {"d_pa": self._d_pa, "d_x": d_x, "k": k}
 
     # ------------------------------------------------------------------

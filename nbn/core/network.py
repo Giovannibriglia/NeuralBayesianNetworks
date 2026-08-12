@@ -185,9 +185,10 @@ class NeuralBayesianNetwork(nn.Module):
         data: Dict[str, torch.Tensor],
         *,
         method: str = "local",
-        epochs: int = 100,
-        batch_size: int = 4096,
-        lr: float = 1e-3,
+        epochs: int | None = None,
+        batch_size: int | None = None,
+        lr: float | None = None,
+        consolidate: bool = True,
         **kwargs: Any,
     ):
         """Fit all node mechanisms to data on the model's device.
@@ -199,7 +200,15 @@ class NeuralBayesianNetwork(nn.Module):
         method:
             ``"local"`` (node-wise, default) or ``"joint"`` (shared optimiser).
         epochs, batch_size, lr:
-            Training hyperparameters.
+            Training hyperparameters. ``None`` (default) = each mechanism
+            uses its own designed budget (flow 300 epochs @ lr 5e-4, MDN 200,
+            neural-categorical 100, ...); explicit values override globally
+            for every mechanism.
+        consolidate:
+            If True (default), neural mechanisms snapshot post-fit EWC state
+            so ``update()`` works later; False skips the Fisher pass for
+            fit-only workloads (``update()`` then raises until refit with
+            ``consolidate=True``).
 
         Returns
         -------
@@ -216,6 +225,7 @@ class NeuralBayesianNetwork(nn.Module):
             self, data,
             method=method, epochs=epochs,
             batch_size=batch_size, lr=lr,
+            consolidate=consolidate,
             device=str(self._device),
             **kwargs,
         )

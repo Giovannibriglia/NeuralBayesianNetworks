@@ -257,9 +257,12 @@ class NBNAdapter:
         """Fit the NBN model on problem.train_data. State stored on self.
 
         kwargs:
-            epochs (int): training epochs (default 20). Passed through from
-                the runner; other hyperparameters (batch_size=512, lr=1e-3)
-                are hardcoded to match the v0.12 paper run configuration.
+            epochs / batch_size / lr: optional global training-budget
+                overrides passed through from the runner config. When absent
+                (the default), each mechanism trains with its own designed
+                budget (flow 300 epochs @ lr 5e-4, MDN 200, neural-categorical
+                100, ...) — the former hardcoded epochs=20 / batch_size=1024 /
+                lr=1e-3 silently starved every neural mechanism.
 
         Mirrors benchmarking/baselines/nbn_adapter.py::NBNAdapter.fit()
         exactly, including:
@@ -270,7 +273,13 @@ class NBNAdapter:
         import networkx as nx
         from nbn import NeuralBayesianNetwork
 
-        epochs = int(kwargs.get("epochs", 20))
+        # None = no override: the mechanism keeps its designed budget.
+        epochs = kwargs.get("epochs")
+        epochs = int(epochs) if epochs is not None else None
+        batch_size = kwargs.get("batch_size")
+        batch_size = int(batch_size) if batch_size is not None else None
+        lr = kwargs.get("lr")
+        lr = float(lr) if lr is not None else None
 
         model = NeuralBayesianNetwork(
             problem.dag,
@@ -290,7 +299,14 @@ class NBNAdapter:
             mech = self._make_mech(kind, k, parent_kinds)
             model.set_mechanism(node, mech)
 
-        model.fit(problem.train_data, epochs=epochs, batch_size=1024, lr=1e-3)
+        # consolidate=False: benchmarks never call model.update(), so the
+        # post-fit EWC Fisher pass (up to 4096 sequential per-sample backward
+        # passes per neural node) is pure overhead here.
+        model.fit(
+            problem.train_data,
+            epochs=epochs, batch_size=batch_size, lr=lr,
+            consolidate=False,
+        )
         self.model = model
         self.problem = problem
         self._attach_engine()

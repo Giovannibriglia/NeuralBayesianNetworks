@@ -180,6 +180,8 @@ class TestRefresh:
 
 class TestGuards:
     def test_update_before_fit_raises(self):
+        # RuntimeError (was AssertionError) since consolidation became
+        # opt-out: the message must point at refitting with consolidate=True.
         mech = MDNMechanism(num_components=3)
-        with pytest.raises(AssertionError):
+        with pytest.raises(RuntimeError, match="consolidate=True"):
             mech.update_local(torch.randn(8, 1), None)

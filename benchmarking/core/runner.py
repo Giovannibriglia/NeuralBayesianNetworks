@@ -445,23 +445,33 @@ def _resolve_batch_sizes(
 
 
 def _fit_identity_key(spec: BaselineSpec, problem: Any) -> tuple:
-    """The SIX-field key deciding which baselines share a base fit (LOCKED).
+    """The key deciding which baselines share a base fit (LOCKED fields).
 
-    ``(library, mechanism, epochs, family, problem_id, seed)``. This is the
-    SINGLE source of truth — both grouping (`_assign_fit_roles`) and the cache
-    filename (`_fit_cache_filename`) derive from it; never recompute inline.
+    ``(library, mechanism, epochs, batch_size, lr, family, problem_id, seed)``.
+    This is the SINGLE source of truth — both grouping (`_assign_fit_roles`)
+    and the cache filename (`_fit_cache_filename`) derive from it; never
+    recompute inline.
 
     Excludes:
       * ``inference_method`` — the axis we share across (the whole point);
       * ``n_samples`` — affects only the engine, not ``model.fit()``;
       * ``device`` — reload relocates via ``map_location`` (Stage-1 CPU<->CUDA
         faithful), so two baselines differing only in device still share.
-    ``epochs`` is the only ``extra_kwargs`` entry that affects ``model.fit()``
-    today; if a future kwarg does, it MUST be added here.
+    ``epochs``/``batch_size``/``lr`` are the ``extra_kwargs`` entries that
+    affect ``model.fit()`` today; if a future kwarg does, it MUST be added
+    here. ``None`` (absent from config) means "mechanism-designed budget" and
+    is a DISTINCT identity from any explicit value — do not collapse it to a
+    numeric default.
     """
-    epochs = int((spec.extra_kwargs or {}).get("epochs", 20))
+    extra = spec.extra_kwargs or {}
+    epochs = extra.get("epochs")
+    epochs = int(epochs) if epochs is not None else None
+    batch_size = extra.get("batch_size")
+    batch_size = int(batch_size) if batch_size is not None else None
+    lr = extra.get("lr")
+    lr = float(lr) if lr is not None else None
     return (
-        spec.library, spec.mechanism, epochs,
+        spec.library, spec.mechanism, epochs, batch_size, lr,
         getattr(problem, "family", ""),
         getattr(problem, "problem_id", ""),
         getattr(problem, "seed", 0),
