@@ -54,6 +54,11 @@ _EXPECTED_APPLICABILITY: dict[tuple[str, str], bool] = {
     ("nbn-cat", "continuous_lg"): False,
     ("nbn-cat", "continuous_nongauss"): False,
     ("nbn-cat", "hybrid"): False,
+    # Laplace-smoothed (alpha=1) empirical CPTs — discrete-only like nbn-cat.
+    ("nbn-cat-bayes", "discrete"): True,
+    ("nbn-cat-bayes", "continuous_lg"): False,
+    ("nbn-cat-bayes", "continuous_nongauss"): False,
+    ("nbn-cat-bayes", "hybrid"): False,
     ("nbn-neuralcat", "discrete"): True,
     ("nbn-neuralcat", "continuous_lg"): False,
     ("nbn-neuralcat", "continuous_nongauss"): False,
@@ -111,6 +116,14 @@ _EXPECTED_APPLICABILITY: dict[tuple[str, str], bool] = {
     ("nbn-cat-lw", "continuous_lg"): False,
     ("nbn-cat-lw", "continuous_nongauss"): False,
     ("nbn-cat-lw", "hybrid"): False,
+    ("nbn-cat-bayes-ve", "discrete"): True,
+    ("nbn-cat-bayes-ve", "continuous_lg"): False,
+    ("nbn-cat-bayes-ve", "continuous_nongauss"): False,
+    ("nbn-cat-bayes-ve", "hybrid"): False,
+    ("nbn-cat-bayes-lw", "discrete"): True,
+    ("nbn-cat-bayes-lw", "continuous_lg"): False,
+    ("nbn-cat-bayes-lw", "continuous_nongauss"): False,
+    ("nbn-cat-bayes-lw", "hybrid"): False,
     ("nbn-neuralcat-ve", "discrete"): True,
     ("nbn-neuralcat-ve", "continuous_lg"): False,
     ("nbn-neuralcat-ve", "continuous_nongauss"): False,
@@ -148,9 +161,12 @@ _EXPECTED_APPLICABILITY: dict[tuple[str, str], bool] = {
     ("nbn-flexcode-lw", "continuous_lg"): True,
     ("nbn-flexcode-lw", "continuous_nongauss"): True,
     ("nbn-flexcode-lw", "hybrid"): True,
-    ("nbn-hybrid-router", "discrete"): False,
-    ("nbn-hybrid-router", "continuous_lg"): False,
-    ("nbn-hybrid-router", "continuous_nongauss"): False,
+    # Router widened to every family (fix/benchmark-baseline-enablement):
+    # it dispatches all-discrete nets to VE and anything else to LW, so it
+    # is applicable wherever its constituent engines are.
+    ("nbn-hybrid-router", "discrete"): True,
+    ("nbn-hybrid-router", "continuous_lg"): True,
+    ("nbn-hybrid-router", "continuous_nongauss"): True,
     ("nbn-hybrid-router", "hybrid"): True,
     # Amortized neural-proposal IS (v0.14, #181): same accuracy class and
     # applicable families as LW (it is LW with a learned proposal).

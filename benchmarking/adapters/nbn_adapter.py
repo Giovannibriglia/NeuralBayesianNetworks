@@ -36,6 +36,13 @@ from benchmarking.domains.posterior import Posterior
 # Which discrete mechanism to use for nodes with kind="discrete"
 _DISCRETE_MECH: dict[str, str] = {
     "cat":       "categorical_table",
+    # Laplace-smoothed (Dirichlet alpha=1) empirical CPTs. Same table
+    # machinery as "cat" but the smoothed estimator instead of MLE-parity
+    # alpha=0: at paper scale pyro's alpha=1 estimator beat nbn-cat on BOTH
+    # discrete recovery metrics (TV 0.0646 vs 0.0699, KL 0.0222 vs 0.2467,
+    # param_learning_complete 20260701) — this label closes that gap with a
+    # mechanism the library already shipped.
+    "cat-bayes": "smoothed_empirical_categorical",
     "neuralcat": "neural_categorical",
     "lg":        "categorical_table",   # lg is continuous-only; discrete fallback
     "mdn":       "categorical_table",
@@ -52,6 +59,7 @@ _DISCRETE_MECH: dict[str, str] = {
 # Which continuous mechanism to use for nodes with kind="continuous"
 _CONTINUOUS_MECH: dict[str, str] = {
     "cat":       "mdn",                 # cat is discrete-only; continuous fallback
+    "cat-bayes": "mdn",                 # discrete-only; continuous fallback like cat
     "neuralcat": "mdn",
     "lg":        "linear_gaussian",
     "mdn":       "mdn",
@@ -207,6 +215,10 @@ class NBNAdapter:
             discrete_mech = _DISCRETE_MECH[self.mechanism]
             if discrete_mech == "neural_categorical":
                 return NeuralCategoricalMechanism(n_classes=k or 2)
+            if discrete_mech == "smoothed_empirical_categorical":
+                # Laplace default (alpha=1.0) — the point of the label.
+                from nbn.mechanisms import SmoothedEmpiricalCategoricalMechanism
+                return SmoothedEmpiricalCategoricalMechanism()
             return CategoricalTableMechanism()
 
         # Continuous node

@@ -36,6 +36,12 @@ BASELINE_FAMILY_APPLICABILITY: dict[str, BaselineApplicability] = {
     "pgmpy-bayes":             BaselineApplicability(frozenset({"discrete"})),
     "pgmpy-lg":                BaselineApplicability(frozenset({"continuous_lg"})),
     "nbn-cat":                 BaselineApplicability(frozenset({"discrete"})),
+    # Laplace-smoothed (alpha=1) empirical CPTs — same table machinery as
+    # nbn-cat, Bayesian estimator instead of MLE parity. Registered because
+    # the alpha=1 competitors (pyro, pgmpy-bayes) beat nbn-cat on discrete
+    # recovery TV/KL at paper scale; the smoothed mechanism already existed
+    # in nbn but was never benchmarked.
+    "nbn-cat-bayes":           BaselineApplicability(frozenset({"discrete"})),
     "nbn-neuralcat":           BaselineApplicability(frozenset({"discrete"})),
     "nbn-lg":                  BaselineApplicability(frozenset({"continuous_lg"})),
     "nbn-mdn":                 BaselineApplicability(
@@ -58,6 +64,8 @@ BASELINE_FAMILY_APPLICABILITY: dict[str, BaselineApplicability] = {
     "pgmpy-lg-predict":        BaselineApplicability(frozenset({"continuous_lg"})),
     "nbn-cat-ve":              BaselineApplicability(frozenset({"discrete"})),
     "nbn-cat-lw":              BaselineApplicability(frozenset({"discrete"})),
+    "nbn-cat-bayes-ve":        BaselineApplicability(frozenset({"discrete"})),
+    "nbn-cat-bayes-lw":        BaselineApplicability(frozenset({"discrete"})),
     "nbn-neuralcat-ve":        BaselineApplicability(frozenset({"discrete"})),
     "nbn-neuralcat-lw":        BaselineApplicability(frozenset({"discrete"})),
     "nbn-lg-lw":               BaselineApplicability(frozenset({"continuous_lg"})),
@@ -74,7 +82,15 @@ BASELINE_FAMILY_APPLICABILITY: dict[str, BaselineApplicability] = {
         frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
     "nbn-flexcode-lw":         BaselineApplicability(
         frozenset({"continuous_lg", "continuous_nongauss", "hybrid"})),
-    "nbn-hybrid-router":       BaselineApplicability(frozenset({"hybrid"})),
+    # The router is family-universal by construction: it dispatches
+    # all-discrete networks to exact VE (treewidth permitting) and anything
+    # else to LW. It was previously gated to {hybrid} only, which — with no
+    # hybrid family in any synthetic config — meant the flagship "auto"
+    # engine produced zero ok cells in every benchmark run (100%
+    # not_supported in the 20260701 parquets). Widened so it competes
+    # everywhere its constituent engines do.
+    "nbn-hybrid-router":       BaselineApplicability(
+        frozenset({"discrete", "continuous_lg", "continuous_nongauss", "hybrid"})),
 
     # Amortized neural-proposal IS (v0.14, #181) — same accuracy class /
     # applicable families as LW (it is LW with a learned proposal).
