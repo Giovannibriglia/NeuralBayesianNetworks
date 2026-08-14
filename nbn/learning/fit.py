@@ -17,7 +17,13 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TrainHistory:
-    """Records per-epoch training metrics."""
+    """Records per-node training metrics.
+
+    ``node_log_likelihoods`` holds **in-sample** mean log-likelihoods —
+    scored on the same rows the mechanism was fitted on.  ``fit`` performs no
+    validation split and no early stopping, so these are a fit-quality trace,
+    never a generalisation estimate.
+    """
 
     node_log_likelihoods: Dict[str, List[float]] = field(default_factory=dict)
     wall_clock_s: float = 0.0
@@ -138,7 +144,12 @@ def fit(
 
             metrics = mech.fit_local(x, pa_tensor, **mech_kwargs)
 
-            # Compute held-out LL on full data for logging
+            # In-sample (training) mean log-likelihood, for logging only.
+            # This was labelled "held-out LL", which it has never been: it is
+            # scored on the very rows just fitted.  ``fit`` has no validation
+            # split and no early stopping — callers who need a held-out
+            # estimate must hold data out themselves and score it with
+            # ``model.log_prob`` / ``score_data``.
             with torch.no_grad():
                 lp = mech.log_prob(x, pa_tensor)
                 mean_ll = float(lp.mean())
@@ -156,7 +167,22 @@ def fit(
         epochs = 100 if epochs is None else epochs
         batch_size = 4096 if batch_size is None else batch_size
         lr = 1e-3 if lr is None else lr
-        opt = torch.optim.Adam(model.parameters(), lr=lr)
+        params = list(model.parameters())
+        if not params:
+            # torch would raise "optimizer got an empty parameter list", which
+            # says nothing about the cause.  Most mechanisms build their
+            # parameters inside fit_local from the data's shape
+            # (LinearGaussianMechanism._weight, MDNMechanism.net and
+            # NormalizingFlowMechanism._flow are all None until then), so a
+            # never-fitted model genuinely has nothing to optimise jointly.
+            raise RuntimeError(
+                "method='joint' has no parameters to optimise: no mechanism "
+                "has been fitted yet, and most build their parameters lazily "
+                "inside fit_local from the data's shape.  Run "
+                "model.fit(data) once with the default method='local' first, "
+                "then refine with method='joint'."
+            )
+        opt = torch.optim.Adam(params, lr=lr)
         nodes = model.dag.topological_order()
         n = next(iter(data_dev.values())).shape[0]
         for ep in range(epochs):
@@ -181,6 +207,18 @@ def fit(
                 steps += 1
             if (ep + 1) % log_every == 0:
                 logger.info("Epoch %d/%d  loss=%.4f", ep + 1, epochs, epoch_loss / max(steps, 1))
+        # Record the same per-node in-sample LL the "local" path records, so
+        # ``TrainHistory.mean_ll`` is meaningful after either method.  The
+        # joint path used to leave ``node_log_likelihoods`` empty, and
+        # ``mean_ll`` silently returned NaN for every node — indistinguishable
+        # from a genuinely degenerate fit.  One extra full-data forward pass,
+        # matching what "local" already costs per node.
+        with torch.no_grad():
+            for node in nodes:
+                mech = model.mechanisms[node]
+                pa_tensor = pack_parents(data_dev, model.dag.parents(node))
+                lp = mech.log_prob(data_dev[node], pa_tensor)
+                history.node_log_likelihoods.setdefault(node, []).append(float(lp.mean()))
     else:
         raise ValueError(f"Unknown method '{method}'. Use 'local' or 'joint'.")
 

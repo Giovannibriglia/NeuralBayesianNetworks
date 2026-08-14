@@ -118,14 +118,26 @@ class LikelihoodWeightingEngine(InferenceEngine):
             tuple(sorted(do.keys())),
             self._cache,
         )
-        # Normalise scalar / 0-D evidence values to 1-D so v.shape[0] works.
-        evidence = {
-            k: (v if (isinstance(v, torch.Tensor) and v.dim() >= 1)
-                else (torch.as_tensor(v).reshape(1) if not isinstance(v, torch.Tensor)
-                      else v.reshape(1)))
-            for k, v in evidence.items()
-        }
-        b = max((v.shape[0] for v in evidence.values()), default=1)
+        # Normalise scalar / 0-D evidence and do values to 1-D so v.shape[0]
+        # works.
+        def _norm(d):
+            return {
+                k: (v if (isinstance(v, torch.Tensor) and v.dim() >= 1)
+                    else (torch.as_tensor(v).reshape(1) if not isinstance(v, torch.Tensor)
+                          else v.reshape(1)))
+                for k, v in d.items()
+            }
+        evidence = _norm(evidence)
+        do = _norm(do)
+        # The batch axis is the widest of evidence AND do.  Deriving it from
+        # evidence alone made a batched intervention (with no evidence to
+        # widen B) die in the ``expand`` below with an opaque shape error —
+        # ``do`` is a peer of ``evidence`` here, both are just clamped nodes,
+        # so a per-row intervention costs no more than a per-row observation.
+        b = max(
+            (v.shape[0] for v in list(evidence.values()) + list(do.values())),
+            default=1,
+        )
         s = n_samples
 
         buf = torch.zeros(b, s, state.total_dim, device=device, dtype=dtype)

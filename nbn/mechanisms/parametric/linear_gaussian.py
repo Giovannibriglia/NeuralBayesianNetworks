@@ -185,6 +185,32 @@ class LinearGaussianMechanism(Mechanism):
     def _scale(self) -> torch.Tensor:
         return torch.exp(self._log_scale).clamp_min(self.min_scale)
 
+    def _cast_parents(
+        self, parents: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        """Cast ``parents`` to the fitted parameter dtype.
+
+        ``fit_local`` already casts its parent block to ``x.dtype`` before
+        solving, but the inference path did not: a discrete parent arrives as
+        a ``long`` column straight out of ``pack_parents`` (which concatenates
+        raw data dtypes, because tabular discrete children need their parent
+        values as *indices*).  ``parents_2d @ self._weight`` is a matmul, and
+        matmul does not type-promote, so a discrete-parent → continuous-child
+        edge — exactly the shape of a discrete action driving a continuous
+        reward — died with ``expected m1 and m2 to have the same dtype``.
+        The first caller to hit it is ``learning.fit``'s post-fit LL pass, so
+        the crash surfaced from ``model.fit()`` even though the ridge solve
+        itself had succeeded.  MDN and flow never had the bug: they
+        standardise parents (``(pa - mean) / std``) before the first matmul,
+        and that division type-promotes.
+        """
+        if parents is None:
+            return None
+        ref = self._weight if self._weight is not None else self._bias
+        if ref is not None and parents.dtype != ref.dtype:
+            parents = parents.to(ref.dtype)
+        return parents
+
     # ------------------------------------------------------------------
     # Distribution interface
     # ------------------------------------------------------------------
@@ -192,6 +218,7 @@ class LinearGaussianMechanism(Mechanism):
     def forward(self, parents: torch.Tensor | None) -> Independent:
         assert self._bias is not None, "Call fit_local before forward()."
         scale = self._scale()  # [D_x]
+        parents = self._cast_parents(parents)
         if self._input_dim == 0 or parents is None:
             b = 1 if parents is None else ensure_2d(parents).shape[0]
             loc = self._bias.unsqueeze(0).expand(b, -1)  # [B, D_x]
@@ -206,6 +233,7 @@ class LinearGaussianMechanism(Mechanism):
         """Return ``[B, n, D_x]``."""
         assert self._bias is not None
         scale = self._scale()
+        parents = self._cast_parents(parents)
         if self._input_dim == 0 or parents is None:
             b = 1 if parents is None else ensure_2d(parents).shape[0]
             loc = self._bias.view(1, 1, -1).expand(b, n, -1)
@@ -218,10 +246,21 @@ class LinearGaussianMechanism(Mechanism):
             sc = scale.view(1, 1, -1).expand(b, n, -1)
         return loc + sc * torch.randn_like(loc)
 
+    @property
+    def is_fitted(self) -> bool:
+        """True iff ``fit_local`` (or ``update_local``) solved for W/b/sigma.
+
+        Without this override the mechanism inherited ``Mechanism.is_fitted``'s
+        ``False`` default and stayed ``False`` after a perfectly successful
+        fit, so any caller gating on it saw a fitted model as unfitted.
+        """
+        return self._bias is not None
+
     def log_prob(
         self, x: torch.Tensor, parents: torch.Tensor | None
     ) -> torch.Tensor:
         assert self._bias is not None
+        parents = self._cast_parents(parents)
         x = ensure_2d(x)  # [B, D_x] or keep [B, S, D_x]
         squeeze_s = False
         if x.dim() == 2:

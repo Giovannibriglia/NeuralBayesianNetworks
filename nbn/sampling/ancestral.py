@@ -53,6 +53,18 @@ def ancestral_sample(
     mechanisms = dict(model.mechanisms)
     for node, val in do.items():
         val_t = val.to(dev)
+        # Every node here yields exactly ``n`` rows, so there is no axis for a
+        # per-row intervention value to live on.  Without this check a batched
+        # do-value died further down in ``expand`` with an opaque shape error
+        # ("expanded size (10) must match existing size (3)").
+        if val_t.dim() > 1 and val_t.shape[0] != 1:
+            raise ValueError(
+                f"Batched do-value for '{node}' (shape {tuple(val_t.shape)}): "
+                f"ancestral sampling draws one mutilated model's worth of "
+                f"samples and has no batch axis to vary the intervention "
+                f"along.  Loop over the values, or use "
+                f"query()/query_batch(do=...), which accept a batch."
+            )
         mechanisms[node] = DeterministicMechanism(val_t)
 
     out: Dict[str, torch.Tensor] = {}

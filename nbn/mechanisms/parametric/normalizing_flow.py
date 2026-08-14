@@ -143,6 +143,16 @@ class NormalizingFlowMechanism(Mechanism):
         self.eval()
         return {"d_pa": d_pa, "d_x": d_x}
 
+    @property
+    def is_fitted(self) -> bool:
+        """True iff ``fit_local`` built the zuko flow.
+
+        Without this override the mechanism inherited
+        ``Mechanism.is_fitted``'s ``False`` default and reported unfitted
+        after a successful fit.
+        """
+        return self._flow is not None
+
     def forward(self, parents: torch.Tensor | None) -> _FlowDistribution:
         assert self._flow is not None, "Call fit_local before forward()."
         if self._d_pa == 0 or parents is None:

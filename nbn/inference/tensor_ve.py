@@ -15,7 +15,8 @@ The v0.3.1 work introduces:
 from __future__ import annotations
 
 import logging
-from typing import Dict, List
+import weakref
+from typing import Dict, List, Mapping
 
 import torch
 
@@ -44,11 +45,14 @@ class TensorVariableElimination(InferenceEngine):
 
     def __init__(self, treewidth_threshold: int = 25) -> None:
         self.treewidth_threshold = treewidth_threshold
-        # Memoise factor build by id(model). Cleared on `invalidate_cache`.
-        self._factor_cache: Dict[int, Dict[str, LogFactor]] = {}
+        # Memoise factor build by id(model). Values are
+        # ``(weakref(model), cache_version, factors)`` — see ``_cache_get``
+        # for why the bare id() key was not enough.  Cleared on
+        # ``invalidate_cache``.
+        self._factor_cache: Dict[int, tuple] = {}
         # Memoise the (elimination_order, relevant_set) per
-        # (id(model), targets, evidence_keys, order).
-        self._plan_cache: Dict[tuple, tuple[list[str], set[str]]] = {}
+        # (id(model), targets, evidence_keys, do_keys, order), same triple.
+        self._plan_cache: Dict[tuple, tuple] = {}
 
     def invalidate_cache(self, model=None) -> None:
         if model is None:
@@ -60,11 +64,49 @@ class TensorVariableElimination(InferenceEngine):
                 self._plan_cache.pop(k, None)
 
     # ------------------------------------------------------------------ #
+    # Cache validity
+    # ------------------------------------------------------------------ #
+    #
+    # Keying a memo on ``id(model)`` alone has two failure modes, both of
+    # which silently return *wrong numbers* rather than raising:
+    #
+    #   1. Refit.  ``model.fit(new_data)`` mutates the CPDs in place; the
+    #      id is unchanged, so an engine held across the refit keeps serving
+    #      the pre-fit posterior.  (``model.query`` happened to escape this
+    #      because ``fit`` -> ``to()`` drops the model's own cached engine,
+    #      but any externally-held or shared engine did not.)
+    #   2. Address reuse.  CPython recycles ``id()`` values: a model that is
+    #      garbage-collected can hand its address to an unrelated new model,
+    #      which then inherits the dead model's factors.
+    #
+    # Storing a weakref alongside the entry fixes (2) — a recycled address
+    # fails the identity check — and the model's ``_cache_version`` counter
+    # (bumped by fit / update / set_mechanism) fixes (1).
+
+    @staticmethod
+    def _model_version(model) -> int:
+        return int(getattr(model, "_cache_version", 0))
+
+    def _cache_get(self, cache: Dict, key, model):
+        entry = cache.get(key)
+        if entry is None:
+            return None
+        ref, version, payload = entry
+        if ref() is not model or version != self._model_version(model):
+            cache.pop(key, None)
+            return None
+        return payload
+
+    def _cache_put(self, cache: Dict, key, model, payload):
+        cache[key] = (weakref.ref(model), self._model_version(model), payload)
+        return payload
+
+    # ------------------------------------------------------------------ #
     # Factor and plan extraction (cached)
     # ------------------------------------------------------------------ #
 
     def _extract_factors(self, model) -> Dict[str, LogFactor]:
-        cached = self._factor_cache.get(id(model))
+        cached = self._cache_get(self._factor_cache, id(model), model)
         if cached is not None:
             return cached
         factors: Dict[str, LogFactor] = {}
@@ -96,8 +138,7 @@ class TensorVariableElimination(InferenceEngine):
             logits = mech.tabulate(parent_cards).detach()
             log_cpt = torch.log_softmax(logits, dim=-1)
             factors[node] = LogFactor(log_cpt, var_scope, cards)
-        self._factor_cache[id(model)] = factors
-        return factors
+        return self._cache_put(self._factor_cache, id(model), model, factors)
 
     def _plan(
         self,
@@ -105,6 +146,7 @@ class TensorVariableElimination(InferenceEngine):
         target: str,
         evidence_keys: tuple[str, ...],
         *,
+        do_keys: tuple[str, ...] = (),
         order: str = "min_fill",
     ) -> list[str]:
         """Compute (or look up cached) elimination order.
@@ -115,7 +157,7 @@ class TensorVariableElimination(InferenceEngine):
         ``ve_profile_n20`` diagnostic).
         """
         return self._plan_with_relevant(
-            model, target, evidence_keys, order=order,
+            model, target, evidence_keys, do_keys=do_keys, order=order,
         )[0]
 
     def _plan_with_relevant(
@@ -124,6 +166,7 @@ class TensorVariableElimination(InferenceEngine):
         target: str,
         evidence_keys: tuple[str, ...],
         *,
+        do_keys: tuple[str, ...] = (),
         order: str = "min_fill",
     ) -> tuple[list[str], set[str]]:
         """Compute (or look up cached) elimination plan + relevant set.
@@ -161,8 +204,8 @@ class TensorVariableElimination(InferenceEngine):
         ``(model, target, evidence_keys)`` so it is cached alongside the
         order under the same key.
         """
-        key = (id(model), target, evidence_keys, order)
-        cached = self._plan_cache.get(key)
+        key = (id(model), target, evidence_keys, do_keys, order)
+        cached = self._cache_get(self._plan_cache, key, model)
         if cached is not None:
             return cached
         # Bug 2 (#127): restrict elimination to the variables m-connected
@@ -170,7 +213,21 @@ class TensorVariableElimination(InferenceEngine):
         # computed on the induced subgraph rather than the full DAG —
         # same algorithm, far smaller input on dense networks.
         graph = model.dag.networkx_graph
-        relevant = relevant_subnetwork(graph, target, evidence_keys)
+        # Mutilate before Bayes-ball: under do(X), X's incoming edges are cut,
+        # so its ancestors are no longer d-connected to anything through X.
+        # Running relevance on the observational graph would still be *sound*
+        # (it can only over-include, and a summed-out CPT contributes a factor
+        # of 1), but the mutilated graph is both correct and cheaper.
+        if do_keys:
+            graph = graph.copy()
+            graph.remove_edges_from(
+                [(u, v) for (u, v) in list(graph.in_edges(do_keys))]
+            )
+        # do-nodes are clamped, exactly like evidence, for the purpose of
+        # d-separation on the mutilated graph.
+        relevant = relevant_subnetwork(
+            graph, target, tuple(evidence_keys) + tuple(do_keys),
+        )
         # Bug 2 Stage 2b (#127): the kept factors are the CPTs of the
         # relevant nodes, whose scopes are {node} ∪ parents(node).  Some
         # of those parents lie *outside* the relevant set — e.g. an
@@ -191,11 +248,45 @@ class TensorVariableElimination(InferenceEngine):
             order,
             graph.subgraph(factor_scope),
             targets=[target],
-            evidence=list(evidence_keys),
+            # do-nodes are clamped like evidence, so they are conditioned out
+            # rather than eliminated — prune them from the moral graph too.
+            evidence=list(evidence_keys) + list(do_keys),
         )
         result = (elimination_order, relevant)
-        self._plan_cache[key] = result
-        return result
+        return self._cache_put(self._plan_cache, key, model, result)
+
+    # ------------------------------------------------------------------ #
+    # do-operator
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _validate_do(model, do: Mapping[str, torch.Tensor], evidence) -> None:
+        """Reject do-specifications VE cannot answer, before any work is done.
+
+        Until this existed, ``do=`` reached ``query`` inside ``**kwargs`` and
+        was *dropped on the floor*: ``model.query(["Y"], do={"X": 1})`` on an
+        all-discrete network returned the observational answer (the prior,
+        when no evidence was given) with no warning at all — the single most
+        dangerous failure mode in the engine, because the number returned was
+        plausible and wrong.  LW/AIS have always honoured ``do=``, so the two
+        engines silently disagreed on the same call.
+        """
+        overlap = sorted(set(do) & set(evidence or {}))
+        if overlap:
+            raise ValueError(
+                f"Node(s) {overlap} given as both evidence and do-intervention; "
+                f"a node cannot be simultaneously observed and set."
+            )
+        unknown = sorted(n for n in do if n not in model.mechanisms)
+        if unknown:
+            raise ValueError(f"Unknown do-intervention target(s): {unknown}.")
+        for node in do:
+            mech = model.mechanisms[node]
+            if not mech.is_discrete:
+                raise ValueError(
+                    f"TensorVariableElimination requires discrete "
+                    f"do-targets; '{node}' is continuous."
+                )
 
     # ------------------------------------------------------------------ #
     # Single-row query (kept identical to the v0.2 path)
@@ -207,6 +298,7 @@ class TensorVariableElimination(InferenceEngine):
         targets: List[str],
         evidence: Dict[str, torch.Tensor] | None = None,
         *,
+        do: Mapping[str, torch.Tensor] | None = None,
         order: str = "min_fill",
         **kwargs,
     ) -> torch.Tensor:
@@ -214,16 +306,39 @@ class TensorVariableElimination(InferenceEngine):
             raise NotImplementedError("TensorVE supports exactly one target.")
         target = targets[0]
         evidence = evidence or {}
+        do = dict(do or {})
+        self._validate_do(model, do, evidence)
         device = model.device
 
-        ev_int: Dict[str, int] = {
-            k: int(v.item()) if isinstance(v, torch.Tensor) else int(v)
-            for k, v in evidence.items()
-        }
+        def _as_int(v):
+            return int(v.item()) if isinstance(v, torch.Tensor) else int(v)
+
+        ev_int: Dict[str, int] = {k: _as_int(v) for k, v in evidence.items()}
+        do_int: Dict[str, int] = {k: _as_int(v) for k, v in do.items()}
+
+        # Intervening on the target itself makes the answer a point mass by
+        # definition.  Handled up front because elimination would otherwise
+        # find no factor mentioning the target (its CPT having been dropped)
+        # and fall through to the uniform default — LW, which clamps and then
+        # histograms, has always returned the delta here.
+        if target in do_int:
+            return _delta_probs(
+                model.mechanisms[target].n_classes, do_int[target], device,
+            )
+
         factors = self._extract_factors(model)
 
+        # Pearl's do-operator on a factorised model is exactly: drop the
+        # intervened node's CPT (severing its incoming edges) and clamp its
+        # value everywhere else.  The remaining factors are the mutilated
+        # model's joint, so conditioning + elimination on them yields
+        # P(target | do(...)) after the final normalisation.
+        factors = {n: f for n, f in factors.items() if n not in do_int}
+        clamped = {**ev_int, **do_int}
+
         to_eliminate, relevant = self._plan_with_relevant(
-            model, target, tuple(sorted(ev_int.keys())), order=order,
+            model, target, tuple(sorted(ev_int.keys())),
+            do_keys=tuple(sorted(do_int.keys())), order=order,
         )
 
         # Bug 2 (#127): drop factors for non-relevant nodes.  Pruning the
@@ -235,11 +350,11 @@ class TensorVariableElimination(InferenceEngine):
         # P(target | evidence) up to the final softmax normalisation.
         factors = {n: f for n, f in factors.items() if n in relevant}
 
-        # Condition each factor on evidence
+        # Condition each factor on evidence + clamped do-values
         conditioned: list[LogFactor] = []
         for _node, factor in factors.items():
             f = factor
-            for ev_node, ev_val in ev_int.items():
+            for ev_node, ev_val in clamped.items():
                 if ev_node in f.variables:
                     f = f.condition({ev_node: ev_val})
             conditioned.append(f)
@@ -288,6 +403,7 @@ class TensorVariableElimination(InferenceEngine):
         targets: List[str],
         evidence: Dict[str, torch.Tensor],
         *,
+        do: Mapping[str, torch.Tensor] | None = None,
         order: str = "min_fill",
         **kwargs,
     ) -> torch.Tensor:
@@ -308,12 +424,17 @@ class TensorVariableElimination(InferenceEngine):
         if len(targets) != 1:
             raise NotImplementedError("TensorVE supports exactly one target.")
         target = targets[0]
+        do = dict(do or {})
+        self._validate_do(model, do, evidence)
         device = model.device
 
-        # Normalise evidence to [B] long tensors on `device`.
+        # Normalise evidence + do to [B] long tensors on `device`.  do-values
+        # may vary per row: the batched conditioner fancy-indexes each factor
+        # with a [B] index tensor, so a per-row intervention costs nothing
+        # extra over a per-row observation.
         ev_norm: Dict[str, torch.Tensor] = {}
         B = 1
-        for k, v in evidence.items():
+        for k, v in {**evidence, **do}.items():
             t = v if isinstance(v, torch.Tensor) else torch.as_tensor(v)
             if t.dim() == 0:
                 t = t.reshape(1)
@@ -325,10 +446,20 @@ class TensorVariableElimination(InferenceEngine):
         # Broadcast any [1] evidence to [B]
         ev_norm = {k: (v.expand(B) if v.shape[0] == 1 else v) for k, v in ev_norm.items()}
 
+        if target in do:
+            # Point mass per row — see ``query``.
+            k = model.mechanisms[target].n_classes
+            out = torch.zeros(B, k, device=device)
+            out.scatter_(1, ev_norm[target].reshape(B, 1), 1.0)
+            return out
+
         factors = self._extract_factors(model)
+        # See ``query``: mutilation = drop the intervened CPTs, clamp the rest.
+        factors = {n: f for n, f in factors.items() if n not in do}
 
         to_eliminate, relevant = self._plan_with_relevant(
-            model, target, tuple(sorted(ev_norm.keys())), order=order,
+            model, target, tuple(sorted(k for k in ev_norm if k not in do)),
+            do_keys=tuple(sorted(do.keys())), order=order,
         )
 
         # Bug 2 (#127): drop factors for non-relevant nodes before
@@ -488,6 +619,13 @@ class TensorVariableElimination(InferenceEngine):
             for i in range(0, B, chunk)
         ]
         return torch.cat(outs, dim=0)
+
+
+def _delta_probs(k: int, value: int, device) -> torch.Tensor:
+    """One-hot ``[K]`` distribution — the answer to ``P(X | do(X = value))``."""
+    out = torch.zeros(k, device=device)
+    out[int(value)] = 1.0
+    return out
 
 
 # ---------------------------------------------------------------------- #
