@@ -6,6 +6,13 @@ from torch.distributions import Distribution
 from nbn.mechanisms.base import Mechanism
 from nbn.utils.batching import ensure_2d
 
+# Log-probability stand-in for "impossible state" in a tabulated delta CPD.
+# A true ``-inf`` propagates NaN through variable elimination's factor
+# products (``-inf + inf``, ``0 * -inf``); ``exp(-1e9)`` is exactly 0.0 in
+# float32, so this is numerically a hard zero without the NaN hazard, and
+# sums of a handful of them stay far inside float32's range.
+_LOG_ZERO = -1e9
+
 
 class _DeltaDistribution(Distribution):
     """A Dirac delta distribution at a fixed value."""
@@ -29,18 +36,43 @@ class _DeltaDistribution(Distribution):
 class DeterministicMechanism(Mechanism):
     """Deterministic CPD: delta distribution at a fixed value.
 
-    Useful for Pearl's do-operator interventions: replace the CPD of a node
-    with ``DeterministicMechanism(value)`` to implement ``do(X = value)``.
+    Used by Pearl's do-operator: replacing a node's CPD with
+    ``DeterministicMechanism(value)`` implements ``do(X = value)``.
 
     Parameters
     ----------
     value:
         Fixed output value, shape ``[D_x]`` or ``[B, D_x]``.
+    cardinality:
+        Number of states when the intervened node is *discrete*.  Supplying it
+        makes the mechanism advertise itself as discrete and gives it the
+        tabular interface (``n_classes``, ``tabulate``, ``_class_values``) that
+        exact inference needs.  Leave ``None`` for continuous nodes, which
+        keeps the historical continuous-delta behaviour byte-for-byte.
+
+    Notes
+    -----
+    Before ``cardinality`` existed this class always inherited
+    ``Mechanism.is_discrete = False``, so an ``intervene()``-produced model of
+    an all-discrete network was rejected wholesale by
+    ``TensorVariableElimination`` ("node 'X' has a continuous mechanism").
+    That left discrete networks with no exact interventional path at all.
     """
 
-    def __init__(self, value: torch.Tensor) -> None:
+    def __init__(
+        self, value: torch.Tensor, cardinality: int | None = None
+    ) -> None:
         super().__init__()
         self.register_buffer("_fixed_value", value)
+        self._n_classes = int(cardinality) if cardinality is not None else 0
+        # Instance-level override of the class attribute (same pattern as
+        # KNNConditionalMechanism): one class serves both variable kinds.
+        self.is_discrete = cardinality is not None
+        if cardinality is not None:
+            self.register_buffer(
+                "_class_values",
+                torch.arange(int(cardinality), dtype=torch.float, device=value.device),
+            )
 
     def forward(self, parents: torch.Tensor | None) -> _DeltaDistribution:
         if parents is not None and self._fixed_value.dim() == 1:
@@ -62,3 +94,42 @@ class DeterministicMechanism(Mechanism):
 
     def fit_local(self, x: torch.Tensor, parents: torch.Tensor | None, **kwargs) -> dict:
         return {}
+
+    # ------------------------------------------------------------------
+    # Tabular interface (discrete interventions only)
+    # ------------------------------------------------------------------
+
+    @property
+    def is_fitted(self) -> bool:
+        """Always True: a delta CPD is fully specified at construction.
+
+        ``TensorVariableElimination`` refuses to build a factor for an
+        unfitted mechanism, and the base-class default is ``False``, so
+        without this an intervened model could never be queried exactly.
+        """
+        return True
+
+    @property
+    def n_classes(self) -> int:
+        return self._n_classes
+
+    def tabulate(self, parent_cards: list[int] | None = None) -> torch.Tensor:
+        """Return the ``[K]`` log-CPT of the post-intervention (mutilated) node.
+
+        The do-operator severs the node's incoming edges, so the tabulation is
+        unconditional: all mass on the intervened state.  ``parent_cards`` is
+        accepted for API uniformity and ignored — a mutilated node has no
+        parents by construction.
+        """
+        if not self.is_discrete:
+            raise NotImplementedError(
+                "DeterministicMechanism.tabulate() is only defined for discrete "
+                "interventions; construct it with cardinality=<K>."
+            )
+        idx = int(self._fixed_value.reshape(-1)[0].item())
+        log_cpt = torch.full(
+            (self._n_classes,), _LOG_ZERO,
+            device=self._fixed_value.device, dtype=torch.float,
+        )
+        log_cpt[idx] = 0.0
+        return log_cpt

@@ -283,6 +283,17 @@ class MDNMechanism(Mechanism):
     # Distribution interface
     # ------------------------------------------------------------------
 
+    @property
+    def is_fitted(self) -> bool:
+        """True iff ``fit_local`` built the conditioner (or root parameters).
+
+        Root nodes are fitted via ``_root_logits``/``_root_loc``; non-root
+        nodes via the ``net`` conditioner.  Without this override the
+        mechanism inherited ``Mechanism.is_fitted``'s ``False`` default and
+        reported unfitted after a successful fit.
+        """
+        return self.net is not None or self._root_logits is not None
+
     def forward(self, parents: torch.Tensor | None) -> MixtureSameFamily:
         if parents is not None:
             parents = ensure_2d(parents)

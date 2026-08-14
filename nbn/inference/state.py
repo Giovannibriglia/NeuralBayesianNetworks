@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import weakref
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -30,9 +31,27 @@ def get_inference_state(
     do_keys: Tuple[str, ...],
     cache: Dict,
 ) -> InferenceState:
-    sig = (id(model), tuple(sorted(targets)), tuple(sorted(evidence_keys)), tuple(sorted(do_keys)))
-    if sig in cache:
-        return cache[sig]
+    # The signature carries the model's ``_cache_version`` (bumped by fit /
+    # update / set_mechanism) and is validated against a weakref, because
+    # ``id(model)`` alone is unsound twice over: it does not change when the
+    # model is refit in place, and CPython recycles addresses, so a dead
+    # model can hand its id to an unrelated new one.  Both failure modes
+    # return stale metadata rather than raising.  (This state holds node
+    # slices and parent indices, so a stale hit misreads the sample buffer
+    # after a graph-shaped change such as ``intervene()``.)
+    sig = (
+        id(model),
+        int(getattr(model, "_cache_version", 0)),
+        tuple(sorted(targets)),
+        tuple(sorted(evidence_keys)),
+        tuple(sorted(do_keys)),
+    )
+    hit = cache.get(sig)
+    if hit is not None:
+        ref, state = hit
+        if ref() is model:
+            return state
+        cache.pop(sig, None)
 
     topo = tuple(model.dag.topological_order())
     node_to_idx = {n: i for i, n in enumerate(topo)}
@@ -65,5 +84,5 @@ def get_inference_state(
         parent_slices=parent_slices,
         total_dim=total,
     )
-    cache[sig] = state
+    cache[sig] = (weakref.ref(model), state)
     return state

@@ -308,14 +308,21 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
             tuple(sorted(do.keys())),
             self._cache,
         )
-        # Normalise scalar / 0-D evidence to 1-D (mirror LW).
-        evidence = {
-            k: (v if (isinstance(v, torch.Tensor) and v.dim() >= 1)
-                else (torch.as_tensor(v).reshape(1) if not isinstance(v, torch.Tensor)
-                      else v.reshape(1)))
-            for k, v in evidence.items()
-        }
-        b = max((v.shape[0] for v in evidence.values()), default=1)
+        # Normalise scalar / 0-D evidence and do to 1-D (mirror LW).
+        def _norm(d):
+            return {
+                k: (v if (isinstance(v, torch.Tensor) and v.dim() >= 1)
+                    else (torch.as_tensor(v).reshape(1) if not isinstance(v, torch.Tensor)
+                          else v.reshape(1)))
+                for k, v in d.items()
+            }
+        evidence = _norm(evidence)
+        do = _norm(do)
+        # Batch axis spans evidence AND do — see LikelihoodWeightingEngine._run.
+        b = max(
+            (v.shape[0] for v in list(evidence.values()) + list(do.values())),
+            default=1,
+        )
         s = n_samples
 
         buf = torch.zeros(b, s, state.total_dim, device=device, dtype=dtype)

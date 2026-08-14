@@ -65,6 +65,25 @@ class DAG:
     def parents(self, node: str) -> List[str]:
         return self._parents.get(node, [])
 
+    def ordered_edges(self) -> List[Tuple[str, str]]:
+        """Edges grouped by child, each child's parents in ``parents()`` order.
+
+        Use this — not ``edges()`` — whenever a DAG is going to be
+        *reconstructed*, e.g. persisted to a checkpoint or mutilated by the
+        do-operator.
+
+        ``DAG(g.edges())`` is not a faithful round-trip.  networkx iterates
+        edges in source-node order (all of A's out-edges, then all of B's),
+        so rebuilding from that list can permute a child's predecessor list:
+        ``A→B, B→C, A→C`` has ``parents(C) == ['B', 'A']`` but its
+        ``edges()`` is ``[(A,B), (A,C), (B,C)]``, which rebuilds to
+        ``parents(C) == ['A', 'B']``.  That matters because every mechanism's
+        tabulation is laid out in its *fit-time* parent order: permuting the
+        parent list transposes the CPT's axes and inference returns
+        confidently wrong probabilities with no error anywhere.
+        """
+        return [(p, n) for n in self.nodes() for p in self.parents(n)]
+
     def children(self, node: str) -> List[str]:
         return self._children.get(node, [])
 
