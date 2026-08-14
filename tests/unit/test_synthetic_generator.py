@@ -8,6 +8,7 @@ import networkx as nx
 import pytest
 import torch
 
+from benchmarking import synthetic as synthetic_mod
 from benchmarking.synthetic import (
     SyntheticBN,
     _FAMILIES,
@@ -167,11 +168,19 @@ def test_lg_fitter_recovers_true_weights_within_tolerance() -> None:
 # ---------------------------------------------------------------------- #
 
 
-def test_large_network_halves_n_reference_with_warning() -> None:
+def test_large_network_halves_n_reference_with_warning(monkeypatch) -> None:
+    """The assertion is that the guard fires and halves n_reference.
+
+    That needs a network *over the threshold*, not a large one — so lower the
+    threshold rather than building the 1000-node network the production
+    default implies.  Same code path, same warning, same halving, ~70s less
+    wall clock in every CI run.
+    """
+    monkeypatch.setattr(synthetic_mod, "_REFERENCE_LARGE_NETWORK_THRESHOLD", 20)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         bn = make_synthetic_bn(
-            family="discrete", n_nodes=1000,
+            family="discrete", n_nodes=25,
             n_train=200, n_test=50, n_reference=50_000,
             seed=0, device="cpu",
         )
