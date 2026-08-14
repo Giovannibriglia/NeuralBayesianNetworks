@@ -231,3 +231,24 @@ def test_train_history_is_populated_for_both_fit_methods():
     assert set(joint.node_log_likelihoods) == {"X", "Y"}
     for node in ("X", "Y"):
         assert joint.mean_ll(node) == joint.mean_ll(node)  # not NaN
+
+
+def test_joint_fit_without_parameters_explains_itself():
+    """torch's "empty parameter list" says nothing about the actual cause."""
+    torch.manual_seed(0)
+    model = NBN(
+        [("X", "Y")],
+        variables={"X": ("continuous", 1), "Y": ("continuous", 1)},
+        device="cpu",
+    )
+    model.set_mechanism("X", LinearGaussianMechanism())
+    model.set_mechanism("Y", LinearGaussianMechanism())
+    x = torch.randn(200, 1)
+    data = {"X": x, "Y": 2 * x + 0.1 * torch.randn(200, 1)}
+
+    with pytest.raises(RuntimeError, match="method='local' first"):
+        model.fit(data, method="joint", epochs=1)
+
+    # ...and the documented remedy works.
+    model.fit(data)
+    assert model.fit(data, method="joint", epochs=1).node_log_likelihoods

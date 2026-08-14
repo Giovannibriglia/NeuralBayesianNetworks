@@ -669,38 +669,88 @@ class NeuralBayesianNetwork(nn.Module):
         return model
 
     @classmethod
-    def from_bif(cls, path: str) -> NeuralBayesianNetwork:
-        """Load a discrete BN from a .bif file (uses pgmpy if available)."""
+    def from_bif(cls, path: str, device: str = "auto") -> NeuralBayesianNetwork:
+        """Load a discrete BN from a ``.bif`` file (requires pgmpy).
+
+        Every node gets a ``CategoricalTableMechanism`` holding the file's CPT
+        verbatim, so the returned model is immediately queryable and its
+        marginals match pgmpy's own inference on the same file.
+
+        ``device`` follows the same ``"auto"`` default as the constructor.
+
+        States are represented by their integer index: state ``i`` of a node is
+        ``cpd.state_names[node][i]``, and that mapping is preserved on the
+        returned model as ``state_names`` so callers can translate a label like
+        ``"yes"`` into the index that ``query(evidence=...)`` expects.
+
+        Notes
+        -----
+        The CPT axis order is read from ``cpd.variables[1:]``, which is the
+        authoritative layout of ``cpd.values``, and then *explicitly permuted*
+        into this model's ``dag.parents(node)`` order.  Getting that mapping
+        from any other source is a trap: pgmpy's ``get_evidence()`` returns the
+        axis order **reversed**, and a parent list read off the graph need not
+        match the CPT's axes at all — either way the CPT would be silently
+        transposed and every query would return confidently wrong
+        probabilities.  (This method previously read ``cpd.evidence`` and
+        ``model.topological_order``, both of which pgmpy has since removed, so
+        it raised ``AttributeError`` on any modern pgmpy.)
+        """
         try:
             from pgmpy.readwrite import BIFReader
-            reader = BIFReader(path)
-            model_pgmpy = reader.get_model()
         except ImportError as e:
             raise ImportError("from_bif requires pgmpy: pip install pgmpy") from e
 
-        edges = list(model_pgmpy.edges())
-        variables = {}
-        for node in model_pgmpy.nodes():
-            card = len(model_pgmpy.get_cpds(node).state_names[node])
-            variables[node] = ("discrete", card)
-        nbn_model = cls(edges, variables)
-
-        # Install fitted CategoricalTableMechanisms from the pgmpy CPDs
         import numpy as np
-        for node in model_pgmpy.topological_order:
-            cpd = model_pgmpy.get_cpds(node)
-            mech = CategoricalTableMechanism()
-            parents = list(model_pgmpy.get_parents(node))
-            k = cpd.variable_card
-            # Build dummy data for fit_local to infer cardinalities
-            # Use the CPT directly instead
-            parent_cards = [cpd.evidence_card[cpd.evidence.index(p)] for p in parents] if parents else []
-            n_parent_states = int(np.prod(parent_cards)) if parent_cards else 1
 
-            log_cpt = torch.log(
-                torch.tensor(cpd.values.reshape(k, n_parent_states).T, dtype=torch.float).clamp_min(1e-9)
+        model_pgmpy = BIFReader(path).get_model()
+
+        cpds = {}
+        variables: Dict[str, Any] = {}
+        state_names: Dict[str, list] = {}
+        for node in model_pgmpy.nodes():
+            cpd = model_pgmpy.get_cpds(node)
+            if cpd is None:
+                raise ValueError(
+                    f"'{path}' declares node '{node}' with no CPD; cannot build "
+                    f"a fitted model from it."
+                )
+            cpds[node] = cpd
+            state_names[node] = list(cpd.state_names[node])
+            variables[node] = ("discrete", len(state_names[node]))
+
+        # Build the graph from each CPT's own axis order, so a node's parents
+        # line up with its CPT axes by construction (the permutation below is
+        # then a no-op, but is applied regardless rather than assumed).
+        edges = [
+            (parent, node)
+            for node, cpd in cpds.items()
+            for parent in cpd.variables[1:]
+        ]
+        nbn_model = cls(edges, variables, device=device)
+        nbn_model.state_names = state_names
+
+        for node, cpd in cpds.items():
+            axis_parents = list(cpd.variables[1:])
+            parents = nbn_model.dag.parents(node)
+            if sorted(axis_parents) != sorted(parents):
+                raise ValueError(
+                    f"Parent mismatch for '{node}': CPT axes {axis_parents} vs "
+                    f"graph parents {parents}."
+                )
+            # Permute [K, *cards-in-CPT-order] -> [K, *cards-in-parents-order].
+            perm = [0] + [axis_parents.index(p) + 1 for p in parents]
+            values = np.transpose(np.asarray(cpd.values, dtype=float), perm)
+            k = int(values.shape[0])
+            parent_cards = [int(c) for c in values.shape[1:]]
+            # Row-major flatten over the permuted parent axes puts the LAST
+            # parent fastest — matching the strides built below.
+            flat = values.reshape(k, -1).T  # [n_parent_states, K]
+
+            mech = CategoricalTableMechanism()
+            mech._logits = nn.Parameter(
+                torch.log(torch.tensor(flat, dtype=torch.float).clamp_min(1e-9))
             )
-            mech._logits = nn.Parameter(log_cpt)
             mech._n_classes = k
             mech._parent_cards = parent_cards
             strides = []
@@ -711,7 +761,7 @@ class NeuralBayesianNetwork(nn.Module):
             mech._parent_strides = list(reversed(strides))
             mech._class_values = torch.arange(k, dtype=torch.float)
             mech.output_dim = 1
-            nbn_model.mechanisms[node] = mech
+            nbn_model.set_mechanism(node, mech)
 
         return nbn_model
 

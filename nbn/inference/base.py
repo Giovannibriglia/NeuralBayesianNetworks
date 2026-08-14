@@ -50,10 +50,30 @@ class InferenceEngine(ABC):
         evidence: Dict[str, torch.Tensor],
         **kwargs,
     ) -> torch.Tensor:
-        """Batched version of ``query``.  Default implementation loops; subclasses override."""
+        """Batched version of ``query``.  Default implementation loops; subclasses override.
+
+        Every engine shipped with nbn overrides this with a vectorised path,
+        so it is the reference implementation for third-party engines rather
+        than a hot path.
+
+        The per-row results are *stacked*, not concatenated: ``query``
+        returns a ``[K]`` probability vector for a single discrete target, and
+        concatenating B of those yields ``[B*K]`` — a silently wrong shape
+        that still indexes and still sums, so it fails far from its cause.
+        Engines whose ``query`` already returns ``[1, K]`` are concatenated as
+        before.
+        """
         b = next(iter(evidence.values())).shape[0]
         results = []
         for i in range(b):
             ev_i = {k: v[i:i+1] for k, v in evidence.items()}
             results.append(self.query(model, targets, ev_i, **kwargs))
+        if not all(isinstance(r, torch.Tensor) for r in results):
+            raise NotImplementedError(
+                f"{type(self).__name__}.query returned a non-tensor result "
+                f"(continuous targets yield a (weights, samples) tuple); "
+                f"override query_batch to define how those batch together."
+            )
+        if results[0].dim() == 1:
+            return torch.stack(results, dim=0)
         return torch.cat(results, dim=0)

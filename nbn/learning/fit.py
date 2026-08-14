@@ -167,7 +167,22 @@ def fit(
         epochs = 100 if epochs is None else epochs
         batch_size = 4096 if batch_size is None else batch_size
         lr = 1e-3 if lr is None else lr
-        opt = torch.optim.Adam(model.parameters(), lr=lr)
+        params = list(model.parameters())
+        if not params:
+            # torch would raise "optimizer got an empty parameter list", which
+            # says nothing about the cause.  Most mechanisms build their
+            # parameters inside fit_local from the data's shape
+            # (LinearGaussianMechanism._weight, MDNMechanism.net and
+            # NormalizingFlowMechanism._flow are all None until then), so a
+            # never-fitted model genuinely has nothing to optimise jointly.
+            raise RuntimeError(
+                "method='joint' has no parameters to optimise: no mechanism "
+                "has been fitted yet, and most build their parameters lazily "
+                "inside fit_local from the data's shape.  Run "
+                "model.fit(data) once with the default method='local' first, "
+                "then refine with method='joint'."
+            )
+        opt = torch.optim.Adam(params, lr=lr)
         nodes = model.dag.topological_order()
         n = next(iter(data_dev.values())).shape[0]
         for ep in range(epochs):

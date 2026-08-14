@@ -248,3 +248,31 @@ def test_intervening_on_the_target_returns_a_point_mass():
     torch.testing.assert_close(
         batched, torch.tensor([[1.0, 0.0], [0.0, 1.0]]), atol=1e-6, rtol=0,
     )
+
+
+def test_base_engine_query_batch_stacks_rather_than_concatenates():
+    """The reference implementation for third-party engines returned [B*K].
+
+    ``query`` yields a ``[K]`` vector per row for a single discrete target;
+    concatenating B of them gives ``[B*K]``, which still indexes and still
+    sums to B, so the wrong shape surfaces far from its cause.
+    """
+    from nbn.inference.base import InferenceEngine
+    from nbn.inference.tensor_ve import TensorVariableElimination
+
+    class LoopingEngine(InferenceEngine):
+        """Uses the base-class query_batch verbatim."""
+
+        def __init__(self):
+            self._ve = TensorVariableElimination()
+
+        def query(self, model, targets, evidence=None, **kwargs):
+            return self._ve.query(model, targets, evidence, **kwargs)
+
+    model = _confounded_model()
+    evidence = {"A": torch.tensor([0, 1, 0])}
+    out = LoopingEngine().query_batch(model, ["C"], evidence)
+    assert out.shape == (3, 2)
+    torch.testing.assert_close(
+        out, model.query_batch(["C"], evidence), atol=1e-6, rtol=1e-6,
+    )
