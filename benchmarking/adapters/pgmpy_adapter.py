@@ -414,7 +414,26 @@ class PgmpyAdapter:
         for cpd in self._model.get_cpds():
             j = node_idx[cpd.variable]
             betas = cpd.beta
-            evidence = list(cpd.evidence) if hasattr(cpd, "evidence") else []
+            # No hasattr fallback here.  This used to read
+            # ``list(cpd.evidence) if hasattr(cpd, "evidence") else []``, and
+            # that ``else []`` is a silent-wrong-number trap: an empty
+            # evidence list leaves row j of A all zeros, which drops the
+            # node's parents from the structural equation entirely.  The SEM
+            # then describes a *different, edge-free* network, every
+            # posterior below is computed from it, and nothing raises.  The
+            # attribute still exists in pgmpy 1.1.2, so the guard never fired
+            # — but pgmpy has removed sibling attributes before (``from_bif``
+            # died on exactly that), and this must fail loudly if it happens.
+            if not hasattr(cpd, "evidence"):
+                raise AttributeError(
+                    f"pgmpy's {type(cpd).__name__} no longer exposes "
+                    f"`.evidence`; _lg_posterior_moments needs it to place "
+                    f"the regression coefficients in the SEM.  Read the "
+                    f"parent order from the CPD's own variable list instead "
+                    f"of defaulting to 'no parents', which would silently "
+                    f"compute posteriors from an edge-free network."
+                )
+            evidence = list(cpd.evidence)
             b_vec[j] = float(betas[0])
             for k, ev_node in enumerate(evidence):
                 A[j, node_idx[ev_node]] = float(betas[k + 1])

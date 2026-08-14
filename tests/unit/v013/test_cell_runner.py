@@ -329,7 +329,13 @@ class TestFailureModes:
                 start_new_session=True,
                 env=env,
             )
-            proc.wait(timeout=10)
+            # 10s was too tight: the worker imports
+            # benchmarking.core.cell_worker (and torch beneath it), which
+            # under a parallel pytest run can take longer than that, turning
+            # a passing assertion into a TimeoutExpired.  The claim under
+            # test is that the cap is *enforced*, not that it is enforced
+            # quickly, so the budget is generous.
+            proc.wait(timeout=120)
             exit_code = proc.returncode
 
             # Expected: signal death (negative returncode or 137)

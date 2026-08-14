@@ -15,6 +15,7 @@ See docs/v0.13-runner-subprocess-isolation.md §3-4.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pickle
 import signal
@@ -23,6 +24,8 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 # Grace period (seconds) between SIGTERM and SIGKILL escalation
@@ -36,21 +39,88 @@ _SIGTERM_GRACE_S = 3.0
 # fires on the runaway subprocess at a threshold survivable for
 # the rest of the system, not at OS-distress.
 _MEMORY_LIMIT_FRACTION = 0.80
-_MEMORY_LIMIT_FLOOR_BYTES = 2 * 1024**3  # 2 GB
+
+# Floor for the per-cell RLIMIT_AS cap.
+#
+# RLIMIT_AS bounds *virtual address space*, not resident memory, and a torch
+# process reserves far more of the former than it ever touches. Measured on
+# this stack (torch 2.x + CUDA), importing torch under a cap of:
+#
+#     <= 4 GB  ->  import fails outright ("failed to map segment from shared
+#                  object", or libgomp "Thread creation failed")
+#        5 GB  ->  torch imports but torch.cuda.is_available() is False
+#     >= 6 GB  ->  imports cleanly with CUDA
+#
+# The floor was 2 GB, i.e. below the level at which a cell can start at all.
+# Whenever the host was busy enough for 0.80 x available to fall near it,
+# every cell died during import and the runner recorded status='oom' — a
+# spurious OOM indistinguishable from a real one. The 5 GB band is worse
+# still: the cell runs, silently on CPU, and reports timings for a device it
+# never used.
+#
+# 8 GB leaves headroom above the measured 6 GB threshold. A cap this size
+# only guards against genuinely runaway cells, which is all it was ever meant
+# to do — a cap below the viable floor is not a guard, it is a guaranteed
+# failure.
+_MEMORY_LIMIT_FLOOR_BYTES = 8 * 1024**3  # 8 GB
+
+#: Parent->worker contract for the per-cell cap. Also honoured as an operator
+#: override when already set in the environment (see below).
+MEMORY_LIMIT_ENV_VAR = "NBN_CELL_MEMORY_LIMIT_BYTES"
 
 
 def _compute_cell_memory_limit_bytes() -> int:
     """Return the per-cell virtual memory cap for the next subprocess.
 
-    Computed fresh per-call so it adapts to current system state
-    (other processes, accumulated runner state). Anchored to
-    psutil.virtual_memory().available rather than .total so the
-    cap respects what's actually allocatable right now.
+    An explicit ``NBN_CELL_MEMORY_LIMIT_BYTES`` in the environment wins.
+    That matters wherever psutil's view of "available" is not the view that
+    binds — a cgroup-limited container or a SLURM allocation sharing a node —
+    and it lets tests pin a deterministic cap instead of inheriting whatever
+    the host happens to have free.
+
+    Otherwise: computed fresh per-call so it adapts to current system state,
+    anchored to ``psutil.virtual_memory().available`` rather than ``.total``
+    so the cap respects what is actually allocatable right now, and floored
+    at ``_MEMORY_LIMIT_FLOOR_BYTES`` so it never lands below the level at
+    which a cell can start.
     """
+    override = os.environ.get(MEMORY_LIMIT_ENV_VAR)
+    if override:
+        try:
+            value = int(override)
+        except ValueError:
+            logger.warning(
+                "%s=%r is not an integer; ignoring the override and "
+                "computing the cap from available memory.",
+                MEMORY_LIMIT_ENV_VAR, override,
+            )
+        else:
+            if value > 0:
+                return value
+            logger.warning(
+                "%s=%d is not positive; ignoring the override.",
+                MEMORY_LIMIT_ENV_VAR, value,
+            )
+
     import psutil
     available = psutil.virtual_memory().available
-    return max(_MEMORY_LIMIT_FLOOR_BYTES,
-               int(available * _MEMORY_LIMIT_FRACTION))
+    computed = int(available * _MEMORY_LIMIT_FRACTION)
+    if computed < _MEMORY_LIMIT_FLOOR_BYTES:
+        # Report it: the cap is no longer bounded by this host's headroom, so
+        # a genuinely runaway cell has more rope than the fraction intended.
+        logger.warning(
+            "Only %.1f GiB available; the per-cell memory cap is pinned to "
+            "its %.1f GiB floor rather than %.1f GiB (%.0f%% of available). "
+            "A cap below the floor kills every cell during torch import and "
+            "reports it as an OOM.  Free memory on this host, or set %s "
+            "explicitly if a cgroup/SLURM limit is the real bound.",
+            available / 1024**3,
+            _MEMORY_LIMIT_FLOOR_BYTES / 1024**3,
+            computed / 1024**3,
+            _MEMORY_LIMIT_FRACTION * 100,
+            MEMORY_LIMIT_ENV_VAR,
+        )
+    return max(_MEMORY_LIMIT_FLOOR_BYTES, computed)
 
 
 @dataclass
@@ -112,7 +182,7 @@ def run_cell_in_subprocess(
     # worker (see cell_worker._apply_memory_limit).
     memory_limit_bytes = _compute_cell_memory_limit_bytes()
     env = os.environ.copy()
-    env["NBN_CELL_MEMORY_LIMIT_BYTES"] = str(memory_limit_bytes)
+    env[MEMORY_LIMIT_ENV_VAR] = str(memory_limit_bytes)
 
     try:
         # Launch the subprocess

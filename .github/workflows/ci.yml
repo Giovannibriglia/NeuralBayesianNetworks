@@ -38,7 +38,12 @@ jobs:
         run: mypy nbn/core nbn/mechanisms
 
       - name: Test
-        run: pytest -n auto --cov=nbn --cov-report=xml -m "not gpu and not slow"
+        # Runs the slow-marked tests too. They were excluded because the suite
+        # took ~25 minutes; with torch's per-worker thread pool pinned under
+        # xdist (see tests/conftest.py) the whole thing is ~80s, so there is
+        # no longer anything to buy by skipping them -- and `slow` had become
+        # "never runs anywhere", since this was the only workflow.
+        run: pytest -n auto --cov=nbn --cov-report=xml -m "not gpu"
 
       - name: Parameter-learning smoke
         run: nbn-bench param-learning --config benchmarking/configs/synthetic/smoke_tests/parameter_learning_smoke.yaml

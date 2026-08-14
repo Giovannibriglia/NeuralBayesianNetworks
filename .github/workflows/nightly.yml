@@ -1,0 +1,42 @@
+name: nightly
+
+# Upstream-drift canary.
+#
+# CI pins nothing and installs whatever resolves at the time of a push, so a
+# dependency can remove an API and nobody finds out until someone happens to
+# touch the affected code. That is exactly how `NeuralBayesianNetwork.from_bif`
+# rotted: pgmpy dropped `model.topological_order`, `cpd.evidence` and
+# `cpd.evidence_card`, the loader raised AttributeError on every modern pgmpy,
+# and because it had no callers and no tests nothing surfaced it for months.
+#
+# This lane reinstalls dependencies at their newest resolvable versions on a
+# schedule and runs the full suite, so upstream removals show up as a failing
+# nightly rather than as a silent hole in the library.
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # 03:00 UTC daily
+  workflow_dispatch: {}   # and on demand, e.g. before a release
+
+jobs:
+  upstream-drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install at newest resolvable versions
+        run: |
+          python -m pip install --upgrade pip
+          pip install --prefer-binary --upgrade --upgrade-strategy eager \
+            -e ".[dev,bench,neural,gp,mcmc]"
+
+      - name: Record resolved versions
+        run: pip freeze
+
+      - name: Run the full suite
+        run: pytest -n auto -m "not gpu" -q --durations=25

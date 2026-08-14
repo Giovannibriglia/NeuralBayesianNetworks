@@ -201,7 +201,23 @@ class TestKNNDiscrete:
 # ── FlexCodeMechanism ─────────────────────────────────────────────────────────
 
 class TestFlexCode:
-    def _fitted(self, **kw):
+    """FlexCode's fit is a 60-epoch MLP — by far the most expensive mechanism
+    fit in this file.  Every test below asked for the same fit (same seed,
+    same kwargs, same data) and got its own, so the class paid for six
+    identical trainings.  One class-scoped fixture, six assertions against
+    it: identical coverage, a sixth of the wall clock.
+
+    The fitted mechanism is shared, so no test may mutate its parameters.
+    ``test_grad_flow`` only populates ``.grad`` (no optimiser step), which
+    nothing else reads.
+    """
+
+    @pytest.fixture(scope="class")
+    def fitted(self):
+        return self._fit()
+
+    @staticmethod
+    def _fit(**kw):
         _seed(0)
         x, pa = _linear_scm()
         kw.setdefault("epochs", 60)
@@ -210,32 +226,32 @@ class TestFlexCode:
         info = mech.fit_local(x, pa)
         return mech, x, pa, info
 
-    def test_fit_returns_dict_and_marks_fitted(self):
-        mech, *_, info = self._fitted()
+    def test_fit_returns_dict_and_marks_fitted(self, fitted):
+        mech, *_, info = fitted
         assert isinstance(info, dict)
         assert mech.is_fitted
 
-    def test_log_prob_shape(self):
-        mech, x, pa, _ = self._fitted()
+    def test_log_prob_shape(self, fitted):
+        mech, x, pa, _ = fitted
         assert mech.log_prob(x[:5], pa[:5]).shape == (5,)
 
-    def test_sample_shape(self):
-        mech, x, pa, _ = self._fitted()
+    def test_sample_shape(self, fitted):
+        mech, x, pa, _ = fitted
         assert mech.sample(pa[:4], n=10).shape == (4, 10, 1)
 
-    def test_log_prob_finite(self):
-        mech, x, pa, _ = self._fitted()
+    def test_log_prob_finite(self, fitted):
+        mech, x, pa, _ = fitted
         assert torch.isfinite(mech.log_prob(x, pa)).all()
 
-    def test_integrates_to_one(self):
-        mech, x, pa, _ = self._fitted()
+    def test_integrates_to_one(self, fitted):
+        mech, x, pa, _ = fitted
         # FlexCode renormalises on its own internal grid; over the support it ≈1.
         lo, hi = mech._y_min.item(), mech._y_max.item()
         z = _grid_integral(mech, pa[:1], lo=lo, hi=hi, steps=4000)
         assert z == pytest.approx(1.0, abs=0.08)
 
-    def test_grad_flow(self):
-        mech, x, pa, _ = self._fitted()
+    def test_grad_flow(self, fitted):
+        mech, x, pa, _ = fitted
         lp = mech.log_prob(x[:16], pa[:16])
         (-lp.mean()).backward()
         assert any(p.grad is not None for p in mech.parameters())
