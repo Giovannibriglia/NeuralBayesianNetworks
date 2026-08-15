@@ -7,6 +7,12 @@ import torch
 import torch.nn as nn
 from torch.distributions import Categorical, Independent, MixtureSameFamily, Normal
 
+from nbn.learning.weighting import (
+    select,
+    validate_weights,
+    weighted_mean,
+    weighted_moments,
+)
 from nbn.mechanisms.base import Mechanism
 from nbn.update import online_laplace
 # _sanitise_parents was promoted to nbn.utils.batching (v0.14) so the flow
@@ -60,6 +66,7 @@ class MDNMechanism(Mechanism):
 
     is_discrete: bool = False
     supports_update: bool = True
+    supports_weights: bool = True
 
     def __init__(
         self,
@@ -118,12 +125,16 @@ class MDNMechanism(Mechanism):
         epochs: int = 200,
         lr: float = 1e-3,
         batch_size: int = 512,
+        weights: torch.Tensor | None = None,
         consolidate: bool = True,
         **kwargs,
     ) -> dict:
         x = ensure_2d(x)  # [N, D_x]
         n, d_x = x.shape
         device = x.device
+        w_vec = validate_weights(weights, n, where="MDNMechanism.fit_local")
+        if w_vec is not None:
+            w_vec = w_vec.to(device)
         self._d_x = d_x
         self.output_dim = d_x
         k = self.num_components
@@ -131,10 +142,14 @@ class MDNMechanism(Mechanism):
         if parents is None or parents.shape[-1] == 0:
             self._d_pa = 0
             # Learnable root parameters
+            # A root MDN is initialised analytically from the data moments and
+            # never enters the training loop below, so weighting has to be
+            # applied to the moments themselves.
+            loc0, scale0 = weighted_moments(x, w_vec, unbiased=True)
             self._root_logits = nn.Parameter(torch.zeros(k, device=device))
-            self._root_loc = nn.Parameter(x.mean(0).unsqueeze(0).expand(k, -1).clone())
+            self._root_loc = nn.Parameter(loc0.unsqueeze(0).expand(k, -1).clone())
             self._root_log_scale = nn.Parameter(
-                torch.log(x.std(0).clamp_min(1e-3)).unsqueeze(0).expand(k, -1).clone()
+                torch.log(scale0.clamp_min(1e-3)).unsqueeze(0).expand(k, -1).clone()
             )
         else:
             parents = ensure_2d(parents).to(device=device, dtype=x.dtype)
@@ -148,8 +163,13 @@ class MDNMechanism(Mechanism):
             # CUDA assert at LW inference (Bug B, issues #81 #24 #54).
             # Standardizing parents maps them to O(1) scale, keeping
             # log_scale finite throughout training and inference.
-            pa_mean = parents.mean(0, keepdim=True)
-            pa_std = parents.std(0, keepdim=True).clamp_min(1e-3)
+            # Weighted along with the loss: standardising against the
+            # *unweighted* spread would silently fit a model normalised for a
+            # data distribution the caller did not ask for, and would break
+            # replication equivalence in a way that still converges.
+            pa_m, pa_s = weighted_moments(parents, w_vec, unbiased=True)
+            pa_mean = pa_m.unsqueeze(0)
+            pa_std = pa_s.unsqueeze(0).clamp_min(1e-3)
             self._pa_mean = pa_mean.detach()
             self._pa_std = pa_std.detach()
             # Do NOT pre-standardize here: _params_from_parents applies
@@ -166,7 +186,12 @@ class MDNMechanism(Mechanism):
                 for i in range(0, n, batch_size):
                     idx = perm[i:i + batch_size]
                     bp, bx = parents[idx], x[idx]
-                    loss = -self._log_prob_2d(bx, bp).mean()
+                    # select() with the *same* idx: the permutation is local to
+                    # this loop, so the weights must be gathered here or they
+                    # desynchronise silently.
+                    loss = weighted_mean(
+                        -self._log_prob_2d(bx, bp), select(w_vec, idx),
+                    )
                     opt.zero_grad()
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.parameters(), 5.0)
@@ -198,6 +223,7 @@ class MDNMechanism(Mechanism):
         batch_size: int = 512,
         fisher_batch_size: int = 1,
         sample_cap: int = 4096,
+        weights: torch.Tensor | None = None,
         **kw,
     ) -> dict:
         """Fold new data in via online EWC (no rehearsal).
@@ -209,6 +235,14 @@ class MDNMechanism(Mechanism):
         (default) is the exact per-sample empirical Fisher; ``>1`` is a faster,
         biased-low approximation.
         """
+        if weights is not None:
+            raise NotImplementedError(
+                "MDNMechanism.update_local does not accept per-sample weights: "
+                "weighting is supported on the fitting path (fit / fit_local) "
+                "only.  A weighted fit does persist weighted sufficient "
+                "statistics, so update() folds new data onto the correct "
+                "prior — but the new data itself is taken at face value."
+            )
         x = ensure_2d(x)
         if parents is not None:
             parents = ensure_2d(parents).to(device=x.device, dtype=x.dtype)

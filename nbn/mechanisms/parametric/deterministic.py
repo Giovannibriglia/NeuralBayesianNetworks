@@ -92,6 +92,10 @@ class DeterministicMechanism(Mechanism):
     def log_prob(self, x: torch.Tensor, parents: torch.Tensor | None) -> torch.Tensor:
         return torch.zeros(x.shape[:-1], device=x.device, dtype=x.dtype)
 
+    # Vacuously true: fit_local estimates nothing from the data (the CPD is
+    # fixed at construction), so there is no statistic for a weight to bias.
+    supports_weights: bool = True
+
     def fit_local(self, x: torch.Tensor, parents: torch.Tensor | None, **kwargs) -> dict:
         return {}
 

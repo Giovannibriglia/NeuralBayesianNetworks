@@ -111,13 +111,31 @@ class KNNConditionalMechanism(Mechanism):
     # ------------------------------------------------------------------
     # Fitting
     # ------------------------------------------------------------------
+    # Deliberately False.  A k-NN estimator selects its k nearest neighbours
+    # by distance alone; there is no principled reading of a *fractional*
+    # multiplicity in that selection ("the 3.7th nearest neighbour" is not a
+    # thing), and inventing a weighted-vote variant would silently change
+    # which estimator the caller believes they fitted.  ``nbn.learning.fit``
+    # checks this flag before fitting any node, so a network containing one of
+    # these fails fast and names the node to swap.
+    supports_weights: bool = False
+
     def fit_local(
         self,
         x: torch.Tensor,
         parents: torch.Tensor | None,
         n_classes: int | None = None,
+        weights: torch.Tensor | None = None,
         **kwargs,
     ) -> dict:
+        if weights is not None:
+            raise NotImplementedError(
+                "KNNConditionalMechanism does not support per-sample weights: "
+                "k-nearest-neighbour selection is by distance alone, and a "
+                "fractional multiplicity has no principled reading in it.  Use "
+                "ConditionalKDEMechanism (weighted Nadaraya-Watson) or a "
+                "parametric mechanism for weighted fitting."
+            )
         device = x.device
         if self.discrete_child:
             y = x.long().reshape(-1)

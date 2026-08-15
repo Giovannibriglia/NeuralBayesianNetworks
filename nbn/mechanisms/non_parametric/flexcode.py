@@ -31,6 +31,12 @@ import torch
 import torch.nn as nn
 from torch.distributions import Distribution
 
+from nbn.learning.weighting import (
+    select,
+    validate_weights,
+    weighted_mean,
+    weighted_moments,
+)
 from nbn.mechanisms.base import Mechanism
 from nbn.mechanisms.parametric.mdn import _build_mlp
 from nbn.utils.batching import _sanitise_parents, ensure_2d, flatten_samples
@@ -83,6 +89,7 @@ class FlexCodeMechanism(Mechanism):
     """
 
     is_discrete: bool = False
+    supports_weights: bool = True
 
     def __init__(
         self,
@@ -138,7 +145,14 @@ class FlexCodeMechanism(Mechanism):
     # ------------------------------------------------------------------
     # Fitting
     # ------------------------------------------------------------------
-    def fit_local(self, x: torch.Tensor, parents: torch.Tensor | None, **kwargs) -> dict:
+    def fit_local(
+        self,
+        x: torch.Tensor,
+        parents: torch.Tensor | None,
+        weights: torch.Tensor | None = None,
+        **kwargs,
+    ) -> dict:
+        kwargs["weights"] = weights
         if self.sharpen == "auto":
             best = self._select_sharpen(x, parents, **kwargs)
             info = self._fit_core(x, parents, **kwargs)  # final coeffs on full data
@@ -168,14 +182,27 @@ class FlexCodeMechanism(Mechanism):
         val_idx, fit_idx = perm[:n_val], perm[n_val:]
         has_pa = parents is not None and parents.shape[-1] > 0
         pa = ensure_2d(parents).float() if has_pa else None
+        # The holdout must carry its own weights on both sides: the sub-fit is
+        # weighted like the real fit, and the score that picks ``sharpen`` is a
+        # weighted NLL.  Selecting an exponent against an unweighted holdout
+        # would tune the estimator for a data distribution the caller did not
+        # ask for.
+        w_all = validate_weights(
+            kwargs.pop("weights", None), n, where="FlexCodeMechanism.fit_local",
+        )
+        sub_kwargs = dict(kwargs)
+        sub_kwargs["weights"] = None if w_all is None else w_all[fit_idx]
+        w_val = None if w_all is None else w_all[val_idx]
         self.sharpen = 1.0
-        self._fit_core(y[fit_idx], pa[fit_idx] if has_pa else None, **kwargs)
+        self._fit_core(y[fit_idx], pa[fit_idx] if has_pa else None, **sub_kwargs)
         best_s, best_nll = 1.0, float("inf")
         for s in candidates:
             self.sharpen = float(s)
             with torch.no_grad():
-                nll = float((-self.log_prob(
-                    y[val_idx], pa[val_idx] if has_pa else None)).mean())
+                nll = float(weighted_mean(
+                    -self.log_prob(y[val_idx], pa[val_idx] if has_pa else None),
+                    w_val,
+                ))
             if nll == nll and nll < best_nll:  # nll == nll rejects NaN
                 best_nll, best_s = nll, float(s)
         self.sharpen = "auto"  # restore request; caller resolves to best_s
@@ -190,6 +217,11 @@ class FlexCodeMechanism(Mechanism):
             )
         n = y.shape[0]
         device = y.device
+        w_vec = validate_weights(
+            kwargs.get("weights"), n, where="FlexCodeMechanism.fit_local",
+        )
+        if w_vec is not None:
+            w_vec = w_vec.to(device)
         epochs = int(kwargs.get("epochs", self.epochs))
         lr = float(kwargs.get("lr", self.lr))
         batch_size = int(kwargs.get("batch_size", self.batch_size))
@@ -215,8 +247,9 @@ class FlexCodeMechanism(Mechanism):
         else:
             pa = ensure_2d(parents).float().to(device)
             self._d_pa = pa.shape[1]
-            self._pa_mean = pa.mean(0, keepdim=True)
-            self._pa_std = pa.std(0, keepdim=True).clamp_min(1e-3)
+            pa_m, pa_s = weighted_moments(pa, w_vec, unbiased=True)
+            self._pa_mean = pa_m.unsqueeze(0)
+            self._pa_std = pa_s.unsqueeze(0).clamp_min(1e-3)
             pa_std = (pa - self._pa_mean) / self._pa_std
             self.net = _build_mlp(self._d_pa, self.hidden, self.n_basis, self.activation).to(device)
             opt = torch.optim.Adam(self.parameters(), lr=lr)
@@ -226,7 +259,13 @@ class FlexCodeMechanism(Mechanism):
                 for i in range(0, n, batch_size):
                     idx = perm[i:i + batch_size]
                     pred = self.net(pa_std[idx])             # [b, J]
-                    loss = (pred - targets[idx]).pow(2).mean()
+                    # Weighted least squares on the basis coefficients: the
+                    # per-row squared error is reduced by a weighted mean over
+                    # the same idx the batch was drawn with.
+                    loss = weighted_mean(
+                        (pred - targets[idx]).pow(2).mean(dim=-1),
+                        select(w_vec, idx),
+                    )
                     opt.zero_grad()
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.parameters(), 5.0)

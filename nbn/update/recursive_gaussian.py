@@ -33,15 +33,36 @@ def design_matrix(parents, x):
     return torch.cat([pa, ones], dim=1)
 
 
-def batch_statistics(parents, x):
+def batch_statistics(parents, x, weights=None):
+    """Normal-equation sufficient statistics, optionally per-sample weighted.
+
+    ``weights`` is a non-negative ``[N]`` tensor of multiplicities.  Weighting
+    enters as ``A = z^T W z``, ``B = z^T W x``, ``c = sum w*x^2`` and
+    ``N = sum w``, i.e. exactly the statistics that replicating row ``i``
+    ``w_i`` times would produce.  Accumulated in float64 before casting back:
+    these are sums over every row, and weights from an EM E-step are long runs
+    of repeated, sometimes tiny values.
+    """
     x2 = x.reshape(x.shape[0], -1)
     z = design_matrix(parents, x2)
-    A = z.transpose(0, 1) @ z
-    B = z.transpose(0, 1) @ x2
-    c = (x2 * x2).sum(dim=0)
-    N = torch.tensor(float(x2.shape[0]), device=x2.device, dtype=x2.dtype)
     input_dim = 0 if z.shape[1] == 1 else z.shape[1] - 1
-    return NormalEquationState(A, B, c, N, input_dim)
+    zd, xd = z.to(torch.float64), x2.to(torch.float64)
+    if weights is None:
+        A = zd.transpose(0, 1) @ zd
+        B = zd.transpose(0, 1) @ xd
+        c = (xd * xd).sum(dim=0)
+        N = torch.tensor(float(x2.shape[0]), dtype=torch.float64, device=x2.device)
+    else:
+        w = weights.reshape(-1, 1).to(device=x2.device, dtype=torch.float64)
+        zw = zd * w
+        A = zw.transpose(0, 1) @ zd
+        B = zw.transpose(0, 1) @ xd
+        c = (w * xd * xd).sum(dim=0)
+        N = w.sum()
+    dt = x2.dtype
+    return NormalEquationState(
+        A.to(dt), B.to(dt), c.to(dt), N.to(dt), input_dim,
+    )
 
 
 def accumulate(prior, batch, *, forgetting: float = 1.0):

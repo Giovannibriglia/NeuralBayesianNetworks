@@ -225,6 +225,7 @@ class NeuralBayesianNetwork(nn.Module):
         batch_size: int | None = None,
         lr: float | None = None,
         consolidate: bool = True,
+        weights: torch.Tensor | None = None,
         **kwargs: Any,
     ):
         """Fit all node mechanisms to data on the model's device.
@@ -236,7 +237,12 @@ class NeuralBayesianNetwork(nn.Module):
         method:
             ``"local"`` (node-wise, default) or ``"joint"`` (shared optimiser).
         epochs, batch_size, lr:
-            Training hyperparameters. ``None`` (default) = each mechanism
+            Training hyperparameters.
+        weights:
+            Optional ``[N]`` non-negative per-sample multiplicities aligned
+            with the data rows (an EM M-step's responsibilities, say).  See
+            :func:`nbn.learning.fit.fit` for the semantics; mechanisms that
+            cannot honour them raise before any node is fitted. ``None`` (default) = each mechanism
             uses its own designed budget (flow 300 epochs @ lr 5e-4, MDN 200,
             neural-categorical 100, ...); explicit values override globally
             for every mechanism.
@@ -264,6 +270,8 @@ class NeuralBayesianNetwork(nn.Module):
                 batch_size=batch_size, lr=lr,
                 consolidate=consolidate,
                 device=str(self._device),
+                weights=(None if weights is None
+                         else torch.as_tensor(weights).to(self._device)),
                 **kwargs,
             )
         finally:

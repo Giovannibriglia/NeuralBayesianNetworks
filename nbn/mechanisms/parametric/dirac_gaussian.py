@@ -99,6 +99,10 @@ class DiracGaussianMechanism(Mechanism):
         lp = lp.sum(-1)
         return lp.squeeze(1) if squeeze_s else lp
 
+    # Vacuously true: fit_local estimates nothing from the data (the CPD is
+    # fixed at construction), so there is no statistic for a weight to bias.
+    supports_weights: bool = True
+
     def fit_local(
         self, x: torch.Tensor, parents: torch.Tensor | None, **kwargs
     ) -> dict:

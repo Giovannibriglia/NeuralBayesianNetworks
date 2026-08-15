@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Categorical
 
+from nbn.learning.weighting import select, validate_weights, weighted_mean
 from nbn.mechanisms.base import Mechanism
 from nbn.mechanisms.parametric.mdn import _build_mlp
 from nbn.update import online_laplace
@@ -33,6 +34,7 @@ class NeuralCategoricalMechanism(Mechanism):
     """
 
     is_discrete: bool = True
+    supports_weights: bool = True
     supports_update: bool = True
 
     def __init__(
@@ -73,12 +75,18 @@ class NeuralCategoricalMechanism(Mechanism):
         epochs: int = 100,
         lr: float = 1e-3,
         batch_size: int = 512,
+        weights: torch.Tensor | None = None,
         consolidate: bool = True,
         **kwargs,
     ) -> dict:
         x = x.long().reshape(-1)
         k = self.n_classes
         device = x.device
+        w_vec = validate_weights(
+            weights, x.shape[0], where="NeuralCategoricalMechanism.fit_local",
+        )
+        if w_vec is not None:
+            w_vec = w_vec.to(device)
 
         if parents is None or parents.shape[-1] == 0:
             self._d_pa = 0
@@ -88,7 +96,15 @@ class NeuralCategoricalMechanism(Mechanism):
             # v0.7-#43 audit.  Closed-form MLE for a marginal categorical
             # is the empirical log-frequency; ``+1e-8`` smoothing avoids
             # ``log(0)`` when a class doesn't appear in train_data.
-            counts = torch.bincount(x, minlength=k).float() + 1e-8
+            # Root MLE is the empirical log-frequency; weighting makes those
+            # frequencies weighted counts.  float64 accumulation for the same
+            # reason as CategoricalTableMechanism.
+            if w_vec is None:
+                counts = torch.bincount(x, minlength=k).to(torch.float64)
+            else:
+                counts = torch.zeros(k, device=device, dtype=torch.float64)
+                counts.scatter_add_(0, x, w_vec)
+            counts = counts.float() + 1e-8
             log_freq = torch.log(counts / counts.sum())
             self._root_logits = nn.Parameter(log_freq.to(device))
             if consolidate:
@@ -117,7 +133,12 @@ class NeuralCategoricalMechanism(Mechanism):
                 idx = perm[i:i + batch_size]
                 bp, bx = parents[idx], x[idx]
                 logits = self._logits_from_parents(bp.float())
-                loss = nn.CrossEntropyLoss()(logits, bx)
+                # reduction="none" so rows can be weighted before the mean;
+                # CrossEntropyLoss's own reduction would average them first.
+                loss = weighted_mean(
+                    nn.functional.cross_entropy(logits, bx, reduction="none"),
+                    select(w_vec, idx),
+                )
                 opt.zero_grad(); loss.backward()
                 opt.step()
         self.eval()
@@ -144,6 +165,7 @@ class NeuralCategoricalMechanism(Mechanism):
         batch_size: int = 512,
         fisher_batch_size: int = 1,
         sample_cap: int = 4096,
+        weights: torch.Tensor | None = None,
         **kw,
     ) -> dict:
         """Fold new data in via online EWC (no rehearsal).
@@ -155,6 +177,14 @@ class NeuralCategoricalMechanism(Mechanism):
         (default) is the exact per-sample empirical Fisher; ``>1`` is a faster,
         biased-low approximation.
         """
+        if weights is not None:
+            raise NotImplementedError(
+                "NeuralCategoricalMechanism.update_local does not accept per-sample weights: "
+                "weighting is supported on the fitting path (fit / fit_local) "
+                "only.  A weighted fit does persist weighted sufficient "
+                "statistics, so update() folds new data onto the correct "
+                "prior — but the new data itself is taken at face value."
+            )
         x = x.long().reshape(-1)
         if parents is not None:
             parents = ensure_2d(parents).to(device=x.device)

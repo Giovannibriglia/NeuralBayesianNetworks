@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Independent, Normal
 
+from nbn.learning.weighting import validate_weights, weighted_moments
 from nbn.mechanisms.base import Mechanism
 from nbn.update import recursive_gaussian
 from nbn.utils.batching import ensure_2d, flatten_samples
@@ -27,6 +28,7 @@ class LinearGaussianMechanism(Mechanism):
 
     is_discrete: bool = False
     supports_update: bool = True
+    supports_weights: bool = True
 
     def __init__(
         self,
@@ -60,24 +62,38 @@ class LinearGaussianMechanism(Mechanism):
         self,
         x: torch.Tensor,
         parents: torch.Tensor | None,
+        weights: torch.Tensor | None = None,
         **kwargs,
     ) -> dict:
-        """Closed-form ridge regression.
+        """Closed-form ridge regression, optionally weighted least squares.
 
         Parameters
         ----------
         x: shape ``[N, D_x]``.
         parents: shape ``[N, D_pa]``, or ``None`` for root nodes.
+        weights: optional ``[N]`` non-negative per-sample multiplicities.
+
+        Notes
+        -----
+        Weighting is applied by scaling each data row of the design matrix and
+        target by ``sqrt(w_i)``, which reproduces the weighted normal
+        equations exactly; the ridge rows appended below are deliberately
+        *not* scaled, so the penalty keeps the strength the caller asked for
+        rather than one that drifts with the weights' magnitude.  Replicating
+        a row ``k`` times and weighting it by ``k`` give the same solve.
         """
         x = ensure_2d(x)
         n, d_x = x.shape
         device = x.device
         self.output_dim = d_x
+        w_vec = validate_weights(weights, n, where="LinearGaussianMechanism.fit_local")
+        if w_vec is not None:
+            w_vec = w_vec.to(device)
 
         if parents is None or (parents.numel() > 0 and parents.shape[-1] == 0):
             # Root node: fit a simple Gaussian
-            mean = x.mean(0)
-            std = x.std(0, unbiased=False).clamp_min(1e-6)
+            mean, std = weighted_moments(x, w_vec)
+            std = std.clamp_min(1e-6)
             w = torch.zeros(0, d_x, device=device, dtype=x.dtype)
             b = mean
             log_s = torch.log(std)
@@ -89,22 +105,35 @@ class LinearGaussianMechanism(Mechanism):
             ones = torch.ones(n, 1, device=device, dtype=x.dtype)
             x_aug = torch.cat([parents, ones], dim=1)  # [N, D_pa+1]
 
+            # Weighted least squares == unweighted least squares on rows
+            # pre-scaled by sqrt(w).  Applied to the data rows only; the ridge
+            # block below is appended afterwards and stays unscaled.
+            if w_vec is None:
+                x_fit, y_fit = x_aug, x
+            else:
+                rw = w_vec.sqrt().to(x.dtype).reshape(-1, 1)
+                x_fit, y_fit = x_aug * rw, x * rw
+
             if self.ridge > 0:
                 reg_pa = math.sqrt(self.ridge) * torch.eye(
                     d_pa, device=device, dtype=x.dtype
                 )
                 reg_row = torch.zeros(d_pa, 1, device=device, dtype=x.dtype)
                 reg_x = torch.cat([reg_pa, reg_row], dim=1)
-                x_aug_r = torch.cat([x_aug, reg_x], dim=0)
-                y_r = torch.cat([x, torch.zeros(d_pa, d_x, device=device, dtype=x.dtype)], dim=0)
+                x_aug_r = torch.cat([x_fit, reg_x], dim=0)
+                y_r = torch.cat(
+                    [y_fit, torch.zeros(d_pa, d_x, device=device, dtype=x.dtype)],
+                    dim=0,
+                )
             else:
-                x_aug_r, y_r = x_aug, x
+                x_aug_r, y_r = x_fit, y_fit
 
             theta = torch.linalg.lstsq(x_aug_r, y_r).solution  # [D_pa+1, D_x]
             w = theta[:-1]       # [D_pa, D_x]
             b = theta[-1]        # [D_x]
+            # Residual scale on the *unscaled* rows, weighted by w.
             resid = x - x_aug @ theta
-            std = resid.std(0, unbiased=False).clamp_min(self.min_scale)
+            std = weighted_moments(resid, w_vec)[1].clamp_min(self.min_scale)
             log_s = torch.log(std)
 
         self._set_params(w, b, log_s)
@@ -112,7 +141,10 @@ class LinearGaussianMechanism(Mechanism):
         # Persist normal-equation sufficient statistics so update_local can
         # accumulate new data without rehearsal (posterior-as-prior).  Uses the
         # same design matrix Z = [parents, 1] the closed-form fit solves over.
-        st = recursive_gaussian.batch_statistics(parents, x)
+        # Weighted too, so a weighted fit followed by an incremental update
+        # stays coherent: an unweighted sufficient-statistics snapshot would
+        # make update() fold new data onto a prior that never existed.
+        st = recursive_gaussian.batch_statistics(parents, x, weights=w_vec)
         self._neq_A = st.A.detach().clone()
         self._neq_B = st.B.detach().clone()
         self._neq_c = st.c.detach().clone()
@@ -155,6 +187,7 @@ class LinearGaussianMechanism(Mechanism):
         parents: torch.Tensor | None,
         *,
         forgetting: float = 1.0,
+        weights: torch.Tensor | None = None,
         **kwargs,
     ) -> dict:
         """Fold new data into the linear-Gaussian CPD via recursive least sq.
@@ -164,6 +197,14 @@ class LinearGaussianMechanism(Mechanism):
         ``fit``→``update`` reproduces a single pooled ridge fit (to solver
         precision); ``forgetting < 1.0`` fades the older statistics.
         """
+        if weights is not None:
+            raise NotImplementedError(
+                "LinearGaussianMechanism.update_local does not accept per-sample weights: "
+                "weighting is supported on the fitting path (fit / fit_local) "
+                "only.  A weighted fit does persist weighted sufficient "
+                "statistics, so update() folds new data onto the correct "
+                "prior — but the new data itself is taken at face value."
+            )
         assert self._neq_A is not None, "call fit_local before update_local"
         x = ensure_2d(x)
         prior = recursive_gaussian.NormalEquationState(
