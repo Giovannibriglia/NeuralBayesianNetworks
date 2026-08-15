@@ -12,6 +12,7 @@ from nbn.mechanisms.base import Mechanism
 from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
 from nbn.mechanisms.parametric.linear_gaussian import LinearGaussianMechanism
 from nbn.mechanisms.parametric.mdn import MDNMechanism
+from nbn.utils.batching import pack_parents
 from nbn.utils.device import resolve_device, to_device
 
 logger = logging.getLogger(__name__)
@@ -288,6 +289,81 @@ class NeuralBayesianNetwork(nn.Module):
             )
         finally:
             self._cache_version += 1
+
+    # ------------------------------------------------------------------
+    # Scoring
+    # ------------------------------------------------------------------
+
+    def log_prob(
+        self,
+        data: Mapping[str, torch.Tensor],
+        *,
+        per_node: bool = False,
+    ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Complete-data log-likelihood of each row under the fitted model.
+
+        Returns ``[N]`` — the per-row sum over nodes of
+        ``log p(x_i | pa(x_i))``.  Not reduced: callers weighting rows (an EM
+        E-step multiplying by responsibilities, say) need the per-row vector,
+        and a scalar cannot be un-summed.
+
+        Parameters
+        ----------
+        data:
+            Dict node → tensor ``[N, D]`` or ``[N]``.  **Every node in the DAG
+            must be present.**  A missing node raises rather than being
+            skipped or marginalised: skipping it would silently return the
+            likelihood of a *different, smaller* model, which is a plausible
+            number that is not the likelihood of anything.  Latent variables
+            must be supplied by the caller — imputed, enumerated, or sampled.
+        per_node:
+            If True, return ``{node: [N]}`` instead of the summed ``[N]``.
+            The decomposition is what you need to attribute likelihood to a
+            particular mechanism (does the *action* channel explain this data,
+            or the *reward* channel?) without re-deriving the loop.
+
+        Returns
+        -------
+        torch.Tensor ``[N]``, or Dict[str, torch.Tensor] when ``per_node``.
+
+        Notes
+        -----
+        Gradient-transparent: the result carries autograd back to both the
+        mechanisms' parameters and any caller-computed tensor in ``data``.
+        See ``sample`` for the interventional counterpart; note that
+        ``query``/``query_batch`` are *not* differentiable by design.
+        """
+        nodes = self.dag.topological_order()
+
+        missing = [n for n in nodes if n not in data]
+        if missing:
+            raise ValueError(
+                f"log_prob needs a column for every node; missing "
+                f"{sorted(missing)}.  Nodes are not skipped or marginalised "
+                f"— supply latent variables explicitly (imputed, enumerated, "
+                f"or sampled), otherwise the returned number is the "
+                f"likelihood of a different model."
+            )
+        unfitted = [n for n in nodes if n not in self.mechanisms]
+        if unfitted:
+            raise RuntimeError(
+                f"No mechanism registered for node(s) {sorted(unfitted)}; "
+                f"fit the model before scoring."
+            )
+
+        data_dev = to_device(dict(data), self._device)
+        per: Dict[str, torch.Tensor] = {}
+        for node in nodes:
+            pa_tensor = pack_parents(data_dev, self.dag.parents(node))
+            lp = self.mechanisms[node].log_prob(data_dev[node], pa_tensor)
+            per[node] = lp.reshape(lp.shape[0]) if lp.dim() > 1 else lp
+
+        if per_node:
+            return per
+        total = None
+        for lp in per.values():
+            total = lp if total is None else total + lp
+        return total
 
     # ------------------------------------------------------------------
     # Inference

@@ -149,7 +149,7 @@ def fit(
             # scored on the very rows just fitted.  ``fit`` has no validation
             # split and no early stopping — callers who need a held-out
             # estimate must hold data out themselves and score it with
-            # ``model.log_prob`` / ``score_data``.
+            # ``NeuralBayesianNetwork.log_prob``.
             with torch.no_grad():
                 lp = mech.log_prob(x, pa_tensor)
                 mean_ll = float(lp.mean())
