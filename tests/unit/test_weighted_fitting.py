@@ -282,14 +282,26 @@ def test_zero_weighted_rows_do_not_influence_mdn_gradients():
 # ==========================================================================
 
 
-def test_unit_weights_reproduce_the_unweighted_fit_exactly():
+def test_unit_weights_reproduce_the_unweighted_linear_gaussian():
+    """To numerical precision, deliberately — not bitwise.
+
+    The weighted path multiplies the design matrix by ``sqrt(w)``, which is a
+    no-op numerically at ``w = 1`` but still hands LAPACK a freshly-built
+    tensor.  Whether ``lstsq`` then returns bit-identical coefficients depends
+    on the thread count (identical single-threaded, ~1e-7 apart at 14
+    threads), and the thread count now varies with how the suite is invoked.
+    Asserting bitwise equality here is therefore a claim about BLAS
+    scheduling, not about the weighting; the tolerance below is the real
+    contract.  The integer-count path in the next test *is* exact, and is
+    asserted as such.
+    """
     x, pa, _ = _lg_data()
     a = LinearGaussianMechanism()
     a.fit_local(x, pa, weights=torch.ones(x.shape[0]))
     b = LinearGaussianMechanism()
     b.fit_local(x, pa)
-    assert torch.equal(a._weight, b._weight)
-    assert torch.equal(a._bias, b._bias)
+    torch.testing.assert_close(a._weight, b._weight, atol=1e-6, rtol=0)
+    torch.testing.assert_close(a._bias, b._bias, atol=1e-6, rtol=0)
 
 
 def test_unit_weights_reproduce_the_unweighted_categorical_exactly():
@@ -300,6 +312,7 @@ def test_unit_weights_reproduce_the_unweighted_categorical_exactly():
     a.fit_local(x, pa, weights=torch.ones(150), parent_cards=[3], n_classes=2)
     b = CategoricalTableMechanism()
     b.fit_local(x, pa, parent_cards=[3], n_classes=2)
+    # Exact: both paths scatter-add the same float64 ones into the same bins.
     assert torch.equal(a.cpt, b.cpt)
 
 
