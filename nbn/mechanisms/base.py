@@ -24,6 +24,30 @@ class Mechanism(nn.Module, ABC):
     -----------------
     parents: ``[B, D_pa]`` (2-D) or ``[B, S, D_pa]`` (3-D with particle dim).
     x:       ``[B, D_x]``  (2-D) or ``[B, S, D_x]`` (3-D).
+
+    Snapshotting and restoring parameters
+    -------------------------------------
+    To take a step and be able to reject it — a monotone generalized-EM loop
+    backtracking an M-step that decreased the objective — use torch's own
+    ``state_dict`` / ``load_state_dict``.  There is no NBN-specific API for
+    this and none is needed, but **the snapshot must be copied**::
+
+        snap = copy.deepcopy(mech.state_dict())   # or {k: v.clone() for ...}
+        ...                                       # optimiser step
+        mech.load_state_dict(snap)                # reverts exactly
+
+    ``state_dict()`` returns tensors that *share storage* with the live
+    parameters, and optimisers update parameters in place, so an uncopied
+    snapshot is mutated by the very step it is supposed to undo.  Nothing
+    raises; the parameters simply fail to revert, and a backtracking M-step
+    would silently accept every step it meant to reject.
+
+    The round trip covers parameters *and* buffers (``LinearGaussianMechanism``'s
+    normal equations, ``MDNMechanism``'s standardisation statistics).  It does
+    not cover fit-time structural attributes such as ``_parent_cards`` or
+    ``_n_classes`` — those describe the CPD's shape, are set once at fit time,
+    and are not altered by an optimiser step.  Pinned by
+    ``tests/unit/test_parameter_snapshot_contract.py``.
     """
 
     is_discrete: bool = False
