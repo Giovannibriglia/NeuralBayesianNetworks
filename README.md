@@ -144,6 +144,23 @@ intervention, use `model.sample(n, do=...)`**, which applies it against the
 live parameters; `intervene()` is for building a mutilated model to *query*.
 The contract is pinned by `tests/unit/test_parent_gradient_contract.py`.
 
+### Snapshotting parameters
+
+To take an optimisation step and be able to reject it (backtracking an M-step
+that decreased the objective, say), use torch's `state_dict` / `load_state_dict`
+— but **copy the snapshot**:
+
+```python
+snap = copy.deepcopy(mech.state_dict())   # NOT mech.state_dict()
+...                                       # optimiser step
+mech.load_state_dict(snap)                # reverts exactly
+```
+
+`state_dict()` returns tensors sharing storage with the live parameters, and
+optimisers update in place, so an uncopied snapshot is mutated by the step it
+is meant to undo — silently, with nothing raising. Pinned by
+`tests/unit/test_parameter_snapshot_contract.py`.
+
 ## Repository layout
 
     nbn/                Library code (mechanisms, inference, sampling, core).
