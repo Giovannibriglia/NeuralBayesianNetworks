@@ -263,4 +263,4 @@ See the [open issues](https://github.com/Giovannibriglia/NeuralBayesianNetworks/
 
 ## License
 
-Apache 2.0.
+Apache License 2.0 — see [LICENSE](LICENSE).
