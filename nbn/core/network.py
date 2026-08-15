@@ -84,6 +84,32 @@ class NeuralBayesianNetwork(nn.Module):
         Inference engine to use for ``query()``/``query_batch()``.
         ``"auto"`` selects ``HybridRouter``.
 
+    Gradients
+    ---------
+    Parent tensors and ``do=`` values are **gradient-transparent**: a value
+    computed by the caller's own ``nn.Module`` and passed in carries autograd
+    back to that module's parameters.  This holds for
+
+    * ``mechanism.log_prob(x, parents)``
+    * ``model.log_prob(data)`` (also with ``per_node=True``)
+    * ``model.sample(n)`` and ``model.sample(n, do=...)`` — including
+      gradients with respect to the intervention value itself
+
+    Two paths are deliberately **not** differentiable, and the asymmetry is
+    easy to trip over:
+
+    * ``query`` / ``query_batch`` — variable elimination detaches when it
+      builds its factors, and likelihood weighting runs under
+      ``torch.inference_mode()``.  Both are deliberate performance decisions.
+    * ``intervene(do=...)`` — it returns a ``copy.deepcopy``, so the returned
+      model's parameters are fresh leaves and backward through it reaches
+      neither the original model nor the caller's intervention value.
+
+    **When you need gradients through an intervention, use
+    ``model.sample(n, do=...)``**, which applies the intervention against the
+    live parameters.  ``intervene()`` is for building a mutilated model to
+    query, not for differentiating through one.
+
     Examples
     --------
     >>> from nbn import NeuralBayesianNetwork as NBN
@@ -421,6 +447,14 @@ class NeuralBayesianNetwork(nn.Module):
         torch.Tensor
             For a single discrete target: ``[K]`` probability vector.
             For continuous or multi-target: ``(weights, samples)`` tuple.
+
+        Notes
+        -----
+        The result is **not differentiable**: variable elimination detaches at
+        factor build and likelihood weighting runs under
+        ``torch.inference_mode()``.  For a gradient path through an
+        intervention use ``sample(n, do=...)``; for one through a likelihood
+        use ``log_prob``.
         """
         if "device" in kwargs:
             raise TypeError(
