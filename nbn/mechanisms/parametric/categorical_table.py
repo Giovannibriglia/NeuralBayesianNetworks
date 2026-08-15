@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Categorical
 
+from nbn.learning.weighting import validate_weights
 from nbn.mechanisms.base import Mechanism
 from nbn.utils.batching import ensure_2d, flatten_samples
 
@@ -64,12 +65,15 @@ class CategoricalTableMechanism(Mechanism):
     # Fitting
     # ------------------------------------------------------------------
 
+    supports_weights: bool = True
+
     def fit_local(
         self,
         x: torch.Tensor,
         parents: torch.Tensor | None,
         parent_cards: List[int] | None = None,
         n_classes: int | None = None,
+        weights: torch.Tensor | None = None,
         **kwargs,
     ) -> dict:
         """Vectorized count-based MLE with Dirichlet(alpha) smoothing.
@@ -150,9 +154,21 @@ class CategoricalTableMechanism(Mechanism):
         x_idx = x  # [N]
 
         flat_idx = parent_idx * k + x_idx  # [N]
-        counts = torch.zeros(n_parent_states * k, device=device, dtype=torch.float)
-        counts.scatter_add_(0, flat_idx, torch.ones(n, device=device))
-        counts = counts.reshape(n_parent_states, k)
+        # Accumulate in float64: with weights from an EM E-step the summands
+        # are long runs of repeated, sometimes tiny values, and float32 loses
+        # digits exactly where the per-parent-state normaliser needs them.
+        # Unweighted counts of 1.0 are integers well inside float32's exact
+        # range, so the default result is unchanged by the wider accumulator.
+        w = validate_weights(weights, n, where="CategoricalTableMechanism.fit_local")
+        contrib = (
+            torch.ones(n, device=device, dtype=torch.float64)
+            if w is None else w.to(device)
+        )
+        counts = torch.zeros(
+            n_parent_states * k, device=device, dtype=torch.float64,
+        )
+        counts.scatter_add_(0, flat_idx, contrib)
+        counts = counts.reshape(n_parent_states, k).to(torch.float)
 
         # Persist the *raw* count table as the sufficient statistics for
         # incremental update (posterior-as-prior).  Smoothing (the #127
@@ -201,6 +217,7 @@ class CategoricalTableMechanism(Mechanism):
         n_classes: int | None = None,
         *,
         forgetting: float = 1.0,
+        weights: torch.Tensor | None = None,
         **kw,
     ) -> dict:
         """Fold new data into the CPT via conjugate Dirichlet accumulation.
@@ -212,6 +229,14 @@ class CategoricalTableMechanism(Mechanism):
         geometrically fades the old raw counts, the intended drift-tracking
         behaviour.
         """
+        if weights is not None:
+            raise NotImplementedError(
+                "CategoricalTableMechanism.update_local does not accept per-sample weights: "
+                "weighting is supported on the fitting path (fit / fit_local) "
+                "only.  A weighted fit does persist weighted sufficient "
+                "statistics, so update() folds new data onto the correct "
+                "prior — but the new data itself is taken at face value."
+            )
         from nbn.update import dirichlet as di
 
         assert self._counts is not None, "call fit_local before update_local"

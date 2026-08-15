@@ -126,6 +126,24 @@ posterior = engine.query_batch(model, ["C"], {"A": torch.tensor([0, 1, 2, 3])})
 For continuous, hybrid, and neural-mechanism examples, see the test suite
 under `tests/integration/`.
 
+### Gradients
+
+Parent values and `do=` values are gradient-transparent — a parent computed by
+your own `nn.Module` carries autograd back into it:
+
+| path | differentiable |
+|---|---|
+| `mechanism.log_prob(x, parents)` | yes |
+| `model.log_prob(data)`, incl. `per_node=True` | yes |
+| `model.sample(n)` / `model.sample(n, do=v)` | yes, w.r.t. parameters **and** `v` |
+| `model.query` / `model.query_batch` | **no** — VE detaches at factor build, LW runs under `torch.inference_mode()` |
+| `model.intervene(do=...)` | **no** — returns a `deepcopy`, so its parameters are fresh leaves |
+
+The last two are deliberate. **When you need gradients through an
+intervention, use `model.sample(n, do=...)`**, which applies it against the
+live parameters; `intervene()` is for building a mutilated model to *query*.
+The contract is pinned by `tests/unit/test_parent_gradient_contract.py`.
+
 ## Repository layout
 
     nbn/                Library code (mechanisms, inference, sampling, core).
@@ -245,4 +263,4 @@ See the [open issues](https://github.com/Giovannibriglia/NeuralBayesianNetworks/
 
 ## License
 
-Apache 2.0.
+Apache License 2.0 — see [LICENSE](LICENSE).

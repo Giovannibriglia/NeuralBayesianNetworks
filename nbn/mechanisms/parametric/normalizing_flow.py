@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Distribution
 
+from nbn.learning.weighting import select, validate_weights, weighted_mean
 from nbn.mechanisms.base import Mechanism
 from nbn.utils.batching import _sanitise_parents, ensure_2d, flatten_samples
 
@@ -58,6 +59,7 @@ class NormalizingFlowMechanism(Mechanism):
     """
 
     is_discrete: bool = False
+    supports_weights: bool = True
 
     def __init__(
         self,
@@ -104,11 +106,15 @@ class NormalizingFlowMechanism(Mechanism):
         epochs: int = 300,
         lr: float = 5e-4,
         batch_size: int = 512,
+        weights: torch.Tensor | None = None,
         **kwargs,
     ) -> dict:
         x = ensure_2d(x)  # [N, D_x]
         n, d_x = x.shape
         device = x.device
+        w_vec = validate_weights(weights, n, where="NormalizingFlowMechanism.fit_local")
+        if w_vec is not None:
+            w_vec = w_vec.to(device)
         self.d_x = d_x
         self.output_dim = d_x
 
@@ -126,8 +132,11 @@ class NormalizingFlowMechanism(Mechanism):
             for _ in range(epochs):
                 perm = torch.randperm(n, device=device)
                 for i in range(0, n, batch_size):
-                    bx = x[perm[i:i + batch_size]]
-                    loss = -self._flow(None).log_prob(bx).mean()
+                    idx = perm[i:i + batch_size]
+                    bx = x[idx]
+                    loss = weighted_mean(
+                        -self._flow(None).log_prob(bx), select(w_vec, idx),
+                    )
                     opt.zero_grad(); loss.backward(); opt.step()
         else:
             self.train()
@@ -136,7 +145,9 @@ class NormalizingFlowMechanism(Mechanism):
                 for i in range(0, n, batch_size):
                     idx = perm[i:i + batch_size]
                     bp, bx = parents[idx], x[idx]
-                    loss = -self._flow(bp).log_prob(bx).mean()
+                    loss = weighted_mean(
+                        -self._flow(bp).log_prob(bx), select(w_vec, idx),
+                    )
                     opt.zero_grad(); loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.parameters(), 5.0)
                     opt.step()

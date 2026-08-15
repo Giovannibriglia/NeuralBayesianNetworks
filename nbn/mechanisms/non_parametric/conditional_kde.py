@@ -40,6 +40,7 @@ import math
 import torch
 from torch.distributions import Distribution
 
+from nbn.learning.weighting import validate_weights, weighted_moments
 from nbn.mechanisms.base import Mechanism
 from nbn.utils.batching import _sanitise_parents, ensure_2d, flatten_samples
 
@@ -98,6 +99,7 @@ class ConditionalKDEMechanism(Mechanism):
     """
 
     is_discrete: bool = False
+    supports_weights: bool = True
 
     def __init__(
         self,
@@ -121,6 +123,13 @@ class ConditionalKDEMechanism(Mechanism):
         self._d_pa = 0
         # Buffers (populated by fit_local) — carried by .to(device)/state_dict.
         self.register_buffer("_train_y", None)   # [N, D_x]
+        # log of each training point's weight, or None when unweighted.  A
+        # weighted conditional KDE is the natural estimator here: the
+        # Nadaraya-Watson ratio simply carries w_i on every kernel, in both
+        # the numerator and the denominator, so the weights cancel out of a
+        # constant and a weight of 0 removes the point exactly (log 0 = -inf
+        # drops it from both logsumexps).
+        self.register_buffer("_train_logw", None)  # [N]
         self.register_buffer("_train_pa", None)   # [N, D_pa] standardised, or empty
         self.register_buffer("_h", None)          # [D_pa] parent bandwidths (std space)
         self.register_buffer("_b", None)          # [D_x] child bandwidths
@@ -150,10 +159,25 @@ class ConditionalKDEMechanism(Mechanism):
     # ------------------------------------------------------------------
     # Fitting
     # ------------------------------------------------------------------
-    def fit_local(self, x: torch.Tensor, parents: torch.Tensor | None, **kwargs) -> dict:
+    def fit_local(
+        self,
+        x: torch.Tensor,
+        parents: torch.Tensor | None,
+        weights: torch.Tensor | None = None,
+        **kwargs,
+    ) -> dict:
+        w = validate_weights(
+            weights, ensure_2d(x).shape[0],
+            where="ConditionalKDEMechanism.fit_local",
+        )
         if self.bw_factor == "auto":
             self.bw_factor = self._select_bw_factor(x, parents)
-        return self._fit_core(x, parents, **kwargs)
+        info = self._fit_core(x, parents, _w_vec=w, **kwargs)
+        self._train_logw = (
+            None if w is None
+            else torch.log(w.to(device=self._train_y.device)).to(self._train_y.dtype)
+        )
+        return info
 
     def _select_bw_factor(
         self,
@@ -201,8 +225,9 @@ class ConditionalKDEMechanism(Mechanism):
         else:
             pa = ensure_2d(parents).float().to(device)
             self._d_pa = pa.shape[1]
-            self._pa_mean = pa.mean(0, keepdim=True)
-            self._pa_std = pa.std(0, keepdim=True).clamp_min(self.min_bandwidth)
+            pa_m, pa_s = weighted_moments(pa, kwargs.get("_w_vec"), unbiased=True)
+            self._pa_mean = pa_m.unsqueeze(0)
+            self._pa_std = pa_s.unsqueeze(0).clamp_min(self.min_bandwidth)
             pa_std_space = (pa - self._pa_mean) / self._pa_std
             self._train_pa = pa_std_space
             self._h = self._rule_bandwidth(pa_std_space)
@@ -245,9 +270,10 @@ class ConditionalKDEMechanism(Mechanism):
             tpa = self._train_pa                              # [N, D_pa]
             h = self._h.to(device)
 
+        logw = self._train_logw
         neg_inf = torch.full((m,), float("-inf"), device=device)
-        log_num = neg_inf.clone()   # logsumexp_i [logK_pa + logK_y]
-        log_den = neg_inf.clone()   # logsumexp_i [logK_pa]
+        log_num = neg_inf.clone()   # logsumexp_i [log w_i + logK_pa + logK_y]
+        log_den = neg_inf.clone()   # logsumexp_i [log w_i + logK_pa]
         for start in range(0, n, self.train_chunk):
             sl = slice(start, start + self.train_chunk)
             ty_c = ty[sl]                                     # [c, D_x]
@@ -260,6 +286,9 @@ class ConditionalKDEMechanism(Mechanism):
                 tpa_c = tpa[sl]                                # [c, D_pa]
                 dx = (xs.unsqueeze(1) - tpa_c.unsqueeze(0)) / h  # [M, c, D_pa]
                 logKpa = (-0.5 * dx.pow(2)).sum(-1)            # [M, c] (norm const drops out)
+            if logw is not None:
+                # Broadcast this chunk's log-weights across the query axis.
+                logKpa = logKpa + logw[sl].to(device).unsqueeze(0)
             log_num = torch.logaddexp(log_num, torch.logsumexp(logKpa + logKy, dim=1))
             log_den = torch.logaddexp(log_den, torch.logsumexp(logKpa, dim=1))
         return log_num - log_den

@@ -33,6 +33,16 @@ class Mechanism(nn.Module, ABC):
     # ``fit_local`` (e.g. categorical counts, linear-Gaussian normal equations)
     # set this True; ``nbn.update.orchestrate`` skips any node where it is False.
     supports_update: bool = False
+    # Whether ``fit_local`` honours a per-sample ``weights`` vector.  Checked
+    # by ``nbn.learning.fit`` *before* any node is fitted, so an unsupported
+    # mechanism fails fast instead of after half the network is done.
+    #
+    # It has to be an explicit capability rather than a convention: every
+    # ``fit_local`` ends in ``**kwargs``, so a ``weights=`` a mechanism does
+    # not implement would be silently swallowed — yielding an unweighted fit
+    # that looks like a converged weighted one, which is the worst outcome
+    # available here.
+    supports_weights: bool = False
 
     @abstractmethod
     def forward(
@@ -113,7 +123,16 @@ class Mechanism(nn.Module, ABC):
     def fit_local(
         self, x: torch.Tensor, parents: torch.Tensor | None, **kwargs
     ) -> dict:
-        """Closed-form or small-loop local MLE.  Returns a dict of metrics."""
+        """Closed-form or small-loop local MLE.  Returns a dict of metrics.
+
+        Implementations that set ``supports_weights = True`` accept a
+        ``weights`` keyword: a non-negative ``[N]`` tensor of per-sample
+        multiplicities aligned with ``x``.  The contract is replication
+        equivalence — fitting with integer weights must equal fitting on the
+        data with each row repeated that many times — and a weight of exactly
+        0 must be indistinguishable from dropping the row.  See
+        :mod:`nbn.learning.weighting`.
+        """
 
     def update_local(
         self, x: torch.Tensor, parents: torch.Tensor | None, **kwargs

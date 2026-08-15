@@ -12,6 +12,7 @@ from nbn.mechanisms.base import Mechanism
 from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
 from nbn.mechanisms.parametric.linear_gaussian import LinearGaussianMechanism
 from nbn.mechanisms.parametric.mdn import MDNMechanism
+from nbn.utils.batching import pack_parents
 from nbn.utils.device import resolve_device, to_device
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,32 @@ class NeuralBayesianNetwork(nn.Module):
     default_engine:
         Inference engine to use for ``query()``/``query_batch()``.
         ``"auto"`` selects ``HybridRouter``.
+
+    Gradients
+    ---------
+    Parent tensors and ``do=`` values are **gradient-transparent**: a value
+    computed by the caller's own ``nn.Module`` and passed in carries autograd
+    back to that module's parameters.  This holds for
+
+    * ``mechanism.log_prob(x, parents)``
+    * ``model.log_prob(data)`` (also with ``per_node=True``)
+    * ``model.sample(n)`` and ``model.sample(n, do=...)`` — including
+      gradients with respect to the intervention value itself
+
+    Two paths are deliberately **not** differentiable, and the asymmetry is
+    easy to trip over:
+
+    * ``query`` / ``query_batch`` — variable elimination detaches when it
+      builds its factors, and likelihood weighting runs under
+      ``torch.inference_mode()``.  Both are deliberate performance decisions.
+    * ``intervene(do=...)`` — it returns a ``copy.deepcopy``, so the returned
+      model's parameters are fresh leaves and backward through it reaches
+      neither the original model nor the caller's intervention value.
+
+    **When you need gradients through an intervention, use
+    ``model.sample(n, do=...)``**, which applies the intervention against the
+    live parameters.  ``intervene()`` is for building a mutilated model to
+    query, not for differentiating through one.
 
     Examples
     --------
@@ -198,6 +225,7 @@ class NeuralBayesianNetwork(nn.Module):
         batch_size: int | None = None,
         lr: float | None = None,
         consolidate: bool = True,
+        weights: torch.Tensor | None = None,
         **kwargs: Any,
     ):
         """Fit all node mechanisms to data on the model's device.
@@ -209,7 +237,12 @@ class NeuralBayesianNetwork(nn.Module):
         method:
             ``"local"`` (node-wise, default) or ``"joint"`` (shared optimiser).
         epochs, batch_size, lr:
-            Training hyperparameters. ``None`` (default) = each mechanism
+            Training hyperparameters.
+        weights:
+            Optional ``[N]`` non-negative per-sample multiplicities aligned
+            with the data rows (an EM M-step's responsibilities, say).  See
+            :func:`nbn.learning.fit.fit` for the semantics; mechanisms that
+            cannot honour them raise before any node is fitted. ``None`` (default) = each mechanism
             uses its own designed budget (flow 300 epochs @ lr 5e-4, MDN 200,
             neural-categorical 100, ...); explicit values override globally
             for every mechanism.
@@ -237,6 +270,8 @@ class NeuralBayesianNetwork(nn.Module):
                 batch_size=batch_size, lr=lr,
                 consolidate=consolidate,
                 device=str(self._device),
+                weights=(None if weights is None
+                         else torch.as_tensor(weights).to(self._device)),
                 **kwargs,
             )
         finally:
@@ -288,6 +323,81 @@ class NeuralBayesianNetwork(nn.Module):
             )
         finally:
             self._cache_version += 1
+
+    # ------------------------------------------------------------------
+    # Scoring
+    # ------------------------------------------------------------------
+
+    def log_prob(
+        self,
+        data: Mapping[str, torch.Tensor],
+        *,
+        per_node: bool = False,
+    ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Complete-data log-likelihood of each row under the fitted model.
+
+        Returns ``[N]`` — the per-row sum over nodes of
+        ``log p(x_i | pa(x_i))``.  Not reduced: callers weighting rows (an EM
+        E-step multiplying by responsibilities, say) need the per-row vector,
+        and a scalar cannot be un-summed.
+
+        Parameters
+        ----------
+        data:
+            Dict node → tensor ``[N, D]`` or ``[N]``.  **Every node in the DAG
+            must be present.**  A missing node raises rather than being
+            skipped or marginalised: skipping it would silently return the
+            likelihood of a *different, smaller* model, which is a plausible
+            number that is not the likelihood of anything.  Latent variables
+            must be supplied by the caller — imputed, enumerated, or sampled.
+        per_node:
+            If True, return ``{node: [N]}`` instead of the summed ``[N]``.
+            The decomposition is what you need to attribute likelihood to a
+            particular mechanism (does the *action* channel explain this data,
+            or the *reward* channel?) without re-deriving the loop.
+
+        Returns
+        -------
+        torch.Tensor ``[N]``, or Dict[str, torch.Tensor] when ``per_node``.
+
+        Notes
+        -----
+        Gradient-transparent: the result carries autograd back to both the
+        mechanisms' parameters and any caller-computed tensor in ``data``.
+        See ``sample`` for the interventional counterpart; note that
+        ``query``/``query_batch`` are *not* differentiable by design.
+        """
+        nodes = self.dag.topological_order()
+
+        missing = [n for n in nodes if n not in data]
+        if missing:
+            raise ValueError(
+                f"log_prob needs a column for every node; missing "
+                f"{sorted(missing)}.  Nodes are not skipped or marginalised "
+                f"— supply latent variables explicitly (imputed, enumerated, "
+                f"or sampled), otherwise the returned number is the "
+                f"likelihood of a different model."
+            )
+        unfitted = [n for n in nodes if n not in self.mechanisms]
+        if unfitted:
+            raise RuntimeError(
+                f"No mechanism registered for node(s) {sorted(unfitted)}; "
+                f"fit the model before scoring."
+            )
+
+        data_dev = to_device(dict(data), self._device)
+        per: Dict[str, torch.Tensor] = {}
+        for node in nodes:
+            pa_tensor = pack_parents(data_dev, self.dag.parents(node))
+            lp = self.mechanisms[node].log_prob(data_dev[node], pa_tensor)
+            per[node] = lp.reshape(lp.shape[0]) if lp.dim() > 1 else lp
+
+        if per_node:
+            return per
+        total = None
+        for lp in per.values():
+            total = lp if total is None else total + lp
+        return total
 
     # ------------------------------------------------------------------
     # Inference
@@ -345,6 +455,14 @@ class NeuralBayesianNetwork(nn.Module):
         torch.Tensor
             For a single discrete target: ``[K]`` probability vector.
             For continuous or multi-target: ``(weights, samples)`` tuple.
+
+        Notes
+        -----
+        The result is **not differentiable**: variable elimination detaches at
+        factor build and likelihood weighting runs under
+        ``torch.inference_mode()``.  For a gradient path through an
+        intervention use ``sample(n, do=...)``; for one through a likelihood
+        use ``log_prob``.
         """
         if "device" in kwargs:
             raise TypeError(

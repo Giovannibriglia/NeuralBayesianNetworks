@@ -76,6 +76,14 @@ write_to = "nbn/_version.py"
 # numeric portion so v0.6c-d resolves to 0.6 and setuptools-scm bumps to
 # 0.7.dev{N}+g{SHA} for installs.  Tag itself stays intact in git/docs/paper.
 tag_regex = "^v(?P<version>\\d+\\.\\d+(?:\\.\\d+)?)"
+# Version reported when no tag is reachable.  This is the load-bearing half for
+# anyone vendoring the library: setuptools-scm derives the version from the
+# nearest tag, so a shallow or tagless clone -- exactly what a vendored
+# snapshot usually is -- falls back to its default 0.1.dev{N}. Two snapshots
+# then report versions ordered by *clone depth* rather than by commit, which is
+# how a later commit came to look older than an earlier one downstream. Pinning
+# the fallback makes that case obviously-unknown instead of plausibly-wrong.
+fallback_version = "0.14.0.dev0+unknown"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

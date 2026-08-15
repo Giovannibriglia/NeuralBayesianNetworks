@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Dict, List
 
 import torch
 
+from nbn.learning.weighting import select, validate_weights, weighted_mean
 from nbn.utils.batching import pack_parents
 
 if TYPE_CHECKING:
@@ -44,6 +45,7 @@ def fit(
     lr: float | None = None,
     device: str | None = None,
     log_every: int = 10,
+    weights: torch.Tensor | None = None,
     consolidate: bool = True,
     **kwargs: Any,
 ) -> TrainHistory:
@@ -77,6 +79,18 @@ def fit(
         Target device; data is moved here.
     log_every:
         Log progress every N nodes.
+    weights:
+        Optional ``[N]`` non-negative per-sample multiplicities aligned with
+        the data rows.  They are *not* a probability distribution and need not
+        sum to 1: ``w = [2, 1]`` means the first row counts twice, and fitting
+        with integer weights equals fitting on the data with each row repeated
+        that many times.  A weight of exactly 0 is equivalent to dropping the
+        row.  Gradient-trained mechanisms reduce with a weighted **mean**
+        (``sum w*nll / sum w``) so the effective step size does not scale with
+        the weights' overall magnitude — see :mod:`nbn.learning.weighting`.
+
+        Mechanisms that cannot honour weights raise *before* any node is
+        fitted; see ``Mechanism.supports_weights``.
     consolidate:
         If True (default), neural mechanisms snapshot their post-fit EWC
         state (theta* + diagonal Fisher) so ``model.update()`` works later.
@@ -98,6 +112,32 @@ def fit(
     data_dev: Dict[str, torch.Tensor] = {
         k: v.to(dev) for k, v in data.items()
     }
+
+    n_rows = next(iter(data_dev.values())).shape[0]
+    w_vec = validate_weights(weights, n_rows, where="fit")
+    if w_vec is not None:
+        w_vec = w_vec.to(dev)
+        # Fail before any node is fitted, not after half the network is done.
+        # The check has to be explicit: every fit_local ends in **kwargs, so a
+        # `weights=` a mechanism does not implement would be swallowed in
+        # silence and produce an unweighted fit that looks like a converged
+        # weighted one.  Name both the class and the node, because a network
+        # has many of each and "kNN does not support weights" does not say
+        # which one to swap.
+        unsupported = [
+            (node, type(model.mechanisms[node]).__name__)
+            for node in model.dag.topological_order()
+            if node in model.mechanisms
+            and not getattr(model.mechanisms[node], "supports_weights", False)
+        ]
+        if unsupported:
+            listed = ", ".join(f"{cls} at node '{node}'" for node, cls in unsupported)
+            raise NotImplementedError(
+                f"weights= was given, but these mechanisms do not support "
+                f"per-sample weights: {listed}.  Swap them for a weighting "
+                f"mechanism (ConditionalKDE rather than KNNConditional, say), "
+                f"or fit without weights."
+            )
 
     history = TrainHistory(device=device)
     t0 = time.perf_counter()
@@ -124,6 +164,8 @@ def fit(
             if batch_size is not None:
                 mech_kwargs["batch_size"] = batch_size
             mech_kwargs["consolidate"] = consolidate
+            if w_vec is not None:
+                mech_kwargs["weights"] = w_vec
 
             # Bug 1a (#127): thread declared cardinalities so tabular
             # mechanisms span the full declared range rather than truncating
@@ -149,7 +191,7 @@ def fit(
             # scored on the very rows just fitted.  ``fit`` has no validation
             # split and no early stopping — callers who need a held-out
             # estimate must hold data out themselves and score it with
-            # ``model.log_prob`` / ``score_data``.
+            # ``NeuralBayesianNetwork.log_prob``.
             with torch.no_grad():
                 lp = mech.log_prob(x, pa_tensor)
                 mean_ll = float(lp.mean())
@@ -192,13 +234,16 @@ def fit(
             for start in range(0, n, batch_size):
                 idx = perm[start:start + batch_size]
                 batch = {k: v[idx] for k, v in data_dev.items()}
+                # Same idx as the batch: this loop owns the permutation, so
+                # the weights are gathered here or they desynchronise.
+                bw = select(w_vec, idx)
                 loss = torch.tensor(0.0, device=dev)
                 for node in nodes:
                     mech = model.mechanisms[node]
                     parents = model.dag.parents(node)
                     pa = pack_parents(batch, parents)
                     lp = mech.log_prob(batch[node], pa)
-                    loss = loss - lp.mean()
+                    loss = loss - weighted_mean(lp, bw)
                 opt.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
