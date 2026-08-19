@@ -34,6 +34,7 @@ from nbn.mechanisms import (
     NeuralCategoricalMechanism,
 )
 from nbn.mechanisms.non_parametric.conditional_kde import ConditionalKDEMechanism
+from nbn.mechanisms.non_parametric.flexcode import FlexCodeMechanism
 from nbn.mechanisms.non_parametric.knn_conditional import KNNConditionalMechanism
 
 
@@ -481,3 +482,88 @@ def test_kde_weighting_shifts_density_toward_weighted_points():
     tilted = ConditionalKDEMechanism(bw_factor=1.0)
     tilted.fit_local(x, None, weights=torch.cat([torch.ones(50), 9 * torch.ones(50)]))
     assert float(tilted.log_prob(query, None)) > float(even.log_prob(query, None))
+
+
+# ==========================================================================
+# FlexCode -- the root branch's closed-form coefficients
+# ==========================================================================
+# A root FlexCode node's coefficients are the closed form beta_j = E[phi_j(Z)].
+# That branch computed ``targets.mean(0)`` and dropped the validated weight
+# vector, so ``supports_weights = True`` was false for exactly this node type:
+# the fit converged, to the unweighted estimator.  Nothing raised and nothing
+# in the output said so -- the same silent-wrong-answer class as a
+# desynchronised weight vector, which is why it is pinned here rather than
+# left to the warm-start suite.
+
+
+def test_flexcode_root_replication_equivalence():
+    """Integer weights must equal fitting on the replicated rows."""
+    torch.manual_seed(0)
+    x = torch.randn(60, 1)
+    w = torch.randint(1, 4, (60,)).float()
+    idx = _replicate(w)
+
+    weighted = FlexCodeMechanism(n_basis=7)
+    weighted.fit_local(x, None, weights=w)
+    replicated = FlexCodeMechanism(n_basis=7)
+    replicated.fit_local(x[idx], None)
+
+    # The basis is evaluated in the z-space fixed by (_y_min, _y_max); the
+    # replicated data has the same min/max, so the two z-spaces coincide and
+    # the coefficients are directly comparable.
+    torch.testing.assert_close(weighted._y_min, replicated._y_min)
+    torch.testing.assert_close(weighted._y_max, replicated._y_max)
+    torch.testing.assert_close(
+        weighted._root_coef, replicated._root_coef, atol=1e-5, rtol=0,
+    )
+
+
+def test_flexcode_root_unit_weights_reproduce_the_unweighted_fit_exactly():
+    """weights=None and an all-ones vector must not merely agree -- be equal."""
+    torch.manual_seed(1)
+    x = torch.randn(50, 1)
+
+    unweighted = FlexCodeMechanism(n_basis=7)
+    unweighted.fit_local(x, None)
+    ones = FlexCodeMechanism(n_basis=7)
+    ones.fit_local(x, None, weights=torch.ones(50))
+
+    torch.testing.assert_close(
+        unweighted._root_coef, ones._root_coef, atol=1e-6, rtol=0,
+    )
+
+
+def test_flexcode_root_zero_weighted_rows_leave_the_estimate():
+    """A zero weight must be indistinguishable from dropping the row.
+
+    The z-space is fixed by ``(_y_min, _y_max)``, which are the data's range
+    regardless of weights, so the dropped block is placed strictly *inside*
+    the kept block's range: removing it leaves the support -- and therefore
+    the basis -- untouched, and the coefficients are directly comparable.
+    """
+    torch.manual_seed(2)
+    kept = torch.cat([
+        torch.tensor([[-3.0], [3.0]]), 6.0 * torch.rand(38, 1) - 3.0,
+    ])
+    dropped = 0.2 * torch.randn(40, 1)          # well inside [-3, 3]
+    x = torch.cat([kept, dropped])
+    w = torch.cat([torch.ones(40), torch.zeros(40)])
+
+    masked = FlexCodeMechanism(n_basis=7)
+    masked.fit_local(x, None, weights=w)
+    without = FlexCodeMechanism(n_basis=7)
+    without.fit_local(kept, None)
+
+    torch.testing.assert_close(masked._y_min, without._y_min)
+    torch.testing.assert_close(masked._y_max, without._y_max)
+    torch.testing.assert_close(
+        masked._root_coef, without._root_coef, atol=1e-6, rtol=0,
+    )
+
+    # And the weights genuinely bite: an unweighted fit on the same rows,
+    # which the dropped cluster dominates, lands somewhere else.
+    pooled = FlexCodeMechanism(n_basis=7)
+    pooled.fit_local(x, None)
+    assert not torch.allclose(
+        masked._root_coef, pooled._root_coef, atol=1e-3,
+    )

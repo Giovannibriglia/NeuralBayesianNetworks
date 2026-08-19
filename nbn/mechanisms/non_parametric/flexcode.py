@@ -242,8 +242,16 @@ class FlexCodeMechanism(Mechanism):
             self._d_pa = 0
             self._pa_mean = torch.zeros(1, 0, device=device)
             self._pa_std = torch.ones(1, 0, device=device)
-            # Closed form: beta_j = E[phi_j(Z)].
-            self._root_coef = nn.Parameter(targets.mean(0))
+            # Closed form: beta_j = E[phi_j(Z)] -- a *weighted* expectation
+            # when the caller supplies per-sample multiplicities.  This branch
+            # used ``targets.mean(0)`` and dropped ``w_vec`` on the floor, so a
+            # root FlexCode node silently returned the unweighted estimator
+            # while the class advertised ``supports_weights = True``.  That is
+            # a wrong answer rather than a missing feature: the fit converges,
+            # to the wrong coefficients.  ``weighted_moments(...)[0]`` is the
+            # per-column weighted mean and reduces to ``targets.mean(0)``
+            # exactly when ``w_vec is None``.
+            self._root_coef = nn.Parameter(weighted_moments(targets, w_vec)[0])
         else:
             pa = ensure_2d(parents).float().to(device)
             self._d_pa = pa.shape[1]
