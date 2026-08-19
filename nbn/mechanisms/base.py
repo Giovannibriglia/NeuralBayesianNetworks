@@ -48,6 +48,14 @@ class Mechanism(nn.Module, ABC):
     ``_n_classes`` — those describe the CPD's shape, are set once at fit time,
     and are not altered by an optimiser step.  Pinned by
     ``tests/unit/test_parameter_snapshot_contract.py``.
+
+    ``warm_start=True`` widens the reach of that requirement.  A cold refit
+    allocates *new* parameter tensors, so an uncopied ``state_dict()``
+    accidentally survived a subsequent ``fit_local``; under a warm start the
+    objects persist and the fit mutates them in place, so the snapshot is
+    clobbered by the very call it was taken to undo.  ``copy.deepcopy`` was
+    load-bearing only across optimiser steps before; it is load-bearing
+    across ``fit_local`` calls now.
     """
 
     is_discrete: bool = False
@@ -67,6 +75,25 @@ class Mechanism(nn.Module, ABC):
     # that looks like a converged weighted one, which is the worst outcome
     # available here.
     supports_weights: bool = False
+    # Whether ``warm_start=True`` has no effect on this mechanism's *non-root*
+    # branch, because its fit is independent of the previous parameters — a
+    # closed-form maximiser (categorical counts, linear-Gaussian normal
+    # equations) or a stored training sample (KDE, k-NN).  There
+    # ``warm_start=True`` is accepted and ignored, and ``fit_local`` reports
+    # ``warm_started: False``.
+    #
+    # Deliberately *not* spelled ``supports_warm_start``.  A same-shaped flag
+    # sitting next to ``supports_weights`` would carry the opposite failure
+    # semantics: an unsupported ``weights=`` **raises**, an ineffective
+    # ``warm_start=`` is **silently ignored** — correctly so, because
+    # recomputing an exact maximiser *is* the continuation.  The double
+    # negative is worth avoiding that trap.
+    #
+    # It describes the non-root branch only.  Root branches are always
+    # no-ops: a root MDN is initialised analytically from the data moments and
+    # never trained, so it must keep tracking the E-step rather than freeze.
+    # See :mod:`nbn.learning.warm_start`.
+    warm_start_is_noop: bool = True
 
     @abstractmethod
     def forward(
@@ -156,6 +183,18 @@ class Mechanism(nn.Module, ABC):
         data with each row repeated that many times — and a weight of exactly
         0 must be indistinguishable from dropping the row.  See
         :mod:`nbn.learning.weighting`.
+
+        Every implementation also accepts ``warm_start: bool = False``.  The
+        default rebuilds from a fresh initialisation, preserving the
+        historical behaviour exactly.  ``True`` continues from the parameters
+        the mechanism already holds — a fresh optimiser over the existing
+        point, with data-derived standardisation buffers frozen — and raises
+        ``ValueError`` rather than silently rebuilding if the shapes are
+        incompatible.  On a mechanism whose fit is initialisation-independent
+        it is an accepted no-op.  Every implementation reports
+        ``warm_started: bool`` in the returned dict, ``True`` only when
+        parameters were actually carried over.  See
+        :mod:`nbn.learning.warm_start` for the full contract.
         """
 
     def update_local(
