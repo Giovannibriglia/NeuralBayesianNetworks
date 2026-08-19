@@ -47,6 +47,7 @@ def fit(
     log_every: int = 10,
     weights: torch.Tensor | None = None,
     consolidate: bool = True,
+    warm_start: bool = False,
     **kwargs: Any,
 ) -> TrainHistory:
     """Fit all node mechanisms to data.
@@ -98,6 +99,37 @@ def fit(
         (it costs up to ``sample_cap`` sequential backward passes per node);
         ``model.update()`` on such a model raises until refit with
         ``consolidate=True``.
+
+        Callers running ``fit`` in a loop -- an EM outer loop, say -- pay that
+        Fisher pass on *every* iteration.  It is almost always wanted only on
+        the final fit, if at all; ``warm_start`` deliberately does not change
+        this default, so pass ``consolidate=False`` explicitly.
+    warm_start:
+        If True, each mechanism continues from the parameters it already
+        holds rather than rebuilding from a fresh initialisation.  Default
+        False reproduces the historical behaviour exactly.
+
+        This is what makes an iterative caller's second call a *refinement*
+        rather than an independent refit — the premise an EM M-step needs.
+        A fresh optimiser is built over the existing parameters (momentum
+        restarts, the point is kept), data-derived standardisation buffers
+        freeze, and an incompatible shape raises rather than silently
+        rebuilding.  Mechanisms whose fit is the exact closed-form maximiser
+        accept it as a documented no-op — including the *root* branches of
+        MDN, neural-categorical and FlexCode, which must keep tracking the
+        E-step.  Each mechanism reports ``warm_started`` in the metrics it
+        returns; see :mod:`nbn.learning.warm_start` for the full contract.
+
+        It is an explicit parameter rather than a ``**kwargs`` passenger on
+        purpose: passed through ``kwargs`` it would be swallowed in silence by
+        any mechanism that did not implement it, which is the same silent
+        failure the ``supports_weights`` check exists to prevent.  No
+        fail-fast scan is needed here, though, because every mechanism accepts
+        it.
+
+        ``method="joint"`` optimises the parameters that are already there and
+        never rebuilds, so it is inherently warm; the flag is accepted and has
+        no effect on that path.
 
     Returns
     -------
@@ -164,6 +196,7 @@ def fit(
             if batch_size is not None:
                 mech_kwargs["batch_size"] = batch_size
             mech_kwargs["consolidate"] = consolidate
+            mech_kwargs["warm_start"] = warm_start
             if w_vec is not None:
                 mech_kwargs["weights"] = w_vec
 

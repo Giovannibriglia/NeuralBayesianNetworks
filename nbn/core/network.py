@@ -226,6 +226,7 @@ class NeuralBayesianNetwork(nn.Module):
         lr: float | None = None,
         consolidate: bool = True,
         weights: torch.Tensor | None = None,
+        warm_start: bool = False,
         **kwargs: Any,
     ):
         """Fit all node mechanisms to data on the model's device.
@@ -250,7 +251,15 @@ class NeuralBayesianNetwork(nn.Module):
             If True (default), neural mechanisms snapshot post-fit EWC state
             so ``update()`` works later; False skips the Fisher pass for
             fit-only workloads (``update()`` then raises until refit with
-            ``consolidate=True``).
+            ``consolidate=True``).  A caller fitting in a loop pays that pass
+            on every iteration and almost certainly wants it off.
+        warm_start:
+            If True, every mechanism continues from the parameters it already
+            holds instead of rebuilding from a fresh initialisation — what
+            makes a second ``fit`` a refinement rather than an independent
+            refit.  Default False is byte-identical to the previous
+            behaviour.  See :func:`nbn.learning.fit.fit` for the semantics and
+            :mod:`nbn.learning.warm_start` for the full contract.
 
         Returns
         -------
@@ -269,6 +278,7 @@ class NeuralBayesianNetwork(nn.Module):
                 method=method, epochs=epochs,
                 batch_size=batch_size, lr=lr,
                 consolidate=consolidate,
+                warm_start=warm_start,
                 device=str(self._device),
                 weights=(None if weights is None
                          else torch.as_tensor(weights).to(self._device)),
