@@ -572,6 +572,15 @@ def test_a_second_warm_call_takes_the_same_first_step_as_the_first():
 
     def _step_once():
         mech.load_state_dict(copy.deepcopy(anchor))
+        # Pin the RNG so both calls draw the SAME row permutation.  fit_local
+        # permutes rows every epoch even at full batch, and a permuted batch
+        # changes the floating-point reduction order, so without this the two
+        # gradients differ in ulps and the bitwise compare below fails with no
+        # optimiser state persisting at all -- platform-dependently (CI CPU on
+        # 3.11/3.12 caught it; CUDA and 3.10 happened to pass).  With identical
+        # permutations the gradients are identical, so the second step differs
+        # iff moments persisted -- which is exactly the claim under test.
+        torch.manual_seed(1234)
         mech.fit_local(
             x, pa, **{**kw, "epochs": 1},
             batch_size=x.shape[0], lr=1e-3, warm_start=True,
