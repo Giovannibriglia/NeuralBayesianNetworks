@@ -31,6 +31,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Distribution
 
+from nbn.learning.warm_start import check_branch, check_shapes
 from nbn.learning.weighting import (
     select,
     validate_weights,
@@ -90,6 +91,7 @@ class FlexCodeMechanism(Mechanism):
 
     is_discrete: bool = False
     supports_weights: bool = True
+    warm_start_is_noop: bool = False
 
     def __init__(
         self,
@@ -150,15 +152,32 @@ class FlexCodeMechanism(Mechanism):
         x: torch.Tensor,
         parents: torch.Tensor | None,
         weights: torch.Tensor | None = None,
+        warm_start: bool = False,
         **kwargs,
     ) -> dict:
         kwargs["weights"] = weights
         if self.sharpen == "auto":
+            # The search sub-fits on a split and then refits on the full data,
+            # discarding whatever was there.  That is exactly the silent
+            # rebuild warm_start exists to prevent, so refuse rather than do
+            # it quietly.  Unreachable through the normal call sequence: the
+            # first fit resolves ``sharpen`` to a float, so a fitted mechanism
+            # never re-enters this branch unless the attribute was reset by
+            # hand.
+            if warm_start and self.is_fitted:
+                raise ValueError(
+                    "FlexCodeMechanism.fit_local: warm_start=True with "
+                    "sharpen='auto'.  Selecting the exponent refits the "
+                    "coefficients from scratch on a held-out split, which "
+                    "would discard the parameters you asked to continue from. "
+                    "Fit once without warm_start (that resolves sharpen to a "
+                    "float), or set a fixed sharpen before warm-starting."
+                )
             best = self._select_sharpen(x, parents, **kwargs)
             info = self._fit_core(x, parents, **kwargs)  # final coeffs on full data
             self.sharpen = best
             return info
-        return self._fit_core(x, parents, **kwargs)
+        return self._fit_core(x, parents, warm_start=warm_start, **kwargs)
 
     def _select_sharpen(
         self,
@@ -208,7 +227,13 @@ class FlexCodeMechanism(Mechanism):
         self.sharpen = "auto"  # restore request; caller resolves to best_s
         return best_s
 
-    def _fit_core(self, x: torch.Tensor, parents: torch.Tensor | None, **kwargs) -> dict:
+    def _fit_core(
+        self,
+        x: torch.Tensor,
+        parents: torch.Tensor | None,
+        warm_start: bool = False,
+        **kwargs,
+    ) -> dict:
         y = ensure_2d(x).float()
         if y.shape[1] != 1:
             raise NotImplementedError(
@@ -217,6 +242,15 @@ class FlexCodeMechanism(Mechanism):
             )
         n = y.shape[0]
         device = y.device
+        is_root = parents is None or parents.shape[-1] == 0
+        warm = bool(warm_start) and self.is_fitted
+        if warm:
+            where = "FlexCodeMechanism.fit_local"
+            check_branch(where, was_root=self._d_pa == 0, is_root=is_root)
+            if not is_root:
+                check_shapes(where, {
+                    "d_pa": (self._d_pa, ensure_2d(parents).shape[1]),
+                })
         w_vec = validate_weights(
             kwargs.get("weights"), n, where="FlexCodeMechanism.fit_local",
         )
@@ -226,11 +260,17 @@ class FlexCodeMechanism(Mechanism):
         lr = float(kwargs.get("lr", self.lr))
         batch_size = int(kwargs.get("batch_size", self.batch_size))
 
-        y_min = y.min()
-        y_max = y.max()
-        span = (y_max - y_min).clamp_min(1e-6)
-        self._y_min = y_min - self.margin * span
-        self._y_max = y_max + self.margin * span
+        # ``(_y_min, _y_max)`` fix the z-space the basis is evaluated in, and
+        # ``net`` predicts coefficients *of that basis*.  Recomputing them
+        # under a warm start would not merely rescale an input, it would
+        # reinterpret every learned coefficient -- the sharper half of the
+        # frozen-buffer rule.  See nbn/learning/warm_start.py.
+        if not warm:
+            y_min = y.min()
+            y_max = y.max()
+            span = (y_max - y_min).clamp_min(1e-6)
+            self._y_min = y_min - self.margin * span
+            self._y_max = y_max + self.margin * span
         z = self._scale_to_z(y).squeeze(-1)                  # [N]
         targets = self._basis(z)                             # [N, J]
 
@@ -242,16 +282,35 @@ class FlexCodeMechanism(Mechanism):
             self._d_pa = 0
             self._pa_mean = torch.zeros(1, 0, device=device)
             self._pa_std = torch.ones(1, 0, device=device)
-            # Closed form: beta_j = E[phi_j(Z)].
-            self._root_coef = nn.Parameter(targets.mean(0))
+            # Closed form: beta_j = E[phi_j(Z)] -- a *weighted* expectation
+            # when the caller supplies per-sample multiplicities.  This branch
+            # used ``targets.mean(0)`` and dropped ``w_vec`` on the floor, so a
+            # root FlexCode node silently returned the unweighted estimator
+            # while the class advertised ``supports_weights = True``.  That is
+            # a wrong answer rather than a missing feature: the fit converges,
+            # to the wrong coefficients.  ``weighted_moments(...)[0]`` is the
+            # per-column weighted mean and reduces to ``targets.mean(0)``
+            # exactly when ``w_vec is None``.
+            #
+            # Being closed form, this branch recomputes even under
+            # warm_start=True (reported as ``warm_started: False``): freezing
+            # it would stop a root node responding to the E-step.  The z-space
+            # it is expressed in *is* frozen above, so the recomputed
+            # coefficients stay comparable with the previous ones.
+            self._root_coef = nn.Parameter(weighted_moments(targets, w_vec)[0])
         else:
             pa = ensure_2d(parents).float().to(device)
             self._d_pa = pa.shape[1]
-            pa_m, pa_s = weighted_moments(pa, w_vec, unbiased=True)
-            self._pa_mean = pa_m.unsqueeze(0)
-            self._pa_std = pa_s.unsqueeze(0).clamp_min(1e-3)
+            if not warm:
+                pa_m, pa_s = weighted_moments(pa, w_vec, unbiased=True)
+                self._pa_mean = pa_m.unsqueeze(0)
+                self._pa_std = pa_s.unsqueeze(0).clamp_min(1e-3)
             pa_std = (pa - self._pa_mean) / self._pa_std
-            self.net = _build_mlp(self._d_pa, self.hidden, self.n_basis, self.activation).to(device)
+            if not warm:
+                self.net = _build_mlp(self._d_pa, self.hidden, self.n_basis, self.activation).to(device)
+            # Fresh optimiser either way -- Adam's moments are not in
+            # state_dict(), so persisting them would survive a caller's
+            # load_state_dict revert of a rejected step.
             opt = torch.optim.Adam(self.parameters(), lr=lr)
             self.train()
             for _ in range(epochs):
@@ -271,7 +330,10 @@ class FlexCodeMechanism(Mechanism):
                     torch.nn.utils.clip_grad_norm_(self.parameters(), 5.0)
                     opt.step()
             self.eval()
-        return {"n_train": int(n), "n_basis": self.n_basis, "d_pa": int(self._d_pa)}
+        return {
+            "n_train": int(n), "n_basis": self.n_basis, "d_pa": int(self._d_pa),
+            "warm_started": warm and not is_root,
+        }
 
     @property
     def is_fitted(self) -> bool:

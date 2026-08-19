@@ -104,7 +104,20 @@ class DiracGaussianMechanism(Mechanism):
     supports_weights: bool = True
 
     def fit_local(
-        self, x: torch.Tensor, parents: torch.Tensor | None, **kwargs
+        self,
+        x: torch.Tensor,
+        parents: torch.Tensor | None,
+        warm_start: bool = False,
+        **kwargs,
     ) -> dict:
-        """No-op: the value is set externally (it's a do-intervention)."""
-        return {"sigma": self.sigma, "value": float(self._value.detach().mean())}
+        """No-op: the value is set externally (it's a do-intervention).
+
+        ``warm_start`` is accepted and ignored -- nothing here is estimated
+        from data, so there is no initialisation to continue from.  Reported
+        as ``warm_started: False``.
+        """
+        return {
+            "sigma": self.sigma,
+            "value": float(self._value.detach().mean()),
+            "warm_started": False,
+        }

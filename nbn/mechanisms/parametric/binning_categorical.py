@@ -62,6 +62,7 @@ class BinningCategoricalTable(CategoricalTableMechanism):
         self,
         x: torch.Tensor,
         parents: torch.Tensor | None,
+        warm_start: bool = False,
         **kwargs,
     ) -> dict:
         """Fit the binner thresholds from ``parents`` (train data), then
@@ -69,13 +70,20 @@ class BinningCategoricalTable(CategoricalTableMechanism):
 
         The thresholds are stored as a buffer so ``.to(device)`` carries
         them along with the rest of the model.
+
+        ``warm_start`` is accepted and ignored, and forwarded to the parent
+        for the same treatment: both the quantile thresholds and the CPT
+        counts are recomputed from this call's data, which is exactly what an
+        EM M-step needs.  Reported as ``warm_started: False``.
         """
         if parents is None or parents.shape[-1] == 0:
             # Root node — no binning needed; just call parent.
             empty = torch.zeros((0, self._n_bins - 1))
             self.register_buffer("_thresholds", empty)
             self.register_buffer("_cont_mask", torch.zeros(0, dtype=torch.bool))
-            return super().fit_local(x.long().reshape(-1), None, **kwargs)
+            return super().fit_local(
+                x.long().reshape(-1), None, warm_start=warm_start, **kwargs,
+            )
 
         n_pa = parents.shape[-1]
         cont_mask = torch.tensor(
@@ -103,7 +111,8 @@ class BinningCategoricalTable(CategoricalTableMechanism):
         # underlying CategoricalTable allocates a fixed-shape CPT.
         parent_cards = [self._n_bins] * n_pa
         return super().fit_local(
-            x.long().reshape(-1), bucketed, parent_cards=parent_cards, **kwargs,
+            x.long().reshape(-1), bucketed, parent_cards=parent_cards,
+            warm_start=warm_start, **kwargs,
         )
 
     def _bucketize(self, parents: torch.Tensor) -> torch.Tensor:

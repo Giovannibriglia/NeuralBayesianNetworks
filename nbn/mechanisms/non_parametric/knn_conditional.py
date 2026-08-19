@@ -126,8 +126,20 @@ class KNNConditionalMechanism(Mechanism):
         parents: torch.Tensor | None,
         n_classes: int | None = None,
         weights: torch.Tensor | None = None,
+        warm_start: bool = False,
         **kwargs,
     ) -> dict:
+        """Store the training sample and resolve the neighbourhood size.
+
+        ``warm_start`` is accepted and ignored: the stored sample, the
+        standardisation statistics and ``k`` are all recomputed from this
+        call's data with no dependence on the previous state, so recomputing
+        *is* the continuation.  Reported as ``warm_started: False``.  Note the
+        asymmetry with ``weights``, which this mechanism *refuses* -- an
+        unsupported weight vector would silently change the answer, whereas an
+        ineffective ``warm_start`` cannot.  See
+        :mod:`nbn.learning.warm_start`.
+        """
         if weights is not None:
             raise NotImplementedError(
                 "KNNConditionalMechanism does not support per-sample weights: "
@@ -166,7 +178,10 @@ class KNNConditionalMechanism(Mechanism):
 
         self._k_eff = self.k if self.k is not None else max(1, int(round(math.sqrt(max(n, 1)))))
         self._k_eff = min(self._k_eff, n)
-        return {"n_train": int(n), "k": int(self._k_eff), "d_pa": int(self._d_pa)}
+        return {
+            "n_train": int(n), "k": int(self._k_eff), "d_pa": int(self._d_pa),
+            "warm_started": False,
+        }
 
     @property
     def is_fitted(self) -> bool:

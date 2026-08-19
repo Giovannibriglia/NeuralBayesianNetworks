@@ -63,6 +63,7 @@ class LinearGaussianMechanism(Mechanism):
         x: torch.Tensor,
         parents: torch.Tensor | None,
         weights: torch.Tensor | None = None,
+        warm_start: bool = False,
         **kwargs,
     ) -> dict:
         """Closed-form ridge regression, optionally weighted least squares.
@@ -72,6 +73,12 @@ class LinearGaussianMechanism(Mechanism):
         x: shape ``[N, D_x]``.
         parents: shape ``[N, D_pa]``, or ``None`` for root nodes.
         weights: optional ``[N]`` non-negative per-sample multiplicities.
+        warm_start: accepted and ignored.  The normal-equation solve is the
+            exact maximiser of the local (weighted) objective and is
+            independent of the previous parameters, so recomputing *is* the
+            continuation -- and an EM M-step needs it to be, or the node would
+            stop responding to the E-step.  Reported as
+            ``warm_started: False``.  See :mod:`nbn.learning.warm_start`.
 
         Notes
         -----
@@ -150,7 +157,10 @@ class LinearGaussianMechanism(Mechanism):
         self._neq_c = st.c.detach().clone()
         self._neq_N = st.N.detach().clone()
 
-        return {"n_params": (w.numel() + b.numel() + log_s.numel())}
+        return {
+            "n_params": (w.numel() + b.numel() + log_s.numel()),
+            "warm_started": False,
+        }
 
     def _set_params(
         self, w: torch.Tensor, b: torch.Tensor, log_s: torch.Tensor

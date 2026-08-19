@@ -164,8 +164,18 @@ class ConditionalKDEMechanism(Mechanism):
         x: torch.Tensor,
         parents: torch.Tensor | None,
         weights: torch.Tensor | None = None,
+        warm_start: bool = False,
         **kwargs,
     ) -> dict:
+        """Store the (weighted) training sample and its bandwidths.
+
+        ``warm_start`` is accepted and ignored.  A KDE's "parameters" are the
+        training sample itself plus rule-of-thumb bandwidths derived from it;
+        both are recomputed exactly from this call's data and weights, with no
+        dependence on what was there before, so recomputing *is* the
+        continuation.  Reported as ``warm_started: False``.  See
+        :mod:`nbn.learning.warm_start`.
+        """
         w = validate_weights(
             weights, ensure_2d(x).shape[0],
             where="ConditionalKDEMechanism.fit_local",
@@ -177,6 +187,7 @@ class ConditionalKDEMechanism(Mechanism):
             None if w is None
             else torch.log(w.to(device=self._train_y.device)).to(self._train_y.dtype)
         )
+        info["warm_started"] = False
         return info
 
     def _select_bw_factor(
