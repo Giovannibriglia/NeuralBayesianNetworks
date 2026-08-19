@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Categorical
 
+from nbn.learning.warm_start import check_branch, check_shapes
 from nbn.learning.weighting import select, validate_weights, weighted_mean
 from nbn.mechanisms.base import Mechanism
 from nbn.mechanisms.parametric.mdn import _build_mlp
@@ -36,6 +37,7 @@ class NeuralCategoricalMechanism(Mechanism):
     is_discrete: bool = True
     supports_weights: bool = True
     supports_update: bool = True
+    warm_start_is_noop: bool = False
 
     def __init__(
         self,
@@ -77,6 +79,7 @@ class NeuralCategoricalMechanism(Mechanism):
         batch_size: int = 512,
         weights: torch.Tensor | None = None,
         consolidate: bool = True,
+        warm_start: bool = False,
         **kwargs,
     ) -> dict:
         x = x.long().reshape(-1)
@@ -88,7 +91,40 @@ class NeuralCategoricalMechanism(Mechanism):
         if w_vec is not None:
             w_vec = w_vec.to(device)
 
-        if parents is None or parents.shape[-1] == 0:
+        is_root = parents is None or parents.shape[-1] == 0
+        # ``n_classes`` is fixed at construction and fit_local never widens it,
+        # so it cannot drift; ``_d_pa`` and the root/non-root branch can.
+        warm = bool(warm_start) and self.is_fitted
+        if warm:
+            where = "NeuralCategoricalMechanism.fit_local"
+            check_branch(where, was_root=self._d_pa == 0, is_root=is_root)
+            if not is_root:
+                check_shapes(where, {
+                    "d_pa": (self._d_pa, ensure_2d(parents).shape[1]),
+                })
+                wants_embeddings = (
+                    self.embedding_dim is not None and parent_cards is not None
+                )
+                if (self.embeddings is not None) != wants_embeddings:
+                    had = "embedded" if self.embeddings is not None else "raw"
+                    now = "embedded" if wants_embeddings else "raw"
+                    raise ValueError(
+                        f"{where}: warm_start=True, but the existing fit uses "
+                        f"{had} parent inputs and this call asks for {now} "
+                        f"ones (embedding_dim and parent_cards must both be "
+                        f"supplied for embeddings).  The MLP's input width "
+                        f"differs between the two, so there is nothing to "
+                        f"continue from.  Pass warm_start=False to refit."
+                    )
+                if self.embeddings is not None and parent_cards is not None:
+                    check_shapes(where, {
+                        f"parent_cards[{i}]": (emb.num_embeddings, int(c))
+                        for i, (emb, c) in enumerate(
+                            zip(self.embeddings, parent_cards)
+                        )
+                    })
+
+        if is_root:
             self._d_pa = 0
             # v0.8-#52: pre-fix initialised ``_root_logits`` to zeros
             # (uniform distribution over K classes) and returned
@@ -106,24 +142,36 @@ class NeuralCategoricalMechanism(Mechanism):
                 counts.scatter_add_(0, x, w_vec)
             counts = counts.float() + 1e-8
             log_freq = torch.log(counts / counts.sum())
+            #
+            # Closed form, so it recomputes even under warm_start=True: there
+            # is no trajectory to continue, and freezing it would stop a root
+            # node responding to the E-step entirely.  Deterministic in the
+            # data, so the bitwise epochs=0 contract still holds.
             self._root_logits = nn.Parameter(log_freq.to(device))
             if consolidate:
                 online_laplace.consolidate(self, x, None)
-            return {"n_classes": k}
+            return {"n_classes": k, "warm_started": False}
 
         parents = ensure_2d(parents).to(device=device)
         d_pa = parents.shape[1]
         self._d_pa = d_pa
 
         if self.embedding_dim is not None and parent_cards is not None:
-            self.embeddings = nn.ModuleList([
-                nn.Embedding(c, self.embedding_dim) for c in parent_cards
-            ])
+            if not warm:
+                self.embeddings = nn.ModuleList([
+                    nn.Embedding(c, self.embedding_dim) for c in parent_cards
+                ])
             in_dim = self.embedding_dim * d_pa
         else:
             in_dim = d_pa
 
-        self.net = _build_mlp(in_dim, self.hidden, k, self.activation).to(device)
+        # The embedding table is as much a learned parameter as the MLP is, so
+        # a warm start keeps both or neither.
+        if not warm:
+            self.net = _build_mlp(in_dim, self.hidden, k, self.activation).to(device)
+        # Fresh optimiser either way -- Adam's moments are not in
+        # state_dict(), so persisting them would survive a caller's
+        # load_state_dict revert of a rejected step.
         opt = torch.optim.Adam(self.parameters(), lr=lr)
         n = x.shape[0]
         self.train()
@@ -147,7 +195,7 @@ class NeuralCategoricalMechanism(Mechanism):
         # workloads that never call update().
         if consolidate:
             online_laplace.consolidate(self, x, parents)
-        return {"n_classes": k, "d_pa": d_pa}
+        return {"n_classes": k, "d_pa": d_pa, "warm_started": warm}
 
     # ------------------------------------------------------------------
     # Incremental update

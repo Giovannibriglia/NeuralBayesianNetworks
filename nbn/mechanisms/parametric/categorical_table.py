@@ -74,6 +74,7 @@ class CategoricalTableMechanism(Mechanism):
         parent_cards: List[int] | None = None,
         n_classes: int | None = None,
         weights: torch.Tensor | None = None,
+        warm_start: bool = False,
         **kwargs,
     ) -> dict:
         """Vectorized count-based MLE with Dirichlet(alpha) smoothing.
@@ -91,6 +92,12 @@ class CategoricalTableMechanism(Mechanism):
             ``select() index out of range`` errors. Falls back to
             observed-max + 1 when None (legacy behaviour for callers that
             don't have the declared cardinality).
+        warm_start: accepted and ignored.  The Dirichlet-smoothed counts are
+            the exact maximiser of the local (weighted) objective and do not
+            depend on the previous parameters, so recomputing *is* the
+            continuation -- and it is what an EM M-step needs, since a frozen
+            table would stop responding to the E-step.  Reported as
+            ``warm_started: False``.  See :mod:`nbn.learning.warm_start`.
         """
         x = x.long().reshape(-1)
         n = x.shape[0]
@@ -184,7 +191,10 @@ class CategoricalTableMechanism(Mechanism):
         probs = smoothed / smoothed.sum(dim=-1, keepdim=True).clamp_min(1e-12)
         logits_data = torch.log(probs.clamp_min(1e-12))
         self._logits = nn.Parameter(logits_data)
-        return {"n_classes": k, "n_parent_states": n_parent_states}
+        return {
+            "n_classes": k, "n_parent_states": n_parent_states,
+            "warm_started": False,
+        }
 
     def _smooth(self, counts: torch.Tensor) -> torch.Tensor:
         """Presentation smoothing applied to raw accumulated counts.

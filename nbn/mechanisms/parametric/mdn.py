@@ -13,6 +13,7 @@ from nbn.learning.weighting import (
     weighted_mean,
     weighted_moments,
 )
+from nbn.learning.warm_start import check_branch, check_shapes
 from nbn.mechanisms.base import Mechanism
 from nbn.update import online_laplace
 # _sanitise_parents was promoted to nbn.utils.batching (v0.14) so the flow
@@ -67,6 +68,7 @@ class MDNMechanism(Mechanism):
     is_discrete: bool = False
     supports_update: bool = True
     supports_weights: bool = True
+    warm_start_is_noop: bool = False
 
     def __init__(
         self,
@@ -127,6 +129,7 @@ class MDNMechanism(Mechanism):
         batch_size: int = 512,
         weights: torch.Tensor | None = None,
         consolidate: bool = True,
+        warm_start: bool = False,
         **kwargs,
     ) -> dict:
         x = ensure_2d(x)  # [N, D_x]
@@ -135,16 +138,38 @@ class MDNMechanism(Mechanism):
         w_vec = validate_weights(weights, n, where="MDNMechanism.fit_local")
         if w_vec is not None:
             w_vec = w_vec.to(device)
-        self._d_x = d_x
-        self.output_dim = d_x
         k = self.num_components
 
-        if parents is None or parents.shape[-1] == 0:
+        is_root = parents is None or parents.shape[-1] == 0
+        # Validate *before* mutating anything: _d_x/output_dim used to be
+        # assigned above the branch, so a rejected warm start would have left
+        # the mechanism describing a shape its parameters do not have.
+        warm = bool(warm_start) and self.is_fitted
+        if warm:
+            where = "MDNMechanism.fit_local"
+            check_branch(where, was_root=self._d_pa == 0, is_root=is_root)
+            check_shapes(where, {
+                "d_x": (self._d_x, d_x),
+                "d_pa": (self._d_pa, 0 if is_root else ensure_2d(parents).shape[1]),
+            })
+        self._d_x = d_x
+        self.output_dim = d_x
+
+        if is_root:
             self._d_pa = 0
             # Learnable root parameters
             # A root MDN is initialised analytically from the data moments and
             # never enters the training loop below, so weighting has to be
             # applied to the moments themselves.
+            #
+            # This branch is closed form, so it recomputes even under
+            # warm_start=True — there is no trajectory to continue, and
+            # freezing it would stop a root node responding to the E-step
+            # entirely: a silent, permanent M-step failure on exactly the
+            # nodes nobody inspects.  The bitwise epochs=0 contract still
+            # holds here because recomputing from unchanged data is
+            # deterministic; the values only move when the weights do, which
+            # is when they should.
             loc0, scale0 = weighted_moments(x, w_vec, unbiased=True)
             self._root_logits = nn.Parameter(torch.zeros(k, device=device))
             self._root_loc = nn.Parameter(loc0.unsqueeze(0).expand(k, -1).clone())
@@ -167,18 +192,30 @@ class MDNMechanism(Mechanism):
             # *unweighted* spread would silently fit a model normalised for a
             # data distribution the caller did not ask for, and would break
             # replication equivalence in a way that still converges.
-            pa_m, pa_s = weighted_moments(parents, w_vec, unbiased=True)
-            pa_mean = pa_m.unsqueeze(0)
-            pa_std = pa_s.unsqueeze(0).clamp_min(1e-3)
-            self._pa_mean = pa_mean.detach()
-            self._pa_std = pa_std.detach()
+            #
+            # Frozen under warm_start: ``net``'s weights were trained against
+            # the map these two buffers define, so recomputing them would
+            # apply every learned weight to a shifted, rescaled input — the
+            # warm start would be warm in name only, and worst exactly when
+            # the weights moved most.  See nbn/learning/warm_start.py.
+            if not warm:
+                pa_m, pa_s = weighted_moments(parents, w_vec, unbiased=True)
+                pa_mean = pa_m.unsqueeze(0)
+                pa_std = pa_s.unsqueeze(0).clamp_min(1e-3)
+                self._pa_mean = pa_mean.detach()
+                self._pa_std = pa_std.detach()
             # Do NOT pre-standardize here: _params_from_parents applies
             # standardization at every forward call (training and inference),
             # so pre-standardizing would double-standardize during training
             # (causing NaN for constant-parent columns) and produce a model
             # trained on different inputs than it sees at inference time.
-            out_dim = k + k * d_x + k * d_x  # logits + locs + log_scales
-            self.net = _build_mlp(d_pa, self.hidden, out_dim, self.activation).to(device)
+            if not warm:
+                out_dim = k + k * d_x + k * d_x  # logits + locs + log_scales
+                self.net = _build_mlp(d_pa, self.hidden, out_dim, self.activation).to(device)
+            # A *fresh* optimiser either way, over whichever parameters now
+            # exist.  Adam's moments are not in state_dict(), so persisting
+            # them across calls would survive a caller's load_state_dict
+            # revert and keep a rejected step's momentum alive.
             opt = torch.optim.Adam(self.parameters(), lr=lr)
             self.train()
             for _ in range(epochs):
@@ -205,7 +242,12 @@ class MDNMechanism(Mechanism):
         # workloads that never call update().
         if consolidate:
             online_laplace.consolidate(self, x, parents)
-        return {"d_pa": self._d_pa, "d_x": d_x, "k": k}
+        # ``warm_started`` is True only where parameters were actually carried
+        # over — never on the closed-form root branch, which recomputes.
+        return {
+            "d_pa": self._d_pa, "d_x": d_x, "k": k,
+            "warm_started": warm and not is_root,
+        }
 
     # ------------------------------------------------------------------
     # Incremental update

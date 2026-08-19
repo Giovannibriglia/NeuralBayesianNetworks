@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Distribution
 
+from nbn.learning.warm_start import check_shapes
 from nbn.learning.weighting import select, validate_weights, weighted_mean
 from nbn.mechanisms.base import Mechanism
 from nbn.utils.batching import _sanitise_parents, ensure_2d, flatten_samples
@@ -60,6 +61,7 @@ class NormalizingFlowMechanism(Mechanism):
 
     is_discrete: bool = False
     supports_weights: bool = True
+    warm_start_is_noop: bool = False
 
     def __init__(
         self,
@@ -107,6 +109,7 @@ class NormalizingFlowMechanism(Mechanism):
         lr: float = 5e-4,
         batch_size: int = 512,
         weights: torch.Tensor | None = None,
+        warm_start: bool = False,
         **kwargs,
     ) -> dict:
         x = ensure_2d(x)  # [N, D_x]
@@ -115,8 +118,6 @@ class NormalizingFlowMechanism(Mechanism):
         w_vec = validate_weights(weights, n, where="NormalizingFlowMechanism.fit_local")
         if w_vec is not None:
             w_vec = w_vec.to(device)
-        self.d_x = d_x
-        self.output_dim = d_x
 
         if parents is None or parents.shape[-1] == 0:
             d_pa = 0
@@ -124,7 +125,26 @@ class NormalizingFlowMechanism(Mechanism):
             parents = ensure_2d(parents).to(device=device, dtype=x.dtype)
             d_pa = parents.shape[1]
 
-        self._build_flow(d_pa, device)
+        # Validate before mutating self.d_x/output_dim, so a rejected warm
+        # start leaves the mechanism describing the shape it actually has.
+        # No check_branch here: unlike MDN and neural-categorical, a root flow
+        # (context width 0) is still a trained zuko NSF rather than a
+        # closed-form branch, so root-ness is fully captured by d_pa.
+        warm = bool(warm_start) and self.is_fitted
+        if warm:
+            check_shapes("NormalizingFlowMechanism.fit_local", {
+                "d_x": (self.d_x, d_x), "d_pa": (self._d_pa, d_pa),
+            })
+        self.d_x = d_x
+        self.output_dim = d_x
+
+        # The flow carries no data-derived standardisation buffers, so a warm
+        # start here is exactly "keep _flow, rebuild the optimiser".
+        if not warm:
+            self._build_flow(d_pa, device)
+        # Fresh optimiser either way -- Adam's moments are not in
+        # state_dict(), so persisting them would survive a caller's
+        # load_state_dict revert of a rejected step.
         opt = torch.optim.Adam(self.parameters(), lr=lr)
 
         if d_pa == 0:
@@ -152,7 +172,7 @@ class NormalizingFlowMechanism(Mechanism):
                     torch.nn.utils.clip_grad_norm_(self.parameters(), 5.0)
                     opt.step()
         self.eval()
-        return {"d_pa": d_pa, "d_x": d_x}
+        return {"d_pa": d_pa, "d_x": d_x, "warm_started": warm}
 
     @property
     def is_fitted(self) -> bool:

@@ -96,8 +96,20 @@ class DeterministicMechanism(Mechanism):
     # fixed at construction), so there is no statistic for a weight to bias.
     supports_weights: bool = True
 
-    def fit_local(self, x: torch.Tensor, parents: torch.Tensor | None, **kwargs) -> dict:
-        return {}
+    def fit_local(
+        self,
+        x: torch.Tensor,
+        parents: torch.Tensor | None,
+        warm_start: bool = False,
+        **kwargs,
+    ) -> dict:
+        """No-op: the CPD is fully specified at construction.
+
+        ``warm_start`` is accepted and ignored for the same reason ``weights``
+        is vacuously honoured -- there is no estimated parameter to continue
+        from.  Reported as ``warm_started: False``.
+        """
+        return {"warm_started": False}
 
     # ------------------------------------------------------------------
     # Tabular interface (discrete interventions only)
