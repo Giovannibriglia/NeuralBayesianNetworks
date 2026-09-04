@@ -741,10 +741,15 @@ class Runner:
                         # saved base), or "standalone" (fit, no save).
                         fit_role, cache_path = fit_roles[i]
                         verb = {"reload": "reloading"}.get(fit_role, "fitting")
-                        pbar.set_description(f"{verb} {name} on {pid}")
+                        # The resolved device is part of the progress line so a
+                        # run.log / console reader can tell at a glance whether
+                        # this cell landed on cuda or cpu (per-baseline YAML
+                        # pins override --device, so it is not a run-wide fact).
+                        dev = resolve_device(spec.device)
+                        pbar.set_description(f"{verb} {name} [{dev}] on {pid}")
                         # Goes to run.log (INFO); console is WARNING-gated.
-                        logger.info("%s %s on %s (seed=%s)",
-                                    verb, name, pid, getattr(problem, "seed", 0))
+                        logger.info("%s %s [%s] on %s (seed=%s)",
+                                    verb, name, dev, pid, getattr(problem, "seed", 0))
                         cell_rows: list[CellResult] = []
                         for row in self._run_cell(
                             cfg, problem, spec, writer,
