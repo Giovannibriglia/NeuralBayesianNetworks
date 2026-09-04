@@ -28,5 +28,5 @@ ignore = [
 [lint.per-file-ignores]
 "tests/*"     = ["S101", "ANN", "E501", "F841", "B007", "F401"]
 "examples/*"  = ["T201", "E501", "F401"]
-"notebooks/*" = ["T201", "E402", "E501"]
+"**/notebooks/*" = ["T201", "E402", "E501"]
 "**/__init__.py" = ["F401"]
