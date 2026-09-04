@@ -30,7 +30,6 @@ from typing import Any, Iterator
 
 from tqdm import tqdm
 
-from benchmarking.core._device import resolve_device
 from benchmarking.core.config import BaselineSpec, RunnerConfig, build_adapter
 from benchmarking.core.output import JsonlWriter
 from benchmarking.core.results import CellResult
@@ -370,13 +369,19 @@ def _rows_to_cellresults(
     well-formed ``oom``/``timeout``/``error`` row.
     """
     baseline_name: str | None = None
+    baseline_device: str | None = None
     for d in row_dicts:
         if _CELLRESULT_FIELDS.issubset(d.keys()):
             yield CellResult(**{k: d[k] for k in _CELLRESULT_FIELDS})
         else:
             # Synthesized row — fill in the cell identity the parent knows.
             if baseline_name is None:
-                baseline_name = build_adapter(spec).name
+                # Probe instance (no fit): name plus the device this adapter
+                # WOULD use -- its own attribute, so CPU-only libraries report
+                # cpu even under --device cuda.
+                probe = build_adapter(spec)
+                baseline_name = probe.name
+                baseline_device = str(getattr(probe, "device", "cpu"))
             yield CellResult(
                 benchmark=benchmark,
                 family=getattr(problem, "family", "unknown"),
@@ -392,7 +397,7 @@ def _rows_to_cellresults(
                 metrics_time_s=_NAN,
                 error_msg=d.get("error_msg"),
                 # No adapter ran (worker died); record the would-be device.
-                device=resolve_device(spec.device),
+                device=baseline_device,
             )
 
 
@@ -645,12 +650,13 @@ class Runner:
                             problem.error_msg, len(cfg.baselines),
                         )
                         for spec in cfg.baselines:
+                            probe = build_adapter(spec)
                             error_row = CellResult(
                                 benchmark=problem.benchmark,
                                 family=problem.family,
                                 problem_id=problem.problem_id,
                                 seed=-1,
-                                baseline=build_adapter(spec).name,
+                                baseline=probe.name,
                                 query_role="",
                                 metric="status",
                                 value=float("nan"),
@@ -665,8 +671,10 @@ class Runner:
                                 n_parameters=None,
                                 n_nodes=None,
                                 # Problem never loaded, so no adapter ran;
-                                # record the would-be device for this baseline.
-                                device=resolve_device(spec.device),
+                                # record the device this adapter WOULD use
+                                # (its own attribute, so CPU-only libraries
+                                # report cpu even under --device cuda).
+                                device=str(getattr(probe, "device", "cpu")),
                             )
                             writer.write(error_row)
                             yield error_row
@@ -703,7 +711,7 @@ class Runner:
                                 in failed_configs
                             ]
                             if to_skip:
-                                dev = resolve_device(spec.device)
+                                dev = str(getattr(adapter_probe, "device", "cpu"))
                                 n_params = n_parameters_from_problem(problem)
                                 n_nodes = n_nodes_from_problem(problem)
                                 n_train = n_train_from_problem(problem)
@@ -741,11 +749,13 @@ class Runner:
                         # saved base), or "standalone" (fit, no save).
                         fit_role, cache_path = fit_roles[i]
                         verb = {"reload": "reloading"}.get(fit_role, "fitting")
-                        # The resolved device is part of the progress line so a
-                        # run.log / console reader can tell at a glance whether
-                        # this cell landed on cuda or cpu (per-baseline YAML
-                        # pins override --device, so it is not a run-wide fact).
-                        dev = resolve_device(spec.device)
+                        # The device in the progress line is the ADAPTER's own
+                        # `device` attribute -- the same fact cell_worker._emit
+                        # stamps on the parquet -- not resolve_device(spec.device).
+                        # The latter only translates the config string, so it
+                        # says "cuda" for a CPU-only library like pgmpy whose
+                        # adapter pins itself to "cpu" regardless of the request.
+                        dev = str(getattr(adapter_probe, "device", "cpu"))
                         pbar.set_description(f"{verb} {name} [{dev}] on {pid}")
                         # Goes to run.log (INFO); console is WARNING-gated.
                         logger.info("%s %s [%s] on %s (seed=%s)",
