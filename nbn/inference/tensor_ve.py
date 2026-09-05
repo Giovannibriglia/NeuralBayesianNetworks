@@ -471,7 +471,7 @@ class TensorVariableElimination(InferenceEngine):
         # v0.6b round-2: pre-allocation memory-budget guard.  Estimate
         # the peak intermediate-factor size by walking the plan
         # algebraically (same algebra as the diagnostic in
-        # ``benchmarking/diagnostics/ve_profile_n20.py``).  Raise a
+        # ``nbn/bench/diagnostics/ve_profile_n20.py``).  Raise a
         # clean ``OutOfMemoryError`` if the estimate exceeds 90% of the
         # available cuda memory — better than letting the cuda
         # allocator partially-OOM mid-elimination, which fragments the
@@ -675,7 +675,7 @@ def _estimate_peak_bytes(
     Walks the elimination ``plan`` algebraically — the same algebra as
     the inner loop of :meth:`TensorVariableElimination.query_batch` and
     of the diagnostic in
-    ``benchmarking/diagnostics/ve_profile_n20.py::_walk_elimination_shapes``,
+    ``nbn/bench/diagnostics/ve_profile_n20.py::_walk_elimination_shapes``,
     but tracks only ``(scope_set, has_b, cardinalities)`` triples and
     never allocates a tensor.
 

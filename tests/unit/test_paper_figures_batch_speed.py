@@ -21,7 +21,7 @@ import math as _math
 
 import numpy as np
 
-from benchmarking._paper_figures import (
+from nbn.bench._paper_figures import (
     _build_batch_speed_figure,
     _metric_cell,
     batch_speed_tables,
@@ -144,12 +144,12 @@ class TestSpeedSmokeRoundTrip:
     def test_render_from_speed_smoke_run(self, tmp_path):
         """Run the PR 5 speed smoke end-to-end, then render the figure
         from its rows via run_plot."""
-        from benchmarking.cli import _run_cells
-        from benchmarking.core.yaml_config import load_runner_config
+        from nbn.bench.cli import _run_cells
+        from nbn.bench.core.yaml_config import load_runner_config
 
         jsonl = tmp_path / "metrics.jsonl"
         cfg = load_runner_config(
-            "benchmarking/configs/synthetic/speed/inference_speed_smoke.yaml",
+            "nbn/bench/configs/synthetic/speed/inference_speed_smoke.yaml",
             device_override="cpu", jsonl_path=jsonl,
         )
         _run_cells(cfg)

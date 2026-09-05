@@ -1,4 +1,4 @@
-"""Tests for benchmarking.selectors.heaviest — Stage 1.
+"""Tests for nbn.bench.selectors.heaviest — Stage 1.
 
 Covers HeaviestQueryByRole's query construction. Adapter / oracle
 None-handling lands in Stages 2-3.
@@ -14,8 +14,8 @@ import networkx as nx
 import pytest
 import torch
 
-from benchmarking.domains.base import BenchmarkProblem
-from benchmarking.selectors.heaviest import HeaviestQueryByRole
+from nbn.bench.domains.base import BenchmarkProblem
+from nbn.bench.selectors.heaviest import HeaviestQueryByRole
 
 
 # --- Fixtures ---
@@ -234,7 +234,7 @@ class TestHeaviestQueryByRole:
         the fix, both shared cache key ('discrete', '10') and seed=1 reused
         seed=0's roles. The fix adds seed to the key → two distinct entries.
         """
-        from benchmarking.problems import SyntheticConfig, SyntheticProblemSource
+        from nbn.bench.problems import SyntheticConfig, SyntheticProblemSource
 
         problems = list(SyntheticProblemSource().iter_problems(SyntheticConfig(
             families=["discrete"], n_nodes_list=[10], seeds=[0, 1],

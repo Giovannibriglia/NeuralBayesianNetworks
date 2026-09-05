@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import pytest
 
-from benchmarking.adapters.nbn_adapter import NBNAdapter
-from benchmarking.core.applicability import is_applicable
+from nbn.bench.adapters.nbn_adapter import NBNAdapter
+from nbn.bench.core.applicability import is_applicable
 
 
 def test_make_mech_returns_smoothed_categorical():

@@ -3,13 +3,14 @@ requires = ["setuptools>=68", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "neuralbayesiannetworks"
+name = "nbn"
 dynamic = ["version"]
 description = "PyTorch-native Bayesian Networks with neural mechanisms and GPU-batched inference"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 authors = [{ name = "Giovanni Briglia" }]
+maintainers = [{ name = "Giovanni Briglia" }]
 keywords = ["bayesian-network", "probabilistic-ml", "pytorch", "causal-inference", "gpu"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -21,20 +22,22 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+# Core = what ``import nbn`` needs. Everything the benchmark suite
+# (``nbn.bench`` / ``nbn-bench``) pulls in on top lives in the ``bench`` extra.
 dependencies = [
     "torch>=2.2",
     "networkx>=3.0",
     "numpy>=1.24",
-    "scipy>=1.10",
     "opt-einsum>=3.3",
-    "pyyaml>=6.0",
-    "tqdm>=4.65",
-    "pandas>=2.0",
-    "pyarrow>=14.0",
 ]
 
 [project.optional-dependencies]
 bench = [
+    "scipy>=1.10",
+    "pyyaml>=6.0",
+    "tqdm>=4.65",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
     "pgmpy>=0.1.25",
     "pomegranate>=1.0",
     "matplotlib>=3.7",
@@ -58,15 +61,24 @@ dev = [
     "ipykernel>=6.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Giovannibriglia/NeuralBayesianNetworks"
+Repository = "https://github.com/Giovannibriglia/NeuralBayesianNetworks"
+Issues = "https://github.com/Giovannibriglia/NeuralBayesianNetworks/issues"
+Changelog = "https://github.com/Giovannibriglia/NeuralBayesianNetworks/releases"
+
 [project.scripts]
-nbn-bench = "benchmarking.cli:main"
+nbn-bench = "nbn.bench.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["nbn*", "benchmarking*"]
+include = ["nbn*"]
 
 [tool.setuptools.package-data]
-"benchmarking" = ["configs/*.yaml"]
+# YAML configs + bnlearn network JSONs ship inside the wheel so that
+# ``nbn-bench --config`` and the bnlearn problem source work from a plain
+# ``pip install "nbn[bench]"``, not only from a checkout.
+"nbn.bench" = ["configs/**/*.yaml", "data/bnlearn/*.json"]
 
 [tool.setuptools_scm]
 write_to = "nbn/_version.py"
@@ -92,7 +104,9 @@ markers = ["gpu: requires CUDA GPU", "slow: slow test skipped in fast CI"]
 
 [tool.coverage.run]
 source = ["nbn"]
-omit = ["nbn/_version.py"]
+# The coverage gate measures the library; the benchmark suite under nbn/bench
+# is exercised by its own tests but is not what the threshold is about.
+omit = ["nbn/_version.py", "nbn/bench/*"]
 
 [tool.coverage.report]
 fail_under = 60

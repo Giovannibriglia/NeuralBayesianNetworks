@@ -29,11 +29,11 @@ from typing import Any, Iterator
 import pytest
 import torch
 
-from benchmarking.adapters import NBNAdapter, PgmpyAdapter, PomegranateAdapter, PyroAdapter
-from benchmarking.core.config import BaselineSpec, RunnerConfig, build_adapter
-from benchmarking.core.output import JsonlWriter
-from benchmarking.core.results import CellResult, VALID_STATUSES
-from benchmarking.core.runner import (
+from nbn.bench.adapters import NBNAdapter, PgmpyAdapter, PomegranateAdapter, PyroAdapter
+from nbn.bench.core.config import BaselineSpec, RunnerConfig, build_adapter
+from nbn.bench.core.output import JsonlWriter
+from nbn.bench.core.results import CellResult, VALID_STATUSES
+from nbn.bench.core.runner import (
     Runner,
     _classify_exception,
     _estimate_total_cells,
@@ -42,11 +42,11 @@ from benchmarking.core.runner import (
     _not_supported_sentinel,
     _rows_to_cellresults,
 )
-from benchmarking.domains.base import BenchmarkProblem, GroundTruth
-from benchmarking.measurements import AccuracyAndTiming, TimingOnly
-from benchmarking.problems.bnlearn import BnlearnConfig
-from benchmarking.problems.synthetic import SyntheticConfig, SyntheticProblemSource
-from benchmarking.selectors.uniform import UniformRandomSelector
+from nbn.bench.domains.base import BenchmarkProblem, GroundTruth
+from nbn.bench.measurements import AccuracyAndTiming, TimingOnly
+from nbn.bench.problems.bnlearn import BnlearnConfig
+from nbn.bench.problems.synthetic import SyntheticConfig, SyntheticProblemSource
+from nbn.bench.selectors.uniform import UniformRandomSelector
 
 
 # ---------------------------------------------------------------------------
@@ -726,7 +726,7 @@ class TestFitFailurePath:
 
     def test_fit_runtime_error_emits_error_rows(self, monkeypatch):
         """RuntimeError in fit() → error rows for all selected queries."""
-        from benchmarking.core.cell_worker import _run_cell
+        from nbn.bench.core.cell_worker import _run_cell
 
         problem = _minimal_discrete_problem()
         spec = BaselineSpec("pgmpy", "discrete", "mle", "ve")
@@ -748,7 +748,7 @@ class TestFitFailurePath:
 
     def test_fit_memory_error_emits_oom_rows(self, monkeypatch):
         """MemoryError in fit() → oom rows."""
-        from benchmarking.core.cell_worker import _run_cell
+        from nbn.bench.core.cell_worker import _run_cell
 
         problem = _minimal_discrete_problem()
         spec = BaselineSpec("pgmpy", "discrete", "mle", "ve")
@@ -778,7 +778,7 @@ class TestFitFailurePath:
         assert len(lines) == len(rows)
 
     def test_fit_failure_fit_time_s_is_nan(self, monkeypatch):
-        from benchmarking.core.cell_worker import _run_cell
+        from nbn.bench.core.cell_worker import _run_cell
 
         problem = _minimal_discrete_problem()
         spec = BaselineSpec("pgmpy", "discrete", "mle", "ve")

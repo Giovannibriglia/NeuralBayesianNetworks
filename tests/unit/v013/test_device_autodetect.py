@@ -21,13 +21,13 @@ import dataclasses
 import pytest
 import torch
 
-from benchmarking.adapters import (
+from nbn.bench.adapters import (
     NBNAdapter,
     PgmpyAdapter,
     PomegranateAdapter,
     PyroAdapter,
 )
-from benchmarking.core._device import resolve_device
+from nbn.bench.core._device import resolve_device
 
 _HAS_CUDA = torch.cuda.is_available()
 _EXPECTED_AUTO = "cuda" if _HAS_CUDA else "cpu"
@@ -132,7 +132,7 @@ class TestAdapterParamsLandOnCuda:
     """When device=cuda, fitted model params actually live on the GPU."""
 
     def _discrete_problem(self, n=300, seed=0):
-        from benchmarking.domains.base import BenchmarkProblem
+        from nbn.bench.domains.base import BenchmarkProblem
 
         torch.manual_seed(seed)
         dag = [("X0", "X1"), ("X1", "X2")]
@@ -166,7 +166,7 @@ class TestAdapterParamsLandOnCuda:
 
 class TestCliDeviceParsing:
     def _parse(self, *argv):
-        from benchmarking.cli import _build_parser
+        from nbn.bench.cli import _build_parser
 
         return _build_parser().parse_args(list(argv))
 
@@ -200,7 +200,7 @@ class TestCliDeviceParsing:
 
 class TestCellResultDevice:
     def _row(self, **overrides):
-        from benchmarking.core.results import CellResult
+        from nbn.bench.core.results import CellResult
 
         base = dict(
             benchmark="synthetic", family="discrete", problem_id="3",
@@ -231,8 +231,8 @@ class TestCellResultDevice:
 # ---------------------------------------------------------------------------
 
 _SMOKE_CONFIGS = [
-    "benchmarking/configs/bnlearn/smoke_tests/inference_smoke.yaml",
-    "benchmarking/configs/synthetic/smoke_tests/scalability_smoke.yaml",
+    "nbn/bench/configs/bnlearn/smoke_tests/inference_smoke.yaml",
+    "nbn/bench/configs/synthetic/smoke_tests/scalability_smoke.yaml",
 ]
 
 

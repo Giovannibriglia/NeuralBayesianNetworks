@@ -1,6 +1,6 @@
 """Port of tests/integration/test_inference_accuracy_oracle.py to v0.13.
 
-Tests the v0.13 oracle helpers in benchmarking/core/oracle.py.  The
+Tests the v0.13 oracle helpers in nbn/bench/core/oracle.py.  The
 oracle functions were adapted from crash_test_runner v0.12 private helpers;
 these tests verify the same behavioral contracts against the v0.13 API.
 
@@ -17,11 +17,11 @@ import math
 import pytest
 import torch
 
-from benchmarking.core.oracle import (
+from nbn.bench.core.oracle import (
     filter_ground_truth,
     forward_with_clamp_posterior_samples,
 )
-from benchmarking.problems import SyntheticConfig, SyntheticProblemSource
+from nbn.bench.problems import SyntheticConfig, SyntheticProblemSource
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Tests for v0.6c-C-3 aggregator (``benchmarking._aggregate``).
+"""Tests for v0.6c-C-3 aggregator (``nbn.bench._aggregate``).
 
 Pin the aggregation contract: 4 DataFrames out (wide, long, status,
 pareto), explicit ``"n/a (...)"`` strings instead of NaN/0 for missing
@@ -14,7 +14,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from benchmarking._aggregate import (
+from nbn.bench._aggregate import (
     _NA_CELL_ERRORED,
     _NA_METRIC_MISSING,
     _NA_NOT_APPLICABLE,

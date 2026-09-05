@@ -149,7 +149,7 @@ def test_min_fill_n20_case_pins_order_and_invariants() -> None:
     is the source of the 64× peak reduction over topological order
     measured in PR #22's round-1 follow-up.
     """
-    from benchmarking.synthetic import make_synthetic_bn
+    from nbn.bench.synthetic import make_synthetic_bn
 
     bn = make_synthetic_bn(
         family="discrete", n_nodes=20,

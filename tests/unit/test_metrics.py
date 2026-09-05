@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import torch
 
-from benchmarking.metrics import (
+from nbn.bench.metrics import (
     brier_score,
     crps,
     energy_distance,

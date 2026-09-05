@@ -1,7 +1,7 @@
 # bnlearn_complete launch plan
 
 **Target run:** paper §5 critical-path data — full bnlearn networks × 5 seeds × 12 baselines
-**Config:** `benchmarking/configs/bnlearn/complete/inference_complete.yaml`
+**Config:** `nbn/bench/configs/bnlearn/complete/inference_complete.yaml`
 **Expected duration:** 2–3 days wall-clock
 **Author:** Giovanni
 **Date:** 2026-06-05 (post-v0.13 cutover, post-#147 GPU autodetect)
@@ -44,10 +44,10 @@ Run through this top-to-bottom before launching. If anything fails, stop and inv
 - [ ] **Host stays awake for the run's expected duration** — no suspend/sleep/power-down (your responsibility per machine)
 
 **Config state:**
-- [ ] Config file inspected: `cat benchmarking/configs/bnlearn/complete/inference_complete.yaml`
+- [ ] Config file inspected: `cat nbn/bench/configs/bnlearn/complete/inference_complete.yaml`
 - [ ] `pyro` is pinned to `cpu` (per PR #102 finding — Importance sampler is 11× slower on GPU)
 - [ ] `fit_timeout_s` and `per_cell_timeout_s` are reasonable for paper-scale (defaults per #143)
-- [ ] Output directory is `benchmarking/results/` (the default; the runner creates a timestamped subdirectory)
+- [ ] Output directory is `results/` (the default; the runner creates a timestamped subdirectory)
 
 **Logging:**
 - [ ] Will launch with `-v` (verbose) so `run.log` captures enough for post-mortem
@@ -100,7 +100,7 @@ date
 
 # Step 5: Launch
 nbn-bench inference \
-    --config benchmarking/configs/bnlearn/complete/inference_complete.yaml \
+    --config nbn/bench/configs/bnlearn/complete/inference_complete.yaml \
     --device auto \
     -v
 
@@ -208,7 +208,7 @@ kill -9 <PID>
 **Immediately after the run completes** (tqdm reaches 100% or you see "done" in the log):
 
 ```bash
-RUNDIR=$(ls -dt benchmarking/results/benchmark_bnlearn_* | head -1)
+RUNDIR=$(ls -dt results/benchmark_bnlearn_* | head -1)
 echo "Verifying: $RUNDIR"
 
 # 1. Process exited cleanly

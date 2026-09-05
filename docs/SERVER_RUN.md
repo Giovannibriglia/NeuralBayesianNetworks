@@ -61,7 +61,7 @@ cd /path/to/NeuralBayesianNetworks   # always from repo root
 # pyro on CPU; pyro timeouts at n≥100 for discrete/continuous_lg/hybrid
 # add ~3-5 h regardless of CUDA). ~30-50 h on a CPU-only server.
 nohup nbn-bench inference \
-  --config benchmarking/configs/synthetic/complete/inference_complete.yaml \
+  --config nbn/bench/configs/synthetic/complete/inference_complete.yaml \
   > /tmp/inference_complete.log 2>&1 &
 echo "PID=$!"
 ```
@@ -124,7 +124,7 @@ b. **If the process is killed or crashes**, the JSONL is intact up to
 
    ```python
    from pathlib import Path
-   from benchmarking.core.output import jsonl_to_parquet
+   from nbn.bench.core.output import jsonl_to_parquet
    jsonl_to_parquet(
        Path("results/benchmark_synthetic_paper_<timestamp>/metrics.jsonl"),
        Path("results/benchmark_synthetic_paper_<timestamp>/metrics.parquet"),
@@ -146,7 +146,7 @@ d. **To avoid losing in-progress data when relaunching**: copy the
 
    python3 -c "
    from pathlib import Path
-   from benchmarking.core.output import jsonl_to_parquet
+   from nbn.bench.core.output import jsonl_to_parquet
    jsonl_to_parquet(Path('/tmp/merged.jsonl'), Path('/tmp/merged.parquet'))
    "
    ```
@@ -232,7 +232,7 @@ does each baseline's full cell pipeline overflow the 60s budget?"
 
 ```bash
 nohup nbn-bench inference \
-  --config benchmarking/configs/synthetic/complete/inference_scalability_complete.yaml \
+  --config nbn/bench/configs/synthetic/complete/inference_scalability_complete.yaml \
   > /tmp/inference_scalability_complete.log 2>&1 &
 echo "PID $!"
 ```

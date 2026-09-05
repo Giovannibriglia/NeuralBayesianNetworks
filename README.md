@@ -13,21 +13,30 @@ continuous-discrete) networks at scale.
 ## Install
 
 ```bash
-# NBN library (with neural mechanisms)
-pip install -e ".[neural]"
-
-# NBN + full benchmarking suite (external baselines, figures, tables)
-pip install -e ".[bench,neural,gp,mcmc]"
+pip install nbn                 # the library
+pip install "nbn[neural]"       # + zuko-backed flows / MDNs (NBN's headline mechanisms)
+pip install "nbn[bench]"        # + the benchmark suite (`nbn-bench`, `nbn.bench`)
 ```
 
-The `[neural]` extra adds zuko-backed flows/MDNs (NBN's headline mechanisms);
-`bench` pulls in the external-baseline libraries (pgmpy, pomegranate) plus
-plotting (matplotlib, seaborn), and `gp`/`mcmc` add the gpytorch and pyro
+The import name is `nbn`. The `[neural]` extra adds zuko-backed flows/MDNs;
+`bench` pulls in the benchmark runner's own dependencies (pandas, pyarrow,
+scipy, yaml, tqdm), the external-baseline libraries (pgmpy, pomegranate) and
+plotting (matplotlib, seaborn); `gp`/`mcmc` add the gpytorch and pyro
 baselines. All of `bench`, `gp`, and `mcmc` are required for paper-grade
 benchmark runs — without them the runner silently skips those baselines
-(cells emit `not_supported` rather than erroring). `gp` and `mcmc` can be
-added to the library install as needed, e.g. `pip install -e ".[neural,gp]"`.
-Add `dev` for the test and docs toolchain.
+(cells emit `not_supported` rather than erroring).
+
+Working from a checkout (development, or reproducing the paper runs, whose
+YAML configs are addressed by repo-relative path):
+
+```bash
+git clone https://github.com/Giovannibriglia/NeuralBayesianNetworks.git
+cd NeuralBayesianNetworks
+pip install -e ".[dev,bench,neural,gp,mcmc]"
+```
+
+`dev` is the test and docs toolchain. Releases are cut by pushing a `v*` tag;
+`.github/workflows/publish.yml` builds from the tag and uploads to PyPI.
 
 ### Run the benchmark suite
 
@@ -35,7 +44,7 @@ From the repo root, launch the six paper-scale benchmarks. At most three run
 in parallel; the next starts as soon as one finishes:
 
 ```bash
-bash benchmarking/run_all_benchmarks.sh
+bash scripts/run_all_benchmarks.sh
 ```
 
 Override the pool size or device via `MAX_PARALLEL=2 bash …` or
@@ -63,7 +72,7 @@ These numbers come from the canonical paper-data run at tag `v0.6c-d`
 
 ### Inference: 9-22× faster on continuous Linear Gaussian networks
 
-![Inference total time vs network size](benchmarking/results/figures/inference_paper_total_time_vs_size.png)
+![Inference total time vs network size](results/figures/inference_paper_total_time_vs_size.png)
 
 NBN-lg-lw vs pgmpy-lg-predict on continuous Linear Gaussian networks:
 22× faster at n=10 (1.9 ms vs 42 ms), 12× at n=1000 (0.72 s vs 8.5 s).
@@ -75,7 +84,7 @@ at 108 ms (75× faster).
 
 ### Parameter learning: 2.3× more accurate on discrete networks at scale
 
-![Parameter learning accuracy vs network size](benchmarking/results/figures/parameter_learning_paper_accuracy_vs_size.png)
+![Parameter learning accuracy vs network size](results/figures/parameter_learning_paper_accuracy_vs_size.png)
 
 On discrete Bayesian networks, NBN-cat reaches TV ≈ 0.14 across all
 n_nodes ≥ 50; pgmpy-mle saturates at TV ≈ 0.34. The quality gap opens
@@ -164,7 +173,10 @@ is meant to undo — silently, with nothing raising. Pinned by
 ## Repository layout
 
     nbn/                Library code (mechanisms, inference, sampling, core).
-    benchmarking/       Crash-test runner, baselines, configs, output figures.
+    nbn/bench/          Benchmark suite: runner, baseline adapters, configs, data.
+    notebooks/          Colab-ready notebooks for the six paper-scale benchmarks.
+    scripts/            run_all_benchmarks.sh and other operational helpers.
+    results/            Where nbn-bench writes runs (gitignored).
     tests/              Unit + integration tests.
     RESEARCH.md         Paper outline and contribution claims.
 
@@ -174,7 +186,7 @@ The headline numbers above are anchored at tag `v0.6c-d`
 (commit `2e0dd32`):
 
 ```bash
-git checkout v0.6c-d
+git checkout v0.6c-d          # the suite lived at benchmarking/ at this tag
 nbn-bench inference \
   --config benchmarking/configs/inference_paper_laptop.yaml
 nbn-bench param-learning \
@@ -189,7 +201,7 @@ nbn-bench param-learning \
 Numerical values vary within MC noise across hardware; STATUS counts
 and qualitative findings (cluster, speedup, quality gap) are stable.
 The committed parquets, tables, and figures under
-`benchmarking/results/{raw,tables,figures}/` are the canonical paper
+`results/{raw,tables,figures}/` are the canonical paper
 artefacts.
 
 ## Crash tests
@@ -210,26 +222,26 @@ Each crash test has a smoke config (CI, < 60s) and a paper config
 
 ```bash
 # Smoke (runs in CI):
-nbn-bench param-learning --config benchmarking/configs/synthetic/smoke_tests/parameter_learning_smoke.yaml
-nbn-bench inference      --config benchmarking/configs/synthetic/smoke_tests/inference_smoke.yaml
+nbn-bench param-learning --config nbn/bench/configs/synthetic/smoke_tests/parameter_learning_smoke.yaml
+nbn-bench inference      --config nbn/bench/configs/synthetic/smoke_tests/inference_smoke.yaml
 
 # Paper (8 GB VRAM, the laptop variant used for v0.6c-d paper data):
-nbn-bench param-learning --config benchmarking/configs/synthetic/complete/parameter_learning_complete_laptop.yaml
-nbn-bench inference      --config benchmarking/configs/synthetic/complete/inference_complete_laptop.yaml
+nbn-bench param-learning --config nbn/bench/configs/synthetic/complete/parameter_learning_complete_laptop.yaml
+nbn-bench inference      --config nbn/bench/configs/synthetic/complete/inference_complete_laptop.yaml
 
 # Paper (≥16 GB VRAM, canonical config without batch reductions):
-nbn-bench param-learning --config benchmarking/configs/synthetic/complete/parameter_learning_complete.yaml
-nbn-bench inference      --config benchmarking/configs/synthetic/complete/inference_complete.yaml
+nbn-bench param-learning --config nbn/bench/configs/synthetic/complete/parameter_learning_complete.yaml
+nbn-bench inference      --config nbn/bench/configs/synthetic/complete/inference_complete.yaml
 ```
 
-Each invocation writes its output under `benchmarking/results/`:
+Each invocation writes its output under `results/`:
 
-    benchmarking/results/figures/{prefix}_total_time_vs_size.{pdf,svg,png}
-    benchmarking/results/figures/{prefix}_accuracy_vs_size.{pdf,svg,png}
-    benchmarking/results/raw/{prefix}_metrics.parquet
-    benchmarking/results/raw/{prefix}_{timestamp}.log         (gitignored)
-    benchmarking/results/raw/{prefix}_{timestamp}.run.json    (gitignored)
-    benchmarking/results/tables/{prefix}_summary.{csv,md,parquet,tex}
+    results/figures/{prefix}_total_time_vs_size.{pdf,svg,png}
+    results/figures/{prefix}_accuracy_vs_size.{pdf,svg,png}
+    results/raw/{prefix}_metrics.parquet
+    results/raw/{prefix}_{timestamp}.log         (gitignored)
+    results/raw/{prefix}_{timestamp}.run.json    (gitignored)
+    results/tables/{prefix}_summary.{csv,md,parquet,tex}
 
 ## Configuration
 
@@ -247,7 +259,7 @@ Each config is a YAML file with these fields:
                           optional inference_method and device (cpu|cuda|auto)
     per_cell_timeout_s:   wall-clock cap per (family, n_nodes, seed, baseline)
 
-See `benchmarking/configs/**/*.yaml` for all shipped configs.
+See `nbn/bench/configs/**/*.yaml` for all shipped configs.
 
 ## Status
 

@@ -40,7 +40,7 @@ Discrete networks ship as `.bif` files at:
 The R-native `.rda`/`.rds` formats can't be read natively from Python.
 We pre-convert these files once to a Python-readable JSON format using
 R (with the `bnlearn` and `jsonlite` packages), and commit the converted
-JSON files to the repo at `benchmarking/data/bnlearn/`.
+JSON files to the repo at `nbn/bench/data/bnlearn/`.
 
 The conversion script (`scripts/convert_bnlearn_continuous.R`) is
 committed to the repo alongside the converted files. Re-running it
@@ -131,7 +131,7 @@ result <- list(
   })
 )
 
-write_json(result, paste0("benchmarking/data/bnlearn/", network_name, ".json"),
+write_json(result, paste0("nbn/bench/data/bnlearn/", network_name, ".json"),
            pretty=TRUE, auto_unbox=TRUE)
 ```
 
@@ -249,7 +249,7 @@ shortcuts in this iteration — users list networks they want.
 The runner produces (network × seed × baseline × n_queries) cells.
 Each network's `family` determines which baselines apply (discrete-only
 baselines skip gaussian networks, etc., via existing applicability
-machinery in `benchmarking/core/applicability.py`).
+machinery in `nbn/bench/core/applicability.py`).
 
 ## 7. Data model
 
@@ -274,7 +274,7 @@ since each `(network, seed)` is a distinct entry.
 
 ## 8. Oracle compatibility
 
-The existing oracle (`benchmarking/core/oracle.py`) dispatches on the
+The existing oracle (`nbn/bench/core/oracle.py`) dispatches on the
 **target node's kind**, not the network's family (confirmed in Stages 2-3):
 
 - **Discrete target**: `filter_ground_truth` does exact-match rejection
@@ -328,12 +328,12 @@ inference falls through to `hybrid` and the LG baselines never run.
 ### Stage 1: R-side conversion script + bundled JSON files
 
 - `scripts/convert_bnlearn_continuous.R` written + reviewed
-- Run locally (requires R + bnlearn + jsonlite — both installed on Giovanni's machine) to produce `benchmarking/data/bnlearn/<network>.json` for all 7 gaussian + clg networks
+- Run locally (requires R + bnlearn + jsonlite — both installed on Giovanni's machine) to produce `nbn/bench/data/bnlearn/<network>.json` for all 7 gaussian + clg networks
 - JSON files committed alongside the script
 
 ### Stage 2: BnlearnProblemSource — discrete kind
 
-- `benchmarking/problems/bnlearn.py` (~150-200 LOC)
+- `nbn/bench/problems/bnlearn.py` (~150-200 LOC)
 - Discrete loading via `pgmpy.readwrite.BIFReader`
 - On-demand download with caching to `~/.cache/nbn/bnlearn/`
 - Forward sampling via `BayesianModelSampling.forward_sample`
@@ -350,7 +350,7 @@ inference falls through to `hybrid` and the LG baselines never run.
 ### Stage 4: YAML dispatch + bnlearn_smoke.yaml + end-to-end smoke
 
 - `yaml_config.py` dispatch for `problem_source: {type: bnlearn}`
-- `benchmarking/configs/bnlearn_smoke.yaml`: 3 networks (asia + ecoli70 + sangiovese), small n_train/n_test, runs in <5 min
+- `nbn/bench/configs/bnlearn_smoke.yaml`: 3 networks (asia + ecoli70 + sangiovese), small n_train/n_test, runs in <5 min
 - End-to-end smoke verifies parquet contains rows from all 3 networks with expected metric values
 - PR marked ready for review
 

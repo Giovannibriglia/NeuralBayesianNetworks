@@ -253,7 +253,7 @@ class Mechanism(nn.Module, ABC):
         discrete mechanisms.  Used by:
 
         * The benchmarking metric site
-          (benchmarking/measurements/accuracy_timing.py)
+          (nbn/bench/measurements/accuracy_timing.py)
         * The variable-elimination engine
           (``nbn/inference/tensor_ve.py:_extract_factors``)
 

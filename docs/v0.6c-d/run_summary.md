@@ -126,9 +126,9 @@ baselines for hybrid — this is NBN-only territory.
 ```bash
 git checkout 33ca98c99b702ae8ed72b97f778971a5286ee774
 nbn-bench inference \
-  --config benchmarking/configs/inference_paper_laptop.yaml
+  --config nbn/bench/configs/inference_paper_laptop.yaml
 nbn-bench param-learning \
-  --config benchmarking/configs/parameter_learning_paper_laptop.yaml
+  --config nbn/bench/configs/parameter_learning_paper_laptop.yaml
 ```
 
 Numerical values vary within MC noise; STATUS counts and qualitative

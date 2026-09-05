@@ -14,7 +14,7 @@ are DNFs. Every DNF falls into one of three categories:
 
 None are method-quality regressions of the v0.7-#37 W₁ fix. Source of
 truth for per-row precision is the parquet
-(`benchmarking/results/raw/{inference,parameter_learning}_paper_metrics.parquet`).
+(`results/raw/{inference,parameter_learning}_paper_metrics.parquet`).
 
 ## Inference run (1571 cells)
 
@@ -58,7 +58,7 @@ parquet directly:
 
 ```python
 import pandas as pd
-df = pd.read_parquet('benchmarking/results/raw/inference_paper_metrics.parquet')
+df = pd.read_parquet('results/raw/inference_paper_metrics.parquet')
 dnf = df[df['status'] != 'ok'][['family', 'baseline', 'n_nodes', 'seed', 'status', 'error_msg']]
 print(dnf.to_string())
 ```

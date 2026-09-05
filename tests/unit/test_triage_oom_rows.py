@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from benchmarking.diagnostics.triage_oom_rows import _classify, main, triage
+from nbn.bench.diagnostics.triage_oom_rows import _classify, main, triage
 
 _NEVER_STARTED = "subprocess produced no output rows (classification=killed, exit_code=-9)"
 _VE_GUARD = (

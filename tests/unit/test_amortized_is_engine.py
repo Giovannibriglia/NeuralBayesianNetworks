@@ -22,8 +22,8 @@ import time
 import pytest
 import torch
 
-from benchmarking.adapters import NBNAdapter
-from benchmarking.domains.base import BenchmarkProblem, Query
+from nbn.bench.adapters import NBNAdapter
+from nbn.bench.domains.base import BenchmarkProblem, Query
 from nbn.inference.amortized_is import AmortizedISEngine
 
 

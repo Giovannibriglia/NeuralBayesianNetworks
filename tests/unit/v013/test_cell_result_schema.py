@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from benchmarking.core.results import (
+from nbn.bench.core.results import (
     CellResult,
     VALID_BENCHMARKS,
     VALID_QUERY_ROLES_ALL,

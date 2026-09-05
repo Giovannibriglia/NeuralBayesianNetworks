@@ -1,4 +1,4 @@
-"""Tests for benchmarking.selectors.topological — Stage 1.
+"""Tests for nbn.bench.selectors.topological — Stage 1.
 
 Covers NodeRoles + compute_node_roles + _TargetAllocator. Steps 2-4
 tested in later stages.
@@ -15,8 +15,8 @@ import pytest
 
 import torch
 
-from benchmarking.domains.base import BenchmarkProblem
-from benchmarking.selectors.topological import (
+from nbn.bench.domains.base import BenchmarkProblem
+from nbn.bench.selectors.topological import (
     TopologicalAllocator,
     _KindEvidenceAllocator,
     _TargetAllocator,
@@ -49,7 +49,7 @@ def asia_dag() -> nx.DiGraph:
 @pytest.fixture
 def synthetic_n1000() -> nx.DiGraph:
     """Synthetic n=1000 continuous_lg DAG."""
-    from benchmarking.synthetic import make_synthetic_bn
+    from nbn.bench.synthetic import make_synthetic_bn
     bn = make_synthetic_bn(n_nodes=1000, family="continuous_lg", seed=0)
     return nx.DiGraph(bn.dag)
 

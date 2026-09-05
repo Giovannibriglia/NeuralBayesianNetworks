@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Deprecated entry point — use ``nbn-bench plot`` instead.
 
-The figure-generation logic moved to ``benchmarking/_paper_figures.py`` and is
+The figure-generation logic moved to ``nbn/bench/_paper_figures.py`` and is
 exposed as the ``nbn-bench plot`` subcommand, mirroring the two-phase
 benchmark → figures workflow (``nbn-bench inference`` then ``nbn-bench plot``).
 
@@ -17,7 +17,7 @@ import logging
 import warnings
 
 # Re-export the public surface so existing imports continue to resolve.
-from benchmarking._paper_figures import (  # noqa: F401
+from nbn.bench._paper_figures import (  # noqa: F401
     n_parameters_lookup,
     run_plot,
 )

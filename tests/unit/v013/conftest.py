@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from benchmarking.core.cell_runner import MEMORY_LIMIT_ENV_VAR
+from nbn.bench.core.cell_runner import MEMORY_LIMIT_ENV_VAR
 
 #: Comfortably above the ~6 GiB at which torch imports cleanly with CUDA, and
 #: still low enough to stop a genuinely runaway cell.

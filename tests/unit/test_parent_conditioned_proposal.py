@@ -11,8 +11,8 @@ import torch.nn as nn
 
 import pytest
 
-from benchmarking.adapters import NBNAdapter
-from benchmarking.domains.base import BenchmarkProblem, Query
+from nbn.bench.adapters import NBNAdapter
+from nbn.bench.domains.base import BenchmarkProblem, Query
 from nbn.inference.amortized_is import (
     _MIN_TRAIN_STEPS,
     _STEPS_PER_NODE,

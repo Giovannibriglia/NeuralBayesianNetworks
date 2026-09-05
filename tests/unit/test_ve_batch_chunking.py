@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import torch
 
-from benchmarking.synthetic import make_synthetic_bn
+from nbn.bench.synthetic import make_synthetic_bn
 from nbn.inference.tensor_ve import (
     TensorVariableElimination,
     _max_chunk_rows,

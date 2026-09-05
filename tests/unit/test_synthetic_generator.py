@@ -1,4 +1,4 @@
-"""Unit tests for ``benchmarking.synthetic.make_synthetic_bn`` (v0.4)."""
+"""Unit tests for ``nbn.bench.synthetic.make_synthetic_bn`` (v0.4)."""
 from __future__ import annotations
 
 import math
@@ -8,8 +8,8 @@ import networkx as nx
 import pytest
 import torch
 
-from benchmarking import synthetic as synthetic_mod
-from benchmarking.synthetic import (
+from nbn.bench import synthetic as synthetic_mod
+from nbn.bench.synthetic import (
     SyntheticBN,
     _FAMILIES,
     make_synthetic_bn,

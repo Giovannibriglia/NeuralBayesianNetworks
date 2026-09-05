@@ -6,14 +6,14 @@ must match to ``allclose(atol=1e-6, rtol=1e-6)`` — the batched path is
 just the same algebra on a leading B axis.
 
 Test fixtures are synthetic discrete BNs of varying size produced by
-:func:`benchmarking.synthetic.make_synthetic_bn`.
+:func:`nbn.bench.synthetic.make_synthetic_bn`.
 """
 from __future__ import annotations
 
 import pytest
 import torch
 
-from benchmarking.synthetic import make_synthetic_bn
+from nbn.bench.synthetic import make_synthetic_bn
 from nbn import TensorVariableElimination
 
 

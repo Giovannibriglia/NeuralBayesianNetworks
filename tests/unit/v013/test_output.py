@@ -12,13 +12,13 @@ from pathlib import Path
 
 import pytest
 
-from benchmarking.core.output import (
+from nbn.bench.core.output import (
     JsonlWriter,
     _compact_datetime,
     jsonl_to_parquet,
     make_results_dir,
 )
-from benchmarking.core.results import CellResult
+from nbn.bench.core.results import CellResult
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +216,7 @@ class TestMakeResultsDir:
     def test_raises_if_already_exists(self, tmp_path):
         # Force a known name by mocking _compact_datetime
         from unittest.mock import patch
-        with patch("benchmarking.core.output._compact_datetime", return_value="20260101_000000"):
+        with patch("nbn.bench.core.output._compact_datetime", return_value="20260101_000000"):
             d = make_results_dir("synthetic", "test", base=tmp_path)
             assert d.exists()
             with pytest.raises(FileExistsError):

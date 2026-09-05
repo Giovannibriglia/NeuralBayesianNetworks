@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from benchmarking.core.cell_runner import (
+from nbn.bench.core.cell_runner import (
     _classification_to_status,
     _read_output_jsonl,
     run_cell_in_subprocess,
@@ -99,13 +99,13 @@ class TestSubprocessLaunch:
         objects (synthetic discrete problem, nbn-cat-ve, topological
         selector, AccuracyAndTiming).
         """
-        from benchmarking.core.config import BaselineSpec
-        from benchmarking.measurements.accuracy_timing import AccuracyAndTiming
-        from benchmarking.problems.synthetic import (
+        from nbn.bench.core.config import BaselineSpec
+        from nbn.bench.measurements.accuracy_timing import AccuracyAndTiming
+        from nbn.bench.problems.synthetic import (
             SyntheticConfig,
             SyntheticProblemSource,
         )
-        from benchmarking.selectors.topological import TopologicalAllocator
+        from nbn.bench.selectors.topological import TopologicalAllocator
 
         scfg = SyntheticConfig(
             families=["discrete"], n_nodes_list=[8], seeds=[0],
@@ -310,7 +310,7 @@ class TestFailureModes:
         worker_script = Path(tempfile.mkdtemp()) / "mem_test_worker.py"
         worker_script.write_text(
             "import sys\n"
-            "from benchmarking.core.cell_worker import _apply_memory_limit\n"
+            "from nbn.bench.core.cell_worker import _apply_memory_limit\n"
             "_apply_memory_limit()\n"
             "# Now attempt 1 GB allocation. With a 300 MB cap, this OOMs.\n"
             "import ctypes\n"
@@ -330,7 +330,7 @@ class TestFailureModes:
                 env=env,
             )
             # 10s was too tight: the worker imports
-            # benchmarking.core.cell_worker (and torch beneath it), which
+            # nbn.bench.core.cell_worker (and torch beneath it), which
             # under a parallel pytest run can take longer than that, turning
             # a passing assertion into a TimeoutExpired.  The claim under
             # test is that the cap is *enforced*, not that it is enforced

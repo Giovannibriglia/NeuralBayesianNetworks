@@ -1,0 +1,90 @@
+# =============================================================================
+# synthetic inference smoke — TopologicalAllocator (hub/cut/terminal/random).
+# =============================================================================
+#
+# Schema reference (nbn/bench/core/yaml_config.py):
+#
+# Top-level (RunnerConfig):
+#   version                   required, must be "v0.13"
+#   benchmark                 required, "bnlearn" | "synthetic"
+#   config_name               required, used as the output-artifact prefix
+#   metrics                   default: "all"  ("all" | "timing")
+#   selector                  default: "uniform_random"
+#                             ("uniform_random" | {type: topological, ...}
+#                              | {type: heaviest_by_role, ...})
+#   source                    required, see below
+#   baselines                 required, non-empty list of baseline specs
+#   n_queries_per_cell        required
+#   per_cell_timeout_s        required (seconds)
+#   fit_timeout_s             default: null (computed = multiplier * per_cell_timeout_s)
+#
+# Source (synthetic):
+#   families             required, list
+#                        (discrete | continuous_lg | continuous_nongauss | hybrid)
+#   n_nodes_list         required, list of int node counts
+#   seeds                required, list of int RNG seeds
+#   n_train              required
+#   n_test               default: 2000
+#   n_reference          required
+#   edge_density         required
+#   max_in_degree        required
+#   cardinality          required
+#   fraction_continuous  required
+#   device               default: "cpu"
+#
+# Baseline spec (each item in `baselines`):
+#   library, mechanism, param_method        (required)
+#   inference_method, device, extra_kwargs   (optional)
+# =============================================================================
+
+# Smoke config for inference with the Phase 2 TopologicalAllocator.
+# Mirrors inference_smoke.yaml but selects queries by topological role.
+# Wall-clock budget: < 90 seconds on CPU.
+version: "v0.13"
+benchmark: synthetic
+config_name: smoke
+metrics: all
+
+selector:
+  type: topological
+  target_allocation:
+    hub: 0.30
+    cut: 0.25
+    terminal: 0.25
+    random: 0.20
+  # kind_allocation, evidence_allocation, n_evidence: use TopologicalAllocator defaults
+
+source:
+  families: [discrete, continuous_lg, continuous_nongauss, hybrid]
+  n_nodes_list: [5, 10]
+  seeds: [0]
+  n_train: 2048
+  n_test: 512
+  n_reference: 5000
+  edge_density: 0.20
+  max_in_degree: 2
+  cardinality: 4
+  fraction_continuous: 0.5
+
+baselines:
+  - {library: pgmpy, mechanism: discrete, param_method: mle,   inference_method: ve}
+  - {library: pgmpy, mechanism: discrete, param_method: bayes, inference_method: ve}
+  - {library: pgmpy, mechanism: lg,       param_method: mle,   inference_method: predict}
+  - {library: nbn,   mechanism: cat,      param_method: mle,   inference_method: ve}
+  - {library: nbn,   mechanism: cat,      param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 1024}}
+  - {library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: ve, extra_kwargs: {epochs: 20}}
+  - {library: nbn,   mechanism: neuralcat, param_method: mle,  inference_method: lw,      extra_kwargs: {epochs: 20, n_samples: 1024}}
+  - {library: nbn,   mechanism: lg,       param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 1024}}
+  - {library: nbn,   mechanism: mdn,      param_method: mle,   inference_method: lw,      extra_kwargs: {epochs: 20, n_samples: 1024}}
+  - {library: nbn,   mechanism: flow,     param_method: mle,   inference_method: lw,      extra_kwargs: {epochs: 20, n_samples: 1024}}
+  # Non-parametric continuous mechanisms (#224 / PR 9) — LW only (ais/avi blocked
+  # at recognition_net._head_for, deferred to #227). KDE + KNN here (sub-second on
+  # CPU); flexcode is complete-config / GPU only.
+  - {library: nbn,   mechanism: kde,      param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 1024}}
+  - {library: nbn,   mechanism: knn,      param_method: mle,   inference_method: lw,      extra_kwargs: {n_samples: 1024}}
+  - {library: nbn,   mechanism: hybrid,   param_method: mle,   inference_method: router, extra_kwargs: {epochs: 20}}
+
+# Larger than inference_smoke.yaml (2) so the topological buckets and
+# evidence strategies are well-exercised across the run.
+n_queries_per_cell: 16
+per_cell_timeout_s: 60.0

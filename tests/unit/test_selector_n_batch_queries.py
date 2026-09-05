@@ -17,10 +17,10 @@ from __future__ import annotations
 import pytest
 import torch
 
-from benchmarking.domains.base import BenchmarkProblem
-from benchmarking.selectors import UniformRandomSelector
-from benchmarking.selectors.heaviest import HeaviestQueryByRole
-from benchmarking.selectors.topological import TopologicalAllocator
+from nbn.bench.domains.base import BenchmarkProblem
+from nbn.bench.selectors import UniformRandomSelector
+from nbn.bench.selectors.heaviest import HeaviestQueryByRole
+from nbn.bench.selectors.topological import TopologicalAllocator
 
 
 def _make_problem(n_train: int = 200, n_test: int = 50, seed: int = 0) -> BenchmarkProblem:

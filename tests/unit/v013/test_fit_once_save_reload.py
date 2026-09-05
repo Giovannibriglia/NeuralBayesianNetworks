@@ -25,16 +25,16 @@ from typing import Iterator
 import pytest
 import torch
 
-from benchmarking.core.config import BaselineSpec, RunnerConfig
-from benchmarking.core.runner import (
+from nbn.bench.core.config import BaselineSpec, RunnerConfig
+from nbn.bench.core.runner import (
     Runner,
     _assign_fit_roles,
     _fit_cache_filename,
     _fit_identity_key,
 )
-from benchmarking.domains.base import BenchmarkProblem, GroundTruth
-from benchmarking.measurements import AccuracyAndTiming, TimingOnly
-from benchmarking.selectors.uniform import UniformRandomSelector
+from nbn.bench.domains.base import BenchmarkProblem, GroundTruth
+from nbn.bench.measurements import AccuracyAndTiming, TimingOnly
+from nbn.bench.selectors.uniform import UniformRandomSelector
 
 
 # --- fixtures ----------------------------------------------------------------
@@ -237,7 +237,7 @@ def _worker_ctx(problem, spec, *, fit_role, cache_path, batch_sizes=(1,)):
 
 class TestCellWorkerBranch:
     def test_fit_role_writes_cache(self, tmp_path):
-        from benchmarking.core import cell_worker
+        from nbn.bench.core import cell_worker
         cache = tmp_path / "fit_x.pt"
         rows = cell_worker._run_cell(
             _worker_ctx(_problem(0), _spec("cat", "ve"),
@@ -246,8 +246,8 @@ class TestCellWorkerBranch:
         assert all(r["status"] != "error" for r in rows)
 
     def test_reload_skips_fit_and_uses_base(self, tmp_path, monkeypatch):
-        from benchmarking.core import cell_worker
-        from benchmarking.adapters.nbn_adapter import NBNAdapter
+        from nbn.bench.core import cell_worker
+        from nbn.bench.adapters.nbn_adapter import NBNAdapter
 
         # First, produce a real cache via a fit-role cell.
         cache = tmp_path / "fit_y.pt"
@@ -276,8 +276,8 @@ class TestCellWorkerBranch:
         assert all(r["status"] != "error" for r in rows)
 
     def test_reload_cache_miss_falls_back_to_fit(self, tmp_path, monkeypatch):
-        from benchmarking.core import cell_worker
-        from benchmarking.adapters.nbn_adapter import NBNAdapter
+        from nbn.bench.core import cell_worker
+        from nbn.bench.adapters.nbn_adapter import NBNAdapter
 
         missing = tmp_path / "does_not_exist.pt"
         calls = {"fit": 0, "load": 0}
@@ -304,7 +304,7 @@ class TestCellWorkerBranch:
         # Exercises the #192 pickle fix through the worker's save/load path: a
         # fitted flow base model is saved by the fitter and reloaded by a
         # sibling. continuous_lg family so flow is applicable.
-        from benchmarking.core import cell_worker
+        from nbn.bench.core import cell_worker
         prob = _problem(0, family="continuous_lg")
         prob = BenchmarkProblem(
             name=prob.name, dag=prob.dag,
@@ -339,8 +339,8 @@ class TestCellWorkerBranch:
 
 class TestReloadValueFaithfulness:
     def test_reload_ve_equals_fresh_ve_bitwise(self, tmp_path):
-        from benchmarking.adapters.nbn_adapter import NBNAdapter
-        from benchmarking.domains.base import Query
+        from nbn.bench.adapters.nbn_adapter import NBNAdapter
+        from nbn.bench.domains.base import Query
 
         problem = _problem(0, n_nodes=5)
         q = Query(targets=("X2",), evidence={"X0": 0})
@@ -363,7 +363,7 @@ class TestReloadValueFaithfulness:
     def test_reloaded_adapter_state_matches_fresh(self, tmp_path):
         # load_base_and_attach must leave the adapter indistinguishable from a
         # freshly-fit one: model + engine + problem all populated.
-        from benchmarking.adapters.nbn_adapter import NBNAdapter
+        from nbn.bench.adapters.nbn_adapter import NBNAdapter
         problem = _problem(0)
         fresh = NBNAdapter(mechanism="cat", engine="ve", device="cpu")
         fresh.fit(problem)
@@ -383,7 +383,7 @@ class TestReloadValueFaithfulness:
 # =====================================================================
 
 def _synth_cfg(tmp_path, *, baselines, metrics):
-    from benchmarking.problems.synthetic import (
+    from nbn.bench.problems.synthetic import (
         SyntheticConfig, SyntheticProblemSource,
     )
     measurement = AccuracyAndTiming() if metrics == "all" else TimingOnly()
@@ -429,7 +429,7 @@ class TestGroupedEqualsUngrouped:
         baselines = [_spec("cat", "lw"), _spec("cat", "ve")]
         cfg = _synth_cfg(tmp_path, baselines=baselines, metrics="all")
         if not grouped:
-            import benchmarking.core.runner as rmod
+            import nbn.bench.core.runner as rmod
             # Force ungrouped: every baseline fits its own model.
             monkeypatch.setattr(
                 rmod, "_assign_fit_roles",

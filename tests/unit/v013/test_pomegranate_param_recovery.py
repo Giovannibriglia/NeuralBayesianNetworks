@@ -29,9 +29,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from benchmarking.adapters import PgmpyAdapter, PomegranateAdapter
-from benchmarking.domains.base import BenchmarkProblem
-from benchmarking.measurements import ParamLearningMeasurement
+from nbn.bench.adapters import PgmpyAdapter, PomegranateAdapter
+from nbn.bench.domains.base import BenchmarkProblem
+from nbn.bench.measurements import ParamLearningMeasurement
 
 
 # ---- fixtures ---------------------------------------------------------------
@@ -56,7 +56,7 @@ def _cat_mech(probs: torch.Tensor, parent_cards: list[int]):
 
 
 def _bn_problem(seed: int = 1, n_nodes: int = 4):
-    from benchmarking.synthetic import make_synthetic_bn
+    from nbn.bench.synthetic import make_synthetic_bn
 
     bn = make_synthetic_bn(
         n_nodes=n_nodes, family="discrete", cardinality=3, edge_density=0.5,

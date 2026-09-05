@@ -8,12 +8,12 @@ Reference: docs/v0.13-benchmark-redesign.md
 
 ## Adding a new problem source
 
-Implement `benchmarking.core.ProblemSource` and add it to the dispatch
-table in `benchmarking/core/yaml_config.py`:
+Implement `nbn.bench.core.ProblemSource` and add it to the dispatch
+table in `nbn/bench/core/yaml_config.py`:
 
 ```python
-from benchmarking.core.interfaces import ProblemSource
-from benchmarking.domains.base import BenchmarkProblem
+from nbn.bench.core.interfaces import ProblemSource
+from nbn.bench.domains.base import BenchmarkProblem
 
 class MyProblemSource:
     def iter_problems(self, config) -> Iterable[BenchmarkProblem]:
@@ -22,18 +22,18 @@ class MyProblemSource:
 ```
 
 Then add a `benchmark="my_domain"` branch to `load_runner_config` in
-`benchmarking/core/yaml_config.py`.
+`nbn/bench/core/yaml_config.py`.
 
 ## Adding a new baseline adapter
 
-Implement `benchmarking.core.BaselineAdapter` and register the library
-in `benchmarking/adapters/__init__.py` and `build_adapter` in
-`benchmarking/core/config.py`:
+Implement `nbn.bench.core.BaselineAdapter` and register the library
+in `nbn/bench/adapters/__init__.py` and `build_adapter` in
+`nbn/bench/core/config.py`:
 
 ```python
-from benchmarking.core.interfaces import BaselineAdapter
-from benchmarking.domains.base import BenchmarkProblem, Query
-from benchmarking.domains.posterior import Posterior
+from nbn.bench.core.interfaces import BaselineAdapter
+from nbn.bench.domains.base import BenchmarkProblem, Query
+from nbn.bench.domains.posterior import Posterior
 
 class MyAdapter:
     name = "my-lib-mle-lw"   # canonical label key
@@ -48,7 +48,7 @@ class MyAdapter:
         return problem.family in {"discrete", "continuous_lg"}
 ```
 
-Add the label to `benchmarking/core/applicability.py`:
+Add the label to `nbn/bench/core/applicability.py`:
 
 ```python
 BASELINE_FAMILY_APPLICABILITY["my-lib-mle-lw"] = BaselineApplicability(
@@ -60,7 +60,7 @@ Then wire it in `build_adapter`:
 
 ```python
 if lib == "my_lib":
-    from benchmarking.adapters.my_adapter import MyAdapter
+    from nbn.bench.adapters.my_adapter import MyAdapter
     return MyAdapter(**kw)
 ```
 
@@ -112,4 +112,4 @@ nbn-bench inference --config my_config.yaml [--device cpu|cuda]
 `TimingOnly` (metrics: "timing") emits:
 - `total_time_s` only — no oracle calls, much faster
 
-See `benchmarking/measurements/` for the implementation.
+See `nbn/bench/measurements/` for the implementation.

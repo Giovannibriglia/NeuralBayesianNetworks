@@ -15,7 +15,7 @@ from unittest.mock import PropertyMock, patch
 import pytest
 import torch
 
-from benchmarking.synthetic import make_synthetic_bn
+from nbn.bench.synthetic import make_synthetic_bn
 import nbn.inference.tensor_ve as ve_mod
 from nbn.inference.tensor_ve import (
     TensorVariableElimination,

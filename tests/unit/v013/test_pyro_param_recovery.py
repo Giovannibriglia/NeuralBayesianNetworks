@@ -26,9 +26,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from benchmarking.adapters import PgmpyAdapter, PyroAdapter
-from benchmarking.domains.base import BenchmarkProblem
-from benchmarking.measurements import ParamLearningMeasurement
+from nbn.bench.adapters import PgmpyAdapter, PyroAdapter
+from nbn.bench.domains.base import BenchmarkProblem
+from nbn.bench.measurements import ParamLearningMeasurement
 
 
 # ---- fixtures ---------------------------------------------------------------
@@ -59,7 +59,7 @@ def _pyro(problem):
 
 
 def _bn_problem(seed: int, family: str = "discrete", n_nodes: int = 4):
-    from benchmarking.synthetic import make_synthetic_bn
+    from nbn.bench.synthetic import make_synthetic_bn
 
     bn = make_synthetic_bn(
         n_nodes=n_nodes, family=family, cardinality=3, edge_density=0.5,

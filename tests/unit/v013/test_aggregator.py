@@ -17,8 +17,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from benchmarking._aggregate import aggregate, _NA_NOT_APPLICABLE, _NA_CELL_ERRORED
-from benchmarking._tables import write_all
+from nbn.bench._aggregate import aggregate, _NA_NOT_APPLICABLE, _NA_CELL_ERRORED
+from nbn.bench._tables import write_all
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +241,7 @@ class TestTables:
 class TestPlotterSmoke:
     def test_render_figures_produces_files(self, tmp_path):
         """Smoke test: render_figures runs end-to-end and creates figure files."""
-        from benchmarking._plot_v2 import render_figures
+        from nbn.bench._plot_v2 import render_figures
 
         parquet = _make_v3_parquet(tmp_path, _multi_size_rows())
         out_paths = render_figures(
@@ -261,7 +261,7 @@ class TestPlotterSmoke:
 
     def test_render_figures_file_naming_convention(self, tmp_path):
         """Produced files follow the <prefix>_<metric>_vs_problem_id.<ext> convention."""
-        from benchmarking._plot_v2 import render_figures
+        from nbn.bench._plot_v2 import render_figures
 
         parquet = _make_v3_parquet(tmp_path, _multi_size_rows())
         out_paths = render_figures(
@@ -279,7 +279,7 @@ class TestPlotterSmoke:
 
     def test_render_figures_backward_compat_v012(self, tmp_path):
         """render_figures accepts v0.12 n_nodes parquets without error."""
-        from benchmarking._plot_v2 import render_figures
+        from nbn.bench._plot_v2 import render_figures
 
         df = pd.DataFrame([{
             "family": "discrete", "n_nodes": 4, "seed": 0,

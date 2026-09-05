@@ -13,10 +13,10 @@ from __future__ import annotations
 import pytest
 import torch
 
-from benchmarking.adapters import NBNAdapter
-from benchmarking.core.interfaces import BaselineAdapter
-from benchmarking.domains.base import BenchmarkProblem, Query
-from benchmarking.domains.posterior import Posterior
+from nbn.bench.adapters import NBNAdapter
+from nbn.bench.core.interfaces import BaselineAdapter
+from nbn.bench.domains.base import BenchmarkProblem, Query
+from nbn.bench.domains.posterior import Posterior
 
 
 # ---- Helpers to build small synthetic problems for testing ----
@@ -323,7 +323,7 @@ class TestNonParametricInferenceLW:
         # Documents the structural deferral: lw is registered, ais/avi are not
         # (so they return not_supported). If a future PR adds ais/avi proposal
         # heads (#227), this test signals the coverage extension.
-        from benchmarking.core.applicability import BASELINE_FAMILY_APPLICABILITY
+        from nbn.bench.core.applicability import BASELINE_FAMILY_APPLICABILITY
         for mech in ("kde", "knn", "flexcode"):
             assert f"nbn-{mech}-lw" in BASELINE_FAMILY_APPLICABILITY
             assert f"nbn-{mech}-ais" not in BASELINE_FAMILY_APPLICABILITY
