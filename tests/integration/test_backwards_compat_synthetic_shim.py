@@ -10,7 +10,7 @@ from nbn.core.network import NeuralBayesianNetwork
 
 def test_v03_generate_synthetic_hybrid_still_callable() -> None:
     """Old call site (positional, v0.3 keyword names) returns valid (model, data)."""
-    from benchmarking.synthetic import generate_synthetic_hybrid
+    from nbn.bench.synthetic import generate_synthetic_hybrid
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         result = generate_synthetic_hybrid(
@@ -34,6 +34,6 @@ def test_v03_generate_synthetic_hybrid_still_callable() -> None:
 
 
 def test_v03_export_path_still_works() -> None:
-    """``from benchmarking import generate_synthetic_hybrid`` keeps working."""
-    from benchmarking import generate_synthetic_hybrid
+    """``from nbn.bench import generate_synthetic_hybrid`` keeps working."""
+    from nbn.bench import generate_synthetic_hybrid
     assert callable(generate_synthetic_hybrid)

@@ -18,14 +18,14 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from benchmarking.core.oracle import (
+from nbn.bench.core.oracle import (
     filter_ground_truth,
     forward_with_clamp_posterior_samples,
 )
-from benchmarking.core.results import VALID_EVIDENCE_MODES, CellResult
-from benchmarking.core.runner import _evidence_mode_for
-from benchmarking.domains.base import BenchmarkProblem, GroundTruth, Query
-from benchmarking.measurements import TimingOnly
+from nbn.bench.core.results import VALID_EVIDENCE_MODES, CellResult
+from nbn.bench.core.runner import _evidence_mode_for
+from nbn.bench.domains.base import BenchmarkProblem, GroundTruth, Query
+from nbn.bench.measurements import TimingOnly
 
 
 # --- Fixtures ---
@@ -36,7 +36,7 @@ def _make_problem_with_gt() -> BenchmarkProblem:
     edges = [("Y", "X"), ("Z", "X")]
     variables = dict.fromkeys(("X", "Y", "Z"), ("discrete", 2))
     # Column order is the topological sort; build samples in that order.
-    from benchmarking.core.oracle import _column_order
+    from nbn.bench.core.oracle import _column_order
 
     test_data = {n: torch.zeros(8) for n in ("X", "Y", "Z")}
     problem = BenchmarkProblem(

@@ -14,13 +14,13 @@ import math
 import pytest
 import torch
 
-from benchmarking.adapters import NBNAdapter
-from benchmarking.domains.base import BenchmarkProblem
-from benchmarking.measurements import ParamLearningMeasurement
+from nbn.bench.adapters import NBNAdapter
+from nbn.bench.domains.base import BenchmarkProblem
+from nbn.bench.measurements import ParamLearningMeasurement
 
 
 def _problem(family: str, *, seed: int = 1, n_nodes: int = 5):
-    from benchmarking.synthetic import make_synthetic_bn
+    from nbn.bench.synthetic import make_synthetic_bn
 
     bn = make_synthetic_bn(
         n_nodes=n_nodes, family=family, cardinality=3, edge_density=0.5,
@@ -116,7 +116,7 @@ def test_calibration_not_supported_without_flag():
         assert by[metric].status == "not_supported"
 
     # The real pgmpy-lg adapter indeed leaves the flag unset (future PR territory).
-    from benchmarking.adapters import PgmpyAdapter
+    from nbn.bench.adapters import PgmpyAdapter
     assert not getattr(
         PgmpyAdapter(param_method="lg", inference_method="predict"),
         "supports_calibration", False,

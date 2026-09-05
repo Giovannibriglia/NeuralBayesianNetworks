@@ -25,11 +25,11 @@ import types
 
 import pytest
 
-import benchmarking.core.config as config_mod
-from benchmarking.core.cell_worker import _run_cell
-from benchmarking.core.config import BaselineSpec
-from benchmarking.domains.base import Query
-from benchmarking.measurements.timing_only import TimingOnly
+import nbn.bench.core.config as config_mod
+from nbn.bench.core.cell_worker import _run_cell
+from nbn.bench.core.config import BaselineSpec
+from nbn.bench.domains.base import Query
+from nbn.bench.measurements.timing_only import TimingOnly
 
 
 # ---------------------------------------------------------------------------

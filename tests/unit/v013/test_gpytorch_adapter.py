@@ -6,9 +6,9 @@ tests/integration/test_adapters_smoke.py.
 
 Context
 -------
-The v0.13 benchmarking.adapters directory does NOT yet contain a
+The v0.13 nbn.bench.adapters directory does NOT yet contain a
 gpytorch_adapter.py — the GPyTorch BN-inference adapter is deferred to v0.8
-(issue #96).  The applicability registry (benchmarking.core.applicability)
+(issue #96).  The applicability registry (nbn.bench.core.applicability)
 does hold the gpytorch labels with ``families=frozenset()`` and
 ``accuracy_supported=False``.
 
@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import pytest
 
-from benchmarking.core.applicability import (
+from nbn.bench.core.applicability import (
     BASELINE_FAMILY_APPLICABILITY,
     accuracy_supported,
     is_applicable,
@@ -54,7 +54,7 @@ def test_gpytorch_label_in_registry(label: str) -> None:
     """Both gpytorch labels must exist in the applicability registry."""
     assert label in BASELINE_FAMILY_APPLICABILITY, (
         f"{label!r} missing from BASELINE_FAMILY_APPLICABILITY — "
-        f"add it to benchmarking/core/applicability.py"
+        f"add it to nbn/bench/core/applicability.py"
     )
 
 

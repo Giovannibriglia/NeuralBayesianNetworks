@@ -2,7 +2,7 @@
 
 ## Reproduction
 
-- File: `benchmarking/diagnostics/ve_profile_n20.py`
+- File: `nbn/bench/diagnostics/ve_profile_n20.py`
 - Device: cpu (16 GiB sandbox)
 - Config: `n_nodes=20, cardinality=4, max_in_degree=4, edge_density=0.20, B=16, seed=0`
 - Query: target = `X12`, evidence on `['X0', 'X4']` (selected as `column_order[5]` and `[0,3]` per the diagnostic — exact names depend on the topological sort but the structural pattern is identical to the smoke runner's `_build_query_batch` output)
@@ -119,7 +119,7 @@ The memory-budget guard is a forward-defensive measure that lands as a separate 
 
 ## Round-1 follow-up: min-fill verification
 
-Two reviewer-requested checks before authorising round 2. Both implemented as extensions of the existing algebraic walk in `benchmarking/diagnostics/ve_profile_n20.py` (no new instrumentation; ~120 LOC for the min-fill prototype + ~60 LOC for the comparison and validator).
+Two reviewer-requested checks before authorising round 2. Both implemented as extensions of the existing algebraic walk in `nbn/bench/diagnostics/ve_profile_n20.py` (no new instrumentation; ~120 LOC for the min-fill prototype + ~60 LOC for the comparison and validator).
 
 ### 1. Min-fill order is a valid elimination order on this DAG
 
@@ -211,7 +211,7 @@ tracemalloc total peak: **62 MiB** for the entire `query_batch` call (compare: 6
 
 ### Smoke run gate
 
-After round 2, `nbn-bench inference --config benchmarking/configs/inference_smoke.yaml` produces:
+After round 2, `nbn-bench inference --config nbn/bench/configs/inference_smoke.yaml` produces:
 
 ```
 inference_smoke STATUS: {'ok': 42, 'not_supported': 39}
@@ -229,7 +229,7 @@ The `nbn_ve discrete n=20` cell — which was `status='oom'` on PR #14's master 
 - [x] Pre-allocation memory-budget guard in `query_batch`; `_estimate_peak_bytes` walks the plan algebraically; raises `torch.cuda.OutOfMemoryError` when estimate > 90% of free cuda memory.
 - [x] `tests/unit/test_min_fill_order.py`: 12 tests pass including the n=20 regression that pins the exact 17-element order.
 - [x] `tests/unit/test_vectorized_query_batch_correctness.py`: parametrised `order ∈ {topological, min_fill}` case verifies plan-independence at n=20 within `atol=1e-6, rtol=1e-5`.
-- [x] `nbn-bench inference --config benchmarking/configs/inference_smoke.yaml --device cpu` runs to completion with **zero `error` rows**.
+- [x] `nbn-bench inference --config nbn/bench/configs/inference_smoke.yaml --device cpu` runs to completion with **zero `error` rows**.
 - [x] Round-1 diagnostic re-run shows real torch peak ~32 MiB for the n=20 case (down from 1024 MiB on master) — within the round-1 brief's predicted bracket.
 - [x] `inference_smoke` parquet `nbn_ve discrete n=20` cell shows `status='ok'` (was `oom` on master).
 - [x] All v0.5c + v0.6a tests still pass (full suite green).

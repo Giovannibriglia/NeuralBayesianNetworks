@@ -19,7 +19,7 @@ import networkx as nx
 import pytest
 import torch
 
-from benchmarking.synthetic import make_synthetic_bn
+from nbn.bench.synthetic import make_synthetic_bn
 
 
 @pytest.mark.parametrize(

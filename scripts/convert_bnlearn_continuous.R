@@ -3,7 +3,7 @@
 #
 # One-time conversion of bnlearn's Gaussian (GBN) and Conditional Linear
 # Gaussian (CLGBN) networks — distributed as R .rda files — into a
-# Python-readable JSON format bundled under benchmarking/data/bnlearn/.
+# Python-readable JSON format bundled under nbn/bench/data/bnlearn/.
 #
 # Users do NOT need R for normal use; they consume the committed JSON.
 # Re-run this only when bnlearn updates a network. Requires R with the
@@ -45,7 +45,7 @@ NETWORKS <- list(
   list(name = "mehra",      kind = "clg", file = "mehra-complete")
 )
 
-OUTPUT_DIR <- "benchmarking/data/bnlearn"
+OUTPUT_DIR <- "nbn/bench/data/bnlearn"
 if (!dir.exists(OUTPUT_DIR)) dir.create(OUTPUT_DIR, recursive = TRUE)
 
 CACHE_DIR <- path.expand("~/.cache/nbn/bnlearn")

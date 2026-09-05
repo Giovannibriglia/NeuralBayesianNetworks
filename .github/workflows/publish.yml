@@ -1,0 +1,91 @@
+name: Publish to PyPI
+
+# Release flow:
+#   git tag v0.16.0 && git push origin v0.16.0
+# builds sdist + wheel from the tag (setuptools-scm derives the version from
+# it, nothing is hand-edited) and uploads them to PyPI through Trusted
+# Publishing (OIDC) -- no API token is stored in the repository.
+#
+# One-time setup on pypi.org -> Your account -> Publishing -> "Add a new
+# pending publisher":
+#   PyPI project name : nbn
+#   Owner             : Giovannibriglia
+#   Repository        : NeuralBayesianNetworks
+#   Workflow name     : publish.yml
+#   Environment name  : pypi
+# Do the same on test.pypi.org with environment name ``testpypi`` to enable
+# the manual dry-run below.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Where to upload (TestPyPI is a dry run)"
+        type: choice
+        options: [testpypi]
+        default: testpypi
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # setuptools-scm needs the tag history
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check --strict dist/*
+
+      - name: Smoke-install the wheel in a clean venv
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --quiet dist/*.whl
+          /tmp/smoke/bin/python -c "import nbn; print('nbn', nbn.__version__)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish-pypi:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/nbn/
+    permissions:
+      id-token: write  # Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-testpypi:
+    if: github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/nbn/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/

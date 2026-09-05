@@ -15,14 +15,14 @@ import math
 import pytest
 import torch
 
-from benchmarking.domains.base import BenchmarkProblem
-from benchmarking.measurements import ParamLearningMeasurement
+from nbn.bench.domains.base import BenchmarkProblem
+from nbn.bench.measurements import ParamLearningMeasurement
 
 
 # ---- fixtures ---------------------------------------------------------------
 
 def _bn_problem(family: str, *, seed: int = 0, n_nodes: int = 3) -> BenchmarkProblem:
-    from benchmarking.synthetic import make_synthetic_bn
+    from nbn.bench.synthetic import make_synthetic_bn
 
     bn = make_synthetic_bn(
         n_nodes=n_nodes, family=family, cardinality=3,
@@ -85,7 +85,7 @@ class _PerfectRecovery:
         return _zeros_score(test_data)
 
     def extract_learned_cpts(self):
-        from benchmarking.core.cpt_extraction import extract_discrete_cpts
+        from nbn.bench.core.cpt_extraction import extract_discrete_cpts
         return extract_discrete_cpts(self._true_model, self._variables)
 
 
@@ -130,7 +130,7 @@ def test_recovery_error_on_malformed_true_cpt(monkeypatch):
         return {node: torch.tensor([[0.5, 0.4]])}
 
     monkeypatch.setattr(
-        "benchmarking.measurements.param_learning.extract_discrete_cpts",
+        "nbn.bench.measurements.param_learning.extract_discrete_cpts",
         _bad_extract,
     )
     rows = ParamLearningMeasurement().measure(

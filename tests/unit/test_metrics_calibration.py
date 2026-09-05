@@ -15,7 +15,7 @@ import math
 
 import torch
 
-from benchmarking.metrics import (
+from nbn.bench.metrics import (
     _pit_ks_single,
     _sd_ratio_single,
     calibration_pit_ks,

@@ -75,7 +75,7 @@ def test_cli_inference_produces_all_outputs(tmp_path: Path) -> None:
     cfg_path.write_text(yaml.safe_dump(_MINIMAL_CONFIG))
 
     result = subprocess.run(
-        [sys.executable, "-m", "benchmarking.cli", "inference",
+        [sys.executable, "-m", "nbn.bench.cli", "inference",
          "--config", str(cfg_path)],
         capture_output=True,
         text=True,
@@ -88,8 +88,8 @@ def test_cli_inference_produces_all_outputs(tmp_path: Path) -> None:
     )
 
     # Find the results directory (compact_datetime suffix makes name unpredictable).
-    results_root = tmp_path / "benchmarking" / "results"
-    assert results_root.exists(), "benchmarking/results/ directory was not created"
+    results_root = tmp_path / "results"
+    assert results_root.exists(), "results/ directory was not created"
 
     run_dirs = list(results_root.glob("benchmark_synthetic_cli_test_*"))
     assert len(run_dirs) == 1, (
@@ -149,7 +149,7 @@ def test_cli_param_learning_produces_parquet(tmp_path: Path) -> None:
     cfg_path.write_text(yaml.safe_dump(d))
 
     result = subprocess.run(
-        [sys.executable, "-m", "benchmarking.cli", "param-learning",
+        [sys.executable, "-m", "nbn.bench.cli", "param-learning",
          "--config", str(cfg_path)],
         capture_output=True,
         text=True,
@@ -161,7 +161,7 @@ def test_cli_param_learning_produces_parquet(tmp_path: Path) -> None:
         f"stderr: {result.stderr[-1000:]}"
     )
 
-    results_root = tmp_path / "benchmarking" / "results"
+    results_root = tmp_path / "results"
     run_dirs = list(results_root.glob("benchmark_synthetic_pl_run_test_*"))
     assert len(run_dirs) == 1, (
         f"expected exactly 1 run dir, found: {[d.name for d in run_dirs]}"

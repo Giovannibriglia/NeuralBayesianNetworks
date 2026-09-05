@@ -44,7 +44,7 @@ budget).
 
 ### 2.1 QuerySelector protocol
 
-Defined in `benchmarking/core/interfaces.py:41`:
+Defined in `nbn/bench/core/interfaces.py:41`:
 
 ```python
 class QuerySelector(Protocol):
@@ -64,7 +64,7 @@ This is resolved by adding metadata fields to the `Query` dataclass (see §3.6).
 
 ### 2.2 Current implementation
 
-`benchmarking/selectors/uniform.py` — `UniformRandomSelector`:
+`nbn/bench/selectors/uniform.py` — `UniformRandomSelector`:
 
 - Constructor: `__init__(self, n_evidence: int = 3)`
 - Picks **one** `(target, evidence_nodes)` pair using a seeded permutation
@@ -78,11 +78,11 @@ This is resolved by adding metadata fields to the `Query` dataclass (see §3.6).
 with *different* `(target, evidence_nodes)` per role group, not a single
 repeated pair. Every query has its own target, kind, and evidence assignment.
 
-`benchmarking/selectors/topological.py` — **does not exist yet**. Phase 2
+`nbn/bench/selectors/topological.py` — **does not exist yet**. Phase 2
 creates it from scratch. The redesign doc expected Phase 1 to create a
 placeholder; it was not. This is the authoritative target location.
 
-### 2.3 Runner integration (`benchmarking/core/runner.py`)
+### 2.3 Runner integration (`nbn/bench/core/runner.py`)
 
 Relevant lines:
 
@@ -103,7 +103,7 @@ reads per-query metadata from the `Query` objects themselves (§3.6).
 
 ### 2.4 Inputs available inside `select()`
 
-From `BenchmarkProblem` (`benchmarking/domains/base.py`):
+From `BenchmarkProblem` (`nbn/bench/domains/base.py`):
 
 | Field | Type | Notes |
 |---|---|---|
@@ -123,9 +123,9 @@ The selector calls `nx.DiGraph(problem.dag)` itself.
 
 NetworkX is already a dependency imported in multiple places:
 
-- `benchmarking/core/oracle.py:50` — `nx.topological_sort(dag_nx)`
-- `benchmarking/synthetic.py:31` — `import networkx as nx`; full DAG generation
-- `benchmarking/adapters/nbn_adapter.py:176`, `pyro_adapter.py:147`,
+- `nbn/bench/core/oracle.py:50` — `nx.topological_sort(dag_nx)`
+- `nbn/bench/synthetic.py:31` — `import networkx as nx`; full DAG generation
+- `nbn/bench/adapters/nbn_adapter.py:176`, `pyro_adapter.py:147`,
   `pomegranate_adapter.py:92` — local nx imports for topo sort
 
 Relevant nx functions for NodeRoles (none currently called in selectors/):
@@ -143,12 +143,12 @@ codebase today.
 
 ### 2.6 Where TopologicalAllocator plugs in
 
-Single file: `benchmarking/selectors/topological.py`. Contains `NodeRoles`
+Single file: `nbn/bench/selectors/topological.py`. Contains `NodeRoles`
 (dataclass + computation) and `TopologicalAllocator` (selector class). No
-separate `benchmarking/query_selection/` package — that was the issue #74
+separate `nbn/bench/query_selection/` package — that was the issue #74
 draft; the redesign doc (newer, authoritative) consolidates into `selectors/`.
 
-Phase 3 = `HeaviestQueryByRole` in `benchmarking/selectors/heaviest.py`, which
+Phase 3 = `HeaviestQueryByRole` in `nbn/bench/selectors/heaviest.py`, which
 imports `NodeRoles` from `topological.py`.
 
 ---
@@ -316,7 +316,7 @@ For each `(target, evidence_nodes)` pair produced by Step 3:
 ### 3.6 Per-query metadata
 
 Three new fields are added to the `Query` dataclass
-(`benchmarking/core/interfaces.py`):
+(`nbn/bench/core/interfaces.py`):
 
 ```python
 @dataclass(frozen=True)
@@ -383,11 +383,11 @@ records the actual count.
 
 ### 4.1 File layout
 
-All new code goes in one file: `benchmarking/selectors/topological.py`
+All new code goes in one file: `nbn/bench/selectors/topological.py`
 (~600–800 LOC). Three small wiring changes in existing files.
 
 ```
-benchmarking/
+nbn/bench/
   selectors/
     __init__.py          (existing)
     uniform.py           (existing, unchanged)
@@ -403,7 +403,7 @@ benchmarking/
 tests/
   unit/v013/
     test_selector_topological.py  (NEW, ~200–250 LOC)
-benchmarking/configs/
+nbn/bench/configs/
   synthetic_paper.yaml   (add selector: block, ~8 lines)
   synthetic_smoke.yaml   (add selector: block, ~8 lines)
 ```
@@ -413,11 +413,11 @@ original "4 lines in runner.py" estimate):
 
 | File | Change | LOC |
 |---|---|---|
-| `benchmarking/domains/base.py` | Add 2 fields to `Query` dataclass (`query_kind`, `evidence_strategy`); keep existing `query_role` | +3 |
-| `benchmarking/core/runner.py` | Read per-query metadata; update sentinel rows at lines 132 and 168 | +12 |
-| `benchmarking/core/results.py` | Add 2 new optional fields to `CellResult` (`query_kind`, `evidence_strategy`); keep `query_role` | +6 |
-| `benchmarking/measurements/accuracy_timing.py` | Propagate `query_kind` and `evidence_strategy` lists through `measure()` | +10 |
-| `benchmarking/measurements/timing_only.py` | Same propagation | +10 |
+| `nbn/bench/domains/base.py` | Add 2 fields to `Query` dataclass (`query_kind`, `evidence_strategy`); keep existing `query_role` | +3 |
+| `nbn/bench/core/runner.py` | Read per-query metadata; update sentinel rows at lines 132 and 168 | +12 |
+| `nbn/bench/core/results.py` | Add 2 new optional fields to `CellResult` (`query_kind`, `evidence_strategy`); keep `query_role` | +6 |
+| `nbn/bench/measurements/accuracy_timing.py` | Propagate `query_kind` and `evidence_strategy` lists through `measure()` | +10 |
+| `nbn/bench/measurements/timing_only.py` | Same propagation | +10 |
 
 Backward-compat decision: keep `query_role` (still populated with
 `target_bucket` value: hub/cut/terminal/random). Add `query_kind`
@@ -429,7 +429,7 @@ columns.
 ### 4.2 Internal class structure
 
 ```python
-# benchmarking/selectors/topological.py
+# nbn/bench/selectors/topological.py
 
 @dataclass(frozen=True)
 class NodeRoles:
@@ -592,8 +592,8 @@ computed in Step 4.
    reason exists.
 
 2. **Send a Phase 0 hard-gate relay** that:
-   - Reads `benchmarking/core/interfaces.py` (current `Query` fields) and
-     `benchmarking/core/runner.py` (lines 236–268) to confirm the exact wiring
+   - Reads `nbn/bench/core/interfaces.py` (current `Query` fields) and
+     `nbn/bench/core/runner.py` (lines 236–268) to confirm the exact wiring
      changes needed.
    - Runs a quick disconnected-DAG empirical check:
      `nx.is_connected(nx.moral_graph(G).to_undirected())` on a synthetic n=1000

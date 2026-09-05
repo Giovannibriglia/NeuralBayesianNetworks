@@ -23,14 +23,14 @@ from typing import Any, Iterator
 
 import torch
 
-import benchmarking.core.config as config_mod
-from benchmarking.core.cell_worker import _run_cell
-from benchmarking.core.config import BaselineSpec
-from benchmarking.core.results import CellResult
-from benchmarking.domains.base import BenchmarkProblem, GroundTruth, Query
-from benchmarking.measurements import AccuracyAndTiming, TimingOnly
-from benchmarking.selectors.topological import TopologicalAllocator
-from benchmarking.selectors.uniform import UniformRandomSelector
+import nbn.bench.core.config as config_mod
+from nbn.bench.core.cell_worker import _run_cell
+from nbn.bench.core.config import BaselineSpec
+from nbn.bench.core.results import CellResult
+from nbn.bench.domains.base import BenchmarkProblem, GroundTruth, Query
+from nbn.bench.measurements import AccuracyAndTiming, TimingOnly
+from nbn.bench.selectors.topological import TopologicalAllocator
+from nbn.bench.selectors.uniform import UniformRandomSelector
 
 
 # --- fixtures / fakes ---
@@ -159,7 +159,7 @@ class TestRunnerPhase2Wiring:
     monkeypatch ``build_adapter`` and use a recording-spy measurement that
     must be observed afterwards) call ``cell_worker._run_cell`` directly
     in-process — where the patch and the spy's ``.received`` apply. The
-    patch targets ``benchmarking.core.config.build_adapter`` (the name the
+    patch targets ``nbn.bench.core.config.build_adapter`` (the name the
     worker imports), not the runner module. Intent unchanged.
     """
 

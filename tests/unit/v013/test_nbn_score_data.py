@@ -20,9 +20,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from benchmarking.adapters import NBNAdapter
-from benchmarking.domains.base import BenchmarkProblem
-from benchmarking.measurements import ParamLearningMeasurement
+from nbn.bench.adapters import NBNAdapter
+from nbn.bench.domains.base import BenchmarkProblem
+from nbn.bench.measurements import ParamLearningMeasurement
 
 
 # ---------------------------------------------------------------------------

@@ -32,7 +32,7 @@ jobs:
           pip install --prefer-binary -e ".[dev,bench,neural,gp,mcmc]"
 
       - name: Lint
-        run: ruff check nbn/ benchmarking/ tests/
+        run: ruff check nbn/ tests/ notebooks/ scripts/
 
       - name: Type-check core
         run: mypy nbn/core nbn/mechanisms
@@ -46,11 +46,11 @@ jobs:
         run: pytest -n auto --cov=nbn --cov-report=xml -m "not gpu"
 
       - name: Parameter-learning smoke
-        run: nbn-bench param-learning --config benchmarking/configs/synthetic/smoke_tests/parameter_learning_smoke.yaml
+        run: nbn-bench param-learning --config nbn/bench/configs/synthetic/smoke_tests/parameter_learning_smoke.yaml
         timeout-minutes: 10
 
       - name: Inference smoke
-        run: nbn-bench inference --config benchmarking/configs/synthetic/smoke_tests/inference_smoke.yaml
+        run: nbn-bench inference --config nbn/bench/configs/synthetic/smoke_tests/inference_smoke.yaml
         timeout-minutes: 10
 
       - name: Upload smoke figures
@@ -58,7 +58,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: smoke-figures-py${{ matrix.python-version }}
-          path: benchmarking/figures/*.png
+          path: results/**/*.png
           if-no-files-found: ignore
 
       - uses: codecov/codecov-action@v4

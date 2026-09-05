@@ -192,7 +192,7 @@ class TestPruningPreservesAnswers:
     """
 
     def _make_model(self):
-        from benchmarking.synthetic import make_synthetic_bn
+        from nbn.bench.synthetic import make_synthetic_bn
 
         bn = make_synthetic_bn(
             family="discrete", n_nodes=12, cardinality=3,
@@ -262,10 +262,10 @@ class TestPruningPreservesAnswers:
         """
         import time
         import networkx as nx
-        from benchmarking.problems.bnlearn import (
+        from nbn.bench.problems.bnlearn import (
             BnlearnConfig, BnlearnProblemSource,
         )
-        from benchmarking.core.config import BaselineSpec, build_adapter
+        from nbn.bench.core.config import BaselineSpec, build_adapter
         from nbn.inference.tensor_ve import TensorVariableElimination
         import nbn.inference.tensor_ve as ve_mod
 

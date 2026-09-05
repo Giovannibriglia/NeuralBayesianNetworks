@@ -32,12 +32,5 @@ ScalabilityImages
 make_bottleneck_figures.py
 .idea/
 
-# v0.13 benchmark run outputs — untracked by default; archive lives in benchmarking/results/v0.12_archive/
-benchmarking/results/benchmark_*/
-benchmarking/results/raw/
-benchmarking/results/figures/
-benchmarking/results/tables/
-benchmarking/results/_v0.10*/
-benchmarking/results/_v0.11*/
-benchmarking/results/nbn-results*/
+# Benchmark run outputs (nbn-bench writes to ./results by default) — untracked.
 /results/

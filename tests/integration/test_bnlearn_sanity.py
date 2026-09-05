@@ -70,7 +70,7 @@ def network_name(request):
 
 @pytest.fixture(scope="module")
 def loaded_problem(network_name):
-    from benchmarking.problems.bnlearn import BnlearnConfig, BnlearnProblemSource
+    from nbn.bench.problems.bnlearn import BnlearnConfig, BnlearnProblemSource
 
     cfg = BnlearnConfig(
         networks=[network_name], seeds=[0],
@@ -102,7 +102,7 @@ class TestStructural:
             f"{network_name} DAG has a cycle"
 
     def test_node_count_matches_registry(self, loaded_problem, network_name):
-        from benchmarking.problems.bnlearn import _NETWORKS
+        from nbn.bench.problems.bnlearn import _NETWORKS
         expected = _NETWORKS[network_name].get("n_nodes")
         if expected is not None:
             assert len(loaded_problem.variables) == expected, (
@@ -141,7 +141,7 @@ class TestDataGeneration:
     def test_node_marginals_match_reference(self, loaded_problem, network_name):
         """Train-data per-node statistics are consistent with the large
         reference pool (both sampled from the true model)."""
-        from benchmarking.core.oracle import _column_order
+        from nbn.bench.core.oracle import _column_order
 
         col_order = _column_order(loaded_problem)
         col_idx = {n: i for i, n in enumerate(col_order)}
@@ -248,7 +248,7 @@ def _pgmpy_lw(model, target, evidence_int, size):
 def _oracle_discrete(problem, target, evidence_int):
     """The benchmark's discrete oracle posterior (rejection on the reference
     pool), as a length-K array, or None if too few rows survive."""
-    from benchmarking.core.oracle import filter_ground_truth
+    from nbn.bench.core.oracle import filter_ground_truth
 
     ev_row = {n: torch.tensor(v) for n, v in evidence_int.items()}
     samp = filter_ground_truth(problem, ev_row, target)
@@ -347,7 +347,7 @@ class TestOracleContinuous:
         tolerances (10% mean, 20% std) avoid flakiness on large-scale nodes."""
         if loaded_problem.family in DISCRETE_FAMILIES:
             pytest.skip(f"{network_name}: discrete (handled by TestOracleDiscrete)")
-        from benchmarking.core.oracle import (
+        from nbn.bench.core.oracle import (
             _column_order, forward_with_clamp_posterior_samples,
         )
 

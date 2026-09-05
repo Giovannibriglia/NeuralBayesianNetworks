@@ -97,7 +97,7 @@ def _build_mdn_with_one_parent():
     synthetic-side helper that's known to produce zero-weight logit
     rows (the structural condition that turned ``0 * NaN = NaN`` into
     a Simplex violation)."""
-    from benchmarking.synthetic import _build_mdn_mechanism
+    from nbn.bench.synthetic import _build_mdn_mechanism
     gen = torch.Generator(device="cpu").manual_seed(0)
     mech = _build_mdn_mechanism(
         parents=["X0"], gen=gen, device=torch.device("cpu"),
@@ -309,7 +309,7 @@ def test_make_synthetic_bn_continuous_nongauss_n5000_seed0_runs() -> None:
     keep the test under a few seconds of CPU; the failure mode reproduces
     at any sample count once the chain reaches n=5000."""
     _reset_sanitise_warned()
-    from benchmarking.synthetic import make_synthetic_bn
+    from nbn.bench.synthetic import make_synthetic_bn
     bn = make_synthetic_bn(
         family="continuous_nongauss", n_nodes=5000,
         edge_density=0.20, max_in_degree=4, cardinality=4,

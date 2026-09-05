@@ -25,18 +25,18 @@ from typing import Any, Iterator
 import pytest
 import torch
 
-from benchmarking.core.config import BaselineSpec, RunnerConfig
-from benchmarking.core.runner import Runner
-from benchmarking.domains.base import BenchmarkProblem, FailedProblem
-from benchmarking.measurements import TimingOnly
-from benchmarking.problems.bnlearn import (
+from nbn.bench.core.config import BaselineSpec, RunnerConfig
+from nbn.bench.core.runner import Runner
+from nbn.bench.domains.base import BenchmarkProblem, FailedProblem
+from nbn.bench.measurements import TimingOnly
+from nbn.bench.problems.bnlearn import (
     _DOWNLOAD_TIMEOUT_S,
     BnlearnConfig,
     BnlearnProblemSource,
     _bif_url,
     _kind_to_family,
 )
-from benchmarking.selectors.uniform import UniformRandomSelector
+from nbn.bench.selectors.uniform import UniformRandomSelector
 
 
 # --- 1. URL mapping ----------------------------------------------------------
@@ -96,7 +96,7 @@ class TestIterProblemsResilience:
         def boom(name):
             raise urllib.error.HTTPError(_bif_url(name), 404, "Not Found", {}, None)
         monkeypatch.setattr(
-            "benchmarking.problems.bnlearn._load_discrete_model", boom)
+            "nbn.bench.problems.bnlearn._load_discrete_model", boom)
         cfg = BnlearnConfig(networks=["asia"], seeds=[0],
                             n_train=10, n_test=5, n_reference=5)
         items = list(BnlearnProblemSource().iter_problems(cfg))
@@ -117,7 +117,7 @@ class TestIterProblemsResilience:
         def boom(name):
             raise RuntimeError(f"load failed for {name}")
         monkeypatch.setattr(
-            "benchmarking.problems.bnlearn._load_discrete_model", boom)
+            "nbn.bench.problems.bnlearn._load_discrete_model", boom)
         cfg = BnlearnConfig(networks=["asia", "alarm", "child"], seeds=[0],
                             n_train=10, n_test=5, n_reference=5)
         items = list(BnlearnProblemSource().iter_problems(cfg))
@@ -138,12 +138,12 @@ class TestIterProblemsResilience:
         # asia fails at load; for "alarm" we bypass the loader entirely by
         # patching the per-network problem generator to yield a ready problem.
         monkeypatch.setattr(
-            "benchmarking.problems.bnlearn._load_discrete_model", selective)
+            "nbn.bench.problems.bnlearn._load_discrete_model", selective)
 
         def fake_discrete(self, net_name, config):
             if net_name == "asia":
                 # Exercise the real loader path -> raises -> caught upstream.
-                from benchmarking.problems.bnlearn import _load_discrete_model
+                from nbn.bench.problems.bnlearn import _load_discrete_model
                 _load_discrete_model(net_name)
             yield real
 
@@ -313,16 +313,16 @@ per_cell_timeout_s: 30.0
             h.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
             logging.getLogger().addHandler(h)
             return h
-        monkeypatch.setattr("benchmarking.cli._attach_run_log", fake_attach)
+        monkeypatch.setattr("nbn.bench.cli._attach_run_log", fake_attach)
 
         # Force a crash inside the cell loop.
         def boom(self, cfg):
             if False:  # pragma: no cover — makes boom a generator (never yields)
                 yield
             raise RuntimeError("synthetic explosion")
-        monkeypatch.setattr("benchmarking.core.runner.Runner.run", boom)
+        monkeypatch.setattr("nbn.bench.core.runner.Runner.run", boom)
 
-        from benchmarking import cli
+        from nbn.bench import cli
         with pytest.raises(RuntimeError, match="synthetic explosion"):
             cli.main(["inference", "--config", str(cfg_path)])
 

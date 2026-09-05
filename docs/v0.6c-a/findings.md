@@ -11,9 +11,9 @@ The reviewer brief routed three hypotheses (A: importance-resampling collapse ov
 ### Configs disagree on the per-query LW sample budget
 
 ```
-benchmarking/configs/inference_smoke.yaml :  nbn_lw_n_samples: 4000
-benchmarking/configs/inference_paper.yaml :  (field omitted)
-benchmarking/_crash_test_utils.py        :  default = 512
+nbn/bench/configs/inference_smoke.yaml :  nbn_lw_n_samples: 4000
+nbn/bench/configs/inference_paper.yaml :  (field omitted)
+nbn/bench/_crash_test_utils.py        :  default = 512
 ```
 
 Smoke explicitly sets `nbn_lw_n_samples: 4000`; paper YAML omits the field, so `CrashTestConfig` uses its default of **512**. That's an 8× sample-budget reduction; for an importance-sampling estimator with effective sample size that drops sharply on multi-evidence continuous queries, an 8× budget cut produces a much-greater-than-8× variance increase.
@@ -74,7 +74,7 @@ Vary-B sweep produces W₁ range ratio 1.8× (= MC noise floor). Vary-n_lw_sampl
 ### Estimated round-2 patch size
 
 - **LOC**: 1 line (add `nbn_lw_n_samples: 4000` to `inference_paper.yaml`). Optionally bump higher (8000 or 20000) for stronger paper-grade tightness; the sweep shows diminishing returns past 2000.
-- **Files touched**: `benchmarking/configs/inference_paper.yaml` only.
+- **Files touched**: `nbn/bench/configs/inference_paper.yaml` only.
 - **Risk**: low. No engine change, no test impact. Smoke parquet is unaffected (smoke YAML already sets 4000 explicitly). Paper run wall-clock cost: linear in `n_lw_samples`, so 8× the LW time per query — but LW is a small fraction of paper-cell wall time so the total impact is modest.
 - **Optional companion**: rename `n_samples` → `n_lw_samples` in `_baseline_posterior_for_query`'s call site so the kwarg name in the call matches the config field; or remove the silent default by making `nbn_lw_n_samples` a required field. Either prevents this drift class from re-occurring. Suggest the agent decides in round 2.
 
@@ -123,7 +123,7 @@ The fact that all 1999 conforming rows are *identical* is itself diagnostic: it 
 
 ### Root cause
 
-`benchmarking/synthetic.py::_build_mdn_mechanism` lines 503-527 set the linear projection's weight rows for the logit slots to **zero**:
+`nbn/bench/synthetic.py::_build_mdn_mechanism` lines 503-527 set the linear projection's weight rows for the logit slots to **zero**:
 
 ```python
 out_dim = k + k * d_x + k * d_x  # logits + locs + log_scales
@@ -174,18 +174,18 @@ The bug only fires on **3 cells out of 360** in the paper run (`continuous_nonga
 
 ## Bonus — structured run logging
 
-`benchmarking/_run_logging.py` adds `setup_run_logging(cfg)` and `finalise_run_logging(meta, status_summary)`. Every `nbn-bench` run now writes:
+`nbn/bench/_run_logging.py` adds `setup_run_logging(cfg)` and `finalise_run_logging(meta, status_summary)`. Every `nbn-bench` run now writes:
 
 - `{output_dir}/{output_prefix}_{timestamp}.log` — INFO+ logs, file-level
 - `{output_dir}/{output_prefix}_{timestamp}.run.json` — git SHA, torch version, cuda device, full config, wall time, status counts
 
 Both gitignored (`*.log` was already in `.gitignore`; this PR adds `*.run.json`). Best-effort on every step; never blocks the run on a logging failure.
 
-Verified on this sandbox via `nbn-bench inference --config benchmarking/configs/inference_smoke.yaml` (paths updated post-v0.6c-B; original v0.6c-A run wrote to `benchmarking/figures/`):
+Verified on this sandbox via `nbn-bench inference --config nbn/bench/configs/inference_smoke.yaml` (paths updated post-v0.6c-B; original v0.6c-A run wrote to `nbn/bench/figures/`):
 
 ```
-benchmarking/results/raw/inference_smoke_20260505_174743.log       (gitignored ✓)
-benchmarking/results/raw/inference_smoke_20260505_174743.run.json  (gitignored ✓)
+results/raw/inference_smoke_20260505_174743.log       (gitignored ✓)
+results/raw/inference_smoke_20260505_174743.run.json  (gitignored ✓)
 ```
 
 The `.run.json` includes `git_sha`, `torch_version`, `cuda_available`, `cuda_device`, the full `config` snapshot (so `nbn_lw_n_samples` would have been visible in any prior run.json had this existed), and post-run `wall_time_s` + `status_summary`.

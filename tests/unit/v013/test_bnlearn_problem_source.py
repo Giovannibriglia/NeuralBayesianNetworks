@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from benchmarking.problems.bnlearn import (
+from nbn.bench.problems.bnlearn import (
     _NETWORKS,
     BnlearnConfig,
     BnlearnProblemSource,
@@ -132,7 +132,7 @@ class TestBnlearnOracleCompatibility:
     def test_oracle_accepts_bnlearn_problem(self):
         """filter_ground_truth returns reference-pool target samples for a
         bnlearn discrete problem — no oracle changes needed."""
-        from benchmarking.core.oracle import filter_ground_truth
+        from nbn.bench.core.oracle import filter_ground_truth
 
         cfg = BnlearnConfig(networks=["asia"], seeds=[0], n_train=100, n_test=20,
                             n_reference=500)
@@ -158,7 +158,7 @@ class TestBnlearnGaussian:
         import json
         from pathlib import Path
 
-        path = Path("benchmarking/data/bnlearn/mehra.json")
+        path = Path("nbn/bench/data/bnlearn/mehra.json")
         if not path.exists():
             pytest.skip("mehra.json not bundled")
         data = json.loads(path.read_text())
@@ -270,7 +270,7 @@ class TestBnlearnContinuousModel:
 
 # ── Tiered n_train / n_reference resolver (_resolve_sample_count) ──────────────
 
-from benchmarking.problems.bnlearn import _resolve_sample_count  # noqa: E402
+from nbn.bench.problems.bnlearn import _resolve_sample_count  # noqa: E402
 
 _TIERS = {
     "tiers": [
@@ -327,12 +327,12 @@ class TestTieredConfigSchema:
     def test_inference_complete_tiers_resolve(self):
         """The shipped inference_complete.yaml parses to tiered specs that
         resolve to the documented per-network values."""
-        from benchmarking.core.yaml_config import _parse_bnlearn_config
+        from nbn.bench.core.yaml_config import _parse_bnlearn_config
         import yaml as _yaml
         from pathlib import Path
 
         src = _yaml.safe_load(Path(
-            "benchmarking/configs/bnlearn/complete/inference_complete.yaml"
+            "nbn/bench/configs/bnlearn/complete/inference_complete.yaml"
         ).read_text())["source"]
         cfg = _parse_bnlearn_config(src, "inference_complete.yaml")
         assert isinstance(cfg.n_train, dict) and "tiers" in cfg.n_train
@@ -345,7 +345,7 @@ class TestTieredConfigSchema:
 
     def test_scalar_config_still_parses(self):
         """Backward compat: a scalar n_train/n_reference still loads as int."""
-        from benchmarking.core.yaml_config import _parse_bnlearn_config
+        from nbn.bench.core.yaml_config import _parse_bnlearn_config
         cfg = _parse_bnlearn_config(
             {"networks": ["asia"], "seeds": [0],
              "n_train": 10240, "n_reference": 10240, "n_test": 1024},

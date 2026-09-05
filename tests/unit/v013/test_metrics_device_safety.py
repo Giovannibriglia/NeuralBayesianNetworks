@@ -1,6 +1,6 @@
 """Port of tests/unit/test_param_learning_helpers_device_safe.py to v0.13.
 
-Pins device safety of benchmarking.metrics.wasserstein_1d after the in-place
+Pins device safety of nbn.bench.metrics.wasserstein_1d after the in-place
 fixes (Phase 3, Decision 3):
   - Both inputs are moved to CPU before quantile computation (PR-B §A.1 fix).
   - Quantile grid length is max(len(x), len(y)) not min (issue #37 fix).
@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from benchmarking.metrics import wasserstein_1d
+from nbn.bench.metrics import wasserstein_1d
 
 
 def test_wasserstein_1d_cpu_cpu_returns_nonneg_float() -> None:

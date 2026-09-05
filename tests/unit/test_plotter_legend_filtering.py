@@ -1,4 +1,4 @@
-"""Tests for v0.6c-C-3 plotter v2 (``benchmarking._plot_v2``).
+"""Tests for v0.6c-C-3 plotter v2 (``nbn.bench._plot_v2``).
 
 Pin the per-panel applicability filter, b&w-safe marker scheme,
 stable color assignment, and figure-footer error indication.
@@ -11,7 +11,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from benchmarking._plot_v2 import _stable_baseline_style, render_figures
+from nbn.bench._plot_v2 import _stable_baseline_style, render_figures
 
 
 def _write_synthetic_parquet(rows: list[dict], path: Path) -> Path:
@@ -167,7 +167,7 @@ def test_legend_filters_per_panel(tmp_path: Path) -> None:
     assert Path(out_paths["continuous_lg_accuracy"][0]).exists()
 
     # Verify registry-based applicability filtering.
-    from benchmarking.core.applicability import is_applicable
+    from nbn.bench.core.applicability import is_applicable
     baselines = sorted(pd.read_parquet(p)["baseline"].unique())
     discrete_applicable = [b for b in baselines if is_applicable(b, "discrete")]
     cont_applicable = [b for b in baselines if is_applicable(b, "continuous_lg")]
@@ -446,7 +446,7 @@ def test_dense_dnf_no_footer_overlap(dense_dnf_render: dict) -> None:
     # --- 5. _render_family_metric uses fig.tight_layout() (no rect) ---
     # DNF annotation is inside the axes (ax.transAxes), so no bottom-margin
     # workaround rect is needed.  Verify the old footer pattern is absent.
-    from benchmarking import _plot_v2
+    from nbn.bench import _plot_v2
     src = inspect.getsource(_plot_v2._render_family_metric)
     assert "0.04 if error_footnotes" not in src, (
         "old conditional rect bottom '0.04 if error_footnotes else 0.01' "

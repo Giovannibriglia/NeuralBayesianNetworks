@@ -17,7 +17,7 @@ from __future__ import annotations
 import psutil
 import pytest
 
-from benchmarking.core.cell_runner import (
+from nbn.bench.core.cell_runner import (
     MEMORY_LIMIT_ENV_VAR,
     _MEMORY_LIMIT_FLOOR_BYTES,
     _compute_cell_memory_limit_bytes,

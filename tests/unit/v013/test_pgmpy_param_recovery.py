@@ -24,9 +24,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from benchmarking.adapters import PgmpyAdapter
-from benchmarking.domains.base import BenchmarkProblem
-from benchmarking.measurements import ParamLearningMeasurement
+from nbn.bench.adapters import PgmpyAdapter
+from nbn.bench.domains.base import BenchmarkProblem
+from nbn.bench.measurements import ParamLearningMeasurement
 
 
 # ---- fixtures ---------------------------------------------------------------
@@ -52,7 +52,7 @@ def _cat_mech(probs: torch.Tensor, parent_cards: list[int]):
 
 def _bn_problem(seed: int = 1, n_nodes: int = 4):
     """A discrete synthetic problem with full state coverage at this n_train."""
-    from benchmarking.synthetic import make_synthetic_bn
+    from nbn.bench.synthetic import make_synthetic_bn
 
     bn = make_synthetic_bn(
         n_nodes=n_nodes, family="discrete", cardinality=3, edge_density=0.5,
@@ -237,7 +237,7 @@ def test_mle_hard_zero_yields_inf_kl_bayes_finite():
 
 @pytest.mark.slow
 def test_lg_recovery_not_applicable():
-    from benchmarking.synthetic import make_synthetic_bn
+    from nbn.bench.synthetic import make_synthetic_bn
 
     bn = make_synthetic_bn(
         n_nodes=4, family="continuous_lg", cardinality=3, edge_density=0.5,
@@ -277,7 +277,7 @@ def test_extract_is_deterministic(param_method):
 # ---- bad state name -> loud error -------------------------------------------
 
 def test_non_integer_state_raises():
-    from benchmarking.adapters.pgmpy_adapter import _state_axis_index
+    from nbn.bench.adapters.pgmpy_adapter import _state_axis_index
 
     with pytest.raises(ValueError, match="not an integer in"):
         _state_axis_index("X", ["lo", "hi"], 2)

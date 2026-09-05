@@ -14,10 +14,10 @@ import time
 
 import torch
 
-from benchmarking.domains.base import BenchmarkProblem, Query
-from benchmarking.domains.posterior import Posterior
-from benchmarking.measurements.accuracy_timing import AccuracyAndTiming
-from benchmarking.measurements.timing_only import TimingOnly
+from nbn.bench.domains.base import BenchmarkProblem, Query
+from nbn.bench.domains.posterior import Posterior
+from nbn.bench.measurements.accuracy_timing import AccuracyAndTiming
+from nbn.bench.measurements.timing_only import TimingOnly
 
 
 # ---- Fixtures ----------------------------------------------------------------

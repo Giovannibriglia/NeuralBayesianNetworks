@@ -31,7 +31,7 @@ def test_linear_gaussian_cpd_still_exposes_evidence():
 
 def test_missing_evidence_attribute_raises_instead_of_dropping_edges():
     """The failure mode must be an exception, not an edge-free SEM."""
-    from benchmarking.adapters.pgmpy_adapter import PgmpyAdapter
+    from nbn.bench.adapters.pgmpy_adapter import PgmpyAdapter
 
     class _NoEvidenceCPD:
         variable = "Y"

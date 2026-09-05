@@ -1,7 +1,7 @@
 """Structural typing tests for v0.13 Protocol interfaces.
 
 These tests verify that the Protocol definitions in
-benchmarking/core/interfaces.py are well-formed and that minimal
+nbn/bench/core/interfaces.py are well-formed and that minimal
 concrete implementations satisfy them via runtime_checkable. They
 do NOT test behavior — there are no real implementations yet.
 
@@ -14,16 +14,16 @@ from typing import Any, Iterator
 import pytest
 import torch
 
-from benchmarking.core.interfaces import (
+from nbn.bench.core.interfaces import (
     BaselineAdapter,
     Measurement,
     ProblemSource,
     QuerySelector,
     default_query_batch,
 )
-from benchmarking.core.results import CellResult
-from benchmarking.domains.base import BenchmarkProblem, Query
-from benchmarking.domains.posterior import Posterior
+from nbn.bench.core.results import CellResult
+from nbn.bench.domains.base import BenchmarkProblem, Query
+from nbn.bench.domains.posterior import Posterior
 
 
 # ---- Minimal stub implementations for structural conformance ----

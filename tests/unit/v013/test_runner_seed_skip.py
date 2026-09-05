@@ -20,16 +20,16 @@ from typing import Iterator
 import pytest
 import torch
 
-from benchmarking.core.config import BaselineSpec, RunnerConfig, build_adapter
-from benchmarking.core.results import CellResult
-from benchmarking.core.runner import (
+from nbn.bench.core.config import BaselineSpec, RunnerConfig, build_adapter
+from nbn.bench.core.results import CellResult
+from nbn.bench.core.runner import (
     Runner,
     _register_failures,
     _skip_sentinel,
 )
-from benchmarking.domains.base import BenchmarkProblem, GroundTruth
-from benchmarking.measurements import TimingOnly
-from benchmarking.selectors.uniform import UniformRandomSelector
+from nbn.bench.domains.base import BenchmarkProblem, GroundTruth
+from nbn.bench.measurements import TimingOnly
+from nbn.bench.selectors.uniform import UniformRandomSelector
 
 
 # --- fixtures ----------------------------------------------------------------
@@ -224,7 +224,7 @@ class TestRunSeedSkipRealSubprocess:
     on seed 0; seed 1 must then be skipped entirely."""
 
     def test_skip_fires_through_subprocess(self, tmp_path):
-        from benchmarking.problems.synthetic import (
+        from nbn.bench.problems.synthetic import (
             SyntheticConfig, SyntheticProblemSource,
         )
 

@@ -223,7 +223,7 @@ Following the Phase 2 pattern: one PR, reviewer checkpoint between
 stages.
 
 ### Stage 1: HeaviestQueryByRole selector
-- New file: `benchmarking/selectors/heaviest.py` (~150 LOC)
+- New file: `nbn/bench/selectors/heaviest.py` (~150 LOC)
 - Reuses `compute_node_roles` from `topological.py`
 - Reuses `_ValueAllocator` for V1 value sampling
 - Unit tests on ASIA fixture verifying:

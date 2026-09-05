@@ -23,10 +23,10 @@ from __future__ import annotations
 import pytest
 import torch
 
-from benchmarking.adapters import PgmpyAdapter
-from benchmarking.core.interfaces import BaselineAdapter
-from benchmarking.domains.base import BenchmarkProblem, Query
-from benchmarking.domains.posterior import Posterior
+from nbn.bench.adapters import PgmpyAdapter
+from nbn.bench.core.interfaces import BaselineAdapter
+from nbn.bench.domains.base import BenchmarkProblem, Query
+from nbn.bench.domains.posterior import Posterior
 
 
 # ---- Helpers ----------------------------------------------------------------

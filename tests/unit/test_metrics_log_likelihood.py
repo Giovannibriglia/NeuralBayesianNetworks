@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import torch
 
-from benchmarking.metrics import log_likelihood
+from nbn.bench.metrics import log_likelihood
 
 
 def test_name_is_exactly_log_likelihood():

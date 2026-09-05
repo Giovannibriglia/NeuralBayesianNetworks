@@ -1,0 +1,163 @@
+# =============================================================================
+# bnlearn inference complete — full 31-network paper-scale coverage.
+# =============================================================================
+#
+# Schema reference (nbn/bench/core/yaml_config.py):
+#
+# Top-level (RunnerConfig):
+#   version                   required, must be "v0.13"
+#   benchmark                 required, "bnlearn" | "synthetic"
+#   config_name               required, used as the output-artifact prefix
+#   metrics                   default: "all"  ("all" | "timing")
+#   selector                  default: "uniform_random"
+#                             ("uniform_random" | {type: topological, ...}
+#                              | {type: heaviest_by_role, ...})
+#   source                    required, see below
+#   baselines                 required, non-empty list of baseline specs
+#   n_queries_per_cell        required
+#   per_cell_timeout_s        required (seconds)
+#   fit_timeout_s             default: null (computed = multiplier * per_cell_timeout_s)
+#
+# Source (bnlearn):
+#   networks      required, list of bnlearn network names
+#   seeds         required, list of int RNG seeds
+#   n_train       default: 5000
+#   n_test        default: 1000
+#   n_reference   default: 5000
+#
+# Baseline spec (each item in `baselines`):
+#   library, mechanism, param_method        (required)
+#   inference_method, device, extra_kwargs   (optional)
+# =============================================================================
+
+# Bnlearn paper-scale benchmark — full network coverage.
+#
+# All 31 networks across three kinds (24 discrete + 4 Gaussian + 3 CLG),
+# 5 seeds, TopologicalAllocator selector, generous per-cell budget.
+#
+# This config produces paper §5 source data for the real-network arm
+# of the v0.13 benchmark. It complements scalability_paper.yaml (synthetic
+# scalability arm).
+#
+# WARNING: full run is multi-day wall-clock. Massive discrete networks
+# (munin*, link at 724-1041 nodes) will have many timeout rows; that's
+# expected outcome, recorded as status, not failure.
+#
+# Design: docs/phase4-design-draft.md §3, §6.
+version: "v0.13"
+benchmark: bnlearn
+config_name: bnlearn_complete
+metrics: all
+
+source:
+  networks:
+    # Discrete — small
+    - asia
+    - cancer
+    - earthquake
+    - sachs
+    - survey
+    # Discrete — medium
+    - alarm
+    - barley
+    - child
+    - insurance
+    - mildew
+    - water
+    # Discrete — large
+    - hailfinder
+    - hepar2
+    - win95pts
+    # Discrete — very large
+    - andes
+    - diabetes
+    - link
+    - munin1
+    - pathfinder
+    - pigs
+    # Discrete — massive
+    - munin
+    - munin2
+    - munin3
+    - munin4
+    # Gaussian
+    - ecoli70
+    - magic-niab
+    - magic-irri
+    - arth150
+    # CLG
+    - healthcare
+    - sangiovese
+    - mehra
+  seeds: [0, 1, 2, 3, 4]
+  # Tiered by n_parameters (total discrete CPT cells, #133): bigger networks
+  # are more under-determined at a fixed sample count (samples/param < 1 for
+  # 11 of the discrete nets at n=10240), so train/reference scale up with size.
+  # First tier whose max_n_params >= the network's n_parameters wins;
+  # max_n_params: null is the catch-all.
+  n_train:
+    tiers:
+      - { max_n_params: 1000,   value: 10240 }
+      - { max_n_params: 10000,  value: 20480 }
+      - { max_n_params: 100000, value: 40960 }
+      - { max_n_params: null,   value: 81920 }
+  n_test: 1024
+  n_reference:
+    tiers:
+      - { max_n_params: 1000,   value: 10240 }
+      - { max_n_params: 10000,  value: 20480 }
+      - { max_n_params: 100000, value: 40960 }
+      - { max_n_params: null,   value: 81920 }
+
+selector:
+  type: topological
+  target_allocation:
+    hub: 0.30
+    cut: 0.30
+    terminal: 0.30
+    random: 0.10
+
+n_queries_per_cell: 128
+
+baselines:
+  # nbn-cat (discrete)
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  # nbn-neuralcat (discrete)
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  # nbn-lg (continuous_lg)
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  # nbn-mdn (continuous_lg / continuous_nongauss / hybrid)
+  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  # nbn-flow (continuous_lg / continuous_nongauss / hybrid)
+  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  # nbn-hybrid (hybrid router)
+  # - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router,    extra_kwargs: {epochs: 100,  n_samples: 2048}}
+  # Non-parametric continuous mechanisms (#224 / PR 9) — LW only (ais/avi blocked
+  # at recognition_net._head_for, deferred to #227). All three carry device: cuda:
+  # KDE-lw's per-query O(n_train) density eval is ~19.5s/query on CPU at this scale
+  # (n_train=10000, n_samples=4096) -> ~5.5h/cell at n_queries_per_cell=1024;
+  # 0.24s/query on GPU. Scalability/speed configs deferred to #228.
+  - { library: nbn,   mechanism: kde,      param_method: mle,   inference_method: lw,      extra_kwargs: { n_samples: 2048 }, device: cuda }
+  - { library: nbn,   mechanism: knn,      param_method: mle,   inference_method: lw,      extra_kwargs: { n_samples: 2048 }, device: cuda }
+  - { library: nbn,   mechanism: flexcode, param_method: mle,   inference_method: lw,      extra_kwargs: { n_samples: 2048 }, device: cuda }
+  # other libraries
+  - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: ve}
+  - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance, device: cpu}
+  - {library: pgmpy,       mechanism: discrete,  param_method: mle,   inference_method: ve}
+  - {library: pgmpy,       mechanism: discrete,  param_method: bayes, inference_method: ve}
+  - {library: pgmpy,       mechanism: lg,        param_method: lg,    inference_method: predict}
+
+per_cell_timeout_s: 1200.0
+fit_timeout_s: 1200

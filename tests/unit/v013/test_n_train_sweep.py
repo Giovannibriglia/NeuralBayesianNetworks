@@ -18,9 +18,9 @@ import textwrap
 import pytest
 import torch
 
-from benchmarking.domains.base import BenchmarkProblem
-from benchmarking.measurements import ParamLearningMeasurement
-from benchmarking.problems import SyntheticConfig, SyntheticProblemSource
+from nbn.bench.domains.base import BenchmarkProblem
+from nbn.bench.measurements import ParamLearningMeasurement
+from nbn.bench.problems import SyntheticConfig, SyntheticProblemSource
 
 
 def _cfg(**over):
@@ -77,7 +77,7 @@ def test_same_true_model_across_n_train():
 # ---- config validation ------------------------------------------------------
 
 def test_validation_mutual_exclusion_and_synthetic_only():
-    from benchmarking.core.yaml_config import (
+    from nbn.bench.core.yaml_config import (
         _parse_bnlearn_config,
         _parse_synthetic_config,
     )
@@ -107,8 +107,8 @@ def test_validation_mutual_exclusion_and_synthetic_only():
 
 @pytest.mark.slow
 def test_sweep_stamps_n_train_column(tmp_path):
-    from benchmarking.core.runner import Runner
-    from benchmarking.core.yaml_config import load_runner_config
+    from nbn.bench.core.runner import Runner
+    from nbn.bench.core.yaml_config import load_runner_config
 
     yaml = tmp_path / "lc.yaml"
     yaml.write_text(textwrap.dedent("""
@@ -172,7 +172,7 @@ def test_weight_cache_hits_across_n_train():
         supports_param_recovery = True
 
         def __init__(self, prob):
-            from benchmarking.adapters import NBNAdapter
+            from nbn.bench.adapters import NBNAdapter
             self._a = NBNAdapter(mechanism="cat", engine=None, device="cpu")
             self._a.fit(prob)
 

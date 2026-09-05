@@ -14,9 +14,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from benchmarking.problems.synthetic import SyntheticConfig, SyntheticProblemSource
-from benchmarking.domains.base import BenchmarkProblem, GroundTruth
-from benchmarking.core.interfaces import ProblemSource
+from nbn.bench.problems.synthetic import SyntheticConfig, SyntheticProblemSource
+from nbn.bench.domains.base import BenchmarkProblem, GroundTruth
+from nbn.bench.core.interfaces import ProblemSource
 
 
 class TestSyntheticConfig:

@@ -1,4 +1,4 @@
-"""Unit tests for benchmarking.metrics._compute_metrics_per_node.
+"""Unit tests for nbn.bench.metrics._compute_metrics_per_node.
 
 Pass 9 Phase 1 introduced a parametrized helper that averages
 {tv_per_node, jsd_per_node, w1_per_node} over collections of
@@ -18,7 +18,7 @@ import math
 
 import torch
 
-from benchmarking.metrics import _compute_metrics_per_node, js_divergence
+from nbn.bench.metrics import _compute_metrics_per_node, js_divergence
 
 
 # ── Discrete CPD pair fixtures ────────────────────────────────────────────
@@ -73,7 +73,7 @@ def test_symmetric_bernoulli_flip():
 
     TV = 0.5*(|0.3-0.7| + |0.7-0.3|) = 0.5*0.8 = 0.4.
     JSD/log(2): no clean closed form on K=2 Bernoulli;
-    cross-check against benchmarking.metrics.js_divergence.
+    cross-check against nbn.bench.metrics.js_divergence.
     """
     p = torch.tensor([0.3, 0.7])
     q = torch.tensor([0.7, 0.3])

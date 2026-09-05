@@ -20,9 +20,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from benchmarking.adapters import NBNAdapter
-from benchmarking.domains.base import BenchmarkProblem, Query
-from benchmarking.domains.posterior import Posterior
+from nbn.bench.adapters import NBNAdapter
+from nbn.bench.domains.base import BenchmarkProblem, Query
+from nbn.bench.domains.posterior import Posterior
 
 
 # ---- Fixtures ----------------------------------------------------------------

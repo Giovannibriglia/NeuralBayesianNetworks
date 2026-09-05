@@ -20,11 +20,11 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from benchmarking.cli import _run_cells
-from benchmarking.core.yaml_config import load_runner_config
+from nbn.bench.cli import _run_cells
+from nbn.bench.core.yaml_config import load_runner_config
 
 _SMOKE = (
-    "benchmarking/configs/synthetic/speed/inference_speed_smoke.yaml"
+    "nbn/bench/configs/synthetic/speed/inference_speed_smoke.yaml"
 )
 
 
@@ -103,7 +103,7 @@ class TestNoSweepPathUnchanged:
         """A config without batch_sizes goes through the pre-sweep path
         (cfg.batch_sizes is None → single Runner pass)."""
         cfg = load_runner_config(
-            "benchmarking/configs/bnlearn/smoke_tests/inference_smoke.yaml",
+            "nbn/bench/configs/bnlearn/smoke_tests/inference_smoke.yaml",
             device_override="cpu",
             jsonl_path=tmp_path / "unused.jsonl",
         )

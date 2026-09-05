@@ -12,9 +12,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from benchmarking.selectors.uniform import UniformRandomSelector
-from benchmarking.core.interfaces import QuerySelector
-from benchmarking.domains.base import BenchmarkProblem, Query
+from nbn.bench.selectors.uniform import UniformRandomSelector
+from nbn.bench.core.interfaces import QuerySelector
+from nbn.bench.domains.base import BenchmarkProblem, Query
 
 
 # ---------------------------------------------------------------------------

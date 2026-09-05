@@ -9,7 +9,7 @@ import types
 
 import pytest
 
-from benchmarking.domains._n_parameters import (
+from nbn.bench.domains._n_parameters import (
     n_nodes_from_problem,
     n_parameters_from_cardinalities,
     n_parameters_from_problem,
@@ -117,7 +117,7 @@ class TestNParametersIntegration:
         """asia: 8 binary nodes. Total discrete CPT cells:
         asia(2) + tub|asia(4) + smoke(2) + lung|smoke(4) + bronc|smoke(4)
         + either|lung,tub(8) + xray|either(4) + dysp|bronc,either(8) = 36."""
-        from benchmarking.problems.bnlearn import BnlearnConfig, BnlearnProblemSource
+        from nbn.bench.problems.bnlearn import BnlearnConfig, BnlearnProblemSource
 
         cfg = BnlearnConfig(networks=["asia"], seeds=[0],
                             n_train=100, n_test=20, n_reference=20)

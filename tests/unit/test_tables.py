@@ -1,4 +1,4 @@
-"""Tests for v0.6c-C-3 table writers (``benchmarking._tables``).
+"""Tests for v0.6c-C-3 table writers (``nbn.bench._tables``).
 
 Pin the four output formats: CSV / markdown / LaTeX / parquet.  CSV
 must use ``na_rep='n/a'``; markdown must render without ``tabulate``;
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from benchmarking._tables import (
+from nbn.bench._tables import (
     _df_to_markdown,
     _escape_latex,
     write_csv,
@@ -169,7 +169,7 @@ def test_write_parquet_round_trips(tmp_path: Path) -> None:
 def test_write_all_uses_canonical_paths(tmp_path: Path) -> None:
     """write_all writes to ``{output_dir}/tables/{prefix}_summary.{ext}``
     for all four formats."""
-    from benchmarking._tables import write_all
+    from nbn.bench._tables import write_all
     aggregated = {"wide": _make_wide(), "pareto": _make_pareto()}
     paths = write_all(
         aggregated, output_dir=str(tmp_path), output_prefix="testrun",

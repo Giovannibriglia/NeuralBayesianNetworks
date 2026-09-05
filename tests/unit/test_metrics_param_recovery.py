@@ -17,7 +17,7 @@ import math
 
 import torch
 
-from benchmarking.metrics import (
+from nbn.bench.metrics import (
     frequency_weights,
     param_recovery_kl,
     param_recovery_tv,

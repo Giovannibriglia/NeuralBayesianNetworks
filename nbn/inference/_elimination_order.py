@@ -26,7 +26,7 @@ Public API
 
 The lower-level helpers ``moralise``, ``fill_count``, ``eliminate`` are
 exposed primarily for tests and for the diagnostic in
-``benchmarking/diagnostics/ve_profile_n20.py``.
+``nbn/bench/diagnostics/ve_profile_n20.py``.
 """
 from __future__ import annotations
 

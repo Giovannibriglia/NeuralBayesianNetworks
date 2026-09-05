@@ -29,14 +29,14 @@ import time
 import pytest
 import torch
 
-from benchmarking.adapters import NBNAdapter, PgmpyAdapter, PomegranateAdapter
-from benchmarking.core.interfaces import Measurement
-from benchmarking.core.results import CellResult, VALID_STATUSES
-from benchmarking.domains.base import BenchmarkProblem, GroundTruth, Query
-from benchmarking.domains.posterior import Posterior
-from benchmarking.measurements import AccuracyAndTiming, TimingOnly
-from benchmarking.problems.synthetic import SyntheticConfig, SyntheticProblemSource
-from benchmarking.selectors.uniform import UniformRandomSelector
+from nbn.bench.adapters import NBNAdapter, PgmpyAdapter, PomegranateAdapter
+from nbn.bench.core.interfaces import Measurement
+from nbn.bench.core.results import CellResult, VALID_STATUSES
+from nbn.bench.domains.base import BenchmarkProblem, GroundTruth, Query
+from nbn.bench.domains.posterior import Posterior
+from nbn.bench.measurements import AccuracyAndTiming, TimingOnly
+from nbn.bench.problems.synthetic import SyntheticConfig, SyntheticProblemSource
+from nbn.bench.selectors.uniform import UniformRandomSelector
 
 
 # ---------------------------------------------------------------------------

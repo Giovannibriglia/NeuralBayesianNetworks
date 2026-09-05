@@ -1,0 +1,76 @@
+# =============================================================================
+# bnlearn inference smoke — fast end-to-end check (asia + ecoli70 + sangiovese).
+# =============================================================================
+#
+# Schema reference (nbn/bench/core/yaml_config.py):
+#
+# Top-level (RunnerConfig):
+#   version                   required, must be "v0.13"
+#   benchmark                 required, "bnlearn" | "synthetic"
+#   config_name               required, used as the output-artifact prefix
+#   metrics                   default: "all"  ("all" | "timing")
+#   selector                  default: "uniform_random"
+#                             ("uniform_random" | {type: topological, ...}
+#                              | {type: heaviest_by_role, ...})
+#   source                    required, see below
+#   baselines                 required, non-empty list of baseline specs
+#   n_queries_per_cell        required
+#   per_cell_timeout_s        required (seconds)
+#   fit_timeout_s             default: null (computed = multiplier * per_cell_timeout_s)
+#
+# Source (bnlearn):
+#   networks      required, list of bnlearn network names
+#   seeds         required, list of int RNG seeds
+#   n_train       default: 5000
+#   n_test        default: 1000
+#   n_reference   default: 5000
+#
+# Baseline spec (each item in `baselines`):
+#   library, mechanism, param_method        (required)
+#   inference_method, device, extra_kwargs   (optional)
+# =============================================================================
+
+# Bnlearn smoke — Phase 4 BnlearnProblemSource, fast end-to-end check.
+#
+# Exercises the full Phase 4 pipeline on one network per kind:
+#   - asia       (discrete,         8 nodes, downloaded .bif)
+#   - ecoli70    (continuous_gauss, 46 nodes, bundled JSON)
+#   - sangiovese (clg,              15 nodes, bundled JSON)
+#
+# Baselines span the families: discrete-only (pgmpy/pomegranate/nbn-cat),
+# Gaussian (pgmpy-lg-predict, nbn-lg-lw), CLG (nbn-hybrid-router), and pyro
+# (all). Inapplicable (baseline, family) cells emit not_supported rows.
+#
+# Design: docs/phase4-design-draft.md §6, §10 Stage 4.
+# Wall-clock budget: ~5 min on CPU.
+version: "v0.13"
+benchmark: bnlearn
+config_name: bnlearn_smoke
+metrics: all
+
+source:
+  networks: [asia, ecoli70, sangiovese]
+  seeds: [0, 1]
+  n_train: 1000
+  n_test: 200
+  n_reference: 500
+
+selector:
+  type: topological
+  target_allocation:
+    hub: 0.30
+    cut: 0.25
+    terminal: 0.25
+    random: 0.20
+
+baselines:
+  - {library: pgmpy,       mechanism: discrete,  param_method: mle, inference_method: ve}
+  - {library: pgmpy,       mechanism: lg,        param_method: lg,  inference_method: predict}
+  - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: ve}
+  - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ve}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: lw, extra_kwargs: {n_samples: 512}}
+  - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router}
+
+n_queries_per_cell: 32
+per_cell_timeout_s: 60.0

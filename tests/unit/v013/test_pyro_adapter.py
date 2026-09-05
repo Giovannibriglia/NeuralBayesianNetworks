@@ -25,10 +25,10 @@ from __future__ import annotations
 import pytest
 import torch
 
-from benchmarking.adapters import PyroAdapter
-from benchmarking.core.interfaces import BaselineAdapter
-from benchmarking.domains.base import BenchmarkProblem, Query
-from benchmarking.domains.posterior import Posterior
+from nbn.bench.adapters import PyroAdapter
+from nbn.bench.core.interfaces import BaselineAdapter
+from nbn.bench.domains.base import BenchmarkProblem, Query
+from nbn.bench.domains.posterior import Posterior
 
 
 # ---- Helpers ----------------------------------------------------------------
@@ -557,7 +557,7 @@ class TestRegressions:
         docs/v0.13-nbn-cat-ve-investigation.md.
         """
         pytest.importorskip("pyro")
-        from benchmarking.problems.bnlearn import (
+        from nbn.bench.problems.bnlearn import (
             BnlearnConfig,
             BnlearnProblemSource,
         )

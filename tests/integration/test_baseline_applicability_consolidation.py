@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import pytest
 
-from benchmarking.core.applicability import (
+from nbn.bench.core.applicability import (
     BaselineApplicability, BASELINE_FAMILY_APPLICABILITY as _BASELINE_APPLICABILITY,
     accuracy_supported, is_applicable, known_labels,
 )

@@ -19,11 +19,11 @@ import pytest
 import torch
 import torch.nn as nn
 
-from benchmarking.adapters import NBNAdapter
-from benchmarking.core.cpt_extraction import extract_discrete_cpts
-from benchmarking.domains.base import BenchmarkProblem
-from benchmarking.measurements import ParamLearningMeasurement
-from benchmarking.metrics import param_recovery_kl, param_recovery_tv
+from nbn.bench.adapters import NBNAdapter
+from nbn.bench.core.cpt_extraction import extract_discrete_cpts
+from nbn.bench.domains.base import BenchmarkProblem
+from nbn.bench.measurements import ParamLearningMeasurement
+from nbn.bench.metrics import param_recovery_kl, param_recovery_tv
 
 
 # ---- fixed-CPT true-model construction --------------------------------------
@@ -184,7 +184,7 @@ def test_canonical_row_index_multiparent():
 
 @pytest.mark.slow
 def test_recovery_gate_discrete_ok_continuous_not_applicable():
-    from benchmarking.synthetic import make_synthetic_bn
+    from nbn.bench.synthetic import make_synthetic_bn
 
     def _problem(family):
         bn = make_synthetic_bn(

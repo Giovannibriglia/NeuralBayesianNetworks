@@ -5,7 +5,7 @@ import math
 
 import torch
 
-from benchmarking.metrics import (
+from nbn.bench.metrics import (
     js_normalized,
     kl_div_continuous_knn,
     tv_continuous,

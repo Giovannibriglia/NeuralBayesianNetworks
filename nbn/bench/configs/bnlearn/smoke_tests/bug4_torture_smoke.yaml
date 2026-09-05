@@ -1,0 +1,70 @@
+# =============================================================================
+# bnlearn torture smoke — reproduces the 612 GB OOM scenario (barley x nbn-cat-ve).
+# =============================================================================
+#
+# Schema reference (nbn/bench/core/yaml_config.py):
+#
+# Top-level (RunnerConfig):
+#   version                   required, must be "v0.13"
+#   benchmark                 required, "bnlearn" | "synthetic"
+#   config_name               required, used as the output-artifact prefix
+#   metrics                   default: "all"  ("all" | "timing")
+#   selector                  default: "uniform_random"
+#                             ("uniform_random" | {type: topological, ...}
+#                              | {type: heaviest_by_role, ...})
+#   source                    required, see below
+#   baselines                 required, non-empty list of baseline specs
+#   n_queries_per_cell        required
+#   per_cell_timeout_s        required (seconds)
+#   fit_timeout_s             default: null (computed = multiplier * per_cell_timeout_s)
+#
+# Source (bnlearn):
+#   networks      required, list of bnlearn network names
+#   seeds         required, list of int RNG seeds
+#   n_train       default: 5000
+#   n_test        default: 1000
+#   n_reference   default: 5000
+#
+# Baseline spec (each item in `baselines`):
+#   library, mechanism, param_method        (required)
+#   inference_method, device, extra_kwargs   (optional)
+# =============================================================================
+
+# bug4_torture_smoke — reproduces the original 612 GB failure scenario.
+#
+# barley x nbn-cat-ve with a hub-only TopologicalAllocator. Hub targets
+# default to ~50% diagnosis and ~40% mb_neighbors evidence — exactly the
+# query shape (query_role=hub, evidence_strategy=mb_neighbors,
+# query_kind=diagnosis) that produced the 612 GB allocation and
+# OS-killed the bnlearn_paper runner.
+#
+# Pre-Bug-4: a killed cell takes down the whole runner.
+# Post-Bug-4 (#127, PR #129): the per-cell subprocess absorbs the
+# failure — the parent records status=oom (the CPU allocator's
+# "can't allocate memory" RuntimeError on hosts where the giant alloc
+# is refused fast, or a SIGKILL -> oom on hosts that overcommit) and
+# the runner continues to the next cell.
+#
+# Reference: docs/v0.13-runner-subprocess-isolation.md §6.3.
+version: "v0.13"
+benchmark: bnlearn
+config_name: bug4_torture_smoke
+metrics: all
+
+source:
+  networks: [barley]
+  seeds: [0, 1]
+  n_train: 10240
+  n_test: 1024
+  n_reference: 10240
+
+selector:
+  type: topological
+  target_allocation:
+    hub: 1.0
+
+baselines:
+  - {library: nbn, mechanism: cat, param_method: mle, inference_method: ve}
+
+n_queries_per_cell: 64
+per_cell_timeout_s: 60.0

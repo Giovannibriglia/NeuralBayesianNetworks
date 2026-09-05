@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import torch
 
-from benchmarking.synthetic import make_synthetic_bn
+from nbn.bench.synthetic import make_synthetic_bn
 from nbn.inference.amortized_is import AmortizedISEngine
 from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
 

@@ -19,8 +19,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from benchmarking.core.yaml_config import load_runner_config
-from benchmarking.measurements import AccuracyAndTiming, TimingOnly
+from nbn.bench.core.yaml_config import load_runner_config
+from nbn.bench.measurements import AccuracyAndTiming, TimingOnly
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +63,7 @@ def _minimal_valid(config_name: str = "test") -> dict:
 # Canonical configs
 # ---------------------------------------------------------------------------
 
-_CONFIG_DIR = Path("benchmarking/configs")
+_CONFIG_DIR = Path("nbn/bench/configs")
 _INFERENCE_CONFIGS = [
     "synthetic/smoke_tests/inference_smoke.yaml",
     "synthetic/complete/inference_complete.yaml",
@@ -100,7 +100,7 @@ def test_param_learning_config_loads_cleanly(cfg_name: str, tmp_path: Path) -> N
     ``measurement_override`` (what the ``param-learning`` command supplies);
     the override is authoritative and the config carries it through.
     """
-    from benchmarking.measurements import ParamLearningMeasurement
+    from nbn.bench.measurements import ParamLearningMeasurement
 
     cfg = load_runner_config(
         _CONFIG_DIR / cfg_name,
@@ -120,7 +120,7 @@ def test_param_learning_metrics_field_guardrail(tmp_path: Path) -> None:
     'log_likelihood' metrics field is rejected; with an override, a non-
     'log_likelihood' metrics field is rejected.
     """
-    from benchmarking.measurements import ParamLearningMeasurement
+    from nbn.bench.measurements import ParamLearningMeasurement
 
     pl_cfg = _CONFIG_DIR / "synthetic/smoke_tests/parameter_learning_smoke.yaml"
 
@@ -277,7 +277,7 @@ def test_extra_kwargs_parsed_into_baseline_spec(tmp_path: Path) -> None:
 
 def test_yaml_dispatch_uniform_string_still_works(tmp_path: Path) -> None:
     """Backward-compat: string selector resolves to UniformRandomSelector."""
-    from benchmarking.selectors.uniform import UniformRandomSelector
+    from nbn.bench.selectors.uniform import UniformRandomSelector
 
     d = _minimal_valid()
     d["selector"] = "uniform_random"
@@ -288,7 +288,7 @@ def test_yaml_dispatch_uniform_string_still_works(tmp_path: Path) -> None:
 
 def test_yaml_dispatch_selector_omitted_defaults_uniform(tmp_path: Path) -> None:
     """No selector field → UniformRandomSelector (legacy default)."""
-    from benchmarking.selectors.uniform import UniformRandomSelector
+    from nbn.bench.selectors.uniform import UniformRandomSelector
 
     d = _minimal_valid()
     d.pop("selector", None)
@@ -299,7 +299,7 @@ def test_yaml_dispatch_selector_omitted_defaults_uniform(tmp_path: Path) -> None
 
 def test_yaml_dispatch_topological_dict(tmp_path: Path) -> None:
     """Phase 2: dict selector with type='topological' builds TopologicalAllocator."""
-    from benchmarking.selectors.topological import TopologicalAllocator
+    from nbn.bench.selectors.topological import TopologicalAllocator
 
     d = _minimal_valid()
     d["selector"] = {
@@ -314,7 +314,7 @@ def test_yaml_dispatch_topological_dict(tmp_path: Path) -> None:
 
 def test_yaml_dispatch_topological_string(tmp_path: Path) -> None:
     """String 'topological' builds TopologicalAllocator with defaults."""
-    from benchmarking.selectors.topological import TopologicalAllocator
+    from nbn.bench.selectors.topological import TopologicalAllocator
 
     d = _minimal_valid()
     d["selector"] = "topological"
@@ -326,7 +326,7 @@ def test_yaml_dispatch_topological_string(tmp_path: Path) -> None:
 
 def test_yaml_dispatch_heaviest_dict(tmp_path: Path) -> None:
     """Phase 3: dict selector type='heaviest_by_role' builds HeaviestQueryByRole."""
-    from benchmarking.selectors.heaviest import HeaviestQueryByRole
+    from nbn.bench.selectors.heaviest import HeaviestQueryByRole
 
     d = _minimal_valid()
     d["selector"] = {"type": "heaviest_by_role"}
@@ -337,7 +337,7 @@ def test_yaml_dispatch_heaviest_dict(tmp_path: Path) -> None:
 
 def test_yaml_dispatch_heaviest_string(tmp_path: Path) -> None:
     """String 'heaviest_by_role' builds HeaviestQueryByRole with defaults."""
-    from benchmarking.selectors.heaviest import HeaviestQueryByRole
+    from nbn.bench.selectors.heaviest import HeaviestQueryByRole
 
     d = _minimal_valid()
     d["selector"] = "heaviest_by_role"
@@ -348,7 +348,7 @@ def test_yaml_dispatch_heaviest_string(tmp_path: Path) -> None:
 
 def test_yaml_dispatch_heaviest_passes_overrides(tmp_path: Path) -> None:
     """n_evidence / max_retry from the YAML block reach the selector."""
-    from benchmarking.selectors.heaviest import HeaviestQueryByRole
+    from nbn.bench.selectors.heaviest import HeaviestQueryByRole
 
     d = _minimal_valid()
     d["selector"] = {
@@ -365,7 +365,7 @@ def test_yaml_dispatch_heaviest_passes_overrides(tmp_path: Path) -> None:
 
 def test_scalability_complete_config_loads(tmp_path: Path) -> None:
     """The paper config loads and exposes the Phase 3 selector + 1200s budget."""
-    from benchmarking.selectors.heaviest import HeaviestQueryByRole
+    from nbn.bench.selectors.heaviest import HeaviestQueryByRole
 
     cfg = load_runner_config(
         _CONFIG_DIR / "synthetic/complete/inference_scalability_complete.yaml",
@@ -389,7 +389,7 @@ def _bnlearn_source(**overrides) -> dict:
 
 def test_yaml_dispatch_bnlearn(tmp_path: Path) -> None:
     """Phase 4: benchmark=bnlearn builds BnlearnProblemSource + BnlearnConfig."""
-    from benchmarking.problems import BnlearnConfig, BnlearnProblemSource
+    from nbn.bench.problems import BnlearnConfig, BnlearnProblemSource
 
     d = _minimal_valid()
     d["benchmark"] = "bnlearn"
@@ -430,7 +430,7 @@ def test_yaml_dispatch_bnlearn_unknown_source_field_raises(tmp_path: Path) -> No
 
 def test_bnlearn_smoke_config_loads(tmp_path: Path) -> None:
     """The committed bnlearn smoke config loads cleanly."""
-    from benchmarking.problems import BnlearnProblemSource
+    from nbn.bench.problems import BnlearnProblemSource
 
     cfg = load_runner_config(
         _CONFIG_DIR / "bnlearn/smoke_tests/inference_smoke.yaml",

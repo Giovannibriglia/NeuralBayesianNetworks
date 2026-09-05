@@ -1,4 +1,4 @@
-"""Smoke test for the `nbn-bench plot` subcommand (benchmarking/_paper_figures.py).
+"""Smoke test for the `nbn-bench plot` subcommand (nbn/bench/_paper_figures.py).
 
 Doesn't verify figure content (manual review). Verifies:
 1. Pipeline runs without exception against a representative DataFrame
@@ -63,7 +63,7 @@ def _make_minimal_parquet(tmp_path: Path) -> Path:
 def _run(parquet: Path, out_dir: Path, aggregation: str):
     """Invoke the `nbn-bench plot` subcommand (positional parquet)."""
     return subprocess.run(
-        [sys.executable, "-m", "benchmarking.cli", "plot", str(parquet),
+        [sys.executable, "-m", "nbn.bench.cli", "plot", str(parquet),
          "--output-dir", str(out_dir), "--aggregation", aggregation],
         capture_output=True, text=True,
     )
@@ -103,7 +103,7 @@ def test_n_parameters_lookup_keyed_by_problem_and_family():
     """#133 regression: the same problem_id across two families with different
     n_parameters must be retrieved independently (synthetic case), not collapsed
     to whichever family sorts first."""
-    from benchmarking._paper_figures import n_parameters_lookup
+    from nbn.bench._paper_figures import n_parameters_lookup
 
     df = pd.DataFrame([
         {"problem_id": "10", "family": "discrete", "n_parameters": 256.0},
@@ -123,13 +123,13 @@ def test_n_parameters_lookup_keyed_by_problem_and_family():
 
 def test_n_parameters_lookup_absent_returns_none():
     df = pd.DataFrame([{"problem_id": "5", "family": "discrete", "value": 1.0}])
-    from benchmarking._paper_figures import n_parameters_lookup
+    from nbn.bench._paper_figures import n_parameters_lookup
     assert n_parameters_lookup(df) is None
 
 
 def test_run_plot_direct_call(tmp_path):
     """The module entry point run_plot() works without the CLI/subprocess."""
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
 
     parquet = _make_minimal_parquet(tmp_path)
     out_dir = tmp_path / "figures_direct"
@@ -141,7 +141,7 @@ def test_run_plot_direct_call(tmp_path):
 
 def test_run_plot_accepts_directory(tmp_path):
     """run_plot resolves a directory to its *_metrics.parquet."""
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
 
     # Lay the parquet out as `<dir>/<name>_metrics.parquet`.
     parquet = _make_minimal_parquet(tmp_path)
@@ -159,7 +159,7 @@ def test_run_plot_accepts_directory(tmp_path):
 def test_per_family_output_layout(tmp_path):
     """run_plot produces the nested per-family/subset layout under
     <bench>/<family>/<subset>/{plots,tables}/ with no <family>_ prefix (PR-4)."""
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
 
     parquet = _make_minimal_parquet(tmp_path)   # bnlearn / discrete / asia,alarm
     out_dir = tmp_path / "figs"
@@ -234,7 +234,7 @@ def test_all_zero_n_parameters_skips_that_axis(tmp_path):
     """A family whose n_parameters are all zero (continuous_gauss) still gets
     the n_nodes axis, but the degenerate *_vs_n_parameters file is skipped
     (decision alpha)."""
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
 
     parquet = _make_allzero_nparams_parquet(tmp_path)
     out_dir = tmp_path / "figs_allzero"
@@ -250,7 +250,7 @@ def test_all_zero_n_parameters_skips_that_axis(tmp_path):
 
 def test_resolve_n_nodes_column_wins(tmp_path, caplog):
     """resolve_n_nodes prefers the parquet column over the fallback."""
-    from benchmarking._paper_figures import resolve_n_nodes
+    from nbn.bench._paper_figures import resolve_n_nodes
 
     df = pd.DataFrame([
         # asia is 8 in _NETWORKS, but the column says 99 → column wins.
@@ -264,7 +264,7 @@ def test_resolve_n_nodes_falls_back_to_networks(tmp_path, caplog):
     """No n_nodes column → _NETWORKS fallback for bnlearn, with an info log."""
     import logging
 
-    from benchmarking._paper_figures import resolve_n_nodes
+    from nbn.bench._paper_figures import resolve_n_nodes
 
     df = pd.DataFrame([
         {"benchmark": "bnlearn", "problem_id": "asia"},
@@ -278,7 +278,7 @@ def test_resolve_n_nodes_falls_back_to_networks(tmp_path, caplog):
 
 def test_resolve_n_nodes_synthetic_numeric_fallback():
     """Synthetic problem_id is n_nodes as a string."""
-    from benchmarking._paper_figures import resolve_n_nodes
+    from nbn.bench._paper_figures import resolve_n_nodes
 
     df = pd.DataFrame([{"benchmark": "synthetic", "problem_id": "100"}])
     assert resolve_n_nodes(df, "synthetic") == {"100": 100}
@@ -289,7 +289,7 @@ def test_resolve_n_nodes_drops_unknown(caplog):
     a warning is emitted."""
     import logging
 
-    from benchmarking._paper_figures import resolve_n_nodes
+    from nbn.bench._paper_figures import resolve_n_nodes
 
     df = pd.DataFrame([{"benchmark": "bnlearn", "problem_id": "not_a_real_net"}])
     with caplog.at_level(logging.WARNING):
@@ -302,7 +302,7 @@ def test_not_supported_baselines_excluded_entirely(tmp_path):
     """A baseline whose every row is not_supported is dropped from the
     per-family success-rate figure AND the per-family tables.
     Partially-supported baselines survive."""
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
 
     rows = []
     # baseline A: ok on every problem (fully supported)
@@ -356,7 +356,7 @@ def test_not_supported_baselines_excluded_entirely(tmp_path):
 
 def test_filter_unsupported_baselines_unit():
     """Direct unit test for the helper."""
-    from benchmarking._paper_figures import _filter_unsupported_baselines
+    from nbn.bench._paper_figures import _filter_unsupported_baselines
 
     df = pd.DataFrame([
         {"baseline": "A", "status": "ok"},
@@ -379,7 +379,7 @@ def _coverage_df(spec: dict, family: str = "discrete") -> pd.DataFrame:
     'ok' rows carry real values; any other status carries NaN. n_nodes is
     looked up from _NETWORKS by problem name when possible.
     """
-    from benchmarking.problems.bnlearn import _NETWORKS
+    from nbn.bench.problems.bnlearn import _NETWORKS
     metrics = [("tv_per_node", 0.05), ("jsd_per_node", 0.01),
                ("fit_time_s", 0.5), ("query_time_s", 0.01),
                ("metrics_time_s", 0.001)]
@@ -406,7 +406,7 @@ def _coverage_df(spec: dict, family: str = "discrete") -> pd.DataFrame:
 
 def test_discover_subsets_basic():
     """3 baselines A/B/C, 4 problems with distinct solving sets."""
-    from benchmarking._paper_figures import _discover_subsets
+    from nbn.bench._paper_figures import _discover_subsets
     spec = {}
     for bl, st in [("A", "ok"), ("B", "ok"), ("C", "ok")]:
         spec[("asia", bl)] = st                         # P1: common {A,B,C}
@@ -428,7 +428,7 @@ def test_discover_subsets_basic():
 
 
 def test_subset_filenames_and_metadata(tmp_path):
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
     spec = {}
     for bl, st in [("nbn-cat-ve", "ok"), ("pgmpy-mle-ve", "ok")]:
         spec[("asia", bl)] = st                         # common {both}
@@ -456,7 +456,7 @@ def test_subset_filenames_and_metadata(tmp_path):
 
 
 def test_subset_table_labels_unique(tmp_path):
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
     import re
     spec = {}
     for bl, st in [("nbn-cat-ve", "ok"), ("pgmpy-mle-ve", "ok")]:
@@ -476,7 +476,7 @@ def test_subset_table_labels_unique(tmp_path):
 
 
 def test_problem_with_no_solver_excluded(tmp_path):
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
     spec = {}
     for bl, st in [("nbn-cat-ve", "ok"), ("pgmpy-mle-ve", "ok")]:
         spec[("asia", bl)] = st                          # normal common problem
@@ -498,9 +498,9 @@ def test_problem_with_no_solver_excluded(tmp_path):
 def test_real_bnlearn_parquet_no_crash(tmp_path):
     """The on-disk bnlearn_complete parquet (no n_nodes column, diverse
     coverage) renders without crashing and yields >=1 subset per family."""
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
     rundir = Path(__file__).resolve().parents[3] / (
-        "benchmarking/results/benchmark_bnlearn_bnlearn_complete_20260612_182220")
+        "results/benchmark_bnlearn_bnlearn_complete_20260612_182220")
     if not rundir.exists():
         pytest.skip("bnlearn_complete parquet not present")
     out = tmp_path / "figs"
@@ -565,7 +565,7 @@ def test_n_train_curve_uses_within_problem_grouping(tmp_path):
     """fig_accuracy_vs_n_train groups by n_train (within-problem), so a single
     problem_id with N swept n_train values yields N distinct x-points per
     baseline -- not one collapsed point (the n_nodes-axis behaviour)."""
-    from benchmarking import _paper_figures as pf
+    from nbn.bench import _paper_figures as pf
 
     df = pd.read_parquet(_make_learning_curve_parquet(tmp_path, n_trains=(50, 200, 800)))
     captured = {}
@@ -586,7 +586,7 @@ def test_n_train_curve_uses_within_problem_grouping(tmp_path):
 def test_n_train_figure_rendered_and_calibration_skipped(tmp_path):
     """run_plot emits <metric>_vs_n_train.pdf for metrics with ok rows and
     skips those without (no degenerate single-point curves)."""
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
 
     parquet = _make_learning_curve_parquet(tmp_path)
     out_dir = tmp_path / "figs"
@@ -600,7 +600,7 @@ def test_n_train_figure_rendered_and_calibration_skipped(tmp_path):
 
 def test_n_train_axis_skipped_without_sweep(tmp_path):
     """A single n_train value is not a sweep: no n_train figure is emitted."""
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
 
     parquet = _make_learning_curve_parquet(tmp_path, n_trains=(200,))
     out_dir = tmp_path / "figs_nosweep"
@@ -614,7 +614,7 @@ def test_status_counts_pl_mode_per_metric(tmp_path):
     """On a PL parquet (no query_time_s / status rows), per_query_status_counts
     counts accuracy-metric rows by status. Each baseline here has, per n_train,
     1 recovery-ok + 1 LL-ok + 1 calibration-not_applicable -> 2/3 ok, 1/3 NA."""
-    from benchmarking import _paper_figures as pf
+    from nbn.bench import _paper_figures as pf
 
     df = pd.read_parquet(_make_learning_curve_parquet(tmp_path, n_trains=(50, 200, 800)))
     counts = pf.per_query_status_counts(df)
@@ -630,7 +630,7 @@ def test_status_counts_inference_path_byte_identical(tmp_path):
     """An inference parquet (query_time_s rows present) routes through the
     original unit count — the PL fallback does NOT fire, so the w1
     not_supported accuracy-metric rows are not counted."""
-    from benchmarking import _paper_figures as pf
+    from nbn.bench import _paper_figures as pf
 
     df = pd.read_parquet(_make_minimal_parquet(tmp_path))
     counts = pf.per_query_status_counts(df)
@@ -645,7 +645,7 @@ def test_status_counts_inference_path_byte_identical(tmp_path):
 
 def test_single_parquet_list_of_one_unchanged(tmp_path):
     """run_plot with a one-element list behaves like the single-path call."""
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
 
     parquet = _make_minimal_parquet(tmp_path)
     out_dir = tmp_path / "figs_list1"
@@ -657,7 +657,7 @@ def test_multi_parquet_concat_renders_both(tmp_path):
     """Two parquets (a bnlearn inference parquet + a synthetic PL parquet) are
     row-concatenated; run_plot processes both benchmarks and renders the
     metrics each contributed."""
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
 
     inf = _make_minimal_parquet(tmp_path)                 # bnlearn, tv/jsd
     pl = _make_learning_curve_parquet(tmp_path)           # synthetic, recovery/LL
@@ -675,7 +675,7 @@ def test_multi_parquet_cli_nargs(tmp_path):
     pl = _make_learning_curve_parquet(tmp_path)
     out_dir = tmp_path / "figs_cli_multi"
     result = subprocess.run(
-        [sys.executable, "-m", "benchmarking.cli", "plot", str(inf), str(pl),
+        [sys.executable, "-m", "nbn.bench.cli", "plot", str(inf), str(pl),
          "--output-dir", str(out_dir), "--aggregation", "mean_std"],
         capture_output=True, text=True,
     )
@@ -689,7 +689,7 @@ def test_multi_parquet_cli_nargs(tmp_path):
 def test_mechanism_key_suffix_aware():
     """_mechanism_key strips a trailing engine suffix to align PL and inference
     baselines for the same mechanism, and preserves everything else."""
-    from benchmarking._paper_figures import _mechanism_key
+    from nbn.bench._paper_figures import _mechanism_key
 
     assert _mechanism_key("nbn-mdn-lw") == "nbn-mdn"      # inference -> mechanism
     assert _mechanism_key("nbn-mdn") == "nbn-mdn"         # PL form preserved
@@ -725,7 +725,7 @@ def _make_divergence_parquet(tmp_path: Path) -> Path:
 def test_divergence_panel_renders_and_aligns_mechanisms(tmp_path):
     """run_plot emits the divergence panel on a family with both metrics, and
     the panel aligns nbn-mdn (PL) with nbn-mdn-lw (inference) as one mechanism."""
-    from benchmarking._paper_figures import run_plot, fig_divergence, _mechanism_key
+    from nbn.bench._paper_figures import run_plot, fig_divergence, _mechanism_key
 
     parquet = _make_divergence_parquet(tmp_path)
     out_dir = tmp_path / "figs_div"
@@ -741,7 +741,7 @@ def test_divergence_panel_renders_and_aligns_mechanisms(tmp_path):
 
 def test_divergence_panel_skipped_without_both_metrics(tmp_path):
     """A family with only one of the pair's metrics renders no divergence panel."""
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
 
     # _make_learning_curve_parquet has calibration (not_applicable) + recovery,
     # but no w1_per_node ok rows -> the (pit_ks, w1) pair is incomplete.
@@ -786,7 +786,7 @@ def _make_walls_parquet(tmp_path: Path) -> Path:
 def test_dnf_cells_detects_partial_walls(tmp_path):
     """_dnf_cells flags (baseline, x) cells with BOTH ok and timeout rows, and
     skips baselines that are ok throughout (the asymmetric-wall signal)."""
-    from benchmarking._paper_figures import _dnf_cells
+    from nbn.bench._paper_figures import _dnf_cells
 
     df = pd.read_parquet(_make_walls_parquet(tmp_path))
     dnf = _dnf_cells(df, "query_time_s", {"100": 100, "200": 200})
@@ -800,7 +800,7 @@ def test_scaling_wall_sidecar_and_query_only(tmp_path):
     figures (kde's wall), but NOT the fit-time figure (a query timeout's status
     is replicated onto fit_time_s rows; marking the fit plot would mislabel a
     query-budget wall as a fit wall)."""
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
 
     parquet = _make_walls_parquet(tmp_path)
     out_dir = tmp_path / "figs_walls"
@@ -816,7 +816,7 @@ def test_scaling_wall_sidecar_and_query_only(tmp_path):
 def test_all_ok_parquet_writes_no_dnf_sidecar(tmp_path):
     """An all-ok parquet (no partial timeouts) writes no DNF sidecar — the
     marker path is dormant and rendering is unchanged."""
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
 
     parquet = _make_minimal_parquet(tmp_path)
     out_dir = tmp_path / "figs_allok"
@@ -828,7 +828,7 @@ def test_all_ok_parquet_writes_no_dnf_sidecar(tmp_path):
 
 def test_bold_best_directions():
     """_bold_best picks the winner per metric direction, excluding NaN/+inf."""
-    from benchmarking._paper_figures import _bold_best
+    from nbn.bench._paper_figures import _bold_best
 
     # lower-better distance: smallest wins.
     assert _bold_best({"a": 0.05, "b": 0.02, "c": 0.09}, "tv_per_node") == {"b"}
@@ -842,7 +842,7 @@ def test_bold_best_directions():
 
 def test_bold_best_excludes_nan_and_inf():
     """+inf (unsmoothed KL) and None never win; an all-excluded column bolds none."""
-    from benchmarking._paper_figures import _bold_best
+    from nbn.bench._paper_figures import _bold_best
 
     assert _bold_best({"a": float("inf"), "b": 0.5, "c": None}, "param_recovery_kl") == {"b"}
     assert _bold_best({"a": float("inf"), "b": None}, "param_recovery_kl") == set()
@@ -850,7 +850,7 @@ def test_bold_best_excludes_nan_and_inf():
 
 def test_bold_best_ties_to_display_precision():
     """Two centrals that round to the same .3g string bold together."""
-    from benchmarking._paper_figures import _bold_best
+    from nbn.bench._paper_figures import _bold_best
 
     # 0.02961 and 0.02964 both render as "0.0296" at .3g -> tied; 0.10 does not.
     assert _bold_best({"a": 0.02961, "b": 0.02964, "c": 0.10}, "tv_per_node") == {"a", "b"}
@@ -858,7 +858,7 @@ def test_bold_best_ties_to_display_precision():
 
 def test_headline_table_bolds_best_cell(tmp_path):
     """A rendered headline table has \\textbf on the best baseline per metric."""
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
 
     parquet = _make_learning_curve_parquet(tmp_path)   # discrete PL: recovery + LL
     out_dir = tmp_path / "figs_bold"
@@ -884,7 +884,7 @@ def _mini(metrics, *, benchmark="synthetic", batch_size=None, n_train=None):
 
 
 def test_benchmark_caption_four_buckets():
-    from benchmarking._paper_figures import _benchmark_caption
+    from nbn.bench._paper_figures import _benchmark_caption
 
     # 1. speed dominates (batch_size>1)
     assert _benchmark_caption(_mini(["query_time_s"], batch_size=4)) == "INFERENCE SPEED"
@@ -903,7 +903,7 @@ def test_benchmark_caption_four_buckets():
 
 def test_benchmark_caption_single_n_train_is_not_sample_efficiency():
     """One n_train value is not a sweep -> falls through to the mode caption."""
-    from benchmarking._paper_figures import _benchmark_caption
+    from nbn.bench._paper_figures import _benchmark_caption
 
     assert _benchmark_caption(
         _mini(["param_recovery_tv"], n_train=300)) == "SYNTHETIC PARAMETER LEARNING"
@@ -912,9 +912,9 @@ def test_benchmark_caption_single_n_train_is_not_sample_efficiency():
 def test_batch_speed_table_bolds_and_captions(tmp_path):
     """The batch-speed table carries the INFERENCE SPEED caption and bolds the
     fastest baseline per $B$ column."""
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
 
-    BS = sorted(Path("benchmarking/results").glob("*batch_speed_smoke*"))
+    BS = sorted(Path("results").glob("*batch_speed_smoke*"))
     if not BS:
         pytest.skip("no batch_speed smoke parquet present")
     out_dir = tmp_path / "figs_bs"
@@ -931,7 +931,7 @@ def test_batch_speed_table_bolds_and_captions(tmp_path):
 def test_n_train_table_renders_with_bold(tmp_path):
     """A learning-curves parquet renders one <metric>_vs_n_train.tex per metric
     with n_train columns and a bolded best baseline per column."""
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
 
     parquet = _make_learning_curve_parquet(tmp_path, n_trains=(50, 200, 800))
     out_dir = tmp_path / "figs"
@@ -946,7 +946,7 @@ def test_n_train_table_renders_with_bold(tmp_path):
 
 def test_n_train_table_skipped_without_sweep(tmp_path):
     """A single n_train value is not a sweep -> no n_train table emitted."""
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
 
     parquet = _make_learning_curve_parquet(tmp_path, n_trains=(200,))
     out_dir = tmp_path / "figs_nosweep"
@@ -957,7 +957,7 @@ def test_n_train_table_skipped_without_sweep(tmp_path):
 def test_n_train_table_caption_and_metric_skip(tmp_path):
     """The caption is SAMPLE EFFICIENCY PARAMETER LEARNING; a metric with no ok
     rows on the family (calibration on discrete) emits no n_train table."""
-    from benchmarking._paper_figures import run_plot
+    from nbn.bench._paper_figures import run_plot
 
     parquet = _make_learning_curve_parquet(tmp_path)
     out_dir = tmp_path / "figs_cap"
