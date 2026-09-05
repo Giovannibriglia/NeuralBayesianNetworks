@@ -17,6 +17,10 @@
 # Paper figure: param_recovery_tv vs n_train (one line per baseline), median KL
 # vs n_train, +inf-rate vs n_train (unsmoothed baselines), log_likelihood vs
 # n_train. n_train is a column on every row.
+# Training minibatch for every nbn baseline below (extra_kwargs.batch_size).
+# Defined once here as a YAML anchor and referenced as *BATCH_SIZE_FIT.
+BATCH_SIZE_FIT: &BATCH_SIZE_FIT 1024
+
 version: "v0.13"
 benchmark: synthetic
 config_name: learning_curves
@@ -25,9 +29,9 @@ selector: uniform_random
 
 source:
   families: [discrete, continuous_lg, continuous_nongauss]
-  n_nodes_list: [30]
+  n_nodes_list: [50]
   seeds: [0, 1, 2, 3, 4]
-  n_train_sweep: [64, 128, 256, 512, 1024, 4096, 8192, 16384, 32768, 65536]
+  n_train_sweep: [4096, 16384, 32768, 65536]
   n_test: 4096
   n_reference: 50000
   edge_density: 0.20
@@ -36,25 +40,33 @@ source:
   fraction_continuous: 0.5
 
 
+# Baseline knobs:
+#   extra_kwargs.batch_size (nbn only): minibatch size for the SGD-trained
+#     mechanisms (neuralcat, mdn, flow, flexcode). Set once via the top-level
+#     BATCH_SIZE_FIT anchor and referenced as *BATCH_SIZE_FIT; omitted -> each
+#     mechanism's own default (512). Closed-form mechanisms (cat, cat-bayes,
+#     lg, kde, knn) ignore it. It is part of the fit-once cache identity
+#     (runner._fit_identity), so keep it identical across baselines that
+#     should share a fit.
 baselines:
   - {library: pgmpy, mechanism: discrete, param_method: mle}
   - {library: pgmpy, mechanism: discrete, param_method: bayes}
   - {library: pgmpy, mechanism: lg,       param_method: mle}
-  - {library: nbn,   mechanism: cat,      param_method: mle}
+  - {library: nbn,   mechanism: cat,      param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}}
   # alpha=1 smoothing is exactly the small-n_train regime this benchmark probes.
-  - {library: nbn,   mechanism: cat-bayes, param_method: mle}
-  - {library: nbn,   mechanism: neuralcat, param_method: mle}
-  - {library: nbn,   mechanism: lg,       param_method: mle}
-  - {library: nbn,   mechanism: mdn,      param_method: mle}
-  - {library: nbn,   mechanism: flow,     param_method: mle}
-  # - {library: nbn,   mechanism: hybrid,   param_method: mle}
+  - {library: nbn,   mechanism: cat-bayes, param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}}
+  - {library: nbn,   mechanism: neuralcat, param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}}
+  - {library: nbn,   mechanism: lg,       param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}}
+  - {library: nbn,   mechanism: mdn,      param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}}
+  - {library: nbn,   mechanism: flow,     param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}}
+  # - {library: nbn,   mechanism: hybrid,   param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}}
   # Non-parametric continuous baselines (#223 / PR 8) — parametric-vs-non-
   # parametric calibration comparison. KDE + KNN are cheap; flexcode trains a
   # 200-epoch MLP per continuous node, so it carries a per-baseline device: cuda
   # override (the global default stays CPU; mdn/flow are a separate device call).
-  - {library: nbn,   mechanism: kde,      param_method: mle, device: cuda}
-  - {library: nbn,   mechanism: knn,      param_method: mle, device: cuda}
-  - {library: nbn,   mechanism: flexcode, param_method: mle, device: cuda}
+  - {library: nbn,   mechanism: kde,      param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}, device: cuda}
+  - {library: nbn,   mechanism: knn,      param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}, device: cuda}
+  - {library: nbn,   mechanism: flexcode, param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}, device: cuda}
   # - {library: gpytorch,    mechanism: gp,       param_method: mle}
   - {library: pomegranate, mechanism: discrete, param_method: mle}
   - {library: pyro, mechanism: empirical, param_method: mle, device: cpu}

@@ -4,7 +4,7 @@ Covers:
   - Each of the 7 canonical configs loads cleanly.
   - Missing version → error.
   - Wrong version → error with pointer to schema docs.
-  - Unknown top-level field → error.
+  - Unknown top-level field → error; ALL-CAPS keys are YAML-anchor constants.
   - Default for ``metrics`` omitted produces AccuracyAndTiming.
   - ``--device`` override sets device on baselines without explicit device.
   - Per-baseline explicit device is not overridden by --device.
@@ -167,6 +167,28 @@ def test_unknown_top_level_field_raises(tmp_path: Path) -> None:
     d["typo_field"] = "oops"
     p = _write_yaml(tmp_path, d)
     with pytest.raises(ValueError, match="typo_field"):
+        load_runner_config(p, jsonl_path=tmp_path / "out.jsonl")
+
+
+def test_all_caps_top_level_key_is_anchor_constant(tmp_path: Path) -> None:
+    """ALL-CAPS top-level keys are YAML-anchor constants, not unknown fields.
+
+    The canonical configs hoist the nbn training minibatch into
+    ``BATCH_SIZE_FIT: &BATCH_SIZE_FIT 1024`` and reference it from every
+    baseline's ``extra_kwargs.batch_size`` as ``*BATCH_SIZE_FIT``.
+    """
+    d = _minimal_valid()
+    d["baselines"][0]["extra_kwargs"] = {"batch_size": "__ALIAS__"}
+    text = "BATCH_SIZE_FIT: &BATCH_SIZE_FIT 1024\n" + yaml.safe_dump(d)
+    assert text.count("__ALIAS__") == 1
+    text = text.replace("__ALIAS__", "*BATCH_SIZE_FIT")
+    p = tmp_path / "cfg.yaml"
+    p.write_text(text)
+    cfg = load_runner_config(p, jsonl_path=tmp_path / "out.jsonl")
+    assert cfg.baselines[0].extra_kwargs["batch_size"] == 1024
+    # A lower-case typo is still rejected.
+    p.write_text(text + "batch_size_fit: 1024\n")
+    with pytest.raises(ValueError, match="batch_size_fit"):
         load_runner_config(p, jsonl_path=tmp_path / "out.jsonl")
 
 

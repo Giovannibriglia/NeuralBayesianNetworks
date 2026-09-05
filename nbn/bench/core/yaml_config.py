@@ -21,6 +21,10 @@ Design decisions
 * ``--device`` CLI override sets the default device for any baseline
   whose ``device:`` key is absent/null in YAML.  Baselines with an
   explicit ``device:`` are not overridden.
+* ALL-CAPS top-level keys (e.g. ``BATCH_SIZE_FIT: &BATCH_SIZE_FIT 1024``)
+  are YAML-anchor constants: a single place to define a value that many
+  baselines reference via ``*BATCH_SIZE_FIT``.  They are ignored by the
+  unknown-key check and carry no runner semantics of their own.
 """
 from __future__ import annotations
 
@@ -51,6 +55,23 @@ _TOP_LEVEL_KEYS = frozenset({
     "batch_sizes",
     "n_batch_queries",
 })
+
+
+def _is_constant_key(key: str) -> bool:
+    """True for ALL-CAPS top-level keys, which are YAML-anchor constants.
+
+    Configs may hoist a value shared by many baselines into a single
+    top-level definition, e.g.::
+
+        BATCH_SIZE_FIT: &BATCH_SIZE_FIT 1024
+        ...
+        baselines:
+          - {library: nbn, mechanism: mdn, ..., extra_kwargs: {batch_size: *BATCH_SIZE_FIT}}
+
+    PyYAML resolves the alias at parse time; the top-level key itself
+    carries no runner semantics and is skipped by the unknown-key check.
+    """
+    return key.isupper()
 
 _BASELINE_REQUIRED = frozenset({"library", "mechanism", "param_method"})
 _BASELINE_KNOWN = frozenset({
@@ -110,12 +131,15 @@ def load_runner_config(
         )
 
     # ── unknown top-level keys ───────────────────────────────────────────────
-    unknown = set(d.keys()) - _TOP_LEVEL_KEYS
+    # ALL-CAPS keys are YAML-anchor constants (see _is_constant_key) and
+    # are neither unknown nor consumed below.
+    unknown = {k for k in d if not _is_constant_key(k)} - _TOP_LEVEL_KEYS
     if unknown:
         raise ValueError(
             f"Config {str(path)!r} has unknown top-level fields: "
             f"{sorted(unknown)}. "
-            f"Known fields: {sorted(_TOP_LEVEL_KEYS)}."
+            f"Known fields: {sorted(_TOP_LEVEL_KEYS)} "
+            f"(ALL-CAPS keys are treated as YAML-anchor constants)."
         )
 
     # ── required top-level fields ────────────────────────────────────────────
