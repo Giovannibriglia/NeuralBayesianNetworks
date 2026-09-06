@@ -90,10 +90,10 @@ baselines:
   - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
   - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
   # nbn-neuralcat (discrete)
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
+  #- {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
+  #- {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
+  #- {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
+  #- {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
   # nbn-lg (continuous_lg)
   - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
   - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
@@ -112,7 +112,7 @@ baselines:
   - {library: nbn,         mechanism: knn,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}, device: cuda}
   - {library: nbn,         mechanism: flexcode,  param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}, device: cuda}
   # nbn-hybrid (hybrid router)
-  - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router,    extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
+  #- {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router,    extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
   # other libraries
   - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: ve}
   - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance, batch_size: 1}

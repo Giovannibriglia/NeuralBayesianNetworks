@@ -90,10 +90,10 @@ baselines:
   - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
   - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
   # nbn-neuralcat (discrete)
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
+  #- {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
+  #- {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
+  #- {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
+  #- {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
   # nbn-lg (continuous_lg)
   - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
   - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}

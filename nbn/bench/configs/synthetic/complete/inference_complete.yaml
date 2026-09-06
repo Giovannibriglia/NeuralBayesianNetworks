@@ -75,10 +75,10 @@ baselines:
   - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
   - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
   # nbn-neuralcat (discrete)
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
-  - {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
+  #- {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
+  #- {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
+  #- {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
+  #- {library: nbn,         mechanism: neuralcat, param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
   # nbn-lg (continuous_lg)
   - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
   - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
@@ -92,7 +92,7 @@ baselines:
   - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
   - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
   # nbn-hybrid (hybrid router)
-  - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router, extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
+  #- {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router, extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
   # Non-parametric continuous mechanisms (#224 / PR 9) — LW only (ais/avi blocked
   # at recognition_net._head_for, deferred to #227). All three carry device: cuda:
   # KDE-lw's per-query O(n_train) density eval is ~19.5s/query on CPU at this scale

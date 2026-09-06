@@ -55,7 +55,7 @@ baselines:
   - {library: nbn,   mechanism: cat,      param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}}
   # alpha=1 smoothing is exactly the small-n_train regime this benchmark probes.
   - {library: nbn,   mechanism: cat-bayes, param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}}
-  - {library: nbn,   mechanism: neuralcat, param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}}
+  #- {library: nbn,   mechanism: neuralcat, param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}}
   - {library: nbn,   mechanism: lg,       param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}}
   - {library: nbn,   mechanism: mdn,      param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}}
   - {library: nbn,   mechanism: flow,     param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}}
