@@ -110,8 +110,39 @@ class NormalizingFlowMechanism(Mechanism):
         batch_size: int = 512,
         weights: torch.Tensor | None = None,
         warm_start: bool = False,
+        early_stopping: bool = True,
+        patience: int = 5,
+        min_delta: float = 1e-3,
+        val_fraction: float = 0.1,
+        root_lr_multiplier: float = 10.0,
         **kwargs,
     ) -> dict:
+        """Fit the flow by minibatch Adam on the negative log-likelihood.
+
+        ``epochs`` is a *cap*, not a budget: with ``early_stopping`` (the
+        default) a ``val_fraction`` slice of the rows is held out, its
+        (weighted) mean NLL is evaluated after every epoch, and training stops
+        once it has failed to improve by ``min_delta`` nats/row for
+        ``patience`` consecutive epochs.  The parameters are then restored to
+        the best epoch seen.  Measured on the n=50 synthetic problems (20480
+        rows, batch 1024): conditional nodes reach their held-out optimum
+        within ~60-140 steps and *overfit* afterwards, so the former fixed
+        100-300 epochs (2000-6000 steps) were ~20x more work for a slightly
+        worse fit.  The split is skipped (full-budget training, as before)
+        when the slice would hold fewer than ``_MIN_VAL_ROWS`` rows, and when
+        ``epochs == 0`` (the warm-start no-op contract).
+
+        ``root_lr_multiplier`` scales ``lr`` for a *root* node (no parents).
+        An unconditional zuko NSF has no conditioner network -- its spline
+        parameters are plain biases that move ~lr per Adam step from a poor
+        initialisation -- so at lr 5e-4 a root was still descending after
+        2000 steps and lost to LinearGaussian on every root tested, while
+        the same node at 5e-3 matched LinearGaussian in 300-500 steps.
+        Conditional nodes were unchanged across that lr range.  A multiplier
+        (rather than an absolute root lr) keeps ``lr=0.0`` a no-op everywhere.
+        """
+        import copy
+
         x = ensure_2d(x)  # [N, D_x]
         n, d_x = x.shape
         device = x.device
@@ -145,34 +176,87 @@ class NormalizingFlowMechanism(Mechanism):
         # Fresh optimiser either way -- Adam's moments are not in
         # state_dict(), so persisting them would survive a caller's
         # load_state_dict revert of a rejected step.
-        opt = torch.optim.Adam(self.parameters(), lr=lr)
+        eff_lr = lr * root_lr_multiplier if d_pa == 0 else lr
+        opt = torch.optim.Adam(self.parameters(), lr=eff_lr)
 
-        if d_pa == 0:
-            self.train()
-            for _ in range(epochs):
-                perm = torch.randperm(n, device=device)
-                for i in range(0, n, batch_size):
-                    idx = perm[i:i + batch_size]
-                    bx = x[idx]
-                    loss = weighted_mean(
-                        -self._flow(None).log_prob(bx), select(w_vec, idx),
-                    )
-                    opt.zero_grad(); loss.backward(); opt.step()
+        # Train/validation split for early stopping.
+        n_val = int(n * val_fraction) if (early_stopping and epochs > 0) else 0
+        if n_val < self._MIN_VAL_ROWS or n - n_val < 1:
+            n_val = 0
+        if n_val:
+            split = torch.randperm(n, device=device)
+            val_idx, tr_idx = split[:n_val], split[n_val:]
+            x_tr, x_val = x[tr_idx], x[val_idx]
+            pa_tr = parents[tr_idx] if d_pa else None
+            pa_val = parents[val_idx] if d_pa else None
+            w_tr, w_val = select(w_vec, tr_idx), select(w_vec, val_idx)
         else:
-            self.train()
-            for _ in range(epochs):
-                perm = torch.randperm(n, device=device)
-                for i in range(0, n, batch_size):
-                    idx = perm[i:i + batch_size]
-                    bp, bx = parents[idx], x[idx]
-                    loss = weighted_mean(
-                        -self._flow(bp).log_prob(bx), select(w_vec, idx),
-                    )
-                    opt.zero_grad(); loss.backward()
+            x_tr, pa_tr, w_tr = x, (parents if d_pa else None), w_vec
+            x_val = pa_val = w_val = None
+        n_tr = x_tr.shape[0]
+
+        best_val = float("inf")
+        best_state = None
+        bad_epochs = 0
+        epochs_run = steps = 0
+        early_stopped = False
+
+        self.train()
+        for _ in range(epochs):
+            perm = torch.randperm(n_tr, device=device)
+            for i in range(0, n_tr, batch_size):
+                idx = perm[i:i + batch_size]
+                bx = x_tr[idx]
+                ctx = pa_tr[idx] if d_pa else None
+                loss = weighted_mean(
+                    -self._flow(ctx).log_prob(bx), select(w_tr, idx),
+                )
+                opt.zero_grad(); loss.backward()
+                if d_pa:
                     torch.nn.utils.clip_grad_norm_(self.parameters(), 5.0)
-                    opt.step()
+                opt.step()
+                steps += 1
+            epochs_run += 1
+            if not n_val:
+                continue
+            val = self._val_nll(x_val, pa_val, w_val)
+            if val < best_val - min_delta:
+                best_val = val
+                # state_dict() aliases the live parameters -- snapshot a copy.
+                best_state = copy.deepcopy(self._flow.state_dict())
+                bad_epochs = 0
+            else:
+                bad_epochs += 1
+                if bad_epochs >= patience:
+                    early_stopped = True
+                    break
+        if best_state is not None:
+            self._flow.load_state_dict(best_state)
         self.eval()
-        return {"d_pa": d_pa, "d_x": d_x, "warm_started": warm}
+        return {
+            "d_pa": d_pa, "d_x": d_x, "warm_started": warm,
+            "epochs_run": epochs_run, "steps": steps,
+            "early_stopped": early_stopped, "n_val": n_val,
+            "best_val_nll": best_val if n_val else None,
+        }
+
+    # Below this many held-out rows the validation NLL is too noisy to gate
+    # on, so fit_local trains the full ``epochs`` budget instead.
+    _MIN_VAL_ROWS: int = 32
+
+    def _val_nll(
+        self,
+        x_val: torch.Tensor,
+        pa_val: torch.Tensor | None,
+        w_val: torch.Tensor | None,
+    ) -> float:
+        """(Weighted) mean NLL of the held-out slice; ``inf`` if non-finite."""
+        self.eval()
+        with torch.no_grad():
+            val = weighted_mean(-self._flow(pa_val).log_prob(x_val), w_val)
+        self.train()
+        v = float(val)
+        return v if v == v and v != float("inf") else float("inf")
 
     @property
     def is_fitted(self) -> bool:
