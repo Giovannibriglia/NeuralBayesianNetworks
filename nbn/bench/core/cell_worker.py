@@ -12,9 +12,13 @@ See docs/v0.13-runner-subprocess-isolation.md §4.2.
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import math
 import pickle
+import signal
 import sys
+import threading
 import traceback
 
 
@@ -94,6 +98,58 @@ def _apply_memory_limit() -> None:
         return
 
 
+@contextlib.contextmanager
+def _fit_deadline(budget_s: float, exc_type: type):
+    """Raise ``exc_type`` from a SIGALRM once ``budget_s`` elapses.
+
+    Active only on the main thread of a POSIX process with a finite, positive
+    budget — the cell worker's normal situation. Anywhere else (Windows, a
+    non-main thread in an in-process test harness, ``inf`` budget) it is a
+    no-op and the post-hoc fit check remains the only guard. The alarm is
+    cleared on exit either way, so a later phase (save / queries) can never be
+    interrupted by a stale timer.
+    """
+    usable = (
+        hasattr(signal, "SIGALRM")
+        and threading.current_thread() is threading.main_thread()
+        and budget_s is not None and math.isfinite(budget_s) and budget_s > 0
+    )
+    if not usable:
+        yield
+        return
+
+    def _on_alarm(signum, frame):
+        raise exc_type(f"fit budget of {budget_s:.0f}s exceeded")
+
+    previous = signal.signal(signal.SIGALRM, _on_alarm)
+    signal.setitimer(signal.ITIMER_REAL, budget_s)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def _log_phases(adapter, fit_role: str, phase: str, wall_s: float,
+                *, pre_empted: bool = False) -> None:
+    """One stderr line per cell with the fit-slot phase split.
+
+    The parent forwards the worker's stderr into run.log (INFO), so this is
+    how the per-phase cost (base fit vs engine attach / proposal training)
+    becomes visible for a cell whose progress-bar label only says "fitting"
+    or "reloading".
+    """
+    base = getattr(adapter, "base_fit_time_s", None)
+    attach = getattr(adapter, "attach_time_s", None)
+    fmt = lambda v: "n/a" if v is None else f"{v:.1f}s"  # noqa: E731
+    print(
+        f"[cell-phases] {getattr(adapter, 'name', '?')} role={fit_role} "
+        f"path={phase} total={wall_s:.1f}s base_fit={fmt(base)} "
+        f"attach={fmt(attach)}" + (" PRE-EMPTED" if pre_empted else ""),
+        file=sys.stderr, flush=True,
+    )
+
+
 def _run_cell(ctx: dict) -> list[dict]:
     """Run one (problem, baseline, seed) cell.
 
@@ -125,6 +181,7 @@ def _run_cell(ctx: dict) -> list[dict]:
     from nbn.bench.core.config import build_adapter
     from nbn.bench.core.runner import (
         _NAN,
+        FitBudgetExceeded,
         _classify_exception,
         _evidence_mode_for,
         _fit_failure_rows,
@@ -160,9 +217,18 @@ def _run_cell(ctx: dict) -> list[dict]:
         # in this worker — the parent runner reconstructs rows from dicts and
         # never sees it. None for engines without a learned proposal.
         proposal_used = getattr(adapter, "proposal_used", None)
+        # Fit-once phase split: model.fit() wall-clock (None on reload) and
+        # engine-attach wall-clock (incl. ais/avi proposal training). Same
+        # adapter-fact choke point as device / proposal_used.
+        base_fit_time_s = getattr(adapter, "base_fit_time_s", None)
+        attach_time_s = getattr(adapter, "attach_time_s", None)
         return [
             dataclasses.asdict(
-                dataclasses.replace(r, device=dev, proposal_used=proposal_used)
+                dataclasses.replace(
+                    r, device=dev, proposal_used=proposal_used,
+                    base_fit_time_s=base_fit_time_s,
+                    attach_time_s=attach_time_s,
+                )
             )
             for r in results
         ]
@@ -243,20 +309,36 @@ def _run_cell(ctx: dict) -> list[dict]:
 
     fit_role = ctx.get("fit_role", "standalone")
     cache_path = ctx.get("cache_path")
+    phase = "fit"
+    t0 = perf_counter()
     try:
-        t0 = perf_counter()
-        if (fit_role == "reload" and cache_path
-                and os.path.exists(cache_path)):
-            adapter.load_base_and_attach(
-                cache_path, problem, **spec.extra_kwargs)
-        else:
-            adapter.fit(problem, **spec.extra_kwargs)
+        # Pre-emptive fit budget: a SIGALRM at fit_budget_s raises
+        # FitBudgetExceeded inside the fit instead of letting a doomed fit run
+        # to completion only to be rejected by the post-hoc check below (which
+        # stays as the backstop for platforms without SIGALRM).
+        with _fit_deadline(fit_budget_s, FitBudgetExceeded):
+            if (fit_role == "reload" and cache_path
+                    and os.path.exists(cache_path)):
+                phase = "reload"
+                adapter.load_base_and_attach(
+                    cache_path, problem, **spec.extra_kwargs)
+            else:
+                adapter.fit(problem, **spec.extra_kwargs)
         fit_time_s = perf_counter() - t0
+    except FitBudgetExceeded:
+        fit_time_s = perf_counter() - t0
+        _log_phases(adapter, fit_role, phase, fit_time_s, pre_empted=True)
+        return _emit(_fit_failure_for_all(
+            fit_time_s=fit_time_s, status="timeout",
+            error_msg=(f"fit exceeded {fit_budget_s:.0f}s safety budget "
+                       f"(pre-empted at {fit_time_s:.0f}s)"),
+        ))
     except Exception as exc:
         status = _classify_exception(exc)
         return _emit(_fit_failure_for_all(
             fit_time_s=_NAN, status=status, error_msg=repr(exc),
         ))
+    _log_phases(adapter, fit_role, phase, fit_time_s)
 
     # --- Fit safety net (timed against fit_budget_s, the single fit) ---
     if fit_time_s > fit_budget_s:

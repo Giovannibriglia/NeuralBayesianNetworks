@@ -20,6 +20,7 @@ Old (functional) adapter: nbn/bench/baselines/nbn_adapter.py
 """
 from __future__ import annotations
 
+from time import perf_counter
 from typing import Any
 
 import torch
@@ -181,6 +182,15 @@ class NBNAdapter:
         # engine actually used — "learned" or "lw_fallback" (low fit-time ESS).
         # None for engines without a learned proposal (ve / lw) and until fit.
         self.proposal_used: str | None = None
+        # Per-cell phase timings (fit-once reporting split). ``base_fit_time_s``
+        # is the wall-clock of ``model.fit()`` (None on the reload path, where
+        # no base fit ran); ``attach_time_s`` is the wall-clock of
+        # ``_attach_engine`` (engine construction + ais/avi proposal training).
+        # Both are stamped onto every row by cell_worker._emit so the parquet
+        # can separate the shared base fit from the per-engine attach cost —
+        # ``fit_time_s`` alone mixes them (fitter = both, reloader = attach only).
+        self.base_fit_time_s: float | None = None
+        self.attach_time_s: float | None = None
 
     # -------------------------------------------------------------------------
     # Internal mechanism factory — mirrors old NBNAdapter._make_mech()
@@ -302,11 +312,13 @@ class NBNAdapter:
         # consolidate=False: benchmarks never call model.update(), so the
         # post-fit EWC Fisher pass (up to 4096 sequential per-sample backward
         # passes per neural node) is pure overhead here.
+        t0 = perf_counter()
         model.fit(
             problem.train_data,
             epochs=epochs, batch_size=batch_size, lr=lr,
             consolidate=False,
         )
+        self.base_fit_time_s = perf_counter() - t0
         self.model = model
         self.problem = problem
         self._attach_engine()
@@ -332,15 +344,24 @@ class NBNAdapter:
 
         ``map_location=self.device`` relocates the saved tensors onto this
         baseline's device (the fit-identity key excludes device for exactly
-        this reason). ``weights_only=False`` is required: the payload is a full
-        ``nn.Module`` object, not a bare state-dict.
+        this reason), and the explicit ``model.to(self.device)`` afterwards
+        updates the network's OWN cached ``device`` attribute — ``map_location``
+        moves parameters/buffers only, so without it a CUDA-fitted base reloaded
+        on CPU still reported ``model.device == cuda`` and the LW/AIS engines
+        allocated their particle buffers on the wrong device (and the AIS ESS
+        gate, which swallows exceptions, was silently skipped).
+        ``weights_only=False`` is required: the payload is a full ``nn.Module``
+        object, not a bare state-dict.
 
         ``**kwargs`` (e.g. ``epochs``) are accepted for call-site parity with
-        ``fit`` but unused here — no base fitting happens on reload.
+        ``fit`` but unused here — no base fitting happens on reload;
+        ``base_fit_time_s`` stays None (the runner fills it from the fitter).
         """
         self.model = torch.load(
             model_path, map_location=self.device, weights_only=False,
         )
+        self.model.to(self.device)
+        self.base_fit_time_s = None
         self.problem = problem
         self._attach_engine()
 
@@ -360,8 +381,15 @@ class NBNAdapter:
         if self.engine is None:
             self._engine_obj = None
             self.proposal_used = None
+            self.attach_time_s = 0.0
             return
 
+        t0 = perf_counter()
+        self._build_engine()
+        self.attach_time_s = perf_counter() - t0
+
+    def _build_engine(self) -> None:
+        """Engine construction proper (untimed body of ``_attach_engine``)."""
         from nbn.inference.amortized_is import AmortizedISEngine
         from nbn.inference.amortized_vi import AmortizedVIEngine
         from nbn.inference.hybrid import HybridRouter

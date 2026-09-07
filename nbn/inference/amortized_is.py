@@ -277,7 +277,10 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
                 ess = 1.0 / w.pow(2).sum(dim=-1).clamp_min(1e-12)  # [B]
                 return float((ess / diag_particles).mean())
         except Exception as exc:  # pragma: no cover - diagnostic safety
-            logger.debug("ESS diagnostic skipped: %s", exc)
+            logger.warning(
+                "AmortizedISEngine: fit-time ESS gate SKIPPED (diagnostic raised "
+                "%r); the learned proposal is used untested.", exc,
+            )
             return None
 
     # ------------------------------------------------------------------

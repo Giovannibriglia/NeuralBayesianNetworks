@@ -275,7 +275,7 @@ class AmortizedVIEngine(InferenceEngine):
                 elbo = self.elbo(model, evidence, n_mc=256)
                 return float((log_pe.mean()).item() - elbo)
         except Exception as exc:  # pragma: no cover - diagnostic safety
-            logger.debug("ELBO-gap diagnostic skipped: %s", exc)
+            logger.warning("AmortizedVIEngine: ELBO-gap diagnostic skipped (%r).", exc)
             return None
 
     @staticmethod
