@@ -318,3 +318,111 @@ def test_hybrid_per_node_heads():
         Query(targets=("C2",), evidence={"D0": torch.tensor(1)}, kind="marginal")
     ).samples
     assert s_cont is not None and torch.isfinite(s_cont).all()
+
+
+# ---- 12. Downstream evidence reaches the posterior (full-joint ELBO) ---------
+#
+# Regression for the objective bug: the ELBO used to sum only the latent
+# nodes' own terms with detached parents, so q learned the PRIOR conditional
+# and any query whose evidence lies downstream of the target returned the
+# prior (P(X0 | X1=1) came back 0.50/0.50 on a 0.9-coupled chain). Every test
+# above conditions on an UPSTREAM node, which is why none of them caught it.
+
+def _chain_discrete(n: int = 6000, coupling: float = 0.9, seed: int = 0) -> BenchmarkProblem:
+    g = torch.Generator().manual_seed(seed)
+    x0 = torch.randint(0, 2, (n,), generator=g)
+    x1 = torch.where(torch.rand(n, generator=g) < coupling, x0, 1 - x0)
+    return BenchmarkProblem(
+        name="chain_d", dag=[("X0", "X1")],
+        variables={"X0": ("discrete", 2), "X1": ("discrete", 2)},
+        train_data={"X0": x0, "X1": x1}, test_data={"X0": x0, "X1": x1}, queries=[],
+    )
+
+
+def _chain_continuous(n: int = 6000, seed: int = 0) -> BenchmarkProblem:
+    torch.manual_seed(seed)
+    x0 = torch.randn(n)
+    x1 = 2.0 * x0 + 0.1 * torch.randn(n)
+    return BenchmarkProblem(
+        name="chain_c", dag=[("X0", "X1")],
+        variables={"X0": ("continuous", None), "X1": ("continuous", None)},
+        train_data={"X0": x0, "X1": x1}, test_data={"X0": x0, "X1": x1}, queries=[],
+    )
+
+
+def _chain_hybrid(n: int = 6000, seed: int = 0) -> BenchmarkProblem:
+    """Discrete parent -> continuous child: exercises the local-expectation
+    (enumeration) gradient path for a discrete latent parent."""
+    g = torch.Generator().manual_seed(seed)
+    x0 = torch.randint(0, 2, (n,), generator=g)
+    x1 = 2.0 * x0.float() + 0.3 * torch.randn(n, generator=g)
+    return BenchmarkProblem(
+        name="chain_h", dag=[("X0", "X1")],
+        variables={"X0": ("discrete", 2), "X1": ("continuous", None)},
+        train_data={"X0": x0, "X1": x1}, test_data={"X0": x0, "X1": x1}, queries=[],
+    )
+
+
+_DIAG_D = Query(targets=("X0",), evidence={"X1": torch.tensor(1)}, kind="marginal")
+_DIAG_C = Query(targets=("X0",), evidence={"X1": torch.tensor(2.0)}, kind="marginal")
+
+
+def test_diagnostic_discrete_matches_ve():
+    problem = _chain_discrete()
+    ve = _fit_adapter("cat", "ve", problem)
+    avi = _fit_adapter("cat", "avi", problem)
+    p_ve = ve.query(_DIAG_D).probs
+    p_avi = avi.query(_DIAG_D).probs
+    # Truth ≈ [0.1, 0.9]; the prior (the old answer) is [0.5, 0.5].
+    assert (p_ve - p_avi).abs().max() < 0.05
+    assert p_avi[1] > 0.8
+
+
+def test_diagnostic_lg_matches_exact_posterior():
+    problem = _chain_continuous()
+    avi = _fit_adapter("lg", "avi", problem, n_samples=4096)
+    torch.manual_seed(1)
+    s = avi.query(_DIAG_C).samples
+    # X0 | X1=2 under X1 = 2·X0 + N(0, 0.1²), X0 ~ N(0,1): mean ≈ 0.998, sd ≈ 0.05.
+    # The old objective returned the prior: mean ≈ 0, sd ≈ 1.
+    assert abs(float(s.mean()) - 1.0) < 0.1
+    assert float(s.std()) < 0.2
+
+
+def test_diagnostic_discrete_parent_of_continuous_child():
+    problem = _chain_hybrid()
+    lw = _fit_adapter("lg", "lw", problem, n_samples=4096)
+    avi = _fit_adapter("lg", "avi", problem)
+    p_lw = lw.query(_DIAG_C).probs
+    p_avi = avi.query(_DIAG_C).probs
+    # X1 = 2 is only reachable from X0 = 1 → posterior ≈ [0, 1].
+    assert p_avi[1] > 0.9
+    assert (p_lw - p_avi).abs().max() < 0.1
+
+
+def test_predictive_still_matches_ve():
+    # The upstream-evidence direction must not regress under the new objective.
+    problem = _chain_discrete()
+    ve = _fit_adapter("cat", "ve", problem)
+    avi = _fit_adapter("cat", "avi", problem)
+    q = Query(targets=("X1",), evidence={"X0": torch.tensor(1)}, kind="marginal")
+    assert (ve.query(q).probs - avi.query(q).probs).abs().max() < 0.05
+
+
+# ---- 13. mdn head: the training sample is a genuine draw from q --------------
+
+def test_mdn_rsample_is_a_real_mixture_draw():
+    """Straight-through Gumbel: values come from ONE component (never a convex
+    blend between components), so log q at the sample cannot be gamed."""
+    from torch.distributions import Categorical, Independent, MixtureSameFamily, Normal
+    torch.manual_seed(0)
+    loc = torch.tensor([[-100.0], [100.0]]).expand(64, 2, 1)
+    scale = torch.full_like(loc, 0.01)
+    logits = torch.zeros(64, 2, requires_grad=True)
+    dist = MixtureSameFamily(Categorical(logits=logits), Independent(Normal(loc, scale), 1))
+    z = AmortizedVIEngine()._rsample_continuous(dist)
+    assert z.shape == (64, 1)
+    assert ((z.abs() - 100.0).abs() < 1.0).all()          # on a component, never between
+    assert z.requires_grad                                # gradient path to the logits
+    z.sum().backward()
+    assert logits.grad is not None and torch.isfinite(logits.grad).all()
