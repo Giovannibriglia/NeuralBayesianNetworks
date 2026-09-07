@@ -396,8 +396,9 @@ def test_scalability_complete_config_loads(tmp_path: Path) -> None:
     assert isinstance(cfg.selector, HeaviestQueryByRole)
     assert cfg.per_cell_timeout_s == 1200.0
     # 23 + 3 non-parametric -lw baselines (kde/knn/flexcode, #228 / PR 10),
-    # minus the nbn-hybrid router baseline (commented out in f7984f6).
-    assert len(cfg.baselines) == 25
+    # minus the nbn-hybrid router baseline (commented out in f7984f6),
+    # minus the 4 nbn-neuralcat baselines (commented out in 38458c9).
+    assert len(cfg.baselines) == 21
 
 
 def _bnlearn_source(**overrides) -> dict:
