@@ -186,6 +186,18 @@ def load_runner_config(
         measurement = AccuracyAndTiming()
     elif metrics == "timing":
         measurement = TimingOnly()
+    elif metrics == "log_likelihood":
+        # A parameter-learning config handed to the inference command. Say
+        # so and name the fix; the generic "unknown metrics" error below
+        # invited editing the metrics field, after which every baseline
+        # failed for lack of inference_method (see the preflight further
+        # down) and the run produced a parquet of error rows.
+        raise ValueError(
+            f"Config {str(path)!r}: metrics='log_likelihood' marks a "
+            f"parameter-learning config; run "
+            f"`nbn-bench param-learning --config {str(path)}` instead. "
+            f"The inference command accepts metrics 'all' | 'timing'."
+        )
     else:
         raise ValueError(
             f"Config {str(path)!r}: unknown metrics={metrics!r}. "
@@ -253,6 +265,23 @@ def load_runner_config(
         _parse_baseline_spec(b, i, device_override, path)
         for i, b in enumerate(raw_baselines)
     ]
+    # Inference-path preflight: every adapter's engine attach raises
+    # "requires inference_method on the inference path" per cell, so a
+    # config that omits it (every parameter-learning config) would burn the
+    # whole grid producing only error rows. Fail before the first cell.
+    if measurement_override is None:
+        lacking = [
+            f"baselines[{i}] ({b.library}-{b.mechanism})"
+            for i, b in enumerate(baselines) if b.inference_method is None
+        ]
+        if lacking:
+            raise ValueError(
+                f"Config {str(path)!r}: the inference command needs "
+                f"inference_method on every baseline; missing on "
+                f"{', '.join(lacking)}. Add `inference_method: ve|lw|ais|avi` "
+                f"to each, or, if this is a parameter-learning config, run "
+                f"`nbn-bench param-learning --config {str(path)}`."
+            )
 
     # ── iteration parameters ─────────────────────────────────────────────────
     n_queries_per_cell = int(d["n_queries_per_cell"])
