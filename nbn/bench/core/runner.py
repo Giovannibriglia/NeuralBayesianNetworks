@@ -69,6 +69,14 @@ def _estimate_total_cells(cfg: RunnerConfig) -> int | None:
             if isinstance(vals, (list, tuple)):
                 n_problems = n_families * len(vals) * len(seeds)
                 break
+        # Learning-curve sweep (#109 PR 6): n_train_sweep is a further
+        # PROBLEM axis (one fit per value), so it multiplies the grid. Left
+        # out, the estimate under-counts by len(sweep) and tqdm -- which
+        # drops `total` the moment n exceeds it -- silently degrades the bar
+        # to an indeterminate counter partway through the run.
+        sweep = getattr(sc, "n_train_sweep", None)
+        if n_problems is not None and isinstance(sweep, (list, tuple)) and sweep:
+            n_problems *= len(sweep)
     if n_problems is None:
         return None
     try:
@@ -777,6 +785,11 @@ class Runner:
                         # already built for the name so we don't build twice.
                         batch_sizes = _resolve_batch_sizes(cfg, spec, adapter_probe)
                         pid = getattr(problem, "problem_id", "?")
+                        # A learning-curve sweep yields several problems per
+                        # problem_id (one per n_train), so the bar/log label
+                        # carries the swept value to tell them apart.
+                        if getattr(cfg.source_config, "n_train_sweep", None):
+                            pid = f"{pid} n_train={n_train_from_problem(problem)}"
 
                         # Seed-skip (#148 PR 2/2): for any batch size whose config
                         # already failed on an earlier seed, emit a skip sentinel

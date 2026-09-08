@@ -303,6 +303,17 @@ class TestEstimateTotalCells:
         )
         assert _estimate_total_cells(_estimate_cfg(sc, 13)) == 2860
 
+    def test_n_train_sweep_multiplies_the_grid(self):
+        # learning_curves.yaml: 3 families x 1 n_nodes x 5 seeds x 4 n_train
+        # x 13 baselines = 780. The sweep was not counted (195), so tqdm
+        # dropped the total after cell 195 and showed a bare counter.
+        sc = SyntheticConfig(
+            families=["discrete", "continuous_lg", "continuous_nongauss"],
+            n_nodes_list=[50], seeds=[0, 1, 2, 3, 4],
+            n_train_sweep=[4096, 16384, 32768, 65536],
+        )
+        assert _estimate_total_cells(_estimate_cfg(sc, 13)) == 780
+
     def test_bnlearn_networks_no_family_multiplier(self):
         # Each (network, seed) is one cell-group; family is intrinsic to the
         # network, not a grid dimension.
