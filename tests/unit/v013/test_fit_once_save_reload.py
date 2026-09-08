@@ -478,3 +478,185 @@ class TestNonNbnUnaffected:
         assert "nbn-cat-ve" in names and "nbn-cat-lw" in names
         assert any("pomegranate" in n for n in names)
         assert list(Path(tmp_path).rglob("*.pt")) == []
+
+
+# =====================================================================
+# 6. Fit-cache-miss trap + reload device + pre-emptive fit budget
+#    (follow-up to #191: the n=50 flow "stuck in reloading" investigation)
+# =====================================================================
+
+def _fake_result(rows):
+    from nbn.bench.core.cell_runner import CellRunResult
+    return CellRunResult(rows=rows, exit_code=0, classification="completed")
+
+
+def _listsource_cfg(tmp_path, baselines, problem):
+    cfg = _cfg(baselines, tmp_path=tmp_path)
+    cfg.problem_source = _ListSource([problem])
+    return cfg
+
+
+class TestFitterFailurePropagation:
+    """When the group's fitter fails (no cache written), the reloaders must
+    NOT be launched — they would only repeat the identical doomed fit. The
+    parent emits the fitter's failure code for them directly."""
+
+    def test_reloaders_skipped_and_inherit_status(self, tmp_path, monkeypatch):
+        import nbn.bench.core.cell_runner as cr
+        calls: list[dict] = []
+
+        def fake(ctx, timeout_s=None):
+            calls.append(ctx)
+            # Fitter dies (a SIGKILL-style synthesized row): no cache written.
+            return _fake_result([{"status": "timeout",
+                                  "error_msg": "fit exceeded 1200s"}])
+
+        monkeypatch.setattr(cr, "run_cell_in_subprocess", fake)
+        baselines = [_spec("cat", "ve"), _spec("cat", "lw"), _spec("cat", "ais")]
+        cfg = _listsource_cfg(tmp_path, baselines, _problem(0))
+        rows = list(Runner().run(cfg))
+
+        # Only the fitter ran; both reloaders were short-circuited.
+        assert [c["fit_role"] for c in calls] == ["fit"]
+        by_name = {}
+        for r in rows:
+            by_name.setdefault(r.baseline, []).append(r)
+        assert set(by_name) == {"nbn-cat-ve", "nbn-cat-lw", "nbn-cat-ais"}
+        for name in ("nbn-cat-lw", "nbn-cat-ais"):
+            assert by_name[name], name
+            for r in by_name[name]:
+                assert r.status == "timeout"
+                assert "group fitter failed (timeout)" in (r.error_msg or "")
+                assert "fit not repeated" in (r.error_msg or "")
+                assert r.n_nodes == 4                 # problem meta stamped
+                assert r.device is not None
+
+    def test_save_failure_with_ok_fit_still_lets_reloaders_run(
+            self, tmp_path, monkeypatch):
+        # A missing cache whose fitter produced ok rows = save failure only;
+        # the reloaders keep the existing fall-back-to-fit behavior.
+        import nbn.bench.core.cell_runner as cr
+        from nbn.bench.core.results import CellResult
+        import dataclasses as dc
+        calls: list[dict] = []
+
+        def fake(ctx, timeout_s=None):
+            calls.append(ctx)
+            p = ctx["problem"]
+            row = CellResult(
+                benchmark="synthetic", family=p.family, problem_id=p.problem_id,
+                seed=p.seed, baseline="x", query_role="random",
+                metric="query_time_s", value=0.1, status="ok",
+                fit_time_s=1.0, query_time_s=0.1, metrics_time_s=0.0,
+            )
+            return _fake_result([dc.asdict(row)])
+
+        monkeypatch.setattr(cr, "run_cell_in_subprocess", fake)
+        cfg = _listsource_cfg(tmp_path, [_spec("cat", "ve"), _spec("cat", "lw")],
+                              _problem(0))
+        list(Runner().run(cfg))
+        assert [c["fit_role"] for c in calls] == ["fit", "reload"]
+
+    def test_reloader_rows_carry_fitter_base_fit_time(self, tmp_path, monkeypatch):
+        import nbn.bench.core.cell_runner as cr
+        from nbn.bench.core.results import CellResult
+        import dataclasses as dc
+
+        def fake(ctx, timeout_s=None):
+            p = ctx["problem"]
+            if ctx["fit_role"] == "fit":
+                Path(ctx["cache_path"]).write_bytes(b"cache")
+            base = 42.5 if ctx["fit_role"] == "fit" else None
+            row = CellResult(
+                benchmark="synthetic", family=p.family, problem_id=p.problem_id,
+                seed=p.seed, baseline="x", query_role="random",
+                metric="query_time_s", value=0.1, status="ok",
+                fit_time_s=1.0, query_time_s=0.1, metrics_time_s=0.0,
+                base_fit_time_s=base, attach_time_s=0.3,
+            )
+            return _fake_result([dc.asdict(row)])
+
+        monkeypatch.setattr(cr, "run_cell_in_subprocess", fake)
+        cfg = _listsource_cfg(tmp_path, [_spec("cat", "ve"), _spec("cat", "lw")],
+                              _problem(0))
+        rows = list(Runner().run(cfg))
+        assert {r.base_fit_time_s for r in rows} == {42.5}   # copied onto the reloader
+        assert {r.attach_time_s for r in rows} == {0.3}
+
+
+class TestPreemptiveFitBudget:
+    def test_budget_exceeded_classifies_as_timeout(self):
+        from nbn.bench.core.runner import FitBudgetExceeded, _classify_exception
+        assert _classify_exception(FitBudgetExceeded("x")) == "timeout"
+
+    def test_long_fit_is_preempted(self, tmp_path, monkeypatch):
+        import time
+        from nbn.bench.core import cell_worker
+        from nbn.bench.adapters.nbn_adapter import NBNAdapter
+
+        def slow_fit(self, *a, **k):
+            time.sleep(5.0)
+
+        monkeypatch.setattr(NBNAdapter, "fit", slow_fit)
+        ctx = _worker_ctx(_problem(0), _spec("cat", "ve"),
+                          fit_role="fit", cache_path=tmp_path / "c.pt")
+        ctx["fit_budget_s"] = 0.5
+        t0 = time.perf_counter()
+        rows = cell_worker._run_cell(ctx)
+        elapsed = time.perf_counter() - t0
+        assert elapsed < 3.0, "fit was not pre-empted at the budget"
+        assert rows and all(r["status"] == "timeout" for r in rows)
+        assert all("pre-empted" in r["error_msg"] for r in rows)
+        assert all(0.4 < r["fit_time_s"] < 3.0 for r in rows)
+        assert not (tmp_path / "c.pt").exists()      # no cache on failure
+
+    def test_alarm_cleared_after_fit(self, tmp_path):
+        # A cell that finishes inside the budget must leave no armed timer
+        # behind (it would fire during save / queries).
+        import signal
+        from nbn.bench.core import cell_worker
+        ctx = _worker_ctx(_problem(0), _spec("cat", "ve"),
+                          fit_role="standalone", cache_path=None)
+        ctx["fit_budget_s"] = 30.0
+        rows = cell_worker._run_cell(ctx)
+        assert all(r["status"] == "ok" for r in rows)
+        assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+
+
+class TestPhaseColumnsAndReloadDevice:
+    def test_phase_timings_stamped_on_fit_and_reload(self, tmp_path):
+        from nbn.bench.core import cell_worker
+        cache = tmp_path / "fit_p.pt"
+        fit_rows = cell_worker._run_cell(_worker_ctx(
+            _problem(0), _spec("cat", "ve"), fit_role="fit", cache_path=cache))
+        assert all(r["base_fit_time_s"] is not None and r["base_fit_time_s"] >= 0
+                   for r in fit_rows)
+        assert all(r["attach_time_s"] is not None for r in fit_rows)
+        reload_rows = cell_worker._run_cell(_worker_ctx(
+            _problem(0), _spec("cat", "lw"), fit_role="reload", cache_path=cache))
+        # No base fit ran on the reload path; the runner fills it in later.
+        assert all(r["base_fit_time_s"] is None for r in reload_rows)
+        assert all(r["attach_time_s"] is not None for r in reload_rows)
+
+    def test_reload_relocates_network_device(self, tmp_path):
+        """A base saved from another device must come back with the network's
+        own ``device`` attribute on THIS adapter's device — map_location moves
+        the tensors but not that attribute, and LW/AIS allocate their particle
+        buffers from it."""
+        from nbn.bench.adapters.nbn_adapter import NBNAdapter
+        from nbn.bench.domains.base import Query
+
+        problem = _problem(0, n_nodes=5)
+        fresh = NBNAdapter(mechanism="cat", engine="lw", device="cpu")
+        fresh.fit(problem)
+        # Simulate a base fitted on CUDA: the cached attribute says so even
+        # though (on a CPU-only box) no tensor can live there.
+        fresh.model._device = torch.device("cuda")
+        cache = tmp_path / "base_cuda.pt"
+        torch.save(fresh.model, cache)
+
+        reloaded = NBNAdapter(mechanism="cat", engine="lw", device="cpu")
+        reloaded.load_base_and_attach(str(cache), problem)
+        assert reloaded.model.device == torch.device("cpu")
+        post = reloaded.query(Query(targets=("X2",), evidence={"X0": 0}))
+        assert post.probs is not None and torch.isfinite(post.probs).all()

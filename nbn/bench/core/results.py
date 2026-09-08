@@ -120,6 +120,18 @@ class CellResult:
     # fallback gate (P1) is unchanged.
     khat: float | None = None
 
+    # Fit-once phase split. ``fit_time_s`` is the wall-clock of *whatever ran*
+    # in the cell's fit slot — for a fit-once GROUP that is base fit + engine
+    # attach on the fitter but attach ONLY on the reloaders, so it is not
+    # comparable across the group. These two columns separate the phases:
+    # ``base_fit_time_s`` = ``model.fit()`` wall-clock (the fitter's own; copied
+    # onto the reloaders' rows by the runner so every member reports the shared
+    # base cost), ``attach_time_s`` = engine construction incl. ais/avi proposal
+    # training (per member). Stamped per cell by cell_worker._emit from the
+    # adapter. None for non-nbn baselines and legacy parquets. Additive.
+    base_fit_time_s: float | None = None
+    attach_time_s: float | None = None
+
 
 # Valid status values (for validation in implementations)
 VALID_STATUSES = frozenset({"ok", "timeout", "oom", "error", "not_supported"})

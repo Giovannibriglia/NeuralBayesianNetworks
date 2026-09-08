@@ -130,10 +130,22 @@ def _is_structural_limit(exc: Exception) -> bool:
 # Exception → status classifier
 # ---------------------------------------------------------------------------
 
+class FitBudgetExceeded(TimeoutError):
+    """Raised inside the cell worker when ``adapter.fit()`` (or the reload +
+    attach step) runs past ``fit_budget_s`` — the PRE-EMPTIVE fit budget.
+
+    Before this the budget was only checked *after* the fit returned, so a
+    doomed fit (e.g. flow at n=50: ~1450s against a 1200s budget) ran to
+    completion, was then recorded as ``timeout`` anyway, and — because the
+    fit-once cache is written only after the check passes — every reloader in
+    its group repeated the same doomed fit. Classified as ``"timeout"``.
+    """
+
+
 def _classify_exception(exc: Exception) -> str:
     """Map an exception to a CellResult status string.
 
-    Returns one of: "oom", "not_supported", "error".
+    Returns one of: "timeout", "oom", "not_supported", "error".
 
     OOM detection covers:
       - torch.cuda.OutOfMemoryError (explicit CUDA OOM)
@@ -148,6 +160,9 @@ def _classify_exception(exc: Exception) -> str:
     ValueError without a structural-limit marker → "error" (real bug).
     All other exceptions → "error".
     """
+    if isinstance(exc, FitBudgetExceeded):
+        return "timeout"
+
     try:
         import torch
         if isinstance(exc, torch.cuda.OutOfMemoryError):
@@ -460,8 +475,10 @@ def _fit_identity_key(spec: BaselineSpec, problem: Any) -> tuple:
     Excludes:
       * ``inference_method`` — the axis we share across (the whole point);
       * ``n_samples`` — affects only the engine, not ``model.fit()``;
-      * ``device`` — reload relocates via ``map_location`` (Stage-1 CPU<->CUDA
-        faithful), so two baselines differing only in device still share.
+      * ``device`` — reload relocates via ``map_location`` + ``model.to()``
+        (``NBNAdapter.load_base_and_attach``; the ``.to()`` is what resets the
+        network's cached ``device`` attribute), so two baselines differing
+        only in device still share.
     ``epochs``/``batch_size``/``lr`` are the ``extra_kwargs`` entries that
     affect ``model.fit()`` today; if a future kwarg does, it MUST be added
     here. ``None`` (absent from config) means "mechanism-designed budget" and
@@ -555,6 +572,60 @@ def _assign_fit_roles(
         delete_after[idxs[-1]] = cache_path
 
     return roles, delete_after
+
+
+def _propagated_fit_failure_rows(
+    cfg: RunnerConfig, problem: Any, adapter: Any, batch_sizes: list[int],
+    *, default_role: str, status: str, error_msg: str,
+    base_fit_time_s: float | None,
+) -> list[CellResult]:
+    """Sentinel rows for a RELOADER whose group fitter failed (#191 follow-up).
+
+    The fitter's fit either raised, was pre-empted by the fit budget, or was
+    killed — so it never wrote the cache. Re-running the reloader would only
+    repeat the identical doomed base fit (same mechanism, same data, same
+    budget), so the parent emits the fitter's failure code for it directly and
+    skips the subprocess. Mirrors the worker's ``_fit_failure_for_all``: one
+    sentinel per selected query group, per batch_size. ``fit_time_s`` is NaN
+    (this cell ran no fit); ``base_fit_time_s`` carries the fitter's measured
+    base-fit wall-clock (if any) so the shared cost is still visible.
+    """
+    selector = cfg.selector
+    rows: list[CellResult] = []
+    for batch_size in batch_sizes:
+        if hasattr(selector, "select_groups"):
+            groups = selector.select_groups(
+                problem, cfg.n_queries_per_cell, problem.seed,
+                batch_size=batch_size,
+            )
+        else:
+            groups = [[q] for q in selector.select(
+                problem, cfg.n_queries_per_cell, problem.seed)]
+        sentinel_queries = [g[0] for g in groups]
+        sentinel_roles = [
+            getattr(q, "query_role", default_role) for q in sentinel_queries
+        ]
+        for r in _fit_failure_rows(
+            problem, adapter, sentinel_queries, sentinel_roles, cfg.benchmark,
+            fit_time_s=_NAN, status=status, error_msg=error_msg,
+        ):
+            rows.append(dataclasses.replace(
+                r, batch_size=batch_size,
+                device=str(getattr(adapter, "device", "cpu")),
+                base_fit_time_s=base_fit_time_s,
+            ))
+    return rows
+
+
+def _stamp_problem_meta(row: CellResult, n_params, n_nodes, n_train) -> CellResult:
+    """Inject problem-level metadata (#133) where the row lacks it."""
+    if n_params is not None and row.n_parameters is None:
+        row = dataclasses.replace(row, n_parameters=n_params)
+    if n_nodes is not None and row.n_nodes is None:
+        row = dataclasses.replace(row, n_nodes=n_nodes)
+    if n_train is not None and row.n_train is None:
+        row = dataclasses.replace(row, n_train=n_train)
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -688,6 +759,14 @@ class Runner:
                     fit_roles, fit_delete_after = _assign_fit_roles(
                         cfg, problem, failed_configs, seed_skip, fitcache_dir,
                     )
+                    # Per-group outcome of the fitter's cell, keyed by cache
+                    # path: ``group_failed[path] = (status, error_msg)`` when
+                    # the fitter's fit failed (no cache written) so its
+                    # reloaders are short-circuited; ``group_base_fit[path]``
+                    # = the fitter's base_fit_time_s, copied onto reloader
+                    # rows so the shared cost is reported group-wide.
+                    group_failed: dict[str, tuple[str, str]] = {}
+                    group_base_fit: dict[str, float | None] = {}
                     for i, spec in enumerate(cfg.baselines):
                         adapter_probe = build_adapter(spec)
                         name = adapter_probe.name
@@ -749,6 +828,46 @@ class Runner:
                         # saved base), or "standalone" (fit, no save).
                         fit_role, cache_path = fit_roles[i]
                         verb = {"reload": "reloading"}.get(fit_role, "fitting")
+                        # ais/avi train a proposal network in the same slot,
+                        # which dominates a reloader's wall-clock (n=50 flow:
+                        # torch.load 0.2s vs 30-300s of proposal training) —
+                        # say so, rather than labelling that time "reloading".
+                        if spec.library == "nbn" and \
+                                spec.inference_method in ("ais", "avi"):
+                            verb += "+training-proposal"
+                        cache_key = str(cache_path) if cache_path else None
+                        if fit_role == "reload" and cache_key in group_failed:
+                            # Fitter failed -> no cache -> the reloader would
+                            # only repeat the identical doomed fit. Propagate.
+                            f_status, f_msg = group_failed[cache_key]
+                            msg = (f"group fitter failed ({f_status}): {f_msg}"
+                                   f" -- reload skipped, fit not repeated")
+                            logger.warning(
+                                "skipping %s on %s (seed=%s): %s", name, pid,
+                                getattr(problem, "seed", 0), msg,
+                            )
+                            n_params = n_parameters_from_problem(problem)
+                            n_nodes = n_nodes_from_problem(problem)
+                            n_train = n_train_from_problem(problem)
+                            cell_rows = []
+                            for row in _propagated_fit_failure_rows(
+                                cfg, problem, adapter_probe, batch_sizes,
+                                default_role=default_role, status=f_status,
+                                error_msg=msg,
+                                base_fit_time_s=group_base_fit.get(cache_key),
+                            ):
+                                row = _stamp_problem_meta(
+                                    row, n_params, n_nodes, n_train)
+                                writer.write(row)
+                                cell_rows.append(row)
+                                yield row
+                            if seed_skip:
+                                _register_failures(
+                                    failed_configs, problem, name,
+                                    batch_sizes, cell_rows,
+                                )
+                            pbar.update(1)
+                            continue
                         # The device in the progress line is the ADAPTER's own
                         # `device` attribute -- the same fact cell_worker._emit
                         # stamps on the parquet -- not resolve_device(spec.device).
@@ -768,9 +887,27 @@ class Runner:
                             batch_sizes=batch_sizes,
                             fit_role=fit_role,
                             cache_path=cache_path,
+                            base_fit_time_s=(
+                                group_base_fit.get(cache_key)
+                                if fit_role == "reload" else None
+                            ),
                         ):
                             cell_rows.append(row)
                             yield row
+                        if fit_role == "fit" and cell_rows:
+                            group_base_fit[cache_key] = next(
+                                (r.base_fit_time_s for r in cell_rows
+                                 if r.base_fit_time_s is not None), None,
+                            )
+                            if (not cache_path.exists()
+                                    and not any(r.status == "ok" for r in cell_rows)):
+                                # Fit failed (raised / pre-empted / killed):
+                                # no cache and nothing ok. A missing cache
+                                # with ok rows is a save failure only; the
+                                # reloaders then fall back to fitting.
+                                first = cell_rows[0]
+                                group_failed[cache_key] = (
+                                    first.status, first.error_msg or "")
                         if seed_skip:
                             _register_failures(
                                 failed_configs, problem, name,
@@ -807,6 +944,7 @@ class Runner:
         batch_sizes: list[int] | None = None,
         fit_role: str = "standalone",
         cache_path: Any | None = None,
+        base_fit_time_s: float | None = None,
     ) -> Iterator[CellResult]:
         # Bug 4 (#127) Stage 2: the per-cell work (build_adapter →
         # applicability → select → fit → measure) now runs inside a
@@ -883,11 +1021,10 @@ class Runner:
         n_train = n_train_from_problem(problem)
 
         for row in _rows_to_cellresults(result.rows, problem, spec, cfg.benchmark):
-            if n_params is not None and row.n_parameters is None:
-                row = dataclasses.replace(row, n_parameters=n_params)
-            if n_nodes is not None and row.n_nodes is None:
-                row = dataclasses.replace(row, n_nodes=n_nodes)
-            if n_train is not None and row.n_train is None:
-                row = dataclasses.replace(row, n_train=n_train)
+            row = _stamp_problem_meta(row, n_params, n_nodes, n_train)
+            # Reloader rows carry the GROUP fitter's base-fit wall-clock (the
+            # worker leaves it None on the reload path, having run no fit).
+            if base_fit_time_s is not None and row.base_fit_time_s is None:
+                row = dataclasses.replace(row, base_fit_time_s=base_fit_time_s)
             writer.write(row)
             yield row
