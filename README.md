@@ -49,6 +49,8 @@ bash scripts/run_all_benchmarks.sh
 
 Override the pool size or device via `MAX_PARALLEL=2 bash …` or
 `DEVICE=cpu bash …` (three GPU benchmarks in flight can exceed an 8 GB card).
+Each benchmark leaves a run directory under `results/`; turn it into figures
+and tables with `nbn-bench plot` (see [Plot the results](#plot-the-results)).
 
 ## Why NBN
 
@@ -234,14 +236,60 @@ nbn-bench param-learning --config nbn/bench/configs/synthetic/complete/parameter
 nbn-bench inference      --config nbn/bench/configs/synthetic/complete/inference_complete.yaml
 ```
 
-Each invocation writes its output under `results/`:
+Each invocation writes one run directory under `results/`; the parquet is
+the single canonical artefact of a run (figures and tables are never
+generated automatically):
 
-    results/figures/{prefix}_total_time_vs_size.{pdf,svg,png}
-    results/figures/{prefix}_accuracy_vs_size.{pdf,svg,png}
-    results/raw/{prefix}_metrics.parquet
-    results/raw/{prefix}_{timestamp}.log         (gitignored)
-    results/raw/{prefix}_{timestamp}.run.json    (gitignored)
-    results/tables/{prefix}_summary.{csv,md,parquet,tex}
+    results/benchmark_<benchmark>_<config_name>_<YYYYMMDD_HHMMSS>/
+        <config_name>_metrics.parquet     one row per (cell, metric)
+        metrics.jsonl                     the same rows, streamed while running
+        run.log                           per-cell log (fit/query phases, errors)
+
+### Plot the results
+
+`nbn-bench plot` turns one (or more) run directories into paper figures and
+LaTeX tables. The same command serves every benchmark; the figures it emits
+are decided by what the parquet contains (which metrics have `ok` rows,
+whether `n_train` or `batch_size` is swept), so you never pick a plotter:
+
+```bash
+nbn-bench plot results/benchmark_synthetic_learning_curves_20260908_092714 \
+  --output-dir results/figures/learning_curves
+# options: --aggregation iqm_iqr|mean_std (default iqm_iqr)
+#          --benchmark synthetic|bnlearn  (default: every benchmark in the parquet)
+```
+
+Output tree: `<output-dir>/<benchmark>/<family>/all/{plots,tables}/`, plus
+`common/` or `subset<k>/` siblings of `all/` when the baselines do not all
+cover the same problems (`_subsets_overview.txt` explains the split). A
+figure that had unfinished cells gets a `*_dnf.txt` sidecar naming them.
+The run-directory name uses the config's `config_name`
+(`complete`, `scalability_complete`, `batch_speed`, `param_learning_complete`,
+`learning_curves`, `bnlearn_complete`), not the YAML file name. Per benchmark:
+
+| Benchmark (config) | Run with | Plot with | What you get under `<output-dir>/<benchmark>/<family>/all/` |
+|---|---|---|---|
+| Synthetic inference (`synthetic/complete/inference_complete.yaml`) | `nbn-bench inference --config …` | `nbn-bench plot <run-dir> --output-dir <out>` | `plots/{tv,jsd,w1}_per_node_vs_{n_nodes,n_parameters}.pdf`, `plots/{fit_time,total_query_time}_vs_{n_nodes,n_parameters}.pdf`, `plots/success_rate.pdf`; `tables/table_overall.tex`, `table_role_<role>.tex`, `table_kind_<kind>.tex` |
+| Inference scalability (`synthetic/complete/inference_scalability_complete.yaml`) | `nbn-bench inference --config …` | same | same set; the time-scaling figures (`*_time_vs_n_nodes.pdf`) are the headline |
+| Inference speed / batching (`synthetic/speed/inference_speed.yaml`, a `batch_sizes` sweep) | `nbn-bench inference --config …` | same | `<output-dir>/<benchmark>/batch_speed.pdf` (per-query time vs batch size, one panel per family) + `batch_speed_table_<family>.tex`, next to the per-family tree above |
+| Parameter learning (`synthetic/complete/parameter_learning_complete.yaml`) | `nbn-bench param-learning --config …` | same | `plots/log_likelihood_vs_{n_nodes,n_parameters}.pdf`, `param_recovery_{tv,kl}_vs_n_nodes.pdf` (discrete), `calibration_{pit_ks,sd_ratio}_vs_n_nodes.pdf` (continuous), `success_rate.pdf`; `tables/table_overall.tex`, `table_role_param_learning.tex`, `table_kind_prediction.tex` |
+| Learning curves / sample efficiency (`synthetic/learning_curves/learning_curves.yaml`, an `n_train_sweep`) | `nbn-bench param-learning --config …` | same | everything in the parameter-learning row **plus** `plots/<metric>_vs_n_train.pdf` and `tables/<metric>_vs_n_train.tex` (rows = baselines, columns = n_train, best per column in bold) for each metric above |
+| bnlearn inference (`bnlearn/complete/inference_complete.yaml`) | `nbn-bench inference --config …` | same | the synthetic-inference set under `<output-dir>/bnlearn/…`, with `*_vs_n_parameters.pdf` as the natural axis (real networks differ in parameter count more than node count) |
+| Calibration vs accuracy divergence (no config: combine two runs) | one `param-learning` run + one `inference` run on the same families | `nbn-bench plot <pl-run-dir> <inference-run-dir> --output-dir <out>` | `plots/divergence_calibration_pit_ks_vs_w1_per_node.pdf` per continuous family (rows are concatenated; engine suffixes such as `-lw` are stripped to align `nbn-mdn-lw` with `nbn-mdn`) |
+
+Two things that bite:
+
+- `learning_curves.yaml` and `parameter_learning_complete.yaml` declare
+  `metrics: log_likelihood` and their baselines carry no `inference_method`,
+  so they **must** run under `param-learning`. Under `inference` the loader
+  refuses them and prints the command to use.
+- A figure is only written when at least one `ok` row exists for its metric
+  in that family. If a plot you expect is missing, `nbn-bench plot -v` logs
+  `skip empty (...)` with the reason, and `run.log` in the run directory has
+  the per-cell error.
+
+Design notes and the full figure/table spec live in
+[`docs/v0.13-paper-figures.md`](docs/v0.13-paper-figures.md).
 
 ## Configuration
 
