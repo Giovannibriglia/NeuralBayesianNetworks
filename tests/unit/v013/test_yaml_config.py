@@ -124,8 +124,11 @@ def test_param_learning_metrics_field_guardrail(tmp_path: Path) -> None:
 
     pl_cfg = _CONFIG_DIR / "synthetic/smoke_tests/parameter_learning_smoke.yaml"
 
-    # Inference path (no override) must reject metrics=log_likelihood.
-    with pytest.raises(ValueError, match="unknown metrics"):
+    # Inference path (no override) must reject metrics=log_likelihood, and
+    # say which command to use instead (a generic "unknown metrics" invited
+    # editing the field, after which every cell errored for lack of
+    # inference_method).
+    with pytest.raises(ValueError, match="nbn-bench param-learning"):
         load_runner_config(pl_cfg, jsonl_path=tmp_path / "a.jsonl")
 
     # PL override path requires the config to declare log_likelihood: an
@@ -243,6 +246,31 @@ def test_metrics_timing_produces_timing_only(tmp_path: Path) -> None:
     p = _write_yaml(tmp_path, d)
     cfg = load_runner_config(p, jsonl_path=tmp_path / "out.jsonl")
     assert isinstance(cfg.measurement, TimingOnly)
+
+
+def test_inference_path_requires_inference_method_on_every_baseline(
+    tmp_path: Path,
+) -> None:
+    """A baseline without inference_method fails at load on the inference
+    path (every adapter would raise per cell otherwise), but is fine under
+    the param-learning override, where no engine is attached."""
+    from nbn.bench.measurements import ParamLearningMeasurement
+
+    d = _minimal_valid()
+    d["baselines"].append(
+        {"library": "pgmpy", "mechanism": "discrete", "param_method": "mle"},
+    )
+    p = _write_yaml(tmp_path, d)
+    with pytest.raises(ValueError, match=r"baselines\[1\] \(pgmpy-discrete\)"):
+        load_runner_config(p, jsonl_path=tmp_path / "out.jsonl")
+
+    d["metrics"] = "log_likelihood"
+    p = _write_yaml(tmp_path, d)
+    cfg = load_runner_config(
+        p, jsonl_path=tmp_path / "out.jsonl",
+        measurement_override=ParamLearningMeasurement(),
+    )
+    assert [b.inference_method for b in cfg.baselines] == ["ve", None]
 
 
 def test_unknown_metrics_value_raises(tmp_path: Path) -> None:
