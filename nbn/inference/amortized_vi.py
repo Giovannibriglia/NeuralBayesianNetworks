@@ -14,14 +14,30 @@ reads out the relevant marginal:
 * continuous target → particles sampled from the variational ``q`` with
   uniform weights (the adapter resamples them, as for LW).
 
-Training maximizes a mean-field ELBO amortized over random-mask evidence
-patterns.  Continuous nodes use reparameterized gradients; discrete nodes
-use a Rao-Blackwellized self term ``Σ_k q(k)·log p(k | pa)`` plus the
-entropy, so gradients reach the recognition net without pushing a relaxed
-sample through nbn's integer-indexed mechanisms.
+Training maximizes the mean-field ELBO of the FULL joint, amortized over
+random-mask evidence patterns::
+
+    ELBO(e) = Σ_j E_q[log p(x_j | pa_j)]  −  Σ_{i latent} E_q[log q(x_i | e)]
+
+The first sum runs over EVERY node — observed ones included. That is what
+carries evidence *downstream* of a latent node back into its posterior
+(an observed child's ``log p(e_child | x_i, …)`` is the likelihood term
+that distinguishes p(x_i | e) from the prior p(x_i | pa_i)). An earlier
+version summed only the latent nodes' own terms with detached parents, so
+q learned the prior conditional and diagnostic queries (evidence on
+descendants, target upstream) returned the prior.
+
+Gradient estimators: continuous latents are reparameterized (gradients
+flow through their value into their own term AND every child term);
+discrete latents use the Rao-Blackwellized own term ``Σ_k q(k)·log p(k |
+pa)`` plus, for each child, a *local-expectation* surrogate
+``Σ_k q_i(k)·log p(x_child | pa_{−i}, x_i = k)`` (Titsias &
+Lázaro-Gredilla 2015) — nbn's integer-indexed mechanisms never see a
+relaxed sample.
 
 References:
 - Ranganath, Gerrish & Blei (2014) Black Box Variational Inference
+- Titsias & Lázaro-Gredilla (2015) Local Expectation Gradients
 - Cremer, Li & Duvenaud (2018) Inference Suboptimality in VAEs
 
 See docs/v0.14-batched-inference-engines-research.md (Engine B section).
@@ -34,11 +50,20 @@ from typing import Dict, List, Tuple
 
 import torch
 
+from torch.distributions import Categorical
+
 from nbn.inference.base import InferenceEngine
 from nbn.inference.recognition_net import RecognitionNetwork
 from nbn.sampling.ancestral import ancestral_sample
 
 logger = logging.getLogger(__name__)
+
+# Training budget: gradient steps scale with node count (as for the AIS
+# proposal, amortized_is._STEPS_PER_NODE), floored, with a wall-clock safety
+# cap. The previous fixed 20 epochs × (20000/4096) = 100 steps under a 30 s
+# cap reached 25 steps at n=50 (flow, GPU) — badly under-trained.
+_STEPS_PER_NODE = 20
+_MIN_TRAIN_STEPS = 300
 
 
 class AmortizedVIEngine(InferenceEngine):
@@ -59,14 +84,23 @@ class AmortizedVIEngine(InferenceEngine):
         self,
         model,
         n_training_samples: int = 20000,
-        n_epochs: int = 20,
+        n_epochs: int | None = None,
         lr: float = 1e-3,
-        batch_size: int = 4096,
+        batch_size: int = 1024,
         mask_prob: float = 0.5,
-        time_budget_s: float = 30.0,
+        time_budget_s: float = 120.0,
+        steps_per_node: int = _STEPS_PER_NODE,
+        min_steps: int = _MIN_TRAIN_STEPS,
         device: str | None = None,
     ) -> dict:
-        """Train the variational recognition network by ELBO maximization."""
+        """Train the variational recognition network by ELBO maximization.
+
+        Budget is step-based — ``max(min_steps, steps_per_node · n_nodes)``
+        gradient steps — with ``time_budget_s`` as a wall-clock safety cap.
+        ``n_epochs`` (explicit passes over the prior-sample set) overrides the
+        step target when given; it is kept for callers that want a tiny,
+        deterministic budget (tests).
+        """
         dev = torch.device(device or model.device)
         net = RecognitionNetwork(model).to(dev)
         self.recognition_net = net
@@ -75,17 +109,28 @@ class AmortizedVIEngine(InferenceEngine):
             node: [net.node_index[p] for p in model.dag.parents(node)]
             for node in net.node_order
         }
+        self._parent_names = {
+            node: list(model.dag.parents(node)) for node in net.node_order
+        }
 
         with torch.no_grad():
             samples = ancestral_sample(model, n=n_training_samples, device=str(dev))
             x = self._stack_values(samples, net.node_order, dev).detach()  # [N, n]
         n = x.shape[0]
+        batches_per_epoch = max(1, -(-n // batch_size))
+        if n_epochs is not None:
+            target_steps = int(n_epochs) * batches_per_epoch
+        else:
+            target_steps = max(int(min_steps),
+                               int(steps_per_node) * len(net.node_order))
 
         opt = torch.optim.Adam(net.parameters(), lr=lr)
         net.train()
         start = time.monotonic()
         last_loss = float("nan")
-        for _epoch in range(n_epochs):
+        steps = 0
+        stop = False
+        while steps < target_steps and not stop:
             perm = torch.randperm(n, device=dev)
             for i in range(0, n, batch_size):
                 idx = perm[i:i + batch_size]
@@ -102,12 +147,18 @@ class AmortizedVIEngine(InferenceEngine):
                 torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0)
                 opt.step()
                 last_loss = float(loss.detach())
-            if time.monotonic() - start > time_budget_s:
-                logger.info(
-                    "AmortizedVIEngine: ELBO training hit time budget "
-                    "(%.0fs) after epoch %d.", time_budget_s, _epoch,
-                )
-                break
+                steps += 1
+                if steps >= target_steps:
+                    stop = True
+                    break
+                if time.monotonic() - start > time_budget_s:
+                    logger.info(
+                        "AmortizedVIEngine: ELBO training hit time budget "
+                        "(%.0fs) after %d/%d steps.",
+                        time_budget_s, steps, target_steps,
+                    )
+                    stop = True
+                    break
         net.eval()
 
         gap = self._estimate_elbo_gap(model)
@@ -118,7 +169,10 @@ class AmortizedVIEngine(InferenceEngine):
                 "approximation may be loose (KL gap); inference still "
                 "runs. Consider more training samples/epochs.", gap,
             )
-        return {"final_loss": last_loss, "elbo_gap": gap}
+        return {
+            "final_loss": last_loss, "elbo_gap": gap,
+            "grad_steps": steps, "target_steps": target_steps,
+        }
 
     @staticmethod
     def _stack_values(samples, node_order, dev) -> torch.Tensor:
@@ -138,9 +192,18 @@ class AmortizedVIEngine(InferenceEngine):
         """Reparameterized sample for a continuous variational head.
 
         Uses ``rsample`` when available (Normal/Independent-Normal for
-        lg/flow heads); falls back to a Gumbel-softmax-over-components +
-        reparameterized-Normal pathwise sample for MixtureSameFamily
-        (mdn head), which has no ``rsample``.
+        lg/flow heads). For MixtureSameFamily (mdn head), which has no
+        ``rsample``, a *straight-through* Gumbel-max sample: the value is a
+        genuine draw from ``q`` (Gumbel-max picks the component exactly, the
+        Normal within it is reparameterized) while the gradient flows to the
+        mixture logits through the softmax relaxation.
+
+        The value being a real draw matters: a plain Gumbel-*softmax* convex
+        mix of component draws is NOT distributed as ``q``, and evaluating
+        ``log q`` at it let the optimizer game the entropy term — push
+        components far apart with tiny scales so the blended point sits
+        where ``log q`` is hugely negative (observed: ELBO → +8e7, a
+        posterior mean of 3.4 on a problem whose truth is 0.25).
         """
         if dist.has_rsample:
             return dist.rsample()
@@ -150,62 +213,122 @@ class AmortizedVIEngine(InferenceEngine):
         normal = comp.base_dist                    # Normal, loc/scale [..., K, d_x]
         g = torch.rand_like(mix.logits).clamp_min(1e-12)
         g = -torch.log(-torch.log(g))
-        soft = torch.softmax((mix.logits + g) / self.gumbel_tau, dim=-1)  # [..., K]
+        perturbed = mix.logits + g
+        soft = torch.softmax(perturbed / self.gumbel_tau, dim=-1)         # [..., K]
+        hard = torch.nn.functional.one_hot(
+            perturbed.argmax(dim=-1), soft.shape[-1]).to(soft.dtype)
+        w = hard + soft - soft.detach()                                   # ST estimator
         eps = torch.randn_like(normal.loc)
         comp_samples = normal.loc + normal.scale * eps                    # [..., K, d_x]
-        return (soft.unsqueeze(-1) * comp_samples).sum(-2)                # [..., d_x]
+        return (w.unsqueeze(-1) * comp_samples).sum(-2)                   # [..., d_x]
+
+    @staticmethod
+    def _log_table(mech, pa, rows: int) -> torch.Tensor:
+        """``log p(k | pa)`` for every class k of a discrete mechanism, ``[rows, K]``."""
+        t = mech.forward(pa).probs.clamp_min(1e-12).log()
+        if t.shape[0] == 1 and rows > 1:
+            t = t.expand(rows, -1)
+        return t
 
     def _elbo_loss(self, model, net, xb, mask) -> torch.Tensor:
-        """Mean negative ELBO over a training minibatch (differentiable)."""
-        params = net(xb * mask, mask)  # [Bb, total_param]
+        """Mean negative full-joint ELBO over a training minibatch (differentiable).
 
-        # Parent context: hard, detached samples (mean-field — gradient
-        # through the parent path is dropped; each node's q is fit to its
-        # local conditional given sampled parents + the entropy term).
-        with torch.no_grad():
-            assign = xb.clone()
-            for node in net.node_order:
-                j = net.node_index[node]
-                d = net.make_dist(node, net.node_param_slice(params, node))
-                s = d.sample()
-                if s.dim() > 1:
-                    s = s[..., 0]
-                col = mask[:, j]
-                assign[:, j] = col * xb[:, j] + (1.0 - col) * s.float()
-        assign = assign.detach()
+        ``xb`` ``[Bb, n]`` are prior samples, ``mask`` ``[Bb, n]`` marks the
+        entries treated as observed (1) vs latent (0). One joint draw
+        ``z ~ q(· | e)`` is taken per row; latent entries of the assignment
+        are the draw, observed entries the data. Then
 
-        total = xb.new_zeros(())
-        count = xb.new_zeros(())
+        * entropy: ``−log q(z_i)`` for continuous latents (reparameterized),
+          the analytic Categorical entropy for discrete latents;
+        * likelihood: ``log p(x_j | pa_j)`` for EVERY node ``j`` (observed
+          or latent), with a latent discrete node's own term
+          Rao-Blackwellized over ``q_j``;
+        * for each *discrete latent parent* ``i`` of ``j``, a zero-valued
+          surrogate whose gradient is the local expectation
+          ``Σ_k q_i(k) · log p(x_j | pa_{−i}, x_i = k)`` — the path by which
+          a child's likelihood reaches a discrete parent's posterior.
+
+        Normalized by the number of latent entries in the batch.
+        """
+        params = net(xb * mask, mask)                     # [Bb, total_param]
+        Bb = xb.shape[0]
+        val: Dict[str, torch.Tensor] = {}                 # assignment column per node [Bb]
+        q_logits: Dict[str, torch.Tensor] = {}            # discrete: log q(k) [Bb, K]
+        q_logp_at: Dict[str, torch.Tensor] = {}           # continuous: log q(z) [Bb]
+
+        # --- one joint draw from q ---------------------------------------
         for node in net.node_order:
             j = net.node_index[node]
-            weight = 1.0 - mask[:, j]            # rows where node is latent
-            if float(weight.sum()) == 0.0:
-                continue
-            cols = self._parent_cols[node]
-            pa = assign[:, cols] if cols else None
-            mech = model.mechanisms[node]
+            obs = mask[:, j]
             p = net.node_param_slice(params, node)
-
             if net.is_discrete(node):
-                q_logprob = torch.log_softmax(p, dim=-1)      # [Bb, K]
-                q_probs = q_logprob.exp()
-                m_probs = mech.forward(pa).probs              # [Bb or 1, K]
-                if m_probs.shape[0] == 1 and q_probs.shape[0] > 1:
-                    m_probs = m_probs.expand(q_probs.shape[0], -1)
-                m_logp = m_probs.clamp_min(1e-12).log()
-                e_logp = (q_probs * m_logp).sum(-1)           # [Bb]
-                e_logq = (q_probs * q_logprob).sum(-1)        # [Bb]
-                elbo_i = e_logp - e_logq
+                lq = torch.log_softmax(p, dim=-1)
+                q_logits[node] = lq
+                s = Categorical(logits=lq.detach()).sample().to(xb.dtype)
             else:
                 qd = net.make_dist(node, p)
-                x_i = self._rsample_continuous(qd)            # [Bb, d_x]
-                log_q = qd.log_prob(x_i)                      # [Bb]
-                log_p = mech.log_prob(x_i, pa)                # [Bb]
-                elbo_i = log_p - log_q
+                z = self._rsample_continuous(qd)          # [Bb, d_x], reparameterized
+                q_logp_at[node] = qd.log_prob(z)          # [Bb]
+                s = z[..., 0]
+            val[node] = obs * xb[:, j] + (1.0 - obs) * s
 
-            total = total - (elbo_i * weight).sum()
-            count = count + weight.sum()
-        return total / count.clamp_min(1.0)
+        elbo = xb.new_zeros(())
+
+        # --- entropy of q over the latent entries ---------------------------
+        for node in net.node_order:
+            lat = 1.0 - mask[:, net.node_index[node]]
+            if net.is_discrete(node):
+                lq = q_logits[node]
+                elbo = elbo - (lat * (lq.exp() * lq).sum(-1)).sum()
+            else:
+                elbo = elbo - (lat * q_logp_at[node]).sum()
+
+        # --- log p(x_j | pa_j) for every node + local-expectation surrogates
+        for node in net.node_order:
+            j = net.node_index[node]
+            lat = 1.0 - mask[:, j]
+            parents = self._parent_names[node]
+            pa = torch.stack([val[p] for p in parents], dim=1) if parents else None
+            x_j = val[node]
+            mech = model.mechanisms[node]
+            discrete = net.is_discrete(node)
+            if discrete:
+                q_j = q_logits[node].exp()
+                idx = x_j.long().unsqueeze(1)
+                own = self._discrete_term(mech, pa, Bb, lat, q_j, idx)
+            else:
+                own = mech.log_prob(x_j.unsqueeze(-1), pa)    # [Bb]
+            elbo = elbo + own.sum()
+
+            for pi, pnode in enumerate(parents):
+                if not net.is_discrete(pnode):
+                    continue                              # continuous parent: reparameterized
+                lat_i = 1.0 - mask[:, net.node_index[pnode]]
+                k_count = q_logits[pnode].shape[-1]
+                with torch.no_grad():
+                    f_k = []
+                    for k in range(k_count):
+                        pa_k = pa.clone()
+                        pa_k[:, pi] = float(k)
+                        if discrete:
+                            f_k.append(self._discrete_term(
+                                mech, pa_k, Bb, lat, q_j.detach(), idx))
+                        else:
+                            f_k.append(mech.log_prob(x_j.detach().unsqueeze(-1), pa_k))
+                    f_k = torch.stack(f_k, dim=1)          # [Bb, K], constants
+                acc = (q_logits[pnode].exp() * f_k).sum(-1)  # d/dθ = local expectation
+                elbo = elbo + (lat_i * (acc - acc.detach())).sum()
+
+        n_latent = (1.0 - mask).sum().clamp_min(1.0)
+        return -elbo / n_latent
+
+    def _discrete_term(self, mech, pa, rows, lat, q_j, idx) -> torch.Tensor:
+        """Own likelihood term of a discrete node: ``Σ_k q_j(k) log p(k | pa)``
+        on rows where it is latent, ``log p(x_j | pa)`` where observed."""
+        lp_tab = self._log_table(mech, pa, rows)          # [Bb, K]
+        own_lat = (q_j * lp_tab).sum(-1)
+        own_obs = lp_tab.gather(1, idx).squeeze(1)
+        return lat * own_lat + (1.0 - lat) * own_obs
 
     # ------------------------------------------------------------------
     # ELBO value (no-grad MC estimate) — for the lower-bound test + diag
