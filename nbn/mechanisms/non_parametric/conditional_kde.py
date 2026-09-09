@@ -26,6 +26,12 @@ Design notes
   on **standardised** parents (so the per-dimension scale is O(1)) and on the
   raw child.  ``torch.quantile``-based robust scale (IQR) guards against
   heavy tails, mirroring the project's existing use of ``torch.quantile``.
+* **Streaming.** The sufficient statistic of a KDE is its (weighted) sample,
+  so ``update_local`` is exact: it appends the new rows to the stored sample
+  and re-derives the standardisation and the rule-of-thumb bandwidths from
+  the pooled sample.  ``fit_local(A)`` then ``update_local(B)`` reproduces
+  ``fit_local(A | B)``; ``forgetting < 1`` fades the weight of the rows that
+  were already stored (the kernel analogue of fading Dirichlet counts).
 
 Shape contracts (see :class:`nbn.mechanisms.base.Mechanism`)
 ------------------------------------------------------------
@@ -100,6 +106,7 @@ class ConditionalKDEMechanism(Mechanism):
 
     is_discrete: bool = False
     supports_weights: bool = True
+    supports_update: bool = True
 
     def __init__(
         self,
@@ -188,6 +195,79 @@ class ConditionalKDEMechanism(Mechanism):
             else torch.log(w.to(device=self._train_y.device)).to(self._train_y.dtype)
         )
         info["warm_started"] = False
+        return info
+
+    def update_local(
+        self,
+        x: torch.Tensor,
+        parents: torch.Tensor | None,
+        *,
+        forgetting: float = 1.0,
+        weights: torch.Tensor | None = None,
+        **kwargs,
+    ) -> dict:
+        """Fold new rows into the stored sample (recursive, no rehearsal).
+
+        The sufficient statistic of a Nadaraya--Watson estimator is its
+        weighted sample, so the posterior-as-prior update is to append the new
+        rows and re-derive, from the pooled sample, exactly what ``fit_local``
+        derives: the parent standardisation and the rule-of-thumb bandwidths.
+        With ``forgetting == 1.0`` a chunked ``fit_local(A)`` →
+        ``update_local(B)`` therefore reproduces ``fit_local(A | B)`` (same
+        buffers, same ``log_prob``).  ``forgetting < 1.0`` multiplies the
+        weight of every row already stored by the factor before appending, so
+        a row's weight decays geometrically with its age in update calls; rows
+        are never dropped.  ``weights`` gives the multiplicity of the *new*
+        rows, with the same contract as in ``fit_local``.  The resolved
+        ``bw_factor`` is kept (``"auto"`` is selected once, at fit time).
+        """
+        assert self._train_y is not None, "call fit_local before update_local"
+        forgetting = float(forgetting)
+        if not (0.0 < forgetting <= 1.0):
+            raise ValueError(f"forgetting factor must be in (0, 1], got {forgetting!r}")
+        device = self._train_y.device
+        y_new = ensure_2d(x).float().to(device)
+        n_old, n_new = self._train_y.shape[0], y_new.shape[0]
+        if y_new.shape[1] != self._train_y.shape[1]:
+            raise ValueError(
+                f"update child dim {y_new.shape[1]} differs from the fitted "
+                f"{self._train_y.shape[1]}"
+            )
+        w_new = validate_weights(
+            weights, n_new, where="ConditionalKDEMechanism.update_local",
+        )
+        has_pa = parents is not None and parents.shape[-1] > 0
+        if has_pa != (self._d_pa > 0) or (has_pa and parents.shape[-1] != self._d_pa):
+            raise ValueError(
+                f"update parents dim {0 if not has_pa else parents.shape[-1]} "
+                f"differs from the fitted {self._d_pa}"
+            )
+        if has_pa:
+            # Stored parents are standardised; undo that so the pooled sample is
+            # standardised afresh, as a pooled fit would.
+            pa_old = self._train_pa * self._pa_std + self._pa_mean
+            pa_pool = torch.cat([pa_old, ensure_2d(parents).float().to(device)], dim=0)
+        else:
+            pa_pool = None
+        y_pool = torch.cat([self._train_y, y_new], dim=0)
+
+        unweighted = forgetting == 1.0 and w_new is None and self._train_logw is None
+        if unweighted:
+            info = self._fit_core(y_pool, pa_pool)
+            self._train_logw = None
+        else:
+            logw_old = (
+                torch.zeros(n_old, dtype=torch.float64, device=device)
+                if self._train_logw is None else self._train_logw.double()
+            ) + math.log(forgetting)
+            logw_new = (
+                torch.zeros(n_new, dtype=torch.float64, device=device)
+                if w_new is None else torch.log(w_new.to(device))
+            )
+            logw_pool = torch.cat([logw_old, logw_new])
+            info = self._fit_core(y_pool, pa_pool, _w_vec=logw_pool.exp())
+            self._train_logw = logw_pool.to(self._train_y.dtype)
+        info.update({"method": "kde_append", "n_new": int(n_new), "forgetting": forgetting})
         return info
 
     def _select_bw_factor(

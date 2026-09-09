@@ -20,6 +20,12 @@ Memory: the neighbour search tiles over the **query** dimension, so peak
 memory is ``O(query_chunk * N)`` rather than ``O(M * N)``.  (A KeOps
 ``argKmin`` backend would make this linear-memory and FAISS-competitive; kept
 optional.)
+
+Streaming: the stored sample is the sufficient statistic, so ``update_local``
+appends the new rows and re-resolves the standardisation and ``k`` from the
+pooled sample; ``fit_local(A)`` then ``update_local(B)`` equals
+``fit_local(A | B)``.  Forgetting is refused (like weights): the neighbour
+selection has no notion of a fractional row.
 """
 from __future__ import annotations
 
@@ -119,6 +125,7 @@ class KNNConditionalMechanism(Mechanism):
     # checks this flag before fitting any node, so a network containing one of
     # these fails fast and names the node to swap.
     supports_weights: bool = False
+    supports_update: bool = True
 
     def fit_local(
         self,
@@ -182,6 +189,70 @@ class KNNConditionalMechanism(Mechanism):
             "n_train": int(n), "k": int(self._k_eff), "d_pa": int(self._d_pa),
             "warm_started": False,
         }
+
+    def update_local(
+        self,
+        x: torch.Tensor,
+        parents: torch.Tensor | None,
+        n_classes: int | None = None,
+        *,
+        forgetting: float = 1.0,
+        weights: torch.Tensor | None = None,
+        **kwargs,
+    ) -> dict:
+        """Append new rows to the stored sample and refit on the pooled sample.
+
+        Exact: the estimator is its sample, so ``fit_local(A)`` followed by
+        ``update_local(B)`` is ``fit_local(A | B)`` -- standardisation, the
+        global child bandwidth and ``k = round(sqrt(N))`` (when ``k`` was not
+        fixed) are all re-resolved from the pooled ``N``.  For a discrete
+        child the class count can only grow (declared cardinality, classes
+        observed so far, classes in the new rows).  ``forgetting < 1`` and
+        ``weights`` are refused for the reason given at ``supports_weights``:
+        k-nearest-neighbour selection is by distance alone and has no reading
+        of a fractional row; a fading kNN would be a different estimator.  Use
+        :class:`ConditionalKDEMechanism` when forgetting is needed.
+        """
+        assert self._train_y is not None, "call fit_local before update_local"
+        if weights is not None:
+            raise NotImplementedError(
+                "KNNConditionalMechanism does not support per-sample weights "
+                "(see fit_local)."
+            )
+        if float(forgetting) != 1.0:
+            raise NotImplementedError(
+                "KNNConditionalMechanism.update_local only supports forgetting=1.0: "
+                "neighbour selection is by distance alone, so a faded (fractional) "
+                "row has no principled reading.  Use ConditionalKDEMechanism for "
+                "exponential forgetting."
+            )
+        device = self._train_y.device
+        if self.discrete_child:
+            y_new = x.long().reshape(-1).to(device)
+            n_classes = max(self._n_classes, 0 if n_classes is None else int(n_classes))
+        else:
+            y_new = ensure_2d(x).float().to(device)
+            if y_new.shape[1] != self._train_y.shape[1]:
+                raise ValueError(
+                    f"update child dim {y_new.shape[1]} differs from the fitted "
+                    f"{self._train_y.shape[1]}"
+                )
+        has_pa = parents is not None and parents.shape[-1] > 0
+        if has_pa != (self._d_pa > 0) or (has_pa and parents.shape[-1] != self._d_pa):
+            raise ValueError(
+                f"update parents dim {0 if not has_pa else parents.shape[-1]} "
+                f"differs from the fitted {self._d_pa}"
+            )
+        if has_pa:
+            pa_old = self._train_pa * self._pa_std + self._pa_mean   # undo standardisation
+            pa_pool = torch.cat([pa_old, ensure_2d(parents).float().to(device)], dim=0)
+        else:
+            pa_pool = None
+        n_new = y_new.shape[0]
+        y_pool = torch.cat([self._train_y, y_new], dim=0)
+        info = self.fit_local(y_pool, pa_pool, n_classes=n_classes if self.discrete_child else None)
+        info.update({"method": "knn_append", "n_new": int(n_new)})
+        return info
 
     @property
     def is_fitted(self) -> bool:
