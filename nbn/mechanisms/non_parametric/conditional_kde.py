@@ -26,6 +26,10 @@ Design notes
   on **standardised** parents (so the per-dimension scale is O(1)) and on the
   raw child.  ``torch.quantile``-based robust scale (IQR) guards against
   heavy tails, mirroring the project's existing use of ``torch.quantile``.
+  Under per-sample weights the rule is replication-exact: the sample size is
+  the total weight, the scale is the frequency-weighted std, and the IQR is
+  the weighted quantile (:func:`nbn.learning.weighting.weighted_quantile`),
+  so integer weights give the bandwidth of the replicated rows.
 * **Streaming.** The sufficient statistic of a KDE is its (weighted) sample,
   so ``update_local`` is exact: it appends the new rows to the stored sample
   and re-derives the standardisation and the rule-of-thumb bandwidths from
@@ -46,7 +50,7 @@ import math
 import torch
 from torch.distributions import Distribution
 
-from nbn.learning.weighting import validate_weights, weighted_moments
+from nbn.learning.weighting import validate_weights, weighted_moments, weighted_quantile
 from nbn.mechanisms.base import Mechanism
 from nbn.utils.batching import _sanitise_parents, ensure_2d, flatten_samples
 
@@ -146,13 +150,27 @@ class ConditionalKDEMechanism(Mechanism):
     # ------------------------------------------------------------------
     # Bandwidth rules
     # ------------------------------------------------------------------
-    def _rule_bandwidth(self, data: torch.Tensor) -> torch.Tensor:
-        """Per-dimension Scott/Silverman bandwidth for ``data`` ``[N, D]``."""
-        n, d = data.shape
-        std = data.std(0, unbiased=True)
+    def _rule_bandwidth(
+        self, data: torch.Tensor, weights: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Per-dimension Scott/Silverman bandwidth for ``data`` ``[N, D]``.
+
+        ``weights`` are per-row multiplicities (see
+        :mod:`nbn.learning.weighting`); the rule is then evaluated on the
+        replicated sample: ``n`` is the total weight, the std is
+        frequency-weighted (``sum(w) - 1`` denominator) and the IQR comes
+        from the weighted quantile.  Unweighted, every quantity is the plain
+        one, so ``weights=None`` is byte-identical to the historical rule.
+        """
+        d = data.shape[1]
+        if weights is None:
+            n = float(data.shape[0])
+        else:
+            n = float(weights.sum())
+        _, std = weighted_moments(data, weights, unbiased=True)
         # Robust scale: min(std, IQR/1.349) when IQR is informative.
-        q = torch.quantile(
-            data, torch.tensor([0.25, 0.75], device=data.device, dtype=data.dtype), dim=0
+        q = weighted_quantile(
+            data, torch.tensor([0.25, 0.75], device=data.device, dtype=torch.float64), weights,
         )
         iqr = (q[1] - q[0]) / 1.349
         scale = torch.where((iqr > 0) & (iqr < std), iqr, std).clamp_min(self.min_bandwidth)
@@ -305,7 +323,8 @@ class ConditionalKDEMechanism(Mechanism):
         n, d_x = y.shape
         device = y.device
         self.output_dim = d_x
-        self._b = self._rule_bandwidth(y)
+        w_vec = kwargs.get("_w_vec")
+        self._b = self._rule_bandwidth(y, w_vec)
 
         if parents is None or parents.shape[-1] == 0:
             self._d_pa = 0
@@ -316,12 +335,12 @@ class ConditionalKDEMechanism(Mechanism):
         else:
             pa = ensure_2d(parents).float().to(device)
             self._d_pa = pa.shape[1]
-            pa_m, pa_s = weighted_moments(pa, kwargs.get("_w_vec"), unbiased=True)
+            pa_m, pa_s = weighted_moments(pa, w_vec, unbiased=True)
             self._pa_mean = pa_m.unsqueeze(0)
             self._pa_std = pa_s.unsqueeze(0).clamp_min(self.min_bandwidth)
             pa_std_space = (pa - self._pa_mean) / self._pa_std
             self._train_pa = pa_std_space
-            self._h = self._rule_bandwidth(pa_std_space)
+            self._h = self._rule_bandwidth(pa_std_space, w_vec)
 
         self._train_y = y
         return {
