@@ -130,6 +130,43 @@ def weighted_moments(
     return mean.to(t.dtype), var.sqrt().to(t.dtype)
 
 
+def weighted_quantile(
+    t: torch.Tensor, q: torch.Tensor, weights: torch.Tensor | None,
+) -> torch.Tensor:
+    """Per-column quantiles ``[Q, D]`` of ``[N, D]``, weighted if ``weights`` given.
+
+    Replication-exact: with integer weights this equals
+    ``torch.quantile(t[idx], q, dim=0)`` on the rows replicated ``w_i`` times,
+    including ``torch.quantile``'s linear interpolation between order
+    statistics.  The replicated, sorted column has ``M = sum(w)`` entries and
+    entry ``j`` is the first sorted row whose cumulative weight exceeds ``j``;
+    the quantile sits at position ``q * (M - 1)`` of that column and is
+    interpolated between its two neighbouring entries.  Non-integer weights
+    generalise naturally (``M`` is then real) and a zero weight drops the row
+    exactly.  Accumulated in float64.
+    """
+    q = torch.as_tensor(q, device=t.device, dtype=torch.float64).reshape(-1)
+    if weights is None:
+        return torch.quantile(t, q.to(t.dtype), dim=0)
+    td = t.to(torch.float64)
+    w = weights.reshape(-1).to(device=t.device, dtype=torch.float64)
+    order = td.argsort(dim=0)                                  # [N, D]
+    xs = torch.gather(td, 0, order)                            # sorted per column
+    cum = w[order].cumsum(0)                                   # [N, D]
+    total = cum[-1]                                            # [D]
+    pos = (q.unsqueeze(1) * (total.unsqueeze(0) - 1.0)).clamp_min(0.0)   # [Q, D]
+    lo, hi = pos.floor(), pos.ceil()
+    frac = pos - lo
+    cum_t = cum.T.contiguous()                                 # [D, N]
+
+    def _at(j: torch.Tensor) -> torch.Tensor:                  # value at replicated index j
+        idx = torch.searchsorted(cum_t, j.T.contiguous(), right=True).T
+        return torch.gather(xs, 0, idx.clamp_max(xs.shape[0] - 1))
+
+    out = _at(lo) * (1.0 - frac) + _at(hi) * frac
+    return out.to(t.dtype)
+
+
 def select(
     weights: torch.Tensor | None, idx: torch.Tensor
 ) -> torch.Tensor | None:
