@@ -90,11 +90,19 @@ class TestKDEAppend:
         weighted.fit_local(torch.cat([y_a, y_b, y_c]), torch.cat([pa_a, pa_b, pa_c]), weights=w)
         assert torch.allclose(chunked.log_prob(qy, qpa), weighted.log_prob(qy, qpa), atol=1e-4)
 
+    def test_new_row_weights_are_multiplicities(self):
+        """Integer weights on the update rows equal appending replicated rows."""
+        pa_a, y_a, _ = _gen(100, seed=1)
+        pa_b, y_b, _ = _gen(40, seed=2)
+        chunked = _kde()
+        chunked.fit_local(y_a, pa_a)
+        chunked.update_local(y_b, pa_b, weights=torch.full((40,), 2.0))
+        replicated = _kde()
+        replicated.fit_local(torch.cat([y_a, y_b, y_b]), torch.cat([pa_a, pa_b, pa_b]))
+        qpa, qy = _query()
+        assert torch.allclose(chunked.log_prob(qy, qpa), replicated.log_prob(qy, qpa), atol=1e-4)
+
     def test_new_row_weights_equal_weighted_pooled_fit(self):
-        # The contract is "update with weights == weighted pooled fit".  (It is
-        # not replication equivalence: the rule-of-thumb bandwidth of the
-        # weighted *fit* uses the row count rather than the effective sample
-        # size, a pre-existing property of fit_local that update inherits.)
         pa_a, y_a, _ = _gen(100, seed=1)
         pa_b, y_b, _ = _gen(40, seed=2)
         chunked = _kde()

@@ -26,6 +26,7 @@ from nbn.learning.weighting import (
     validate_weights,
     weighted_mean,
     weighted_moments,
+    weighted_quantile,
 )
 from nbn.mechanisms import (
     CategoricalTableMechanism,
@@ -457,6 +458,62 @@ def test_update_local_refuses_weights_rather_than_swallowing_them():
 # ==========================================================================
 # KDE — weighted Nadaraya-Watson
 # ==========================================================================
+
+
+def test_weighted_quantile_equals_torch_quantile_on_replicated_rows():
+    """Integer weights, several q, two columns, zero weights: exact match."""
+    torch.manual_seed(0)
+    x = torch.randn(37, 2)
+    w = torch.randint(0, 4, (37,)).float()          # zeros drop rows exactly
+    w[0] = 2.0                                       # keep at least one row
+    q = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0])
+    got = weighted_quantile(x, q, w.double())
+    want = torch.quantile(x[_replicate(w)], q, dim=0)
+    torch.testing.assert_close(got, want, atol=1e-6, rtol=0)
+
+
+def test_weighted_quantile_unit_weights_reproduce_torch_quantile():
+    torch.manual_seed(1)
+    x = torch.randn(50, 3)
+    q = torch.tensor([0.25, 0.75])
+    torch.testing.assert_close(weighted_quantile(x, q, torch.ones(50).double()),
+                               torch.quantile(x, q, dim=0), atol=1e-6, rtol=0)
+    torch.testing.assert_close(weighted_quantile(x, q, None), torch.quantile(x, q, dim=0))
+
+
+def test_kde_replication_equivalence():
+    """Integer weights must equal fitting on the replicated rows: the
+    bandwidths (child and parent), the standardisation and the density."""
+    torch.manual_seed(0)
+    pa = torch.randn(80, 2)
+    y = 0.7 * pa[:, :1] + 0.1 * torch.randn(80, 1)
+    w = torch.randint(1, 4, (80,)).float()
+    idx = _replicate(w)
+
+    weighted = ConditionalKDEMechanism(bw_factor=0.5)
+    weighted.fit_local(y, pa, weights=w)
+    replicated = ConditionalKDEMechanism(bw_factor=0.5)
+    replicated.fit_local(y[idx], pa[idx])
+
+    for name in ("_b", "_h", "_pa_mean", "_pa_std"):
+        torch.testing.assert_close(getattr(weighted, name), getattr(replicated, name),
+                                   atol=1e-5, rtol=0, msg=name)
+    qpa, qy = torch.randn(32, 2), torch.randn(32, 1)
+    torch.testing.assert_close(weighted.log_prob(qy, qpa), replicated.log_prob(qy, qpa),
+                               atol=1e-4, rtol=0)
+
+
+def test_kde_unit_weights_reproduce_the_unweighted_fit_exactly():
+    torch.manual_seed(0)
+    pa = torch.randn(60, 2)
+    y = torch.randn(60, 1)
+    plain = ConditionalKDEMechanism(bw_factor=0.5)
+    plain.fit_local(y, pa)
+    ones = ConditionalKDEMechanism(bw_factor=0.5)
+    ones.fit_local(y, pa, weights=torch.ones(60))
+    for name in ("_b", "_h", "_pa_mean", "_pa_std"):
+        torch.testing.assert_close(getattr(plain, name), getattr(ones, name),
+                                   atol=1e-6, rtol=0, msg=name)
 
 
 def test_kde_zero_weighted_points_leave_the_mixture():
