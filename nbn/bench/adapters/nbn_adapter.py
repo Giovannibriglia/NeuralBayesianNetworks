@@ -179,8 +179,10 @@ class NBNAdapter:
         self._engine_obj: Any | None = None
         self.problem: BenchmarkProblem | None = None
         # Per-cell methodology flag (#185 follow-up): which proposal the AIS
-        # engine actually used — "learned" or "lw_fallback" (low fit-time ESS).
-        # None for engines without a learned proposal (ve / lw) and until fit.
+        # engine actually used — "learned" or "lw_fallback" (low fit-time ESS);
+        # since #249 the AVI engine reports the same flag from its fit-time
+        # ELBO-gain gate. None for engines without a learned proposal (ve /
+        # lw) and until fit.
         self.proposal_used: str | None = None
         # Per-cell phase timings (fit-once reporting split). ``base_fit_time_s``
         # is the wall-clock of ``model.fit()`` (None on the reload path, where
@@ -429,7 +431,10 @@ class NBNAdapter:
             # once, here, so it is reused across all query/query_batch calls
             # within the fit-once-query-many cell (compatible with PR #176).
             self._engine_obj = AmortizedVIEngine(n_samples=self.n_samples)
-            self._engine_obj.train_proposal(self.model, device=str(self.device))
+            metrics = self._engine_obj.train_proposal(
+                self.model, device=str(self.device))
+            # Fit-time quality gate outcome (#249): "learned" or "lw_fallback".
+            self.proposal_used = metrics.get("proposal_used")
         else:
             self._engine_obj = HybridRouter()
 

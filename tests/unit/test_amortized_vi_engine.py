@@ -172,7 +172,10 @@ def test_discrete_gradient_flow(discrete_problem):
     ve = _fit_adapter("cat", "ve", discrete_problem, epochs=5)
     model = ve.model
     eng = AmortizedVIEngine(n_samples=256)
-    eng.train_proposal(model, n_training_samples=512, n_epochs=1, device="cpu")
+    # 1 epoch is far too little to clear the fit-time quality gate (#249);
+    # this test inspects q's gradients, not its quality — bypass the gate.
+    eng.train_proposal(model, n_training_samples=512, n_epochs=1, device="cpu",
+                       quality_gate=False)
     net = eng.recognition_net
 
     samples = ancestral_sample(model, n=256, device="cpu")
@@ -196,7 +199,10 @@ def test_variational_gap_warns(discrete_problem, caplog):
     eng = AmortizedVIEngine(n_samples=256)
     eng._estimate_elbo_gap = lambda *a, **k: 50.0  # type: ignore[assignment]
     with caplog.at_level(logging.WARNING):
-        eng.train_proposal(model, n_training_samples=500, n_epochs=2, device="cpu")
+        # quality_gate=False: a 2-epoch q is (correctly) rejected by the
+        # fit-time gate (#249); this test is about the gap diagnostic only.
+        eng.train_proposal(model, n_training_samples=500, n_epochs=2, device="cpu",
+                           quality_gate=False)
     assert eng.recognition_net is not None
     assert any("variational gap" in rec.getMessage() for rec in caplog.records), (
         "expected variational-gap warning"
