@@ -103,6 +103,18 @@ class CellResult:
     # of M AIS cells" quantitatively.
     proposal_used: str | None = None
 
+    # Per-cell fraction of query rows the AIS engine answered with the prior
+    # (LW) proposal under the PER-QUERY ESS fallback (#250): rows whose
+    # learned-proposal ESS fell below the query threshold were re-run with LW
+    # and LW won on the ESS. 0.0 = the learned proposal answered every query,
+    # 1.0 = LW answered every query. None for engines without a learned
+    # proposal, for ``proposal_used == "lw_fallback"`` cells (no learned
+    # proposal to fall back from), and legacy parquets. Stamped per cell by
+    # cell_worker._emit from the adapter (cumulative over the cell's queries at
+    # emit time). Additive. Lets the paper report "learned proposal answered
+    # X% of AIS queries" rather than the all-or-nothing fit-time flag.
+    query_fallback_frac: float | None = None
+
     # Per-query effective-sample-size fraction ∈ (0, 1] for importance-sampling
     # engines (LW / AIS), stamped onto every row of a query by the measurement
     # (parallel to query_time_s, which is also per-query). None for exact / non-IS

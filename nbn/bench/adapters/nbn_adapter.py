@@ -192,6 +192,19 @@ class NBNAdapter:
         self.base_fit_time_s: float | None = None
         self.attach_time_s: float | None = None
 
+    @property
+    def query_fallback_frac(self) -> float | None:
+        """Fraction of query rows the AIS engine answered with LW (#250).
+
+        Read from the engine's per-query fallback counters at emit time
+        (cumulative over the cell). None before any query, for non-AIS
+        engines, and for ``lw_fallback`` cells (no learned proposal).
+        """
+        eng = self._engine_obj
+        if eng is None or getattr(eng, "recognition_net", None) is None:
+            return None
+        return getattr(eng, "query_fallback_frac", None)
+
     # -------------------------------------------------------------------------
     # Internal mechanism factory — mirrors old NBNAdapter._make_mech()
     # -------------------------------------------------------------------------
