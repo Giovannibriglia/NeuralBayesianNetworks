@@ -17,9 +17,17 @@ degrades gracefully to the marginal: a full-sample KDE for a continuous child,
 or smoothed global class frequencies for a discrete child.
 
 Memory: the neighbour search tiles over the **query** dimension, so peak
-memory is ``O(query_chunk * N)`` rather than ``O(M * N)``.  (A KeOps
+memory is ``O(query_chunk * N)`` rather than ``O(M * N)``; the root
+continuous marginal streams over training chunks the same way.  (A KeOps
 ``argKmin`` backend would make this linear-memory and FAISS-competitive; kept
 optional.)
+
+Neighbour memoisation: the ``[M, k]`` neighbour indices of the last few
+parent batches are cached (exact match by ``torch.equal``), so ``log_prob``
+and ``sample`` on the same parent rows -- ``forward(pa)`` then both, or a
+scored ancestral sample -- run the ``cdist`` + ``topk`` search once.  The
+cache is cleared whenever the stored sample changes (fit / update / a state
+dict load).
 
 Streaming: the stored sample is the sufficient statistic, so ``update_local``
 appends the new rows and re-resolves the standardisation and ``k`` from the
@@ -38,6 +46,13 @@ from nbn.mechanisms.base import Mechanism
 from nbn.utils.batching import _sanitise_parents, ensure_2d, flatten_samples
 
 _LOG_2PI = math.log(2.0 * math.pi)
+
+
+def _clear_neighbour_cache_hook(module, incompatible_keys) -> None:
+    """``load_state_dict`` post-hook: a module-level function so the module
+    stays picklable (``torch.save(model)`` is how the benchmark's fit-once
+    cache persists a fitted network)."""
+    module._clear_neighbour_cache()
 
 
 class _KNNContinuousDistribution(Distribution):
@@ -84,7 +99,11 @@ class KNNConditionalMechanism(Mechanism):
     min_bandwidth:
         Floor on the continuous bandwidth.
     query_chunk:
-        Query rows per neighbour-search tile.
+        Query rows per neighbour-search tile (and training rows per tile of
+        the root continuous marginal).
+    neighbour_cache_size:
+        How many recent parent batches keep their neighbour indices
+        memoised (``0`` disables the cache; see the module notes).
     """
 
     def __init__(
@@ -95,6 +114,7 @@ class KNNConditionalMechanism(Mechanism):
         bw_factor: float = 1.0,
         min_bandwidth: float = 1e-3,
         query_chunk: int = 1024,
+        neighbour_cache_size: int = 4,
     ) -> None:
         super().__init__()
         self.k = None if k is None else int(k)
@@ -104,10 +124,16 @@ class KNNConditionalMechanism(Mechanism):
         self.bw_factor = float(bw_factor)
         self.min_bandwidth = float(min_bandwidth)
         self.query_chunk = int(query_chunk)
+        self.neighbour_cache_size = int(neighbour_cache_size)
         self.output_dim = 1
         self._d_pa = 0
         self._n_classes = 0
         self._k_eff = 0
+        # Memoised neighbour searches: list of (standardised query batch,
+        # indices), most recent last.  Plain attribute, never persisted.
+        self._nbr_cache: list[tuple[torch.Tensor, torch.Tensor]] = []
+        # A loaded state dict swaps the stored sample under the cache.
+        self.register_load_state_dict_post_hook(_clear_neighbour_cache_hook)
         self.register_buffer("_train_y", None)    # [N, D_x] (float) or [N] long for discrete
         self.register_buffer("_train_pa", None)    # [N, D_pa] standardised
         self.register_buffer("_pa_mean", None)
@@ -155,6 +181,7 @@ class KNNConditionalMechanism(Mechanism):
                 "ConditionalKDEMechanism (weighted Nadaraya-Watson) or a "
                 "parametric mechanism for weighted fitting."
             )
+        self._clear_neighbour_cache()   # the stored sample is about to change
         device = x.device
         if self.discrete_child:
             y = x.long().reshape(-1)
@@ -261,8 +288,30 @@ class KNNConditionalMechanism(Mechanism):
     # ------------------------------------------------------------------
     # Neighbour search (tiled over query)
     # ------------------------------------------------------------------
+    def _clear_neighbour_cache(self) -> None:
+        self._nbr_cache = []
+
     def _knn_indices(self, xs: torch.Tensor) -> torch.Tensor:
-        """Return neighbour indices ``[M, k]`` for standardised queries ``xs`` ``[M, D_pa]``."""
+        """Return neighbour indices ``[M, k]`` for standardised queries ``xs`` ``[M, D_pa]``.
+
+        Memoised on the exact content of ``xs`` (``torch.equal``, an
+        ``O(M·D_pa)`` compare against the ``O(M·N·D_pa)`` search) for the last
+        ``neighbour_cache_size`` batches, so ``log_prob`` then ``sample`` on
+        the same parent rows search once.
+        """
+        if self.neighbour_cache_size > 0:
+            for key, idx in reversed(self._nbr_cache):
+                if (key.shape == xs.shape and key.device == xs.device
+                        and key.dtype == xs.dtype and torch.equal(key, xs)):
+                    return idx
+        out = self._knn_search(xs)
+        if self.neighbour_cache_size > 0:
+            self._nbr_cache.append((xs.detach().clone(), out))
+            del self._nbr_cache[:-self.neighbour_cache_size]
+        return out
+
+    def _knn_search(self, xs: torch.Tensor) -> torch.Tensor:
+        """The uncached neighbour search behind ``_knn_indices``."""
         tpa = self._train_pa
         m = xs.shape[0]
         k = self._k_eff
@@ -315,12 +364,18 @@ class KNNConditionalMechanism(Mechanism):
         y = y.to(device).float()
         m = y.shape[0]
         if self._d_pa == 0 or parents is None:
-            # marginal full-sample KDE (uniform weights)
+            # marginal full-sample KDE (uniform weights), streamed over
+            # training chunks: peak memory O(M * query_chunk), not [M, N, D_x].
             b = self._b_global.to(device)
             log_b_norm = (torch.log(b) + 0.5 * _LOG_2PI).sum()
-            dy = (y.unsqueeze(1) - ty.unsqueeze(0)) / b        # [M, N, D_x]
-            logk = (-0.5 * dy.pow(2)).sum(-1) - log_b_norm     # [M, N]
-            return torch.logsumexp(logk, dim=1) - math.log(ty.shape[0])
+            n = ty.shape[0]
+            acc = torch.full((m,), float("-inf"), device=device)
+            for start in range(0, n, self.query_chunk):
+                ty_c = ty[start:start + self.query_chunk]
+                dy = (y.unsqueeze(1) - ty_c.unsqueeze(0)) / b   # [M, c, D_x]
+                logk = (-0.5 * dy.pow(2)).sum(-1)              # [M, c]
+                acc = torch.logaddexp(acc, torch.logsumexp(logk, dim=1))
+            return acc - log_b_norm - math.log(n)
         xs = self._std_parents(ensure_2d(parents)).to(device)
         idx = self._knn_indices(xs)                            # [M, k]
         nbr_y = ty[idx]                                        # [M, k, D_x]

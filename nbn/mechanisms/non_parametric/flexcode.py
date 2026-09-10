@@ -43,6 +43,24 @@ from nbn.mechanisms.parametric.mdn import _build_mlp
 from nbn.utils.batching import _sanitise_parents, ensure_2d, flatten_samples
 
 
+def _may_have_duplicate_rows(rows: torch.Tensor) -> bool:
+    """Cheap screen before a row-wise ``torch.unique``.
+
+    Projects every row onto one fixed direction and counts distinct
+    projections: distinct projections imply distinct rows, so a full count
+    proves there is nothing to fold and the (much costlier) lexicographic
+    row sort is skipped -- the common case of one sampled parent row per
+    particle.  A projection collision only sends the batch to the exact
+    row-wise ``unique``; it never merges rows.
+    """
+    m, d = rows.shape
+    if d == 1:
+        return torch.unique(rows[:, 0]).numel() < m
+    g = torch.Generator(device="cpu").manual_seed(0x5F3759DF)
+    direction = torch.randn(d, generator=g).to(device=rows.device, dtype=rows.dtype)
+    return torch.unique(rows @ direction).numel() < m
+
+
 class _FlexCodeDistribution(Distribution):
     has_rsample = False
     arg_constraints: dict = {}
@@ -87,6 +105,15 @@ class FlexCodeMechanism(Mechanism):
         select it by held-out negative log-likelihood at fit time.
     min_density:
         Floor for the density (numerical-stability / finite log-prob).
+    dedup_parents:
+        Evaluate the coefficient network and the grid normaliser once per
+        *distinct* parent row of a ``log_prob`` call and broadcast (default).
+        The normaliser is a ``[m, grid_size]`` grid density integrated per
+        row -- ``grid_size`` times the coefficient work -- while an
+        importance-sampling sweep scores ``S`` particles against the same
+        ``B`` parent rows, so the distinct-row count is often ``m / S``.
+        ``False`` keeps the per-row evaluation (the reference the exactness
+        test compares against).
     """
 
     is_discrete: bool = False
@@ -105,10 +132,12 @@ class FlexCodeMechanism(Mechanism):
         margin: float = 0.05,
         sharpen: float | str = 1.0,
         min_density: float = 1e-6,
+        dedup_parents: bool = True,
     ) -> None:
         super().__init__()
         if isinstance(sharpen, str) and sharpen != "auto":
             raise ValueError(f"sharpen must be a float or 'auto', got {sharpen!r}")
+        self.dedup_parents = bool(dedup_parents)
         self.n_basis = int(n_basis)
         self.hidden = tuple(hidden)
         self.activation = activation
@@ -373,6 +402,43 @@ class FlexCodeMechanism(Mechanism):
         return torch.trapz(gd, dx=dz, dim=1).clamp_min(self.min_density) if hasattr(torch, "trapz") \
             else torch.trapezoid(gd, dx=dz, dim=1).clamp_min(self.min_density)
 
+    def _coef_and_normaliser(
+        self, parents: torch.Tensor | None, b: int, s: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Coefficients ``[b*s, J]`` and normalisers ``[b*s]`` for a ``log_prob`` call.
+
+        ``parents`` is ``None`` (root), ``[b, D_pa]`` (one row per batch
+        element, shared by its ``s`` particles) or ``[b, s, D_pa]``.  With
+        ``dedup_parents`` the work is done once per distinct parent row:
+        the ``[b, D_pa]`` case broadcasts the ``b`` rows (no search needed);
+        the flat case folds duplicate rows with ``torch.unique``.  Rows are
+        sanitised before deduplication so NaN parents (mapped to 0 by
+        ``_coef``) compare equal.  Row order is ``b``-major, matching
+        ``flatten_samples``.
+        """
+        m = b * s
+        if parents is None or self._d_pa == 0:
+            coef = self._coef(None, m)
+            return coef, self._normaliser(coef)
+        if parents.dim() == 2:
+            if self.dedup_parents and s > 1:
+                coef_b = self._coef(parents, b)                      # [b, J]
+                norm_b = self._normaliser(coef_b)                    # [b]
+                return (coef_b.repeat_interleave(s, dim=0),
+                        norm_b.repeat_interleave(s, dim=0))
+            parents = parents.unsqueeze(1).expand(-1, s, -1)
+        pa_flat = flatten_samples(parents)[0]                        # [m, D_pa]
+        if self.dedup_parents and m > 1:
+            pa_flat = _sanitise_parents(ensure_2d(pa_flat).float(), mech_name="FlexCode")
+            if _may_have_duplicate_rows(pa_flat):
+                uniq, inv = torch.unique(pa_flat, dim=0, return_inverse=True)
+                if uniq.shape[0] < m:
+                    coef_u = self._coef(uniq, uniq.shape[0])         # [u, J]
+                    norm_u = self._normaliser(coef_u)                # [u]
+                    return coef_u[inv], norm_u[inv]
+        coef = self._coef(pa_flat, m)
+        return coef, self._normaliser(coef)
+
     # ------------------------------------------------------------------
     # Distribution interface
     # ------------------------------------------------------------------
@@ -388,15 +454,11 @@ class FlexCodeMechanism(Mechanism):
             x = x.unsqueeze(1)
             squeeze_s = True
         b, s, _ = x.shape
-        if parents is not None and parents.dim() == 2:
-            parents = parents.unsqueeze(1).expand(-1, s, -1)
-        pa_flat = None if parents is None else flatten_samples(parents)[0]
         m = b * s
-        coef = self._coef(pa_flat, m)                        # [m, J]
+        coef, norm = self._coef_and_normaliser(parents, b, s)  # [m, J], [m]
         y = x.reshape(m, 1).to(self._y_min.device)
         z = self._scale_to_z(y).squeeze(-1)                  # [m]
         dens_z = self._density_z(z, coef)                    # [m]
-        norm = self._normaliser(coef)                        # [m]
         span = (self._y_max - self._y_min)
         log_p = torch.log(dens_z.clamp_min(self.min_density)) - torch.log(norm) - torch.log(span)
         log_p = log_p.reshape(b, s)

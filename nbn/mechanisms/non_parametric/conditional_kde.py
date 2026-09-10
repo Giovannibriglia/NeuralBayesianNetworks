@@ -22,6 +22,15 @@ Design notes
   online map-reduce) would give a further 10--100x on large N, but is kept out
   of the hard dependency set; the chunked torch path below is the portable
   default.
+* **Neighbour truncation (opt-in).** ``n_neighbors=k`` restricts both sums to
+  the ``k`` training rows nearest to the query in bandwidth-scaled parent
+  space.  Gaussian parent kernels decay as ``exp(-d²/2)``, so the rows beyond
+  the ``k``-th neighbour contribute a vanishing share of either sum once ``k``
+  covers the kernel's support; the query cost drops from ``Θ(M·N)`` to a
+  ``Θ(M·k)`` gather plus one chunked neighbour search.  The neighbour search
+  streams over the training rows with a running top-``k`` (never a whole
+  ``[M, N]`` distance matrix).  ``None`` (the default) is the exact estimator,
+  as is any ``k >= N``; roots have no parent space and are always exact.
 * **Bandwidth.** Scott's and Silverman's rules-of-thumb are provided, computed
   on **standardised** parents (so the per-dimension scale is O(1)) and on the
   raw child.  ``torch.quantile``-based robust scale (IQR) guards against
@@ -105,7 +114,18 @@ class ConditionalKDEMechanism(Mechanism):
         Number of training points processed per tile in ``log_prob`` (caps
         peak memory at ``O(M * train_chunk)``).
     query_chunk:
-        Number of query rows processed per tile in ``sample``.
+        Number of query rows processed per tile in ``sample`` (and in the
+        truncated neighbour search).
+    n_neighbors:
+        ``None`` (default) evaluates the exact Nadaraya--Watson sums over all
+        ``N`` training rows.  An integer ``k`` truncates both sums to the
+        ``k`` nearest training rows in bandwidth-scaled parent space (see the
+        module notes); ``k >= N`` and root nodes take the exact path.  The
+        truncation is an approximation whose error is set by how far, in
+        bandwidths, the ``k``-th neighbour lies: pick ``k`` so that it is
+        ~3 bandwidths out (``k`` grows with ``N·h^D_pa``).  Measured at
+        ``N=10000, D_pa=2`` (Scott ``h≈0.22`` std) on in-distribution
+        queries: ``k=2048`` → median ``|Δ log p|`` 3e-5, ``k=256`` → 6e-2.
     """
 
     is_discrete: bool = False
@@ -119,17 +139,21 @@ class ConditionalKDEMechanism(Mechanism):
         min_bandwidth: float = 1e-3,
         train_chunk: int = 8192,
         query_chunk: int = 1024,
+        n_neighbors: int | None = None,
     ) -> None:
         super().__init__()
         if bandwidth not in ("scott", "silverman"):
             raise ValueError(f"bandwidth must be 'scott' or 'silverman', got {bandwidth!r}")
         if isinstance(bw_factor, str) and bw_factor != "auto":
             raise ValueError(f"bw_factor must be a float or 'auto', got {bw_factor!r}")
+        if n_neighbors is not None and int(n_neighbors) < 1:
+            raise ValueError(f"n_neighbors must be a positive int or None, got {n_neighbors!r}")
         self.bandwidth = bandwidth
         self.bw_factor = bw_factor if bw_factor == "auto" else float(bw_factor)
         self.min_bandwidth = float(min_bandwidth)
         self.train_chunk = int(train_chunk)
         self.query_chunk = int(query_chunk)
+        self.n_neighbors = None if n_neighbors is None else int(n_neighbors)
         self.output_dim = 1
         self._d_pa = 0
         # Buffers (populated by fit_local) — carried by .to(device)/state_dict.
@@ -362,6 +386,87 @@ class ConditionalKDEMechanism(Mechanism):
         parents = _sanitise_parents(parents.float(), mech_name="ConditionalKDE")
         return (parents - self._pa_mean) / self._pa_std
 
+    def _truncation_k(self) -> int | None:
+        """Effective neighbour count, or ``None`` when the exact path applies.
+
+        Truncation needs a parent space to search and only pays (and only
+        changes the answer) when ``k < N``; ``k >= N`` sums the same rows as
+        the exact estimator, so it takes the exact code path and stays
+        byte-identical.
+        """
+        k = self.n_neighbors
+        if k is None or self._d_pa == 0 or self._train_y is None:
+            return None
+        n = self._train_y.shape[0]
+        return k if k < n else None
+
+    def _topk_neighbours(self, xs: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """``k`` nearest training rows to each standardised query row.
+
+        Distances are measured in bandwidth-scaled parent space, so the
+        parent log-kernel of a selected row is exactly ``-0.5 * d2``.
+        Streams over training chunks with a running top-``k`` and tiles over
+        query rows: peak memory is ``O(query_chunk * (train_chunk + k))``,
+        never ``[M, N]``.
+
+        Returns ``(idx [M, k] long, d2 [M, k])``, each row sorted ascending
+        by distance.
+        """
+        tpa = self._train_pa                                   # [N, D_pa]
+        h = self._h.to(tpa.device)
+        n = tpa.shape[0]
+        tpa_h = tpa / h                                        # [N, D_pa]
+        xs_h = xs / h                                          # [M, D_pa]
+        m = xs_h.shape[0]
+        idx_out = torch.empty(m, k, dtype=torch.long, device=tpa.device)
+        for qs in range(0, m, self.query_chunk):
+            qsl = slice(qs, qs + self.query_chunk)
+            xq = xs_h[qsl]                                     # [q, D_pa]
+            best_d = None                                      # [q, <=k]
+            best_idx = None
+            for ts in range(0, n, self.train_chunk):
+                tsl = slice(ts, min(ts + self.train_chunk, n))
+                # Selection only: cdist's matmul form is far cheaper than the
+                # [q, c, D_pa] difference tensor; its float32 cancellation
+                # error can at most permute near-ties, and the kernel weights
+                # are recomputed exactly on the selected rows below.
+                d = torch.cdist(xq, tpa_h[tsl])                # [q, c]
+                cand_idx = torch.arange(tsl.start, tsl.stop, device=tpa.device)
+                cand_idx = cand_idx.unsqueeze(0).expand(d.shape[0], -1)
+                if best_d is not None:
+                    d = torch.cat([best_d, d], dim=1)
+                    cand_idx = torch.cat([best_idx, cand_idx], dim=1)
+                kk = min(k, d.shape[1])
+                best_d, pos = torch.topk(d, kk, largest=False, dim=1, sorted=True)
+                best_idx = torch.gather(cand_idx, 1, pos)
+            idx_out[qsl] = best_idx
+        # Exact bandwidth-scaled squared distances of the selected rows —
+        # the same arithmetic as the exact path's ``dx``.
+        diff = xs_h.unsqueeze(1) - tpa_h[idx_out]              # [M, k, D_pa]
+        return idx_out, diff.pow(2).sum(-1)
+
+    def _logp_2d_truncated(
+        self, y: torch.Tensor, xs: torch.Tensor, k: int,
+    ) -> torch.Tensor:
+        """Truncated Nadaraya--Watson: sums over each query's ``k`` neighbours.
+
+        ``y`` ``[M, D_x]`` on the training device, ``xs`` ``[M, D_pa]``
+        standardised parents.  Same log-space arithmetic as the exact
+        ``_logp_2d`` restricted to the gathered rows.
+        """
+        ty = self._train_y
+        device = ty.device
+        b = self._b.to(device)
+        log_b_norm = (torch.log(b) + 0.5 * _LOG_2PI).sum()
+        idx, d2 = self._topk_neighbours(xs, k)                # [M, k]
+        ty_k = ty[idx]                                         # [M, k, D_x]
+        dy = (y.unsqueeze(1) - ty_k) / b                       # [M, k, D_x]
+        logKy = (-0.5 * dy.pow(2)).sum(-1) - log_b_norm        # [M, k]
+        logKpa = -0.5 * d2                                     # [M, k]
+        if self._train_logw is not None:
+            logKpa = logKpa + self._train_logw.to(device)[idx]
+        return torch.logsumexp(logKpa + logKy, dim=1) - torch.logsumexp(logKpa, dim=1)
+
     def _logp_2d(self, y: torch.Tensor, parents: torch.Tensor | None) -> torch.Tensor:
         """log p(y | parents) for ``y`` ``[M, D_x]``, ``parents`` ``[M, D_pa]``/None → ``[M]``."""
         assert self._train_y is not None, "Call fit_local before log_prob."
@@ -377,6 +482,9 @@ class ConditionalKDEMechanism(Mechanism):
             xs = None
         else:
             xs = self._std_parents(parents).to(device)        # [M, D_pa]
+            k_trunc = self._truncation_k()
+            if k_trunc is not None:
+                return self._logp_2d_truncated(y, xs, k_trunc)
             tpa = self._train_pa                              # [N, D_pa]
             h = self._h.to(device)
 
@@ -419,6 +527,18 @@ class ConditionalKDEMechanism(Mechanism):
 
         xs = self._std_parents(ensure_2d(parents)).to(device)  # [M, D_pa]
         m = xs.shape[0]
+        k_trunc = self._truncation_k()
+        if k_trunc is not None:
+            # Mixture over each query's k neighbours only: the component
+            # logits are the parent log-kernels (+ log-weights) of those rows.
+            idx, d2 = self._topk_neighbours(xs, k_trunc)       # [M, k]
+            logits = -0.5 * d2
+            if self._train_logw is not None:
+                logits = logits + self._train_logw.to(device)[idx]
+            pick = torch.distributions.Categorical(logits=logits).sample((n_samples,))  # [n, M]
+            comp = torch.gather(idx, 1, pick.transpose(0, 1))  # [M, n] training rows
+            base = ty[comp]                                    # [M, n, D_x]
+            return base + b * torch.randn_like(base)
         h = self._h.to(device)
         tpa = self._train_pa
         out = torch.empty(m, n_samples, d_x, device=device)
