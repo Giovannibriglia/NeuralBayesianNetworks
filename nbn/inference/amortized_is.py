@@ -41,6 +41,7 @@ context.
 """
 from __future__ import annotations
 
+import copy
 import logging
 import time
 from typing import Dict, List, Tuple
@@ -71,6 +72,48 @@ _ESS_FALLBACK_THRESHOLD = 0.1
 _STEPS_PER_NODE = 90
 _MIN_TRAIN_STEPS = 500
 
+# Per-query fallback (#250).  The fit-time gate above judges the proposal on
+# ONE synthetic evidence pattern (half of topo order observed, last node
+# target) — at paper scale that collapsed to all-or-nothing (learned 100% at
+# n=10, 0% at n≥100) while LW's own per-query ESS sat at ~0.24 for both
+# proposals alike.  So the decision is now also made per query, on the actual
+# evidence: rows whose learned-proposal ESS fraction falls below this
+# threshold are re-run with the prior (LW) proposal and the row with the
+# higher ESS is kept — never worse than LW on any single query.
+_QUERY_ESS_FALLBACK_THRESHOLD = 0.1
+
+# Training early stop on the held-out ESS (#250).  The proposal's ESS is
+# measured on a FIXED held-out evidence set every ``ess_check_every`` steps /
+# ``ess_check_every_s`` seconds.  Two stop rules, best checkpoint restored:
+#   * plateau — ``ess_patience`` checks without an improvement of at least
+#     ``max(ess_min_delta, ess_rel_delta · best)``;
+#   * hopeless — the proposal is still below the fit-time gate and, at the
+#     slope of the last checks, cannot reach it within the remaining step /
+#     time budget (n=1000: the full 600 s cap used to be spent, then 100% fell
+#     back to LW; n=50 discrete climbs slowly but steadily and must NOT be cut).
+_ESS_PATIENCE = 3
+_ESS_MIN_DELTA = 0.005
+_ESS_REL_DELTA = 0.05
+_ESS_SLOPE_WINDOW = 3
+_ESS_EVAL_ROWS = 64
+_ESS_EVAL_PARTICLES = 256
+
+
+def _norm_batch(d: Dict[str, torch.Tensor] | None) -> Dict[str, torch.Tensor]:
+    """Normalise scalar / 0-D evidence (or do) values to ≥1-D (mirror LW)."""
+    return {
+        k: (v if (isinstance(v, torch.Tensor) and v.dim() >= 1)
+            else (torch.as_tensor(v).reshape(1) if not isinstance(v, torch.Tensor)
+                  else v.reshape(1)))
+        for k, v in (d or {}).items()
+    }
+
+
+def _ess_fraction_rows(log_w: torch.Tensor) -> torch.Tensor:
+    """Per-row ESS fraction ``ESS_b / S`` for ``log_w`` ``[B, S]`` → ``[B]``."""
+    w = torch.softmax(log_w, dim=-1)
+    return 1.0 / (w.pow(2).sum(dim=-1) * log_w.shape[-1]).clamp_min(1e-12)
+
 
 class AmortizedISEngine(LikelihoodWeightingEngine):
     """Amortized importance-sampling engine with a learned proposal.
@@ -79,11 +122,36 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
     ----------
     n_samples:
         Number of particles per query (importance-sampling sample size).
+    per_query_fallback:
+        Re-run rows whose learned-proposal ESS fraction is below
+        ``query_ess_threshold`` with the prior (LW) proposal and keep the
+        better row (#250).  ``n_queries_seen`` / ``n_queries_fallback`` count
+        the rows and the rows where LW won; ``last_fallback_mask`` is the
+        per-row decision of the last query.
+    query_ess_threshold:
+        ESS-fraction threshold for the per-query fallback.
     """
 
-    def __init__(self, n_samples: int = 1024) -> None:
+    def __init__(
+        self,
+        n_samples: int = 1024,
+        per_query_fallback: bool = True,
+        query_ess_threshold: float = _QUERY_ESS_FALLBACK_THRESHOLD,
+    ) -> None:
         super().__init__(n_samples=n_samples)
         self.recognition_net: ParentConditionedProposal | None = None
+        self.per_query_fallback = bool(per_query_fallback)
+        self.query_ess_threshold = float(query_ess_threshold)
+        self.n_queries_seen = 0
+        self.n_queries_fallback = 0
+        self.last_fallback_mask: torch.Tensor | None = None
+
+    @property
+    def query_fallback_frac(self) -> float | None:
+        """Fraction of query rows answered by the LW fallback so far (None before any query)."""
+        if self.n_queries_seen == 0:
+            return None
+        return self.n_queries_fallback / self.n_queries_seen
 
     # ------------------------------------------------------------------
     # Proposal training (called once, from adapter.fit())
@@ -99,6 +167,12 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
         time_budget_s: float = 600.0,
         steps_per_node: int = _STEPS_PER_NODE,
         device: str | None = None,
+        early_stop: bool = True,
+        ess_check_every: int | None = None,
+        ess_check_every_s: float | None = None,
+        ess_patience: int = _ESS_PATIENCE,
+        ess_min_delta: float = _ESS_MIN_DELTA,
+        ess_rel_delta: float = _ESS_REL_DELTA,
     ) -> dict:
         """Train the parent-conditioned proposal ``q(xᵢ | e, paᵢ)`` on prior samples.
 
@@ -110,16 +184,32 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
 
         Budget is step-based and scales with node count (``steps_per_node·n``,
         floored at ``_MIN_TRAIN_STEPS``); ``time_budget_s`` is a safety cap.
+
+        With ``early_stop`` (#250) the held-out ESS fraction is measured on a
+        fixed evidence set every ``ess_check_every`` steps (default
+        ``max(25, target_steps // 20)``) or ``ess_check_every_s`` seconds
+        (default ``time_budget_s / 12``), whichever comes first; training
+        stops when the ESS plateaus (``ess_patience`` checks without a
+        ``max(ess_min_delta, ess_rel_delta·best)`` improvement) or when it is
+        below the fit-time gate and its recent slope cannot reach the gate
+        within the remaining budget; the best checkpoint is restored.
         Returns a metrics dict (final loss, grad steps, held-out ESS proxy,
-        proposal_used).
+        proposal_used, early_stopped, stop_reason, ess_history).
         """
         dev = torch.device(device or model.device)
         net = ParentConditionedProposal(model).to(dev)
         self.recognition_net = net
         self.device = dev
+        self.n_queries_seen = 0
+        self.n_queries_fallback = 0
+        self.last_fallback_mask = None
 
         n_nodes = len(net.node_order)
         target_steps = self._target_train_steps(n_nodes, steps_per_node)
+        if ess_check_every is None:
+            ess_check_every = max(25, target_steps // 20)
+        if ess_check_every_s is None:
+            ess_check_every_s = float(time_budget_s) / 12.0
 
         # Ancestral prior samples → [N, n_nodes] value matrix (topo order).
         # Under no_grad: fixed training data; differentiable mechanisms would
@@ -129,12 +219,29 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
             x = self._stack_values(samples, net.node_order, dev).detach()  # [N, n_nodes]
         n = x.shape[0]
 
+        # Fixed held-out evidence set for the ESS checkpoints AND the final
+        # gate: the same rows at every check, so successive ESS values are
+        # comparable (fresh samples per check would add noise to the
+        # early-stop decision).  None if it cannot be built; then the
+        # checkpoints are skipped and the final gate samples its own.
+        eval_set = self._make_ess_eval_set(model) if early_stop else None
+        if early_stop and eval_set is None:
+            early_stop = False
+
         opt = torch.optim.Adam(net.parameters(), lr=lr)
         net.train()
         start = time.monotonic()
+        last_check = start
         last_loss = float("nan")
         steps = 0
         stop = False
+        early_stopped = False
+        stop_reason = "budget"
+        best_ess: float | None = None
+        best_state = None
+        best_step = 0
+        bad_checks = 0
+        ess_history: List[Tuple[int, float]] = []
         while steps < target_steps and not stop:
             perm = torch.randperm(n, device=dev)
             for i in range(0, n, batch_size):
@@ -153,17 +260,80 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
                 opt.step()
                 last_loss = float(loss.detach())
                 steps += 1
-                if steps >= target_steps or time.monotonic() - start > time_budget_s:
+                now = time.monotonic()
+                if steps >= target_steps or now - start > time_budget_s:
                     stop = True
                     break
-            if time.monotonic() - start > time_budget_s:
+                if early_stop and (
+                        steps % ess_check_every == 0
+                        or now - last_check > ess_check_every_s):
+                    last_check = now
+                    net.eval()
+                    ess_now = self._estimate_ess_fraction(model, eval_set=eval_set)
+                    net.train()
+                    if ess_now is None:
+                        # Diagnostic unavailable → cannot early-stop; train
+                        # the full budget as before.
+                        early_stop = False
+                        continue
+                    ess_history.append((steps, float(ess_now)))
+                    if best_ess is None or ess_now > best_ess + max(
+                            ess_min_delta, ess_rel_delta * best_ess):
+                        best_ess, best_step, bad_checks = float(ess_now), steps, 0
+                        # state_dict() aliases the live params — snapshot by copy.
+                        best_state = copy.deepcopy(net.state_dict())
+                    else:
+                        bad_checks += 1
+                    if bad_checks >= ess_patience:
+                        early_stopped, stop, stop_reason = True, True, "plateau"
+                        logger.info(
+                            "AmortizedISEngine: held-out ESS plateaued at %.3f "
+                            "(best at step %d); stopping proposal training "
+                            "after %d/%d steps.",
+                            best_ess, best_step, steps, target_steps,
+                        )
+                        break
+                    if (ess_now < _ESS_FALLBACK_THRESHOLD
+                            and len(ess_history) > _ESS_SLOPE_WINDOW):
+                        # Hopeless: extrapolate the recent slope (per check)
+                        # over the checks the remaining step AND time budget
+                        # still allow; stop if the gate stays out of reach.
+                        past = ess_history[-1 - _ESS_SLOPE_WINDOW][1]
+                        slope = (float(ess_now) - past) / _ESS_SLOPE_WINDOW
+                        # Checks the remaining STEP budget allows, capped by
+                        # the remaining TIME budget at the observed seconds
+                        # per check (the step trigger usually fires first,
+                        # so ess_check_every_s would overestimate the gap).
+                        sec_per_check = max((now - start) / len(ess_history), 1e-6)
+                        remaining = min(
+                            (target_steps - steps) / ess_check_every,
+                            max(0.0, time_budget_s - (now - start)) / sec_per_check,
+                        )
+                        if float(ess_now) + slope * remaining < _ESS_FALLBACK_THRESHOLD:
+                            early_stopped, stop, stop_reason = True, True, "hopeless"
+                            logger.info(
+                                "AmortizedISEngine: held-out ESS %.3f rising "
+                                "%.4f/check cannot reach the %.2f gate within "
+                                "the remaining budget (~%.0f checks); stopping "
+                                "proposal training after %d/%d steps.",
+                                ess_now, slope, _ESS_FALLBACK_THRESHOLD,
+                                remaining, steps, target_steps,
+                            )
+                            break
+            if not early_stopped and time.monotonic() - start > time_budget_s:
                 logger.info(
                     "AmortizedISEngine: proposal training hit time budget "
                     "(%.0fs) after %d/%d steps.", time_budget_s, steps, target_steps,
                 )
         net.eval()
+        train_time_s = time.monotonic() - start
 
-        ess_frac = self._estimate_ess_fraction(model)
+        ess_frac = self._estimate_ess_fraction(model, eval_set=eval_set)
+        if best_state is not None and (ess_frac is None or best_ess > ess_frac):
+            # The final parameters are worse (on the same held-out rows) than
+            # the best checkpoint: restore it and report its ESS.
+            net.load_state_dict(best_state)
+            ess_frac = best_ess
         proposal_used = "learned"
         if ess_frac is not None and ess_frac < _ESS_FALLBACK_THRESHOLD:
             # Diagnostic: why the proposal is being rejected.
@@ -190,6 +360,11 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
             "target_steps": target_steps,
             "ess_fraction": ess_frac,
             "proposal_used": proposal_used,
+            "early_stopped": early_stopped,
+            "stop_reason": stop_reason,
+            "best_step": best_step,
+            "ess_history": ess_history,
+            "train_time_s": train_time_s,
         }
 
     @staticmethod
@@ -245,22 +420,20 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
             count = count + n_unobs
         return total / count.clamp_min(1.0)
 
-    def _estimate_ess_fraction(
-        self, model, n_eval: int = 64, diag_particles: int = 256,
-    ) -> float | None:
-        """Held-out ESS proxy: mean effective-sample-size fraction.
+    def _make_ess_eval_set(
+        self, model, n_eval: int = _ESS_EVAL_ROWS,
+    ) -> Dict[str, object] | None:
+        """Fixed held-out evidence set for the ESS proxy (fresh prior samples).
 
-        Observes roughly half of the nodes (from fresh prior samples) as
-        evidence, runs the proposal, and returns the mean of
-        ``ESS_b / diag_particles`` across the eval batch.  Returns ``None``
-        on any failure — a diagnostic must never break ``fit``.
+        Observes roughly the first half of topo order as evidence and targets
+        the last node — deliberately a hard pattern (many latents between the
+        evidence and the target).  Returns ``None`` on any failure.
         """
         try:
             dev = self.device or model.device
             with torch.no_grad():
                 test = ancestral_sample(model, n=n_eval, device=str(dev))
                 node_order = self.recognition_net.node_order
-                # Observe the first half of topo order; target the last node.
                 n_nodes = len(node_order)
                 obs_nodes = node_order[: max(1, n_nodes // 2)]
                 tgt = node_order[-1]
@@ -272,10 +445,37 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
                     if v.dim() >= 2:
                         v = v[..., 0]
                     evidence[node] = v.reshape(-1, 1).to(device=dev, dtype=torch.float32)
-                log_w, _ = self._run(model, [tgt], evidence, {}, diag_particles)
-                w = torch.softmax(log_w, dim=-1)             # [B, S]
-                ess = 1.0 / w.pow(2).sum(dim=-1).clamp_min(1e-12)  # [B]
-                return float((ess / diag_particles).mean())
+            return {"evidence": evidence, "target": tgt}
+        except Exception as exc:  # pragma: no cover - diagnostic safety
+            logger.warning(
+                "AmortizedISEngine: could not build the held-out ESS set (%r); "
+                "ESS checkpoints disabled.", exc,
+            )
+            return None
+
+    def _estimate_ess_fraction(
+        self, model, n_eval: int = _ESS_EVAL_ROWS,
+        diag_particles: int = _ESS_EVAL_PARTICLES,
+        eval_set: Dict[str, object] | None = None,
+    ) -> float | None:
+        """Held-out ESS proxy: mean effective-sample-size fraction.
+
+        Runs the LEARNED proposal (no per-query fallback) on ``eval_set`` —
+        or a fresh one from ``_make_ess_eval_set`` — and returns the mean of
+        ``ESS_b / diag_particles`` across the eval rows.  Returns ``None`` on
+        any failure — a diagnostic must never break ``fit``.
+        """
+        try:
+            if eval_set is None:
+                eval_set = self._make_ess_eval_set(model, n_eval=n_eval)
+                if eval_set is None:
+                    return None
+            with torch.no_grad():
+                log_w, _ = self._run_learned(
+                    model, [eval_set["target"]], eval_set["evidence"], {},
+                    diag_particles,
+                )
+                return float(_ess_fraction_rows(log_w).mean())
         except Exception as exc:  # pragma: no cover - diagnostic safety
             logger.warning(
                 "AmortizedISEngine: fit-time ESS gate SKIPPED (diagnostic raised "
@@ -298,9 +498,63 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
         if self.recognition_net is None:
             # No trained proposal → fall back to prior-proposal LW.
             return super()._run(model, targets, evidence, do, n_samples)
+        log_w, buf = self._run_learned(model, targets, evidence, do, n_samples)
+        if not self.per_query_fallback:
+            return log_w, buf
+        return self._apply_query_fallback(
+            model, targets, evidence, do, n_samples, log_w, buf)
 
-        evidence = evidence or {}
-        do = do or {}
+    def _apply_query_fallback(
+        self, model, targets, evidence, do, n_samples, log_w, buf,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Per-query ESS fallback (#250): re-run low-ESS rows with the prior proposal.
+
+        Rows whose learned-proposal ESS fraction is below
+        ``query_ess_threshold`` are re-run through the inherited LW loop (on
+        that row subset only) and, per row, the result with the higher ESS is
+        kept.  Both loops share the inference state, so the sample buffers
+        have the same layout and rows can be spliced.  ``last_fallback_mask``
+        ``[B]`` records which rows LW answered; the counters feed
+        ``query_fallback_frac``.
+        """
+        b = log_w.shape[0]
+        ess = _ess_fraction_rows(log_w)                              # [B]
+        low = ess < self.query_ess_threshold
+        used_lw = torch.zeros(b, dtype=torch.bool, device=log_w.device)
+        if bool(low.any()):
+            idx = low.nonzero(as_tuple=False).reshape(-1)
+            evidence = _norm_batch(evidence)
+            do = _norm_batch(do)
+
+            def _rows(d):
+                # Evidence/do tensors are [B, ...] (row-select) or [1, ...]
+                # (broadcast across the batch → keep).
+                return {k: (v[idx] if v.shape[0] == b else v) for k, v in d.items()}
+
+            lw_log_w, lw_buf = super()._run(
+                model, targets, _rows(evidence), _rows(do), n_samples)
+            better = _ess_fraction_rows(lw_log_w) > ess[idx]           # [b']
+            if bool(better.any()):
+                take = idx[better]
+                log_w[take] = lw_log_w[better]
+                buf[take] = lw_buf[better]
+                used_lw[take] = True
+        self.n_queries_seen += b
+        self.n_queries_fallback += int(used_lw.sum())
+        self.last_fallback_mask = used_lw
+        return log_w, buf
+
+    def _run_learned(
+        self,
+        model,
+        targets: List[str],
+        evidence: Dict[str, torch.Tensor] | None,
+        do: Dict[str, torch.Tensor] | None,
+        n_samples: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Learned-proposal IS loop (no fallback).  Returns ``(log_w [B, S], buf)``."""
+        evidence = _norm_batch(evidence)
+        do = _norm_batch(do)
         device = model.device
         dtype = torch.float32
         net = self.recognition_net
@@ -311,16 +565,6 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
             tuple(sorted(do.keys())),
             self._cache,
         )
-        # Normalise scalar / 0-D evidence and do to 1-D (mirror LW).
-        def _norm(d):
-            return {
-                k: (v if (isinstance(v, torch.Tensor) and v.dim() >= 1)
-                    else (torch.as_tensor(v).reshape(1) if not isinstance(v, torch.Tensor)
-                          else v.reshape(1)))
-                for k, v in d.items()
-            }
-        evidence = _norm(evidence)
-        do = _norm(do)
         # Batch axis spans evidence AND do — see LikelihoodWeightingEngine._run.
         b = max(
             (v.shape[0] for v in list(evidence.values()) + list(do.values())),

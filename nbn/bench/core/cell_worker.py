@@ -217,6 +217,8 @@ def _run_cell(ctx: dict) -> list[dict]:
         # in this worker — the parent runner reconstructs rows from dicts and
         # never sees it. None for engines without a learned proposal.
         proposal_used = getattr(adapter, "proposal_used", None)
+        # Per-query fallback fraction (#250): same adapter-fact choke point.
+        query_fallback_frac = getattr(adapter, "query_fallback_frac", None)
         # Fit-once phase split: model.fit() wall-clock (None on reload) and
         # engine-attach wall-clock (incl. ais/avi proposal training). Same
         # adapter-fact choke point as device / proposal_used.
@@ -226,6 +228,7 @@ def _run_cell(ctx: dict) -> list[dict]:
             dataclasses.asdict(
                 dataclasses.replace(
                     r, device=dev, proposal_used=proposal_used,
+                    query_fallback_frac=query_fallback_frac,
                     base_fit_time_s=base_fit_time_s,
                     attach_time_s=attach_time_s,
                 )
