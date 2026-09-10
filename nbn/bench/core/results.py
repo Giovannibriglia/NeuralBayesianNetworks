@@ -95,7 +95,9 @@ class CellResult:
     # AIS proposal provenance (#185 follow-up): which proposal the amortized-IS
     # engine actually used for this cell — "learned" (the recognition net
     # cleared the fit-time ESS gate) or "lw_fallback" (ESS too low → engine fell
-    # back to likelihood weighting). None for engines without a learned proposal
+    # back to likelihood weighting). Since #249 the AVI engine stamps the same
+    # flag from its fit-time ELBO-gain gate (q no better than the prior → LW).
+    # None for engines without a learned proposal
     # (ve / lw) and for legacy parquets predating this column. Stamped once per
     # cell by the worker from the adapter (cell_worker._emit), so it is
     # identical across all rows of a given cell. Additive — downstream readers
