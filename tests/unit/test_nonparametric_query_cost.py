@@ -148,7 +148,14 @@ class TestKDETruncation:
         chunked.update_local(y_b, pa_b)
         pooled = ConditionalKDEMechanism(n_neighbors=64, train_chunk=97)
         pooled.fit_local(torch.cat([y_a, y_b]), torch.cat([pa_a, pa_b]))
-        assert torch.equal(chunked.log_prob(qy, qpa), pooled.log_prob(qy, qpa))
+        # update_local un-standardises and re-standardises the pooled parents,
+        # leaving ~1e-7 round-off in the stored rows, so the contract is
+        # allclose (as in test_update_nonparametric), not bit equality; the
+        # truncated neighbour sets themselves must agree exactly.
+        ia, _ = chunked._topk_neighbours(chunked._std_parents(qpa), 64)
+        ib, _ = pooled._topk_neighbours(pooled._std_parents(qpa), 64)
+        assert torch.equal(ia.sort(dim=1).values, ib.sort(dim=1).values)
+        assert torch.allclose(chunked.log_prob(qy, qpa), pooled.log_prob(qy, qpa), atol=1e-5)
 
 
 # ── KNNConditional: neighbour memoisation ────────────────────────────────────
