@@ -171,6 +171,61 @@ class TestJsonlToParquet:
         assert df["problem_id"].iloc[0] == "4"
 
 
+    def test_streams_in_row_groups(self, tmp_path):
+        """chunk_rows bounds the in-memory buffer: rows land in several row groups."""
+        import pyarrow.parquet as pq
+        jsonl = tmp_path / "rows.jsonl"
+        _write_jsonl(jsonl, [_sample_v3_row(seed=i) for i in range(7)])
+        out = tmp_path / "rows.parquet"
+        jsonl_to_parquet(jsonl, out, chunk_rows=3)
+        md = pq.ParquetFile(out).metadata
+        assert md.num_rows == 7
+        assert md.num_row_groups == 3          # 3 + 3 + 1
+        import pandas as pd
+        assert pd.read_parquet(out)["seed"].tolist() == list(range(7))
+
+    def test_all_null_column_in_first_chunk_keeps_declared_dtype(self, tmp_path):
+        """A CellResult float column that is all-null in the first chunk and
+        float in a later chunk must not raise a schema mismatch (the reason
+        the schema is derived from the dataclass, not inferred)."""
+        import math as _m
+        import pandas as pd
+        jsonl = tmp_path / "rows.jsonl"
+        rows = [_sample_v3_row(ess=None) for _ in range(3)]
+        rows += [_sample_v3_row(ess=0.5) for _ in range(3)]
+        _write_jsonl(jsonl, rows)
+        out = tmp_path / "rows.parquet"
+        jsonl_to_parquet(jsonl, out, chunk_rows=3)
+        df = pd.read_parquet(out)
+        assert str(df["ess"].dtype) == "float64"
+        assert _m.isnan(df["ess"].iloc[0]) and df["ess"].iloc[-1] == 0.5
+
+    def test_extra_column_in_first_chunk_is_kept(self, tmp_path):
+        import pandas as pd
+        jsonl = tmp_path / "rows.jsonl"
+        _write_jsonl(jsonl, [_sample_v3_row(future_col="x"), _sample_v3_row()])
+        out = tmp_path / "rows.parquet"
+        jsonl_to_parquet(jsonl, out)
+        df = pd.read_parquet(out)
+        assert df["future_col"].tolist()[0] == "x"
+        assert df["future_col"].isna().tolist() == [False, True]
+
+    def test_extra_column_after_first_chunk_raises(self, tmp_path):
+        jsonl = tmp_path / "rows.jsonl"
+        _write_jsonl(jsonl, [_sample_v3_row(), _sample_v3_row(), _sample_v3_row(late="y")])
+        out = tmp_path / "rows.parquet"
+        with pytest.raises(ValueError, match="late"):
+            jsonl_to_parquet(jsonl, out, chunk_rows=2)
+
+    def test_int_problem_id_is_stringified(self, tmp_path):
+        import pandas as pd
+        jsonl = tmp_path / "rows.jsonl"
+        _write_jsonl(jsonl, [_sample_v3_row(problem_id=10)])
+        out = tmp_path / "rows.parquet"
+        jsonl_to_parquet(jsonl, out)
+        assert pd.read_parquet(out)["problem_id"].iloc[0] == "10"
+
+
 # ---------------------------------------------------------------------------
 # TestCompactDatetime
 # ---------------------------------------------------------------------------

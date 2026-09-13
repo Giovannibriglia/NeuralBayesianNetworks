@@ -206,11 +206,17 @@ class TestTimingOnlyProtocol:
         result = m.measure(problem, _StubAdapter(), [])
         assert result == []
 
-    def test_three_rows_per_query(self):
+    def test_one_row_per_query_plus_two_per_pass(self):
+        """N query_time_s rows + one fit_time_s + one metrics_time_s row."""
         problem, queries = _get_discrete_problem_and_queries()
         m = TimingOnly()
         result = m.measure(problem, _StubAdapter(), queries)
-        assert len(result) == 3 * len(queries)
+        assert len(result) == len(queries) + 2
+        assert [r.metric for r in result[-2:]] == ["fit_time_s", "metrics_time_s"]
+        for r in result[-2:]:
+            assert r.query_role == ""
+            assert r.status == "ok"
+            assert math.isnan(r.query_time_s)
 
     def test_query_time_s_rows_present(self):
         problem, queries = _get_discrete_problem_and_queries()
@@ -300,8 +306,14 @@ class TestCellResultSchema:
         problem, queries = _get_discrete_problem_and_queries()
         m = TimingOnly()
         result = m.measure(problem, _StubAdapter(), queries)
-        for row in result:
+        per_query = [r for r in result if r.metric == "query_time_s"]
+        assert len(per_query) == len(queries)
+        for row in per_query:
             assert row.query_role == "random"
+        # The per-pass fit/metrics rows are cell-level: query_role="".
+        for row in result:
+            if row.metric != "query_time_s":
+                assert row.query_role == ""
 
     def test_custom_query_roles_propagated(self):
         problem, queries = _get_discrete_problem_and_queries()
@@ -309,7 +321,8 @@ class TestCellResultSchema:
         m = TimingOnly()
         result = m.measure(problem, _StubAdapter(), queries, query_roles=roles)
         for row in result:
-            assert row.query_role == "hub"
+            if row.metric == "query_time_s":
+                assert row.query_role == "hub"
 
     def test_query_roles_length_mismatch_raises(self):
         problem, queries = _get_discrete_problem_and_queries()
@@ -322,9 +335,13 @@ class TestCellResultSchema:
         problem, queries = _get_discrete_problem_and_queries()
         m = TimingOnly()
         result = m.measure(problem, _StubErrorAdapter(), queries)
-        for row in result:
+        per_query = [r for r in result if r.metric == "query_time_s"]
+        assert len(per_query) == len(queries)
+        for row in per_query:
             assert row.status == "error"
             assert row.error_msg is not None
+        # Query failures do not un-fit the model: the per-pass fit row stays ok.
+        assert [r.status for r in result if r.metric == "fit_time_s"] == ["ok"]
 
     def test_timing_only_query_oom_classifies_as_oom(self):
         """A torch CPU allocator failure raised at query time classifies as
@@ -339,8 +356,9 @@ class TestCellResultSchema:
         problem, queries = _get_discrete_problem_and_queries()
         m = TimingOnly()
         result = m.measure(problem, _StubOOMAdapter(), queries)
-        assert len(result) > 0
-        for row in result:
+        per_query = [r for r in result if r.metric == "query_time_s"]
+        assert len(per_query) == len(queries)
+        for row in per_query:
             assert row.status == "oom", (
                 f"expected oom, got {row.status!r} for {row.error_msg!r}"
             )
@@ -363,7 +381,11 @@ class TestCellResultSchema:
         m = TimingOnly()
         result = m.measure(problem, _StubAdapter(), queries)
         for row in result:
-            assert row.query_time_s >= 0.0
+            if row.metric == "query_time_s":
+                assert row.query_time_s >= 0.0
+            else:
+                # per-pass rows have no single query behind them
+                assert math.isnan(row.query_time_s)
 
 
 # ---------------------------------------------------------------------------
@@ -591,7 +613,7 @@ class TestQueryBudget:
         result = m.measure(problem, _StubAdapter(), queries, query_budget_s=float("inf"))
         timeout_rows = [r for r in result if r.status == "timeout"]
         assert len(timeout_rows) == 0
-        assert len(result) == 3 * len(queries)
+        assert len(result) == len(queries) + 2
 
     def test_timing_only_zero_budget_times_out_all_queries(self):
         """budget=0.0: cumulative 0.0 >= 0.0 before query 0 → all timeout."""
@@ -599,7 +621,9 @@ class TestQueryBudget:
         m = TimingOnly()
         result = m.measure(problem, _StubAdapter(), queries, query_budget_s=0.0)
         timeout_rows = [r for r in result if r.status == "timeout"]
-        assert len(timeout_rows) == 3 * len(queries)
+        assert len(timeout_rows) == len(queries)
+        # The per-pass fit/metrics rows stay "ok": the fit succeeded.
+        assert [r.metric for r in result if r.status == "ok"] == ["fit_time_s", "metrics_time_s"]
 
     def test_timing_only_timeout_rows_have_nan_query_time(self):
         problem, queries = _get_discrete_problem_and_queries()
@@ -661,7 +685,7 @@ class TestTimingOnlyBehavioral:
         m = TimingOnly()
         result = m.measure(problem, adapter, queries, fit_time_s=fit_time_s)
 
-        assert len(result) == 3 * len(queries)
+        assert len(result) == len(queries) + 2
         for row in result:
             assert row.metrics_time_s == 0.0
             assert row.fit_time_s == pytest.approx(fit_time_s)
@@ -681,7 +705,7 @@ class TestTimingOnlyBehavioral:
         m = TimingOnly()
         result = m.measure(problem, adapter, queries, fit_time_s=fit_time_s)
 
-        assert len(result) == 3 * len(queries)
+        assert len(result) == len(queries) + 2
         for row in result:
             assert row.status == "ok"
         qt_rows = [r for r in result if r.metric == "query_time_s"]
@@ -732,8 +756,9 @@ class TestTimingMetricRows:
         result = m.measure(problem, _StubAdapter(), queries, fit_time_s=2.0)
         ft_rows = [r for r in result if r.metric == "fit_time_s"]
         mt_rows = [r for r in result if r.metric == "metrics_time_s"]
-        assert len(ft_rows) == len(queries)
-        assert len(mt_rows) == len(queries)
+        # One per measure() pass, not one per query.
+        assert len(ft_rows) == 1
+        assert len(mt_rows) == 1
         for row in ft_rows:
             assert row.value == pytest.approx(2.0)
         for row in mt_rows:

@@ -21,6 +21,14 @@
 # NOTE on VRAM: three GPU benchmarks in flight can exceed an 8 GB card. If you
 # hit CUDA OOM, drop to MAX_PARALLEL=2 (or 1), or set DEVICE=cpu for the run.
 #
+# NOTE on RAM / where to launch from: run long jobs from a plain terminal
+# (or under nohup / tmux), NOT from an IDE's embedded terminal. On a systemd
+# desktop the IDE and every process it spawned share one cgroup; when the
+# post-run JSONL -> parquet step (or the IDE itself) pushes that cgroup into
+# memory pressure, systemd-oomd kills the WHOLE scope -- the IDE and the
+# benchmark together -- with no traceback in run.log (2026-09-12 batch_speed
+# run: 20 h of cells completed, then killed during conversion).
+#
 # Requires bash >= 4.3 (for `wait -n`).
 # =============================================================================
 set -uo pipefail
