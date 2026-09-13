@@ -10,6 +10,17 @@ and **2.3× more accurate** on discrete parameter learning at scale, and is
 the only library in our benchmark suite that handles hybrid (mixed
 continuous-discrete) networks at scale.
 
+## Quick start (from a checkout)
+
+```bash
+pip install -U -e ".[all]" && nbn-bench check-env
+```
+
+This installs the library plus everything the benchmark suite needs at the
+pinned versions, then verifies the environment (`nbn-bench check-env` must
+print `environment OK`; the run commands refuse to start otherwise). Run it
+again after every `git pull` on a benchmark machine.
+
 ## Install
 
 ```bash
