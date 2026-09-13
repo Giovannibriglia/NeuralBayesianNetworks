@@ -46,17 +46,28 @@ elif command -v python3 >/dev/null 2>&1; then
 else
   echo "ERROR: no python interpreter found (need python or python3 on PATH," >&2
   echo "       or a repo .venv). Install the package first:" >&2
-  echo "       pip install -e \".[bench,neural,gp,mcmc]\"" >&2
+  echo "       pip install -e \".[all]\"" >&2
   exit 1
 fi
 # `<py> -m nbn.bench.cli` is equivalent to the `nbn-bench` console script
 # but does not depend on the entry point being on PATH.
 BENCH_CMD=("${PY}" -m nbn.bench.cli)
 
-# ── preflight: is the CLI importable / runnable?
+# ── never let a stale copy in ~/.local shadow the environment's packages
+#    (a pre-1.0 pgmpy there turned every discrete pgmpy cell of the
+#    2026-09-10 run into not_supported).
+export PYTHONNOUSERSITE=1
+
+# ── preflight: is the CLI importable, and are the libraries the adapters
+#    need installed at the right versions? (`nbn-bench check-env`)
 if ! "${BENCH_CMD[@]}" --help >/dev/null 2>&1; then
   echo "ERROR: cannot run '${BENCH_CMD[*]}'. Install the package first:" >&2
-  echo "       pip install -e \".[bench,neural,gp,mcmc]\"" >&2
+  echo "       pip install -e \".[all]\"" >&2
+  exit 1
+fi
+if ! "${BENCH_CMD[@]}" check-env; then
+  echo "ERROR: environment check failed (see table above). Install the" >&2
+  echo "       missing/outdated libraries: pip install -U -e \".[all]\"" >&2
   exit 1
 fi
 

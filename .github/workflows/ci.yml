@@ -31,6 +31,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install --prefer-binary -e ".[dev,bench,neural,gp,mcmc]"
 
+      - name: Check environment
+        # The resolver's picks must satisfy the versions the adapters are
+        # written against (nbn/bench/_env.py mirrors pyproject.toml).
+        run: nbn-bench check-env
+
       - name: Lint
         run: ruff check nbn/ tests/ notebooks/ scripts/
 

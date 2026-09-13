@@ -36,6 +36,9 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Path to a parameter-learning YAML config.")
     pl.add_argument("--device", default="auto",
                     help="'auto' (default), 'cpu', or 'cuda[:i]'.")
+    pl.add_argument("--skip-env-check", action="store_true",
+                    help="Start even if a library a baseline needs is missing "
+                         "or too old (those cells will be not_supported).")
     pl.add_argument("-v", "--verbose", action="store_true")
 
     inf = sub.add_parser(
@@ -46,7 +49,20 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="Path to an inference YAML config.")
     inf.add_argument("--device", default="auto",
                      help="'auto' (default), 'cpu', or 'cuda[:i]'.")
+    inf.add_argument("--skip-env-check", action="store_true",
+                     help="Start even if a library a baseline needs is missing "
+                          "or too old (those cells will be not_supported).")
     inf.add_argument("-v", "--verbose", action="store_true")
+
+    env = sub.add_parser(
+        "check-env",
+        help="Verify the installed libraries against the versions the "
+             "adapters need; exit 1 on any problem.",
+    )
+    env.add_argument("--config", default=None,
+                     help="Check only what this YAML config's baselines need "
+                          "(default: every declared requirement).")
+    env.add_argument("-v", "--verbose", action="store_true")
 
     plot = sub.add_parser(
         "plot",
@@ -200,9 +216,63 @@ def _execute_run(cfg, *, what: str = "inference") -> int:
         log_handler.close()
 
 
+def _config_baselines(path) -> list:
+    """The raw ``baselines`` list of a YAML config (no schema validation:
+    the loader does that later with its own messages)."""
+    import yaml
+
+    with open(path, encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh) or {}
+    return list(raw.get("baselines") or []) if isinstance(raw, dict) else []
+
+
+def _env_gate(config_path, *, skip: bool) -> int:
+    """Refuse to start a run whose baselines need a library that is missing,
+    too old, broken, or shadowed. Returns 0 to proceed, 2 to abort."""
+    from nbn.bench._env import (check_environment, format_reports, problems,
+                                required_for_baselines)
+
+    need = required_for_baselines(_config_baselines(config_path))
+    reports = check_environment(need)
+    bad = problems(reports)
+    if not bad:
+        return 0
+    table = format_reports(reports)
+    if skip:
+        logger.warning("environment problems (--skip-env-check given, "
+                       "affected baselines will be not_supported):\n%s", table)
+        return 0
+    print(table, file=sys.stderr)
+    print("\nERROR: the environment does not satisfy this config's baselines "
+          f"({', '.join(r.dist for r in bad)}). Fix the install (see the "
+          "notes above), or pass --skip-env-check to run anyway.",
+          file=sys.stderr)
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     _setup_console_logging(args.verbose, inference=(args.cmd == "inference"))
+
+    if args.cmd == "check-env":
+        from nbn.bench._env import (check_environment, format_reports, problems,
+                                    required_for_baselines)
+
+        need = (required_for_baselines(_config_baselines(args.config))
+                if args.config else None)
+        reports = check_environment(need)
+        print(format_reports(reports))
+        bad = problems(reports)
+        if bad:
+            print(f"\n{len(bad)} problem(s): " + ", ".join(r.dist for r in bad))
+            return 1
+        print("\nenvironment OK")
+        return 0
+
+    if args.cmd in {"param-learning", "inference"}:
+        rc = _env_gate(args.config, skip=args.skip_env_check)
+        if rc:
+            return rc
 
     if args.cmd == "param-learning":
         from nbn.bench.core.yaml_config import load_runner_config

@@ -43,10 +43,16 @@ bench = [
     "matplotlib>=3.7",
     "seaborn>=0.12",
     "psutil>=5.9",
+    "packaging>=23.0",
 ]
 neural = ["zuko>=1.2,<2.0"]
 gp = ["gpytorch>=1.11"]
 mcmc = ["pyro-ppl>=1.9"]
+# Everything a paper-grade benchmark run needs, in one extra. The runner
+# records a baseline whose library is absent as ``not_supported`` rather than
+# failing, so partial installs produce quiet, wrong runs; ``nbn-bench
+# check-env`` (and the run commands themselves) verify this set.
+all = ["nbn[bench,neural,gp,mcmc]"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",

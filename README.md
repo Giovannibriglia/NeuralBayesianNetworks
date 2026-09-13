@@ -16,15 +16,35 @@ continuous-discrete) networks at scale.
 pip install nbn                 # the library
 pip install "nbn[neural]"       # + zuko-backed flows / MDNs (NBN's headline mechanisms)
 pip install "nbn[bench]"        # + the benchmark suite (`nbn-bench`, `nbn.bench`)
+pip install "nbn[all]"          # everything a benchmark run needs (bench + neural + gp + mcmc)
 ```
 
 The import name is `nbn`. The `[neural]` extra adds zuko-backed flows/MDNs;
 `bench` pulls in the benchmark runner's own dependencies (pandas, pyarrow,
 scipy, yaml, tqdm), the external-baseline libraries (pgmpy, pomegranate) and
 plotting (matplotlib, seaborn); `gp`/`mcmc` add the gpytorch and pyro
-baselines. All of `bench`, `gp`, and `mcmc` are required for paper-grade
-benchmark runs — without them the runner silently skips those baselines
-(cells emit `not_supported` rather than erroring).
+baselines; `all` is the union. Use `all` for benchmark runs: a baseline whose
+library is absent is recorded as `not_supported`, not as an error.
+
+**Check the environment before a run.** The adapters are written against
+specific library versions (pgmpy ≥ 1.0 for `DiscreteBayesianNetwork`,
+pomegranate ≥ 1.0 for the torch API, …). `nbn-bench check-env` verifies
+every declared requirement — installed, importable, at the required version,
+and not a second copy shadowing the environment's (a stale pgmpy in
+`~/.local` is how one run lost all its pgmpy cells):
+
+```bash
+nbn-bench check-env                        # every requirement
+nbn-bench check-env --config <run.yaml>    # only what that config's baselines need
+```
+
+`nbn-bench inference` and `nbn-bench param-learning` run the same check for
+their config's baselines and **refuse to start** on a problem (exit code 2);
+`--skip-env-check` overrides that. `scripts/run_all_benchmarks.sh` runs it
+too and sets `PYTHONNOUSERSITE=1` so user-site packages cannot shadow the
+environment. If the check fails, `pip install -U "nbn[all]"` (or
+`pip install -U -e ".[all]"` from a checkout) brings everything up to the
+pinned versions.
 
 Working from a checkout (development, or reproducing the paper runs, whose
 YAML configs are addressed by repo-relative path):
@@ -32,7 +52,8 @@ YAML configs are addressed by repo-relative path):
 ```bash
 git clone https://github.com/Giovannibriglia/NeuralBayesianNetworks.git
 cd NeuralBayesianNetworks
-pip install -e ".[dev,bench,neural,gp,mcmc]"
+pip install -e ".[dev,all]"
+nbn-bench check-env
 ```
 
 `dev` is the test and docs toolchain. Releases are cut by pushing a `v*` tag;
