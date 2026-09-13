@@ -1,39 +1,32 @@
 """Generate paper figures + LaTeX tables from a benchmark parquet.
 
-Implements the spec in ``docs/v0.13-paper-figures.md``. The public entry point
-is :func:`run_plot`, invoked by the ``nbn-bench plot`` subcommand
+Public entry point: :func:`run_plot`, invoked by ``nbn-bench plot``
 (``nbn/bench/cli.py``); ``scripts/make_paper_figures.py`` remains as a
 deprecation shim.
 
-Supports the ``iqm_iqr`` (default) and ``mean_std`` aggregation flags,
-propagated uniformly to every numeric aggregation (accuracy AND time).
+Every figure is a **grouped bar plot** over the benchmark's discrete x grid
+(``n_nodes``, ``n_train``, ``batch_size`` or bnlearn ``network``); every
+figure and table comes in two views (``docs/v0.18-bar-reporting-all-common.md``,
+aggregation in :mod:`nbn.bench._paper_agg`):
 
-Output layout is per-FAMILY, with auto-discovered coverage SUBSETS under each
-family, at ``<output_dir>/<bench>/<family>/``:
+  all/      each method over the seeds it solved; ``k/n`` annotated when k<n
+  common/   each method over the seeds solved by every shown method at that x
 
-  all/                  every problem, every supported baseline (mixed coverage)
-    plots/success_rate.pdf, <metric>_vs_<axis>.pdf,
-          {total_query_time,fit_time}_vs_<axis>.pdf
-    tables/table_overall.tex, table_kind_<k>.tex, table_role_<r>.tex
-  common/               problems solved by the FULL supported baseline set
-    methods.txt, problems.txt, plots/ (no success_rate), tables/
-  subsetN/              one per auto-discovered solving-baseline set
-    methods.txt, problems.txt, plots/, tables/
-  _subsets_overview.txt navigation aid
+Shown methods per x = all non-nbn baselines applicable to the family + the
+``top_nbn`` best nbn methods (ranked on the view's own aggregate).
 
-A subset groups the problems whose "solving set" (baselines that are ``ok`` on
-every row of the problem) is identical; its plots/tables are restricted to
-those problems and baselines. ``<metric>`` in {tv,jsd,w1,log_likelihood}
-_per_node (w1 skipped for family==discrete); ``<axis>`` in {n_nodes,
-n_parameters}. Filenames carry no ``<family>_`` prefix (the folder names it).
+Output layout, at ``<output_dir>/<bench>/<family>/``:
 
-x-axes: ``n_nodes`` is resolved from the parquet column (#195) with a
-``_NETWORKS`` / synthetic-int fallback for older parquets (resolve_n_nodes).
-``n_parameters`` is read from the parquet if present; the per-family
-``*_vs_n_parameters`` file is skipped when that family's n_parameters are
-all zero (continuous_gauss) -- a degenerate x=0 axis (decision alpha).
+  all/plots/<metric>_vs_<x>.pdf      all/tables/<metric>_vs_<x>.tex
+  all/plots/success_rate.pdf         (status breakdown, diagnostic)
+  all/plots/divergence_*.pdf         (calibration-vs-accuracy panel, if both metrics)
+  common/plots/<metric>_vs_<x>.pdf   common/tables/<metric>_vs_<x>.tex
+  common/common_seeds.txt            C(x) per metric and x
+  selection.txt                      shown nbn methods per (view, metric, x)
 
-Reference: docs/v0.13-paper-figures.md
+``<metric>`` in the accuracy set (w1 skipped for discrete families) plus the
+timing pseudo-metrics: ``query_time`` (per-query, batch_size sweeps) or
+``total_query_time`` + ``fit_time`` (everything else).
 """
 from __future__ import annotations
 
@@ -46,64 +39,40 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from nbn.bench._paper_agg import (  # noqa: F401  (re-exported for callers/tests)
+    ACCURACY_METRICS,
+    CLOSER_TO_VALUE,
+    DISCRETE_FAMILIES,
+    FAILURE_STATUSES,
+    HIGHER_IS_BETTER,
+    LOWER_IS_BETTER,
+    METRIC_LABEL,
+    TIME_METRICS,
+    Views,
+    aggregate,
+    assign_x,
+    build_views,
+    cell_table,
+    clip_band,
+    is_nbn,
+    metric_kind,
+    parse_baseline,
+    sweep_axis,
+    x_order,
+)
+
 logger = logging.getLogger(__name__)
 
 
-# --- Constants from the spec --------------------------------------------------
-
-# Accuracy metrics (spec 5.2). The original four are inference-mode
-# (tv/jsd/w1) plus log_likelihood; the four PL-mode primitives
-# (param_recovery_*, calibration_*) come from the param-learning command
-# (#233). All are gated on row existence per (family, cell), so an
-# inference parquet that lacks the PL metrics simply skips them and a PL
-# parquet that lacks tv/jsd/w1 skips those.
-ACCURACY_METRICS = (
-    "tv_per_node", "jsd_per_node", "w1_per_node", "log_likelihood",
-    "param_recovery_tv", "param_recovery_kl",
-    "calibration_pit_ks", "calibration_sd_ratio",
-)
-# Direction conventions. param_recovery_tv/kl and calibration_pit_ks are
-# distances/statistics where 0 is ideal (lower is better). log_likelihood is
-# the lone higher-is-better score. calibration_sd_ratio is neither: it is a
-# ratio of fitted-to-oracle predictive SD whose ideal is 1.0 (under-dispersed
-# < 1, over-dispersed > 1) — a "closer to a target value" metric (#233).
-LOWER_IS_BETTER = frozenset({
-    "tv_per_node", "jsd_per_node", "w1_per_node",
-    "param_recovery_tv", "param_recovery_kl", "calibration_pit_ks",
-})
-HIGHER_IS_BETTER = frozenset({"log_likelihood"})
-# Metrics whose target is a specific value, not a monotone direction. The
-# value is the ideal; the metric is a nonnegative ratio so its band is
-# clipped at 0 like a distance, but axes/labels read "closer to <v>".
-CLOSER_TO_VALUE = {"calibration_sd_ratio": 1.0}
-# Pretty labels for tables / axes.
-METRIC_LABEL = {
-    "tv_per_node": "TV",
-    "jsd_per_node": "JSD",
-    "w1_per_node": "W1",
-    "log_likelihood": "LL",
-    "param_recovery_tv": "TV (recovery)",
-    "param_recovery_kl": "KL (recovery)",
-    "calibration_pit_ks": "PIT-KS",
-    "calibration_sd_ratio": "SD-ratio",
-}
-
-# Families that skip w1_per_node (Wasserstein-1 N/A for discrete posteriors).
-DISCRETE_FAMILIES = frozenset({"discrete"})
+# --- Constants ----------------------------------------------------------------
 
 # Divergence panel (#235): metric pairs rendered side-by-side per family when
-# both metrics have ok rows. calibration_pit_ks (PL parquet) vs w1_per_node
-# (inference parquet) is the PR 9 cross-metric finding — they disagree on
-# mdn vs kde for the nongauss family. Extensible: add a pair to render more.
+# both metrics have ok rows (calibration_pit_ks from a PL parquet vs
+# w1_per_node from an inference parquet — the PR 9 cross-metric finding).
 _DIVERGENCE_PAIRS = (("calibration_pit_ks", "w1_per_node"),)
 
-# Engine / inference-method suffixes appended to INFERENCE baselines but absent
-# on PARAMETER-LEARNING baselines (PL is fit-only, engine-less). Stripped to
-# align the same mechanism across parquet types: nbn-mdn-lw <-> nbn-mdn. The
-# set is deliberately suffix-aware, NOT "strip last token": mechanism and
-# param-method tokens (cat, lg, mdn, mle, bayes, discrete, ...) are not here,
-# so a baseline whose final token is not a known engine passes through
-# unchanged and unrelated mechanisms never collapse together.
+# Engine suffixes appended to INFERENCE baselines but absent on
+# PARAMETER-LEARNING baselines; stripped to align nbn-mdn-lw <-> nbn-mdn.
 _ENGINE_SUFFIXES = frozenset({"lw", "ve", "ais", "avi", "router", "predict",
                               "importance"})
 
@@ -116,104 +85,29 @@ LIBRARY_COLORS = {
 }
 _FALLBACK_COLOR = "tab:gray"
 
-# Libraries that cannot batch queries by design (adapter
-# ``supports_batched_queries = False``): they are pinned to batch_size=1 in
-# configs and process queries sequentially. Source of truth is the adapter
-# class flag (nbn/bench/adapters/{pyro,pgmpy}_adapter.py); mirrored here as
-# a constant so the plotting path stays free of heavy adapter imports.
-#
-# Detection MUST be config/design-level (the library), NOT observational: a
-# *batchable* baseline (e.g. nbn-cat-ve) that OOMs at every batch size above
-# B=1 still has only ok data at B=1, but it is NOT a fixed reference — it
-# renders as points-with-gaps (Change 1), never a dashed line (#148, Change 2).
-_NON_BATCHABLE_LIBRARIES = frozenset({"pyro", "pgmpy"})
-
-# Status -> color for the 100%-stacked status breakdown (spec 5.1). Green for
-# the good segment; failure modes warm-progressing-to-distinct. not_supported
-# is neutral gray (applicability, not failure). STATUS_ORDER fixes the stacking
-# order bottom-up: ok grows from the floor, failures stacked above.
+# Status -> color for the 100%-stacked status breakdown.
 STATUS_COLORS = {
-    "ok": "#2ca02c",             # green
-    "not_supported": "#7f7f7f",  # gray (neutral — applicability, not failure)
-    "not_applicable": "#b0b0b0",  # lighter gray (PL-mode applicability; #233/#236)
-    "timeout": "#ff7f0e",        # orange (over budget)
-    "error": "#d62728",          # red (genuine failure)
-    "oom": "#8c564b",            # brown (memory failure)
+    "ok": "#2ca02c",
+    "not_supported": "#7f7f7f",
+    "not_applicable": "#b0b0b0",
+    "timeout": "#ff7f0e",
+    "error": "#d62728",
+    "oom": "#8c564b",
 }
-# not_applicable ordered next to not_supported: both are "applicability, not
-# failure" (spec 3.3). Registration only — PL parquets emit not_applicable on
-# per-metric rows that per_query_status_counts does not yet count, so this adds
-# no visible segment today; the PL-mode applicability breakdown is tracked in
-# #236.
 STATUS_ORDER = ("ok", "not_supported", "not_applicable", "timeout", "error", "oom")
+
+# Bar groups per figure before the x grid is split into ``_partK`` files
+# (bnlearn has 24 discrete networks; 8 groups x ~7 bars stays legible).
+_MAX_GROUPS_PER_FIGURE = 8
+
+_X_LABEL = {"n_nodes": "n_nodes", "n_train": "n_train",
+            "batch_size": "batch size $B$", "network": "network"}
+
 
 # --- Pure helpers -------------------------------------------------------------
 
-def aggregate(values, method: str) -> tuple[float, float, float]:
-    """Return (center, lower_band, upper_band) per the aggregation flag.
-
-    mean_std: center = mean, band = +/-1 std.
-    iqm_iqr:  center = interquartile mean (mean of values in [Q1, Q3]),
-              band   = +/-(Q3-Q1)/2 around the IQM.
-    NaNs are dropped first; empty -> (nan, nan, nan).
-    """
-    values = np.asarray(list(values), dtype=float)
-    values = values[~np.isnan(values)]
-    if values.size == 0:
-        return float("nan"), float("nan"), float("nan")
-    # +inf sentinel (#234): param_recovery_kl is +inf when the true CPT has a
-    # hard zero an unsmoothed-MLE adapter never covers. Surface it explicitly
-    # BEFORE aggregating — IQM trims values above Q3, so a lone +inf would be
-    # excluded from the interquartile mean and the finding ("this adapter has
-    # hard zeros") would silently vanish. Any +inf in the cell => center +inf,
-    # band undefined. (posinf only: a hypothetical -inf is not this sentinel.)
-    if np.isposinf(values).any():
-        return float("inf"), float("nan"), float("nan")
-    if method == "mean_std":
-        c = float(np.mean(values))
-        s = float(np.std(values, ddof=0))
-        return c, c - s, c + s
-    if method == "iqm_iqr":
-        q1, q3 = np.percentile(values, [25, 75])
-        in_range = (values >= q1) & (values <= q3)
-        c = float(np.mean(values[in_range])) if in_range.any() else float(np.median(values))
-        half = float((q3 - q1) / 2)
-        return c, c - half, c + half
-    raise ValueError(f"unknown aggregation: {method!r}")
-
-
-def clip_band(metric_kind: str, lower: float, upper: float) -> tuple[float, float]:
-    """Clip a band to the metric's natural range (spec 3.2)."""
-    if metric_kind == "time" or metric_kind in LOWER_IS_BETTER:
-        return max(0.0, lower), upper          # nonneg
-    if metric_kind in {"tv_per_node", "jsd_per_node"}:
-        return max(0.0, lower), min(1.0, upper)  # bounded [0,1]
-    if metric_kind in HIGHER_IS_BETTER:
-        return lower, upper                     # log_likelihood: unbounded
-    if metric_kind in CLOSER_TO_VALUE:
-        return max(0.0, lower), upper           # sd_ratio: nonneg, no upper bound
-    if metric_kind == "success_rate":
-        return max(0.0, lower), min(100.0, upper)
-    return lower, upper
-
-
-def parse_baseline(baseline: str) -> tuple[str, str]:
-    """('nbn-cat-ve') -> ('nbn', 'cat-ve'). Library is always the first token;
-    the remainder is kept as an opaque variant label (token counts vary across
-    libraries, e.g. pgmpy-mle-ve vs pyro-empirical-importance)."""
-    parts = baseline.split("-", 1)
-    return (parts[0], parts[1] if len(parts) > 1 else "")
-
-
 def _mechanism_key(baseline: str) -> str:
-    """Normalize a baseline to its mechanism identity for the divergence panel
-    (#235), stripping a trailing engine/inference-method token.
-
-    Inference baselines carry the engine suffix (``nbn-mdn-lw``); the matching
-    parameter-learning baseline does not (``nbn-mdn``) — the panel must align
-    them on one key. Suffix-aware, NOT last-token: a baseline whose final token
-    is not a known engine (``nbn-cat``, ``pgmpy-mle``, ``pomegranate-discrete``)
-    is preserved unchanged, so unrelated mechanisms never collapse together."""
+    """Strip a trailing engine token: nbn-mdn-lw -> nbn-mdn; nbn-cat -> nbn-cat."""
     head, sep, last = baseline.rpartition("-")
     if sep and last in _ENGINE_SUFFIXES:
         return head
@@ -221,19 +115,16 @@ def _mechanism_key(baseline: str) -> str:
 
 
 def baseline_colors(baselines) -> dict[str, tuple]:
-    """Map each baseline -> an RGBA color: the library base color, lightened
-    by a distinct factor per baseline within the same library so lines are
-    visually separable on white."""
+    """Library base color, lightened by a distinct factor per baseline within
+    the same library."""
     by_lib: dict[str, list[str]] = {}
     for b in sorted(baselines):
-        lib = parse_baseline(b)[0]
-        by_lib.setdefault(lib, []).append(b)
+        by_lib.setdefault(parse_baseline(b)[0], []).append(b)
     colors: dict[str, tuple] = {}
     for lib, members in by_lib.items():
         base = np.array(matplotlib.colors.to_rgb(LIBRARY_COLORS.get(lib, _FALLBACK_COLOR)))
         n = len(members)
         for i, b in enumerate(members):
-            # blend toward white by up to ~0.55 across members
             t = 0.0 if n == 1 else 0.55 * i / (n - 1)
             rgb = base * (1 - t) + np.array([1.0, 1.0, 1.0]) * t
             colors[b] = (*rgb, 1.0)
@@ -247,13 +138,20 @@ def _log_or_linear(ax, vals, axis: str) -> None:
         (ax.set_xscale if axis == "x" else ax.set_yscale)("log")
 
 
+def _direction(metric) -> str:
+    if metric in TIME_METRICS or metric in LOWER_IS_BETTER:
+        return "lower better"
+    if metric in CLOSER_TO_VALUE:
+        return f"closer to {CLOSER_TO_VALUE[metric]:g} better"
+    return "higher better"
+
+
 # --- Lookups ------------------------------------------------------------------
 
 def n_nodes_lookup(benchmark: str, problem_ids) -> dict[str, int]:
     if benchmark == "bnlearn":
         from nbn.bench.problems.bnlearn import _NETWORKS
         return {p: _NETWORKS[p]["n_nodes"] for p in problem_ids if p in _NETWORKS}
-    # synthetic: problem_id is n_nodes as a string
     out = {}
     for p in problem_ids:
         try:
@@ -264,36 +162,19 @@ def n_nodes_lookup(benchmark: str, problem_ids) -> dict[str, int]:
 
 
 def resolve_n_nodes(dfb: pd.DataFrame, benchmark: str) -> dict[str, int]:
-    """Map ``problem_id -> n_nodes`` for a benchmark slice.
-
-    Priority:
-      1. the parquet ``n_nodes`` column (post-PR-1 #195): used for any
-         problem_id with at least one non-null value;
-      2. ``n_nodes_lookup`` fallback for the rest -- ``_NETWORKS`` for
-         bnlearn, ``int(problem_id)`` for synthetic (older parquets that
-         predate the column still plot);
-      3. anything still unresolved is omitted, so the scaling helpers
-         simply skip those problems rather than crashing.
-
-    Backward-compat diagnostics are gentle (this is "older parquet, here's
-    what we did", not an error): one ``info`` when a fallback fired, one
-    ``warning`` when some problem_id could not be resolved at all.
-    """
+    """Map ``problem_id -> n_nodes``: parquet column first (#195), then the
+    ``_NETWORKS`` / synthetic-int fallback; unresolved problems are omitted."""
     pids = sorted(dfb["problem_id"].dropna().unique())
-
     from_col: dict[str, int] = {}
     if "n_nodes" in dfb.columns:
         sub = dfb[["problem_id", "n_nodes"]].dropna(subset=["n_nodes"])
         if not sub.empty:
             g = sub.groupby("problem_id")["n_nodes"].first()
             from_col = {str(p): int(v) for p, v in g.items()}
-
     missing = [p for p in pids if p not in from_col]
     fallback = n_nodes_lookup(benchmark, missing) if missing else {}
-
-    resolved = {**fallback, **from_col}  # column wins over fallback
+    resolved = {**fallback, **from_col}
     out = {p: resolved[p] for p in pids if p in resolved}
-
     if missing:
         src = "_NETWORKS" if benchmark == "bnlearn" else "problem_id"
         logger.info(
@@ -313,16 +194,7 @@ def resolve_n_nodes(dfb: pd.DataFrame, benchmark: str) -> dict[str, int]:
 
 
 def n_parameters_lookup(df: pd.DataFrame) -> dict[tuple[str, str], float] | None:
-    """Map ``(problem_id, family) -> n_parameters`` from the parquet (#133),
-    or None if the column is absent.
-
-    Keyed by ``(problem_id, family)`` rather than ``problem_id`` alone because
-    in the synthetic benchmark the same ``problem_id`` (n_nodes) recurs across
-    families with different n_parameters (e.g. discrete n=10 -> 256, hybrid -> 72,
-    continuous -> 0); keying by problem_id alone would collapse them to whichever
-    family sorted first. For bnlearn each problem_id maps to a single family, so
-    the extra key is a no-op there (behavior unchanged).
-    """
+    """Map ``(problem_id, family) -> n_parameters`` (#133), or None if absent."""
     if "n_parameters" not in df.columns:
         return None
     sub = df[["problem_id", "family", "n_parameters"]].dropna(subset=["n_parameters"])
@@ -332,28 +204,11 @@ def n_parameters_lookup(df: pd.DataFrame) -> dict[tuple[str, str], float] | None
     return {(p, f): float(v) for (p, f), v in g.items()}
 
 
-# --- Per-query extraction (the melted schema) ---------------------------------
-# Each query emits 6 metric rows (tv/jsd/w1_per_node + fit/query/metrics_time_s).
-# query_time_s / fit_time_s also appear as dedicated columns (duplicated per row).
-# Whole-cell-unsupported baselines emit a single metric=="status" sentinel row.
+# --- Per-query status extraction (success_rate.pdf) ---------------------------
 
 def per_query_success(df_cell: pd.DataFrame) -> dict[str, float]:
-    """Query-level success rate (%) per baseline (spec 5.1).
-
-    A query's execution status is taken from its metric=="query_time_s" row
-    (one per executed query); metric=="status" rows are whole-cell unsupported
-    units that count as failures.
-
-    PL-mode fallback (#233): parameter-learning cells emit per-cell metric
-    rows (param_recovery_*, calibration_*, log_likelihood) with NO per-query
-    (query_time_s) or sentinel (status) rows, so the inference-mode unit count
-    is zero. For such a baseline, success is binary on metric-row presence:
-    100% when it produced at least one ok accuracy-metric row, else 0%. A
-    not_supported / not_applicable metric is applicability, not failure
-    (spec 3.3) — what matters is whether any usable metric came out. Inference
-    cells (any query_time_s or status row present) keep the path below
-    byte-identical; mixed cells, were they to occur, count as inference.
-    """
+    """Query-level success rate (%) per baseline; PL-mode cells (no per-query
+    rows) are binary on the presence of an ok accuracy-metric row."""
     out = {}
     for b, g in df_cell.groupby("baseline"):
         executed = g[g["metric"] == "query_time_s"]
@@ -369,61 +224,18 @@ def per_query_success(df_cell: pd.DataFrame) -> dict[str, float]:
 
 
 def per_query_status_counts(df_cell: pd.DataFrame) -> pd.DataFrame:
-    """Per-baseline status counts over the same unit as :func:`per_query_success`.
-
-    The counting unit is one executed query (``metric=="query_time_s"`` rows,
-    one per query, carrying its per-query status: ok / timeout / error / oom /
-    not_supported) *plus* the whole-cell sentinel rows (``metric=="status"``,
-    one per unsupported/fit-failed unit). Both contribute to the denominator
-    exactly as in ``per_query_success`` (total = executed + sentinel), so the
-    stacked percentages are the per-query success rate decomposed by status.
-
-    Returns a DataFrame indexed by baseline with one column per status in
-    STATUS_ORDER (counts, reindexed with fill 0); empty if no unit rows exist.
-
-    PL-mode fallback (#236): parameter-learning cells have no per-query
-    (query_time_s) or sentinel (status) rows — they emit per-cell metric rows.
-    When the inference-mode unit is empty, count accuracy-metric rows
-    (metric in ACCURACY_METRICS) by status instead, so the status-stacked
-    figure shows the applicability breakdown (ok vs not_applicable per
-    baseline) rather than skipping. Counting unit = one accuracy-metric row,
-    matching the per-metric rendering of the accuracy plots. This mirrors the
-    per_query_success PL-mode fallback; the inference path (any query_time_s
-    or status row present) is byte-identical. not_supported rows are already
-    dropped upstream by _filter_unsupported_baselines, so a PL bar shows ok +
-    not_applicable (participation vs metric-applicability), never
-    not_supported.
-    """
+    """Per-baseline status counts over the per-query unit (query_time_s rows +
+    whole-cell sentinels); PL-mode fallback counts accuracy-metric rows."""
     unit = df_cell[df_cell["metric"].isin(["query_time_s", "status"])]
     if unit.empty:
         unit = df_cell[df_cell["metric"].isin(ACCURACY_METRICS)]
     if unit.empty:
         return pd.DataFrame()
     counts = unit.groupby(["baseline", "status"]).size().unstack(fill_value=0)
-    # Surface any status outside the palette rather than silently dropping it.
     unknown = [c for c in counts.columns if c not in STATUS_ORDER]
     if unknown:
         logger.warning("status(es) outside stacked-bar palette dropped: %s", unknown)
     return counts.reindex(columns=list(STATUS_ORDER), fill_value=0)
-
-
-def query_time_totals(df_cell: pd.DataFrame) -> pd.DataFrame:
-    """Per-(baseline, problem_id, seed) total query time (spec 3.4): sum of
-    query_time_s over the metric=="query_time_s", status=="ok" rows."""
-    q = df_cell[(df_cell["metric"] == "query_time_s") & (df_cell["status"] == "ok")]
-    if q.empty:
-        return pd.DataFrame(columns=["baseline", "problem_id", "seed", "total"])
-    g = q.groupby(["baseline", "problem_id", "seed"])["value"].sum().reset_index()
-    return g.rename(columns={"value": "total"})
-
-
-def fit_times(df_cell: pd.DataFrame) -> pd.DataFrame:
-    """Per-(baseline, problem_id, seed) fit_time_s (one value per cell)."""
-    f = df_cell[(df_cell["metric"] == "fit_time_s") & (df_cell["status"] == "ok")]
-    if f.empty:
-        return pd.DataFrame(columns=["baseline", "problem_id", "seed", "total"])
-    g = f.groupby(["baseline", "problem_id", "seed"])["value"].first().reset_index()
-    return g.rename(columns={"value": "total"})
 
 
 # --- Figures ------------------------------------------------------------------
@@ -435,14 +247,7 @@ def _savefig(fig, out_path: Path) -> None:
 
 
 def fig_status_stacked(df_cell, out_path: Path, title: str) -> None:
-    """100%-stacked status breakdown per baseline (spec 5.1).
-
-    Each bar sums to 100%; segments show the fraction of each status
-    (ok / not_supported / timeout / error / oom) over the per-query unit.
-    Replaces the prior single-segment success-rate plot — same artifact name
-    (``success_rate.pdf``), richer information: the green segment is exactly the
-    old success rate, and the remainder is decomposed by failure mode.
-    """
+    """100%-stacked status breakdown per baseline (``success_rate.pdf``)."""
     counts = per_query_status_counts(df_cell)
     totals = counts.sum(axis=1) if not counts.empty else pd.Series(dtype=float)
     counts = counts[totals > 0] if not counts.empty else counts
@@ -452,13 +257,12 @@ def fig_status_stacked(df_cell, out_path: Path, title: str) -> None:
     pct = counts.div(counts.sum(axis=1), axis=0) * 100
     baselines = sorted(pct.index)
     pct = pct.loc[baselines]
-
     fig, ax = plt.subplots(figsize=(max(5, 0.7 * len(baselines)), 4))
     bottoms = np.zeros(len(baselines))
     for status in STATUS_ORDER:
         values = pct[status].to_numpy()
         if (values == 0).all():
-            continue  # don't add a legend entry for an absent status
+            continue
         ax.bar(range(len(baselines)), values, bottom=bottoms,
                color=STATUS_COLORS[status], label=status,
                edgecolor="white", linewidth=0.5)
@@ -472,200 +276,9 @@ def fig_status_stacked(df_cell, out_path: Path, title: str) -> None:
     _savefig(fig, out_path)
 
 
-_DNF_STATUSES = ("timeout", "oom", "error")
-
-
-def _dnf_cells(df_cell, metric_name, x_lookup):
-    """Detect partial-wall cells (#233): (baseline, x) cells that have BOTH ok
-    rows AND timeout/oom/error rows for ``metric_name``.
-
-    This 'saw both states' signal marks where a baseline scaled to a wall — some
-    queries finished within budget, some hit it — as opposed to a baseline that
-    never ran at this scale (timeout-only, no ok point on the curve to mark).
-    The distinction matters: the ok-only filter in the scaling plots keeps the
-    finished (cheap-tail) queries, so a partial-wall cell still plots a finite
-    point that UNDERSTATES cost; the marker flags that point as a wall.
-
-    Returns ``{baseline: {x_value: {status: count}}}`` (empty when no such cell)."""
-    sub = df_cell[df_cell["metric"] == metric_name]
-    if sub.empty:
-        return {}
-    out: dict[str, dict] = {}
-    for (b, p), g in sub.groupby(["baseline", "problem_id"]):
-        if p not in x_lookup:
-            continue
-        statuses = g["status"]
-        if not (statuses == "ok").any():
-            continue  # no ok point on the curve to mark (never-ran, not a wall)
-        fails = statuses[statuses.isin(_DNF_STATUSES)]
-        if not fails.empty:
-            out.setdefault(b, {})[x_lookup[p]] = fails.value_counts().to_dict()
-    return out
-
-
-def _scaling_plot(points_by_baseline, x_label, y_label, title, out_path, metric_kind,
-                  dnf_by_baseline=None):
-    """points_by_baseline: {baseline: [(x, center, lo, hi), ...]}.
-
-    dnf_by_baseline (#233): {baseline: {x: {status: count}}} of partial-wall
-    cells. Each marked point gets a hollow ring overlay (same color / x / y as
-    the underlying ok point) so the scaling wall reads directly off the curve;
-    a ``*_dnf.txt`` sidecar + corner note list the cells. Dormant (byte-identical
-    rendering) when no DNF cells exist."""
-    if not points_by_baseline:
-        logger.info("skip empty (no conditioned data): %s", out_path.name)
-        return
-    dnf_by_baseline = dnf_by_baseline or {}
-    colors = baseline_colors(points_by_baseline.keys())
-    fig, ax = plt.subplots(figsize=(6, 4))
-    all_x, all_y = [], []
-    inf_points = []           # (x, baseline): +inf sentinels drawn after autoscale
-    labeled = set()           # baselines already carrying a legend entry
-    for b in sorted(points_by_baseline):
-        pts = sorted(points_by_baseline[b], key=lambda r: r[0])
-        # #234: split finite points (draw the line) from +inf sentinels (drawn
-        # as caret markers at the top edge). Only finite values feed autoscale,
-        # so a +inf never corrupts the log-scale heuristic or the y-range.
-        finite = [p for p in pts if np.isfinite(p[1])]
-        inf_points += [(p[0], b) for p in pts if np.isposinf(p[1])]
-        all_x += [p[0] for p in pts]
-        if not finite:
-            continue
-        xs = [p[0] for p in finite]
-        cs = [p[1] for p in finite]
-        los = [clip_band(metric_kind, p[2], p[3])[0] for p in finite]
-        his = [clip_band(metric_kind, p[2], p[3])[1] for p in finite]
-        ax.plot(xs, cs, marker="o", color=colors[b], label=b, markersize=4)
-        ax.fill_between(xs, los, his, color=colors[b], alpha=0.2)
-        labeled.add(b)
-        all_y += cs + los + his
-    _log_or_linear(ax, all_x, "x")
-    _log_or_linear(ax, [v for v in all_y if v is not None and v > 0], "y")
-    # +inf sentinels: caret at the top axis edge. An inf-only baseline (no
-    # finite point, e.g. pgmpy-mle KL on a hard-zero CPT) still gets a legend
-    # entry via its marker so it is not silently absent from the figure.
-    if inf_points:
-        y_top = ax.get_ylim()[1]
-        for x, b in inf_points:
-            lbl = b if b not in labeled else None
-            ax.plot([x], [y_top], marker="^", color=colors[b], markersize=9,
-                    linestyle="None", clip_on=False, label=lbl)
-            labeled.add(b)
-        ax.text(0.99, 0.99, "↑ = +∞", transform=ax.transAxes, ha="right",
-                va="top", fontsize=7, alpha=0.7)
-    # Partial-wall markers (#233): a hollow ring on each ok point whose cell also
-    # had timeout/oom/error rows — the asymmetric scaling wall reads off the
-    # curve (kde rings appear where it walls; knn/lg have none). One legend entry.
-    dnf_lines: list[str] = []
-    ring_labeled = False
-    for b in sorted(dnf_by_baseline):
-        ys = {p[0]: p[1] for p in points_by_baseline.get(b, [])}
-        for x in sorted(dnf_by_baseline[b]):
-            if x in ys and np.isfinite(ys[x]):
-                ax.plot([x], [ys[x]], marker="o", markerfacecolor="none",
-                        markeredgecolor=colors[b], markeredgewidth=1.6,
-                        markersize=11, linestyle="None",
-                        label=None if ring_labeled else "○ partial-timeout cell")
-                ring_labeled = True
-            for st, n in sorted(dnf_by_baseline[b][x].items()):
-                dnf_lines.append(f"  baseline={b}, x={x:g}, status={st}, count={n}")
-    if dnf_lines:
-        ax.text(0.99, 0.02, f"DNF: {len(dnf_lines)} cells (see *_dnf.txt)",
-                transform=ax.transAxes, ha="right", va="bottom",
-                fontsize=7, alpha=0.7)
-    ax.set_xlabel(x_label)
-    ax.set_ylabel(y_label)
-    ax.set_title(title)
-    ax.legend(fontsize=7, loc="best")
-    if dnf_lines:
-        sidecar = out_path.with_name(out_path.stem + "_dnf.txt")
-        sidecar.parent.mkdir(parents=True, exist_ok=True)
-        sidecar.write_text(
-            "Partial-wall cells (ok + timeout/oom/error in the same cell):\n"
-            + "\n".join(dnf_lines) + "\n", encoding="utf-8")
-    _savefig(fig, out_path)
-
-
-def _direction(metric) -> str:
-    """The 'good direction' annotation for a metric's axis label. Distances
-    and statistics are lower-better; log_likelihood is higher-better;
-    CLOSER_TO_VALUE metrics (e.g. calibration_sd_ratio) read 'closer to <v>'."""
-    if metric in LOWER_IS_BETTER:
-        return "lower better"
-    if metric in CLOSER_TO_VALUE:
-        return f"closer to {CLOSER_TO_VALUE[metric]:g} better"
-    return "higher better"
-
-
-def fig_accuracy_scaling(df_cell, metric, x_axis, x_lookup, aggregation, out_path, title):
-    ok = df_cell[(df_cell["status"] == "ok") & (df_cell["metric"] == metric)]
-    if ok.empty:
-        logger.info("skip empty (no ok rows for %s): %s", metric, out_path.name)
-        return
-    success = per_query_success(df_cell)
-    points: dict[str, list] = {}
-    for b, gb in ok.groupby("baseline"):
-        if success.get(b, 0.0) <= 0.0:    # Policy 3: condition on success>0
-            continue
-        rows = []
-        for p, gp in gb.groupby("problem_id"):
-            if p not in x_lookup:
-                continue
-            c, lo, hi = aggregate(gp["value"], aggregation)
-            if np.isnan(c):
-                continue
-            rows.append((x_lookup[p], c, lo, hi))
-        if rows:
-            points[b] = rows
-    _scaling_plot(points, x_axis, f"{METRIC_LABEL[metric]} ({_direction(metric)})",
-                  f"{title} — {METRIC_LABEL[metric]} vs {x_axis}", out_path, metric,
-                  dnf_by_baseline=_dnf_cells(df_cell, metric, x_lookup))
-
-
-def fig_accuracy_vs_n_train(df_cell, metric, aggregation, out_path, title):
-    """Learning-curve sibling of fig_accuracy_scaling: metric vs n_train.
-
-    Structurally different from the n_nodes / n_parameters axes — n_train
-    varies *within* a problem (PR 6's sweep), so values aggregate per
-    (baseline, n_train) ACROSS (problem_id, seed), not per (baseline,
-    problem_id) across seed. The x value is the n_train column itself, not a
-    problem_id lookup. The shared _scaling_plot draws the lines, bands, and
-    +inf sentinels (so e.g. param_recovery_kl=+inf renders identically here)."""
-    ok = df_cell[(df_cell["status"] == "ok") & (df_cell["metric"] == metric)
-                 & df_cell["n_train"].notna()]
-    if ok.empty:
-        logger.info("skip empty (no ok rows for %s): %s", metric, out_path.name)
-        return
-    success = per_query_success(df_cell)
-    points: dict[str, list] = {}
-    for b, gb in ok.groupby("baseline"):
-        if success.get(b, 0.0) <= 0.0:    # Policy 3: condition on success>0
-            continue
-        rows = []
-        for nt, gnt in gb.groupby("n_train"):
-            c, lo, hi = aggregate(gnt["value"], aggregation)   # across problem_id, seed
-            if np.isnan(c):
-                continue
-            rows.append((float(nt), c, lo, hi))
-        if rows:
-            points[b] = rows
-    _scaling_plot(points, "n_train", f"{METRIC_LABEL[metric]} ({_direction(metric)})",
-                  f"{title} — {METRIC_LABEL[metric]} vs n_train", out_path, metric)
-
-
 def fig_divergence(df_cell, metric_a, metric_b, family, aggregation, out_path, title):
-    """Two-panel divergence figure (#235): metric_a (top) over metric_b (bottom),
-    one bar per mechanism, sharing an x-order ranked by metric_a.
-
-    Captures the PR 9 finding that calibration (PIT-KS) and accuracy (w1) can
-    disagree on which mechanism is best: panel A ranks the mechanisms low→high
-    on metric_a, panel B reuses that exact order, so a metric_b disagreement
-    reads visually as out-of-order bars in panel B. The two metrics keep their
-    own y-scales (PIT-KS in [0,1], w1 unbounded — a shared axis would mislead).
-
-    Baselines are normalized to mechanism keys (_mechanism_key) so the same
-    mechanism aligns across PL (nbn-mdn) and inference (nbn-mdn-lw) parquets;
-    a mechanism present for only one metric leaves a gap in the other panel."""
+    """Two-panel divergence figure (#235): metric_a over metric_b, one bar per
+    mechanism, x-order ranked by metric_a."""
     def _agg_by_mech(metric):
         ok = df_cell[(df_cell["family"] == family) & (df_cell["metric"] == metric)
                      & (df_cell["status"] == "ok")].copy()
@@ -684,11 +297,8 @@ def fig_divergence(df_cell, metric_a, metric_b, family, aggregation, out_path, t
     if not a or not b:
         logger.info("skip divergence (a metric has no ok rows): %s", out_path.name)
         return
-    # x-order ranked by metric_a (ascending; both metrics are lower-better),
-    # tie-broken by name for determinism. Shared across both panels.
     order = sorted(set(a) | set(b), key=lambda m: (a.get(m, (float("inf"),))[0], m))
     xs = list(range(len(order)))
-
     fig, (ax_a, ax_b) = plt.subplots(2, 1, sharex=True,
                                      figsize=(max(5, 0.9 * len(order)), 6))
     for ax, vals, metric in ((ax_a, a, metric_a), (ax_b, b, metric_b)):
@@ -708,38 +318,117 @@ def fig_divergence(df_cell, metric_a, metric_b, family, aggregation, out_path, t
     _savefig(fig, out_path)
 
 
-def fig_time_scaling(df_cell, time_kind, x_axis, x_lookup, aggregation, out_path, title):
-    """time_kind in {'query_total', 'fit'}."""
-    totals = query_time_totals(df_cell) if time_kind == "query_total" else fit_times(df_cell)
-    if totals.empty:
-        logger.info("skip empty (no %s data): %s", time_kind, out_path.name)
-        return
-    success = per_query_success(df_cell)
-    points: dict[str, list] = {}
-    for b, gb in totals.groupby("baseline"):
-        if success.get(b, 0.0) <= 0.0:
-            continue
-        rows = []
-        for p, gp in gb.groupby("problem_id"):
-            if p not in x_lookup:
+def _slot_order(view: pd.DataFrame) -> list[str]:
+    """Bar slots: non-nbn methods first (sorted), then the nbn methods shown
+    anywhere in this figure (sorted). Fixed across groups so a method keeps
+    its position and colour."""
+    shown = view[view["shown"]]["method"].unique()
+    return (sorted([m for m in shown if not is_nbn(m)])
+            + sorted([m for m in shown if is_nbn(m)]))
+
+
+def _tick(x, x_axis: str) -> str:
+    return str(x) if x_axis == "network" else f"{int(x):d}"
+
+
+def fig_bars(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name: str,
+             out_path: Path, title: str, common_sets: dict | None = None) -> list[Path]:
+    """Grouped bar plot: one group per x, one bar per shown method, error bar =
+    aggregation band. Annotations: ``k/n`` above a bar whose method solved
+    fewer than all seeds (``all`` view); the failure code in a slot whose
+    method solved none; ``+∞`` for an infinite center. ``common`` groups carry
+    ``|C|=k`` under the x label. The x grid is split into ``_partK`` files
+    beyond :data:`_MAX_GROUPS_PER_FIGURE` groups.
+
+    Returns the written paths (empty when nothing is drawable)."""
+    view = view[view["shown"]]
+    if view.empty or not ((view["k"] > 0) & view["center"].notna()).any():
+        logger.info("skip empty (no solved seeds): %s", out_path.name)
+        return []
+    slots = _slot_order(view)
+    colors = baseline_colors(slots)
+    kind = metric_kind(metric)
+    xs = list(xs)
+    chunks = [xs[i:i + _MAX_GROUPS_PER_FIGURE]
+              for i in range(0, len(xs), _MAX_GROUPS_PER_FIGURE)]
+    by_key = {(r.method, r.x): r for r in view.itertuples(index=False)}
+    written = []
+    for ci, chunk in enumerate(chunks):
+        n_x, n_s = len(chunk), len(slots)
+        width = 0.8 / max(n_s, 1)
+        fig, ax = plt.subplots(figsize=(max(6.0, n_x * (0.3 * n_s + 0.6)), 4.2))
+        finite_vals, notes = [], []   # notes: (xpos, kind, text, color, y)
+        for si, m in enumerate(slots):
+            centers, los, his, poss = [], [], [], []
+            for xi, x in enumerate(chunk):
+                r = by_key.get((m, x))
+                pos = xi + (si - (n_s - 1) / 2) * width
+                if r is None:
+                    continue
+                if r.k == 0:
+                    if r.code:
+                        notes.append((pos, "code", r.code, colors[m], None))
+                    continue
+                if np.isposinf(r.center):
+                    notes.append((pos, "inf", "+∞", colors[m], None))
+                    continue
+                if np.isnan(r.center):
+                    continue
+                lo, hi = clip_band(kind, r.lo, r.hi)
+                if np.isnan(lo) or np.isnan(hi):
+                    lo, hi = r.center, r.center
+                centers.append(r.center)
+                los.append(lo)
+                his.append(hi)
+                poss.append(pos)
+                if view_name == "all" and r.k < r.n:
+                    notes.append((pos, "kn", f"{r.k}/{r.n}", colors[m], hi))
+            if not poss:
+                # no bar in this chunk (DNF / +inf everywhere): keep the legend
+                # entry so the failure-code / +∞ annotation is attributable.
+                ax.bar([0.0], [np.nan], color=colors[m], label=m)
                 continue
-            c, lo, hi = aggregate(gp["total"], aggregation)   # across seeds
-            if np.isnan(c):
-                continue
-            rows.append((x_lookup[p], c, lo, hi))
-        if rows:
-            points[b] = rows
-    label = "Total query time (s)" if time_kind == "query_total" else "Fit time (s)"
-    # Partial-wall markers apply only to the query-time plot. A query timeout's
-    # status is replicated onto every metric row of that attempt (incl fit_time_s),
-    # so running DNF detection on fit_time_s would mislabel a QUERY-budget wall
-    # (kde/knn) as a fit wall. A genuine FIT-budget wall (flexcode) is
-    # all-or-nothing — the fit never completes, so the cell has no ok rows and the
-    # line truncates naturally; there is no partial point to mark. (PR 10: kde/knn
-    # trip the query budget, flexcode trips the fit budget.)
-    dnf = _dnf_cells(df_cell, "query_time_s", x_lookup) if time_kind == "query_total" else None
-    _scaling_plot(points, x_axis, label, f"{title} — {label} vs {x_axis}", out_path,
-                  "time", dnf_by_baseline=dnf)
+            yerr = [np.array(centers) - np.array(los), np.array(his) - np.array(centers)]
+            ax.bar(poss, centers, width=width * 0.95, yerr=yerr, capsize=2,
+                   color=colors[m], edgecolor="white", linewidth=0.5, label=m,
+                   error_kw=dict(lw=0.8))
+            finite_vals += centers + his
+        positives = [v for v in finite_vals if v > 0]
+        if kind == "time" and positives and len(positives) == len(finite_vals):
+            ax.set_yscale("log")
+        else:
+            _log_or_linear(ax, finite_vals, "y")
+        y0, y1 = ax.get_ylim()
+        for pos, nk, text, col, y in notes:
+            if nk == "kn":
+                ax.text(pos, y, text, ha="center", va="bottom", fontsize=5.5,
+                        color="black", rotation=90)
+            elif nk == "code":
+                ax.text(pos, y0, text, ha="center", va="bottom", fontsize=5.5,
+                        color=col, rotation=90, alpha=0.9)
+            else:
+                ax.text(pos, y1, text, ha="center", va="top", fontsize=8, color=col)
+        ax.set_xticks(range(n_x))
+        labels = [_tick(x, x_axis) for x in chunk]
+        if view_name == "common" and common_sets is not None:
+            labels = [f"{lab}\n|C|={len(common_sets.get(x, []))}"
+                      for lab, x in zip(labels, chunk)]
+        is_net = x_axis == "network"
+        ax.set_xticklabels(labels, rotation=30 if is_net else 0,
+                           ha="right" if is_net else "center", fontsize=8)
+        ax.set_xlabel(_X_LABEL.get(x_axis, x_axis))
+        ax.set_ylabel(f"{METRIC_LABEL.get(metric, metric)} ({_direction(metric)})")
+        part = f" (part {ci + 1}/{len(chunks)})" if len(chunks) > 1 else ""
+        ax.set_title(f"{title} — {METRIC_LABEL.get(metric, metric)} vs {x_axis} "
+                     f"[{view_name}]{part}", fontsize=10)
+        ax.grid(True, axis="y", alpha=0.3)
+        ax.legend(fontsize=7, loc="upper center", bbox_to_anchor=(0.5, -0.22),
+                  ncol=min(4, max(1, n_s)), frameon=False)
+        path = out_path if len(chunks) == 1 else out_path.with_name(
+            f"{out_path.stem}_part{ci + 1}{out_path.suffix}")
+        _savefig(fig, path)
+        written.append(path)
+    return written
 
 
 # --- LaTeX tables -------------------------------------------------------------
@@ -748,60 +437,16 @@ def _fmt(center: float, lo: float, hi: float) -> str:
     if np.isnan(center):
         return "--"
     if np.isposinf(center):
-        return "$+\\infty$"          # #234: unsmoothed-MLE recovery KL sentinel
+        return "$+\\infty$"
     half = (hi - lo) / 2
+    if np.isnan(half):
+        return f"{center:.3g}"
     return f"{center:.3g}$\\pm${half:.2g}"
 
 
-def _metric_agg(df_cell, baseline, metric, aggregation, role=None, kind=None):
-    """The (center, lo, hi) for a (baseline, metric) cell, or None if no ok rows.
-    Shared by the formatted cell (_metric_cell) and the bold-best comparison
-    (which needs the raw central)."""
-    sub = df_cell[(df_cell["baseline"] == baseline) & (df_cell["metric"] == metric)
-                  & (df_cell["status"] == "ok")]
-    if role is not None:
-        sub = sub[sub["query_role"] == role]
-    if kind is not None:
-        sub = sub[sub["query_kind"] == kind]
-    if sub.empty:
-        return None
-    return aggregate(sub["value"], aggregation)
-
-
-def _metric_cell(df_cell, baseline, metric, aggregation, role=None, kind=None) -> str:
-    agg = _metric_agg(df_cell, baseline, metric, aggregation, role=role, kind=kind)
-    return "--" if agg is None else _fmt(*agg)
-
-
-def _time_agg(df_cell, baseline, aggregation):
-    """The (center, lo, hi) of total query time for a baseline, or None."""
-    t = query_time_totals(df_cell)
-    t = t[t["baseline"] == baseline]
-    if t.empty:
-        return None
-    return aggregate(t["total"], aggregation)
-
-
-def _time_cell(df_cell, baseline, aggregation) -> str:
-    agg = _time_agg(df_cell, baseline, aggregation)
-    return "--" if agg is None else _fmt(*agg)
-
-
-def _central(agg):
-    """Pull the central value out of a (center, lo, hi) tuple, or None."""
-    return agg[0] if agg is not None else None
-
-
 def _bold_best(centrals: dict, criterion: str) -> set:
-    """Baselines tied-best on ``criterion`` (to .3g display precision, the same
-    precision _fmt shows the central at).
-
-    ``criterion`` is a metric name or ``"time"``. Lower-is-better metrics and
-    ``"time"`` minimize the central; HIGHER_IS_BETTER (log_likelihood) maximizes
-    it; CLOSER_TO_VALUE (calibration_sd_ratio) minimizes ``|central - target|``
-    (so two baselines equidistant from the target tie even when their displayed
-    centrals differ). None / NaN / +-inf cells are excluded; an all-excluded
-    column bolds nothing."""
+    """Baselines tied-best on ``criterion`` (a metric name or ``"time"``) to
+    .3g display precision. None / NaN / +-inf are excluded."""
     finite = {b: c for b, c in centrals.items()
               if c is not None and np.isfinite(c)}
     if not finite:
@@ -821,13 +466,9 @@ def _bold(cell: str) -> str:
 
 
 def _table_slug(value: str) -> str:
-    """Sanitize a path component for use inside a ``\\label{tab:...}`` key."""
     return str(value).replace("+", "plus").replace(" ", "_").replace("/", "_")
 
 
-# Metric sets that signal the run's mode for caption naming (#241). Mode is not
-# a parquet column — it is inferred from which metrics are present (the PR-12
-# signal): PL metrics => parameter-learning; inference metrics => inference.
 _PL_METRICS = frozenset({"param_recovery_tv", "param_recovery_kl",
                          "calibration_pit_ks", "calibration_sd_ratio",
                          "log_likelihood"})
@@ -835,18 +476,8 @@ _INFERENCE_METRICS = frozenset({"tv_per_node", "jsd_per_node", "w1_per_node"})
 
 
 def _benchmark_caption(df_view) -> str:
-    """The benchmark-named caption bucket (#241), derived in priority order:
-
-      1. INFERENCE SPEED                    — a batch_sizes sweep (batch_size>1).
-      2. SAMPLE EFFICIENCY PARAMETER LEARNING — an n_train sweep + PL metrics.
-      3/4. <BENCHMARK> INFERENCE / PARAMETER LEARNING — mode from the metric set.
-      fall-through. SYNTHETIC INFERENCE — a mixed (PR-14 concat) or timing-only
-        view, where the table is not the deliverable (the divergence panel is).
-
-    Speed and sample-efficiency are mode labels independent of benchmark, so
-    they win over the benchmark-prefixed cases. ``scalability`` reads as
-    SYNTHETIC (the n_nodes axis already carries the scaling story; the spec
-    names no SCALABILITY caption)."""
+    """INFERENCE SPEED / SAMPLE EFFICIENCY PARAMETER LEARNING /
+    <BENCH> INFERENCE|PARAMETER LEARNING, from the parquet contents (#241)."""
     cols = df_view.columns
     if "batch_size" in cols and (df_view["batch_size"] > 1).any():
         return "INFERENCE SPEED"
@@ -862,14 +493,13 @@ def _benchmark_caption(df_view) -> str:
     bench = "BNLEARN" if str(benchmark).lower() == "bnlearn" else "SYNTHETIC"
     if has_pl and not has_inf:
         return f"{bench} PARAMETER LEARNING"
-    # inference, timing-only, or mixed concat (deliverable is the panel) -> INFERENCE.
     return f"{bench} INFERENCE"
 
 
-def _write_table(out_path: Path, header_cols, rows, caption="", label=""):
-    """Emit a full ``table`` float (booktabs). ``caption`` is plain text whose
-    underscores are escaped here (it is typeset); ``label`` is used verbatim as
-    the ``\\label{}`` key (not typeset, so underscores are fine)."""
+def _write_table(out_path: Path, header_cols, rows, caption="", label="",
+                 footer_rows=()):
+    """Emit a full ``table`` float (booktabs). ``footer_rows`` go under a
+    second ``\\midrule``."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     n = len(header_cols)
     caption_tex = (caption or "auto-generated; paste into paper").replace("_", "\\_")
@@ -882,6 +512,9 @@ def _write_table(out_path: Path, header_cols, rows, caption="", label=""):
         "\\midrule",
     ]
     lines += [" & ".join(r) + " \\\\" for r in rows]
+    if footer_rows:
+        lines.append("\\midrule")
+        lines += [" & ".join(r) + " \\\\" for r in footer_rows]
     lines += ["\\bottomrule", "\\end{tabular}", f"\\caption{{{caption_tex}}}"]
     if label:
         lines.append(f"\\label{{{label}}}")
@@ -896,658 +529,191 @@ def _metrics_for_family(family) -> list[str]:
     return metrics
 
 
-def table_headline(df_cell, family, size, aggregation, roles, out_path, label=""):
-    """Rows=baselines; cols = Success%, then per metric (overall + per role),
-    then Total time (spec 6). log_likelihood / w1 columns appear only when data
-    exists for that metric in the cell."""
-    metrics = [m for m in _metrics_for_family(family)
-               if not df_cell[(df_cell["metric"] == m) & (df_cell["status"] == "ok")].empty]
-    success = per_query_success(df_cell)
-    baselines = sorted(success)
-    role_order = ["overall"] + sorted(roles)
-    header = ["Method", "Succ.\\%"]
-    for m in metrics:
-        for r in role_order:
-            header.append(f"{METRIC_LABEL[m]} ({r})")
-    header.append("Time (s)")
+def _x_header(x, x_axis: str) -> str:
+    if x_axis == "network":
+        return str(x).replace("_", "\\_")
+    sym = {"n_nodes": "n", "n_train": "n_{tr}", "batch_size": "B"}[x_axis]
+    return f"${sym}={int(x)}$"
 
-    # bold-best per column (each (metric, role) cross + Time); Succ.% is a
-    # coverage indicator, not bolded. Zero-success baselines are excluded.
-    def col_central(getter):
-        return {b: (None if success[b] <= 0.0 else _central(getter(b)))
-                for b in baselines}
-    bold_metric = {
-        (m, r): _bold_best(
-            col_central(lambda b, m=m, r=r: _metric_agg(
-                df_cell, b, m, aggregation, role=None if r == "overall" else r)), m)
-        for m in metrics for r in role_order}
-    bold_time = _bold_best(
-        col_central(lambda b: _time_agg(df_cell, b, aggregation)), "time")
 
+def write_view_table(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name: str,
+                     out_path: Path, caption_prefix: str, label: str,
+                     common_sets: dict | None = None, top_nbn: int = 2) -> bool:
+    """Rows = shown methods (nbn rows marked $^\\dagger$), columns = x values.
+
+    ``all``:    ``c±h (k/n)`` with the ``(k/n)`` only when k < n; failure code
+                when no seed was solved; ``--`` when the method did not run or
+                is not among the top-N nbn at that column.
+    ``common``: ``c±h`` over C(x); a footer row gives |C(x)| per column.
+    Best per column in bold (direction-aware). Returns False if nothing to
+    write."""
+    view = view[view["shown"]]
+    if view.empty or not ((view["k"] > 0) & view["center"].notna()).any():
+        return False
+    slots = _slot_order(view)
+    xs = list(xs)
+    by_key = {(r.method, r.x): r for r in view.itertuples(index=False)}
+    kind = metric_kind(metric)
+    cells, centrals = {}, {}
+    for m in slots:
+        cells[m], centrals[m] = {}, {}
+        for x in xs:
+            r = by_key.get((m, x))
+            if r is None:
+                cells[m][x], centrals[m][x] = "--", None
+                continue
+            if r.k == 0:
+                cells[m][x] = (r.code or "--").replace("_", "\\_")
+                centrals[m][x] = None
+                continue
+            s = _fmt(r.center, r.lo, r.hi)
+            if view_name == "all" and r.k < r.n:
+                s += f" ({r.k}/{r.n})"
+            cells[m][x] = s
+            centrals[m][x] = r.center if np.isfinite(r.center) else None
+    bold = {x: _bold_best({m: centrals[m][x] for m in slots}, kind) for x in xs}
+    header = ["Method"] + [_x_header(x, x_axis) for x in xs]
     rows = []
-    for b in baselines:
-        cells = [b.replace("_", "\\_"), f"{success[b]:.0f}"]
-        zero = success[b] <= 0.0
-        for m in metrics:
-            for r in role_order:
-                cell = ("--" if zero else
-                        _metric_cell(df_cell, b, m, aggregation,
-                                     role=None if r == "overall" else r))
-                cells.append(_bold(cell) if b in bold_metric[(m, r)] else cell)
-        tcell = "--" if zero else _time_cell(df_cell, b, aggregation)
-        cells.append(_bold(tcell) if b in bold_time else tcell)
-        rows.append(cells)
-    # Benchmark-named caption (#241), prominent; diagnostic detail trails it.
-    caption = (f"{_benchmark_caption(df_cell)}. {family}/{size}; "
-               f"agg={aggregation}; {len(header)} cols (metric x role cross)")
-    _write_table(out_path, header, rows, caption, label=label)
-
-
-def _table_scoped(df_cell, family, aggregation, scope_col, scope_val, out_path, note,
-                  label=""):
-    metrics = [m for m in _metrics_for_family(family)
-               if not df_cell[(df_cell["metric"] == m) & (df_cell["status"] == "ok")].empty]
-    sub = df_cell[df_cell[scope_col] == scope_val]
-    success = per_query_success(sub)
-    if not success:
-        return
-    header = ["Method", "Succ.\\%"] + [METRIC_LABEL[m] for m in metrics] + ["Time (s)"]
-    baselines = sorted(success)
-    scope_kw = "role" if scope_col == "query_role" else "kind"
-
-    def col_central(getter):
-        return {b: (None if success[b] <= 0.0 else _central(getter(b)))
-                for b in baselines}
-    bold_metric = {
-        m: _bold_best(col_central(
-            lambda b, m=m: _metric_agg(sub, b, m, aggregation, **{scope_kw: scope_val})), m)
-        for m in metrics}
-    bold_time = _bold_best(col_central(lambda b: _time_agg(sub, b, aggregation)), "time")
-
-    rows = []
-    for b in baselines:
-        zero = success[b] <= 0.0
-        cells = [b.replace("_", "\\_"), f"{success[b]:.0f}"]
-        for m in metrics:
-            cell = ("--" if zero else
-                    _metric_cell(sub, b, m, aggregation, **{scope_kw: scope_val}))
-            cells.append(_bold(cell) if b in bold_metric[m] else cell)
-        tcell = "--" if zero else _time_cell(sub, b, aggregation)
-        cells.append(_bold(tcell) if b in bold_time else tcell)
-        rows.append(cells)
-    # Benchmark-named caption (#241) with the scope qualifier; `note` (family /
-    # subset diagnostic) trails it. Mode is derived from the full df_cell, not
-    # the scoped slice, so the metric set is intact.
-    caption = f"{_benchmark_caption(df_cell)} ({scope_kw}={scope_val}). {note}"
-    _write_table(out_path, header, rows, caption, label=label)
+    for m in slots:
+        name = m.replace("_", "\\_") + ("$^\\dagger$" if is_nbn(m) else "")
+        row = [name]
+        for x in xs:
+            c = cells[m][x]
+            row.append(_bold(c) if m in bold[x] else c)
+        rows.append(row)
+    footer = ()
+    if view_name == "common" and common_sets is not None:
+        footer = (["$|C|$ (common seeds)"]
+                  + [str(len(common_sets.get(x, []))) for x in xs],)
+    if view_name == "all":
+        rule = ("(k/n) = seeds solved / seeds run, shown when k<n; a failure "
+                "code = no seed solved; -- = not run, or an nbn method outside "
+                "the top-N at that column")
+    else:
+        rule = ("each value over the seeds solved by every shown method at "
+                "that column (|C| row); methods with no solved seed are DNF "
+                "and do not constrain C; -- = not run, or an nbn method "
+                "outside the top-N at that column")
+    caption = (f"{caption_prefix}. {METRIC_LABEL.get(metric, metric)} "
+               f"({_direction(metric)}) vs {x_axis}, view={view_name}. "
+               f"Center$\\pm$band across seeds; $\\dagger$ = top-{top_nbn} nbn "
+               f"per column; {rule}.")
+    _write_table(out_path, header, rows, caption, label=label, footer_rows=footer)
+    return True
 
 
 # --- Orchestration ------------------------------------------------------------
 
 def _filter_unsupported_baselines(dff: pd.DataFrame) -> pd.DataFrame:
-    """Drop baselines whose every row in this slice is ``not_supported``,
-    and drop ``not_supported`` rows from any remaining baseline.
-
-    The semantic: ``not_supported`` means "this baseline cannot handle this
-    problem" (e.g. a discrete-only baseline on a continuous family) -- it
-    never participated. Showing it as a 100% failure in the success-rate
-    figure (or as a row of em-dashes in the tables) is misleading noise.
-    Partially-supported baselines stay; their success rate is then computed
-    over the SUPPORTED subset, which is the meaningful denominator.
-    """
+    """Drop baselines whose every row in this slice is ``not_supported``, and
+    drop ``not_supported`` rows from any remaining baseline: a baseline that
+    never participated is applicability, not a 100% failure."""
     if "status" not in dff.columns or "baseline" not in dff.columns:
         return dff
-    # Baselines with at least one non-not_supported row.
     supported = set(
         dff.loc[dff["status"] != "not_supported", "baseline"].unique()
     )
-    # Drop baselines that never had a supported row, AND drop the
-    # not_supported rows from baselines that survive.
     return dff[
         dff["baseline"].isin(supported)
         & (dff["status"] != "not_supported")
     ]
 
 
-def _problem_solving_sets(dff: pd.DataFrame) -> dict[str, frozenset]:
-    """Map ``problem_id -> frozenset(baselines that FULLY solved it)``.
+def _family_metrics(dff: pd.DataFrame, family: str, x_axis: str) -> list[str]:
+    """Accuracy metrics with >= 1 ok row, then the timing pseudo-metrics that
+    make sense for the sweep."""
+    metrics = [m for m in _metrics_for_family(family)
+               if not dff[(dff["metric"] == m) & (dff["status"] == "ok")].empty]
+    has_query = not dff[(dff["metric"] == "query_time_s") & (dff["status"] == "ok")].empty
+    if x_axis == "batch_size":
+        if has_query:
+            metrics.append("query_time")
+        return metrics
+    if has_query:
+        metrics.append("total_query_time")
+    has_fit_rows = not dff[(dff["metric"] == "fit_time_s") & (dff["status"] == "ok")].empty
+    has_fit_col = ("fit_time_s" in dff.columns
+                   and not dff[dff["metric"].isin(ACCURACY_METRICS)
+                               & (dff["status"] == "ok")].empty)
+    if has_fit_rows or has_fit_col:
+        metrics.append("fit_time")
+    return metrics
 
-    A baseline "fully solves" a problem when every one of its rows for that
-    problem is ``status=="ok"`` (no timeout/error/oom). ``dff`` is assumed
-    already cleaned of ``not_supported`` rows by
-    :func:`_filter_unsupported_baselines`, so the only remaining non-ok
-    statuses are genuine failures.
-    """
-    out: dict[str, frozenset] = {}
-    for pid, gp in dff.groupby("problem_id"):
-        solvers = {
-            bl for bl, gb in gp.groupby("baseline")
-            if len(gb) and (gb["status"] == "ok").all()
-        }
-        out[str(pid)] = frozenset(solvers)
-    return out
 
-
-def _discover_subsets(dff: pd.DataFrame) -> list[dict]:
-    """Auto-discover baseline-coverage subsets from a family's data.
-
-    Groups problems by their "solving set" (the baselines that fully succeed
-    on every row of the problem). Each unique non-empty solving set with >=1
-    problem becomes a subset:
-      - ``"common"`` when the solving set equals the full supported set,
-      - ``"subset1"``, ``"subset2"``, ... otherwise, numbered by descending
-        baseline-set size, then descending problem count, then the
-        alphabetically-first baseline (fully deterministic).
-
-    Problems that no baseline fully solves (empty solving set) are skipped.
-    Returns dicts ``{name, baselines: sorted list, problems: sorted list}``
-    with ``"common"`` first (if present), then the numbered subsets.
-    """
+def process_family(dff, benchmark, family, aggregation, n_nodes, n_params,
+                   family_dir, top_nbn: int = 2) -> int:
+    """Per-family orchestrator: the ``all`` and ``common`` trees under
+    ``family_dir`` (see the module docstring). Returns the number of figures
+    written."""
+    family_dir = Path(family_dir)
+    family_dir.mkdir(parents=True, exist_ok=True)
+    dff = _filter_unsupported_baselines(dff)
     if dff.empty:
-        return []
-    full = frozenset(dff["baseline"].dropna().unique())
-    solving = _problem_solving_sets(dff)
+        logger.info("skip family with no supported baselines: %s", family)
+        return 0
 
-    groups: dict[frozenset, list[str]] = {}
-    for pid, sset in solving.items():
-        if not sset:
-            continue  # no baseline fully solved this problem -> skip
-        groups.setdefault(sset, []).append(pid)
+    x_axis = sweep_axis(dff, benchmark)
+    dfx = assign_x(dff, x_axis, n_nodes)
+    if dfx.empty:
+        logger.warning("skip family %s: no row resolved an x value (%s)", family, x_axis)
+        return 0
+    xs = x_order(dfx, x_axis, n_nodes)
+    title = f"{benchmark}/{family}"
+    caption_prefix = f"{_benchmark_caption(dff)}. {family}"
+    lbl = f"tab:{_table_slug(benchmark)}_{_table_slug(family)}"
 
-    common = groups.pop(full, None)
-
-    # Deterministic ordering for the numbered subsets.
-    ordered = sorted(
-        groups.items(),
-        key=lambda kv: (-len(kv[0]), -len(kv[1]), sorted(kv[0])[0]),
-    )
-
-    out: list[dict] = []
-    if common is not None:
-        out.append(dict(name="common", baselines=sorted(full),
-                        problems=sorted(common)))
-    for i, (sset, probs) in enumerate(ordered, start=1):
-        out.append(dict(name=f"subset{i}", baselines=sorted(sset),
-                        problems=sorted(probs)))
-    return out
-
-
-def _write_subset_metadata(subset_dir, name, baselines, problems) -> None:
-    subset_dir.mkdir(parents=True, exist_ok=True)
-    (subset_dir / "methods.txt").write_text("\n".join(sorted(baselines)) + "\n")
-    (subset_dir / "problems.txt").write_text("\n".join(sorted(problems)) + "\n")
-
-
-def _write_subsets_overview(family_dir, family, subsets) -> None:
-    """One-page navigation file listing each subset, its baseline count,
-    problem count, and the baselines themselves."""
-    lines = [f"Subsets for family={family}", "=" * 60, ""]
-    for s in subsets:
-        lines.append(f"{s['name']}: {len(s['baselines'])} baselines, "
-                     f"{len(s['problems'])} problems")
-        lines.append(f"  baselines: {', '.join(sorted(s['baselines']))}")
-        lines.append("")
-    (family_dir / "_subsets_overview.txt").write_text("\n".join(lines))
-
-
-def _render_view(dff, benchmark, family, aggregation, n_nodes, n_params,
-                 view_dir, *, subset_name, include_success_rate):
-    """Render one view (the ``all`` view or one subset) into
-    ``view_dir/{plots,tables}/``.
-
-    Filenames carry no ``<family>_`` prefix (the folder path already names the
-    family and subset). Table labels are
-    ``tab:<bench>_<family>_<subset>_<scope>`` -- unique across subsets.
-    ``dff`` is assumed already filtered of ``not_supported`` rows.
-    """
-    plots_dir = view_dir / "plots"
-    tables_dir = view_dir / "tables"
-    plots_dir.mkdir(parents=True, exist_ok=True)
-    tables_dir.mkdir(parents=True, exist_ok=True)
-    title = f"{benchmark}/{family}/{subset_name}"
-
-    # x-axes. n_params is keyed by (problem_id, family); scope to this family
-    # and flatten to {problem_id: value}. Decision alpha: include the
-    # n_parameters axis only when at least one problem has a positive value
-    # (continuous_gauss is all-zero -> n_nodes axis only).
-    axes = [("n_nodes", n_nodes)]
-    if n_params is not None:
-        n_params_family = {p: v for (p, f), v in n_params.items() if f == family}
-        if any(v and v > 0 for v in n_params_family.values()):
-            axes.append(("n_parameters", n_params_family))
-
-    if include_success_rate:
-        fig_status_stacked(dff, plots_dir / "success_rate.pdf", title)
-
-    # n_train learning-curve axis: emitted only when the parquet carries a
-    # real sweep (>= 2 distinct n_train values within this view), mirroring
-    # the n_parameters all-zero-skip (decision alpha). Non-sweep parquets
-    # (inference, plain param_learning) get no degenerate single-point curve.
-    has_n_train_sweep = ("n_train" in dff.columns
-                         and dff["n_train"].dropna().nunique() > 1)
-
-    for metric in ACCURACY_METRICS:
-        if family in DISCRETE_FAMILIES and metric == "w1_per_node":
+    produced = 0
+    selection_lines = [f"Shown nbn methods per (view, metric, {x_axis}) — top-{top_nbn}", ""]
+    common_lines = [f"Common seeds C(x) per metric and {x_axis}", ""]
+    for metric in _family_metrics(dff, family, x_axis):
+        cells, n_total = cell_table(dfx, metric)
+        if cells.empty or not cells["solved"].any():
+            logger.info("skip %s/%s: no solved cell", family, metric)
             continue
-        for x_axis, lookup in axes:
-            fig_accuracy_scaling(dff, metric, x_axis, lookup, aggregation,
-                                 plots_dir / f"{metric}_vs_{x_axis}.pdf", title)
-        if has_n_train_sweep:
-            fig_accuracy_vs_n_train(dff, metric, aggregation,
-                                    plots_dir / f"{metric}_vs_n_train.pdf", title)
+        views = build_views(cells, n_total, aggregation, metric, xs, top_n=top_nbn)
+        stem = f"{metric}_vs_{x_axis}"
+        for view_name, vdf in (("all", views.all), ("common", views.common)):
+            vdir = family_dir / view_name
+            paths = fig_bars(vdf, xs, x_axis, metric, view_name,
+                             vdir / "plots" / f"{stem}.pdf", title,
+                             common_sets=views.common_sets)
+            produced += len(paths)
+            write_view_table(vdf, xs, x_axis, metric, view_name,
+                             vdir / "tables" / f"{stem}.tex", caption_prefix,
+                             label=f"{lbl}_{view_name}_{_table_slug(stem)}",
+                             common_sets=views.common_sets, top_nbn=top_nbn)
+            sel = views.selection[view_name]
+            for x in xs:
+                if x in sel:
+                    selection_lines.append(
+                        f"{view_name}\t{metric}\t{x_axis}={_tick(x, x_axis)}\t"
+                        + (", ".join(sel[x]) if sel[x] else "(none)"))
+        for x in xs:
+            insts = views.common_sets.get(x, [])
+            common_lines.append(
+                f"{metric}\t{x_axis}={_tick(x, x_axis)}\t|C|={len(insts)}\t"
+                + (", ".join(insts) if insts else "(empty)"))
 
-    # Divergence panels (#235): per-family, auto-detected for each configured
-    # metric pair where BOTH metrics have ok rows in this view (e.g. nongauss
-    # carries calibration_pit_ks from a PL parquet and w1_per_node from an
-    # inference parquet once both are passed to `nbn-bench plot`).
+    all_plots = family_dir / "all" / "plots"
+    fig_status_stacked(dff, all_plots / "success_rate.pdf", title)
     for metric_a, metric_b in _DIVERGENCE_PAIRS:
         have_a = not dff[(dff["metric"] == metric_a) & (dff["status"] == "ok")].empty
         have_b = not dff[(dff["metric"] == metric_b) & (dff["status"] == "ok")].empty
         if have_a and have_b:
             fig_divergence(dff, metric_a, metric_b, family, aggregation,
-                           plots_dir / f"divergence_{metric_a}_vs_{metric_b}.pdf",
+                           all_plots / f"divergence_{metric_a}_vs_{metric_b}.pdf",
                            title)
-
-    for time_kind, stem in [("query_total", "total_query_time"), ("fit", "fit_time")]:
-        for x_axis, lookup in axes:
-            fig_time_scaling(dff, time_kind, x_axis, lookup, aggregation,
-                             plots_dir / f"{stem}_vs_{x_axis}.pdf", title)
-
-    # Tables. Labels unique per (family, subset): tab:<bench>_<family>_<subset>_<scope>.
-    roles = sorted(dff["query_role"].dropna().unique())
-    kinds = sorted(dff["query_kind"].dropna().unique())
-    lbl = f"tab:{_table_slug(benchmark)}_{_table_slug(family)}_{_table_slug(subset_name)}"
-    scope = f"{family}/{subset_name}"
-    table_headline(dff, family, subset_name, aggregation, roles,
-                   tables_dir / "table_overall.tex", label=f"{lbl}_overall")
-    # note = family/subset only; _table_scoped prepends the scope qualifier
-    # (role=/kind=) to the benchmark-named caption itself (#241).
-    for r in roles:
-        _table_scoped(dff, family, aggregation, "query_role", r,
-                      tables_dir / f"table_role_{r}.tex", scope,
-                      label=f"{lbl}_role_{_table_slug(r)}")
-    for k in kinds:
-        _table_scoped(dff, family, aggregation, "query_kind", k,
-                      tables_dir / f"table_kind_{k}.tex", scope,
-                      label=f"{lbl}_kind_{_table_slug(k)}")
-    # Sample-efficiency tables: one per (family, metric), n_train as columns
-    # (#241). Same gate as the n_train figure axis (decision alpha).
-    if has_n_train_sweep:
-        n_train_tables(dff, aggregation, tables_dir, family, lbl)
-
-
-def n_train_tables(df_cell, aggregation, tables_dir, family, label_prefix) -> int:
-    """Sample-efficiency tables (#241): one per (family, metric), rows=baselines,
-    cols=n_train values, bold-best per column. Mirrors the batch_speed table
-    (rows=baselines, cols=sweep) but for the n_train sweep.
-
-    Aggregation groups by n_train directly (across problem_id, seed) — the
-    within-problem grouping fig_accuracy_vs_n_train uses (PR 13), NOT the
-    across-problem grouping of table_headline: n_train varies WITHIN a problem.
-
-    Returns the number of tables written."""
-    grid = sorted(int(n) for n in df_cell["n_train"].dropna().unique())
-    written = 0
-    for metric in _metrics_for_family(family):
-        ok = df_cell[(df_cell["metric"] == metric) & (df_cell["status"] == "ok")]
-        if ok.empty:
-            continue
-        baselines = sorted(df_cell["baseline"].dropna().unique())
-        # per (baseline, n_train) central, across (problem_id, seed).
-        kept, centrals = {}, {}
-        for b in baselines:
-            cells, cens = {}, {}
-            for n in grid:
-                sub = ok[(ok["baseline"] == b) & (ok["n_train"] == n)]
-                agg = aggregate(sub["value"], aggregation) if not sub.empty else None
-                cells[n] = "--" if agg is None else _fmt(*agg)
-                cens[n] = _central(agg)
-            if all(cells[n] == "--" for n in grid):
-                continue  # baseline not applicable to this metric
-            kept[b] = cells
-            centrals[b] = cens
-        if not kept:
-            continue
-        bold = {n: _bold_best({b: centrals[b][n] for b in kept}, metric) for n in grid}
-        header = ["Method"] + [f"$n={n}$" for n in grid]
-        rows = []
-        for b in sorted(kept):
-            row = [b.replace("_", "\\_")]
-            for n in grid:
-                cell = kept[b][n]
-                row.append(_bold(cell) if b in bold[n] else cell)
-            rows.append(row)
-        caption = f"{_benchmark_caption(df_cell)} (metric={METRIC_LABEL[metric]}). {family}"
-        _write_table(tables_dir / f"{metric}_vs_n_train.tex", header, rows, caption,
-                     label=f"{label_prefix}_n_train_{_table_slug(metric)}")
-        written += 1
-    return written
-
-
-def process_family(dff, benchmark, family, aggregation, n_nodes, n_params,
-                   family_dir):
-    """Per-family orchestrator. Produces, under ``family_dir``:
-
-      - ``all/{plots,tables}/``       always (every problem, every supported
-                                      baseline -- mixed-coverage aggregation)
-      - ``common/{plots,tables}/``    if any problem is solved by the full
-                                      supported baseline set
-      - ``subsetN/{plots,tables}/``   one per auto-discovered solving set
-      - ``_subsets_overview.txt``     navigation aid
-
-    Each subset is computed over its problems and restricted to its solving
-    baselines; ``methods.txt`` / ``problems.txt`` record the membership.
-    Subset views omit ``success_rate.pdf`` (100% by construction).
-    """
-    family_dir.mkdir(parents=True, exist_ok=True)
-
-    # Drop baselines entirely not_supported for this family (and not_supported
-    # rows from survivors): a baseline that never participated is noise, not a
-    # 100% failure. (PR #197 semantics; the scaling plots filter to ok anyway.)
-    dff = _filter_unsupported_baselines(dff)
-    if dff.empty:
-        logger.info("skip family with no supported baselines: %s", family)
-        return
-
-    # 1. The "all" view: every problem, every participating baseline.
-    _render_view(dff, benchmark, family, aggregation, n_nodes, n_params,
-                 family_dir / "all", subset_name="all", include_success_rate=True)
-
-    # 2. Auto-discover coverage subsets and render each.
-    subsets = _discover_subsets(dff)
-    _write_subsets_overview(family_dir, family, subsets)
-    for s in subsets:
-        subset_dir = family_dir / s["name"]
-        _write_subset_metadata(subset_dir, s["name"], s["baselines"], s["problems"])
-        sub_dff = dff[dff["baseline"].isin(s["baselines"])
-                      & dff["problem_id"].isin(s["problems"])]
-        if sub_dff.empty:
-            continue
-        _render_view(sub_dff, benchmark, family, aggregation, n_nodes, n_params,
-                     subset_dir, subset_name=s["name"], include_success_rate=False)
-
-
-def _build_batch_speed_figure(
-    df: pd.DataFrame,
-    aggregation: str,
-    title: str,
-):
-    """Build the batch-speed figure (v0.14 #148, design doc §6.PR6).
-
-    Log-log batch_size vs amortized per-query time, one line per
-    baseline, one facet per family. Returns ``(fig, dnf_lines)`` so
-    tests can inspect facet structure / axis scales / annotations;
-    :func:`fig_batch_speed` saves and closes it.
-
-    Data contract: ``df`` is a speed-benchmark slice. Plotted points
-    use ``status == "ok"`` / ``metric == "query_time_s"`` rows, first
-    averaged per (family, baseline, batch_size, seed), then aggregated
-    across seeds via :func:`aggregate` for the band. Seed invalidation
-    (#148 Change B): a (family, baseline, batch_size) cell with ANY
-    failed seed (oom/timeout/error) is dropped entirely — no point, and
-    the dashed B=1 reference is suppressed — so a partially-failed config
-    never plots a survivor value. DNF annotation (matching the #163
-    convention): error/timeout/oom rows are counted per (family,
-    baseline, batch_size, status) and reported via a corner note +
-    sidecar lines.
-
-    Returns ``(None, [])`` when there is nothing to plot.
-    """
-    if "batch_size" not in df.columns:
-        return None, []
-    ok = df[(df["status"] == "ok") & (df["metric"] == "query_time_s")].copy()
-    ok = ok[ok["value"].notna() & (ok["value"] > 0)]
-    if ok.empty:
-        return None, []
-
-    families = sorted(ok["family"].dropna().unique())
-    colors = baseline_colors(sorted(ok["baseline"].unique()))
-
-    # Full sweep x-grid — every batch size the run swept (any status, so a size
-    # where a baseline FAILED still appears). Batchable lines are laid on this
-    # grid with NaN at missing/failed sizes so the line BREAKS at gaps
-    # (Change 1) instead of bridging a failed cell.
-    grid = sorted(int(b) for b in df["batch_size"].dropna().unique() if b >= 1)
-
-    # Seed invalidation (#148 Change B, speed-only): a (family, baseline,
-    # batch_size) cell with ANY failed seed (oom/timeout/error) is fully failed
-    # -> no point (NaN gap), and its dashed B=1 reference is suppressed. Built
-    # from the full df (failure rows are dropped from `ok`). Seed-count-agnostic.
-    fail = df[df["status"].isin(["oom", "timeout", "error"])]
-    failed_cells = {
-        (f, b, int(bs))
-        for f, b, bs in zip(fail["family"], fail["baseline"], fail["batch_size"])
-        if pd.notna(bs)
-    }
-
-    fig, axes = plt.subplots(
-        1, len(families),
-        figsize=(4.2 * len(families), 3.6),
-        sharey=True, squeeze=False,
-    )
-    dnf_lines: list[str] = []
-
-    for ax, family in zip(axes[0], families):
-        sub = ok[ok["family"] == family]
-        for bl in sorted(sub["baseline"].unique()):
-            blsub = sub[sub["baseline"] == bl]
-            library = parse_baseline(bl)[0]
-
-            # Per-(baseline, batch_size) center+band: per-seed mean of queries
-            # first, then seed-aggregate — same two-level pattern as the
-            # scaling figures.
-            by_bs: dict[int, tuple[float, float, float]] = {}
-            for bs, grp in blsub.groupby("batch_size"):
-                # Change B: drop any cell with a failed seed (no point/band; the
-                # dashed B=1 reference below is suppressed via the same `by_bs`).
-                if (family, bl, int(bs)) in failed_cells:
-                    continue
-                seed_means = grp.groupby("seed")["value"].mean()
-                c, lo, hi = aggregate(seed_means, aggregation)
-                lo, hi = clip_band("time", lo, hi)
-                by_bs[int(bs)] = (c, lo, hi)
-
-            if library in _NON_BATCHABLE_LIBRARIES:
-                # Change 2: non-batchable baseline (pinned B=1). If it succeeded
-                # at B=1, draw a dashed horizontal reference spanning the full
-                # x-axis ("fixed cost, doesn't improve with batching"). If it
-                # DNF'd at B=1 there's no ok data here at all -> no line.
-                if 1 in by_bs:
-                    ax.axhline(by_bs[1][0], ls="--", lw=1.2,
-                               color=colors[bl], label=bl)
-                continue
-
-            # Change 1: batchable baseline on the full grid; NaN where this
-            # baseline has no ok point so the line/band break at the gap.
-            ys = [by_bs[b][0] if b in by_bs else float("nan") for b in grid]
-            los = [by_bs[b][1] if b in by_bs else float("nan") for b in grid]
-            his = [by_bs[b][2] if b in by_bs else float("nan") for b in grid]
-            ax.plot(grid, ys, marker="o", markersize=4,
-                    color=colors[bl], label=bl)
-            ax.fill_between(grid, los, his, color=colors[bl], alpha=0.2)
-
-        # DNF cells for this family — failed rows (error/timeout/oom),
-        # deduped to (baseline, batch_size, status). #163 convention:
-        # corner count + sidecar detail. Pinned baselines simply absent
-        # at swept values are NOT DNF (by-design non-runs, §5.6).
-        fam_dnf = df[
-            (df["family"] == family)
-            & (df["status"].isin(["error", "timeout", "oom"]))
-        ]
-        n_dnf_before = len(dnf_lines)
-        if not fam_dnf.empty:
-            grouped = fam_dnf.groupby(
-                ["baseline", "batch_size", "status"]
-            ).size()
-            for (bl, bs, st), _n in grouped.items():
-                dnf_lines.append(f"  {family} B={int(bs)} {bl}: {st}")
-        n_fam_dnf = len(dnf_lines) - n_dnf_before
-        if n_fam_dnf:
-            ax.text(0.98, 0.98,
-                    f"DNF: {n_fam_dnf} cells (see *_dnf.txt)",
-                    fontsize=7, alpha=0.6, ha="right", va="top",
-                    transform=ax.transAxes)
-
-        ax.set_xscale("log", base=2)
-        ax.set_yscale("log")
-        ax.set_xlabel("batch_size")
-        ax.set_title(family, fontsize=10)
-        ax.legend(fontsize=6, loc="best")
-
-    axes[0][0].set_ylabel("per-query time [s] (amortized)")
-    fig.suptitle(f"{title} — per-query time vs batch_size", fontsize=11)
-    return fig, dnf_lines
-
-
-def fig_batch_speed(
-    df: pd.DataFrame,
-    aggregation: str,
-    out_path: Path,
-    title: str,
-) -> None:
-    """Render + save the batch-speed figure (and its DNF sidecar)."""
-    fig, dnf_lines = _build_batch_speed_figure(df, aggregation, title)
-    if fig is None:
-        logger.info("skip empty (no ok batched rows): %s", out_path.name)
-        return
-    if dnf_lines:
-        sidecar = out_path.with_name(out_path.stem + "_dnf.txt")
-        sidecar.parent.mkdir(parents=True, exist_ok=True)
-        sidecar.write_text(
-            "Error/timeout/oom cells for the batch-speed figure:\n"
-            + "\n".join(dnf_lines) + "\n",
-            encoding="utf-8",
-        )
-    _savefig(fig, out_path)
-
-
-# --- Batch-speed per-family LaTeX tables (v0.14 #148, Change 3) ---------------
-
-def _batch_speed_cell(rows: pd.DataFrame, aggregation: str) -> str:
-    """One table cell for a (baseline, batch_size) slice.
-
-    Failure-first (speed-only seed invalidation, #148 Change B): ANY row with
-    status in {oom, timeout, error} fails the whole cell -> the failure code
-    (most frequent). Otherwise ok query-time rows -> ``IQM$\\pm$band`` (same agg
-    as the figure); otherwise (not_supported / absent) -> ``--``.
-
-    The "any failure row" rule is seed-count-agnostic: correct whether the
-    runner ran every seed or stopped after the first failure (forward-compatible
-    with the PR-2 execution-level seed-skip).
-    """
-    failed = rows[rows["status"].isin(["oom", "timeout", "error"])]
-    if not failed.empty:
-        return str(failed["status"].mode().iloc[0])
-    ok = rows[(rows["status"] == "ok") & (rows["metric"] == "query_time_s")]
-    ok = ok[ok["value"].notna() & (ok["value"] > 0)]
-    if not ok.empty:
-        seed_means = ok.groupby("seed")["value"].mean()
-        return _fmt(*aggregate(seed_means, aggregation))
-    return "--"
-
-
-def _batch_speed_central(rows: pd.DataFrame, aggregation: str):
-    """Central per-query time for a (baseline, batch_size) slice, or None for a
-    failed / not-run cell (those never win bold-best). Mirrors _batch_speed_cell's
-    failure-first logic so the bolded cell and its value agree."""
-    if not rows[rows["status"].isin(["oom", "timeout", "error"])].empty:
-        return None
-    ok = rows[(rows["status"] == "ok") & (rows["metric"] == "query_time_s")]
-    ok = ok[ok["value"].notna() & (ok["value"] > 0)]
-    if ok.empty:
-        return None
-    return _central(aggregate(ok.groupby("seed")["value"].mean(), aggregation))
-
-
-def _write_batch_speed_table(out_path, grid, rows, family, aggregation, label="") -> None:
-    """``table`` float (booktabs): rows=methods, cols=batch sizes. The code
-    legend lives in ``\\caption`` (hand-built LaTeX — escaped at construction)."""
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    header = ["Method"] + [f"$B={b}$" for b in grid]
-    ncol = len(header)
-    band = "IQM$\\pm$(Q3$-$Q1)/2" if aggregation == "iqm_iqr" else "mean$\\pm$std"
-    agg_tex = aggregation.replace("_", "\\_")  # underscore is math-mode in text
-    # "INFERENCE SPEED" caption (#241); this builder only renders for a
-    # batch_sizes sweep, so the bucket is definitionally INFERENCE SPEED.
-    caption = (
-        f"INFERENCE SPEED. Per-query time [s], {band} over seeds (agg={agg_tex}). "
-        f"\\texttt{{oom}}/\\texttt{{timeout}}/\\texttt{{error}} = cell DNF at "
-        f"that batch size (any failed seed fails the cell); "
-        f"-- = not run / non-batchable at $B>1$."
-    )
-    lines = [
-        "\\begin{table}[t]",
-        "\\centering",
-        "\\begin{tabular}{l" + "r" * (ncol - 1) + "}",
-        "\\toprule",
-        " & ".join(header) + " \\\\",
-        "\\midrule",
-    ]
-    lines += [" & ".join(r) + " \\\\" for r in rows]
-    lines += ["\\bottomrule", "\\end{tabular}", f"\\caption{{{caption}}}"]
-    if label:
-        lines.append(f"\\label{{{label}}}")
-    lines += ["\\end{table}", ""]
-    out_path.write_text("\n".join(lines))
-
-
-def batch_speed_tables(df, aggregation, out_dir: Path, bench: str) -> int:
-    """One ``batch_speed_table_<family>.tex`` per family present in a swept run.
-
-    Mirrors :func:`fig_batch_speed`'s data contract; reuses :func:`aggregate`
-    and :func:`_fmt` so plot and tables agree under ``--aggregation`` (Change 4).
-    Returns the number of tables written.
-    """
-    if "batch_size" not in df.columns:
-        return 0
-    grid = sorted(int(b) for b in df["batch_size"].dropna().unique() if b >= 1)
-    if not grid or max(grid) <= 1:
-        return 0
-
-    out_dir = Path(out_dir)
-    written = 0
-    for family in sorted(df["family"].dropna().unique()):
-        fam = df[df["family"] == family]
-        kept, centrals = {}, {}     # baseline -> {B: cell} / {B: central or None}
-        for bl in sorted(fam["baseline"].dropna().unique()):
-            blsub = fam[fam["baseline"] == bl]
-            cells = {b: _batch_speed_cell(blsub[blsub["batch_size"] == b], aggregation)
-                     for b in grid}
-            if all(cells[b] == "--" for b in grid):
-                continue  # baseline not applicable to this family
-            kept[bl] = cells
-            centrals[bl] = {b: _batch_speed_central(blsub[blsub["batch_size"] == b],
-                                                    aggregation) for b in grid}
-        if not kept:
-            continue
-        # bold-best per $B$ column (per-query time is lower-better); the winning
-        # baseline can differ across batch sizes — that is the batching story.
-        bold = {b: _bold_best({bl: centrals[bl][b] for bl in kept}, "time") for b in grid}
-        rows = []
-        for bl in sorted(kept):
-            row = [bl.replace("_", "\\_")]
-            for b in grid:
-                cell = kept[bl][b]
-                row.append(_bold(cell) if bl in bold[b] else cell)
-            rows.append(row)
-        out_path = out_dir / f"batch_speed_table_{family}.tex"
-        _write_batch_speed_table(
-            out_path, grid, rows, family, aggregation,
-            label=f"tab:{_table_slug(bench)}_batch_speed_{_table_slug(family)}",
-        )
-        written += 1
-    return written
+            produced += 1
+    (family_dir / "selection.txt").write_text("\n".join(selection_lines) + "\n")
+    (family_dir / "common").mkdir(parents=True, exist_ok=True)
+    (family_dir / "common" / "common_seeds.txt").write_text(
+        "\n".join(common_lines) + "\n")
+    return produced
 
 
 def _resolve_parquet(parquet) -> list[Path]:
-    """Resolve a parquet argument to a list of concrete ``.parquet`` files.
-
-    Accepts a single ``.parquet`` file, a directory (find the single
-    ``*_metrics.parquet`` inside, the layout written by ``nbn-bench
-    inference``), or a list/tuple of any of those. Always returns a
-    ``list[Path]`` (one entry per input) so ``run_plot`` can row-concatenate
-    several parquets — e.g. a parameter-learning parquet plus an inference
-    parquet for the divergence panel (#235)."""
+    """A ``.parquet`` file, a run directory (single ``*_metrics.parquet``
+    inside), or a list of those -> ``list[Path]``."""
     items = parquet if isinstance(parquet, (list, tuple)) else [parquet]
     resolved: list[Path] = []
     for item in items:
@@ -1572,30 +738,23 @@ def run_plot(
     output_dir: Path,
     aggregation: str = "iqm_iqr",
     benchmark: str | None = None,
+    top_nbn: int = 2,
 ) -> int:
-    """Generate figures + LaTeX tables from a benchmark parquet.
+    """Generate figures + LaTeX tables from one or more benchmark parquets.
 
     Args:
-        parquet: a ``*_metrics.parquet`` file, a directory containing one
-            (output of ``nbn-bench inference``), or a list of such paths.
-            Multiple parquets are row-concatenated before plotting (#235) —
-            PL and inference parquets share the CellResult schema, so combining
-            them is a row union, not a relational join.
-        output_dir: where to write the ``<benchmark>/{plots,tables}/`` tree
-            (one set of per-family files across all problems in each family).
+        parquet: a ``*_metrics.parquet`` file, a run directory, or a list of
+            those (row-concatenated, #235).
+        output_dir: root of the ``<benchmark>/<family>/{all,common}/`` tree.
         aggregation: ``"iqm_iqr"`` (default) or ``"mean_std"``.
-        benchmark: restrict to one benchmark; default processes every
-            benchmark present in the parquet.
+        benchmark: restrict to one benchmark; default = every one present.
+        top_nbn: how many nbn methods to show per x (default 2).
 
     Returns:
         Process exit code (0 on success, 1 if the parquet is missing columns).
     """
     paths = _resolve_parquet(parquet)
     output_dir = Path(output_dir)
-
-    # Row-concatenate in deterministic order (#235). The ess/khat columns may
-    # coalesce object<->float64 when an all-None PL column meets a float
-    # inference column; harmless — the figures never read them.
     frames = [pd.read_parquet(p) for p in sorted(paths, key=str)]
     df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
     required = {"benchmark", "family", "problem_id", "seed", "baseline",
@@ -1607,8 +766,7 @@ def run_plot(
 
     n_params_global = n_parameters_lookup(df)
     if n_params_global is None:
-        logger.info("n_parameters column absent; skipping *_vs_n_parameters "
-                    "figures (will populate from the paper-relaunch parquet)")
+        logger.info("n_parameters column absent")
 
     benchmarks = [benchmark] if benchmark else sorted(df["benchmark"].dropna().unique())
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1618,37 +776,16 @@ def run_plot(
         dfb = df[df["benchmark"] == bench].copy()
         if dfb.empty:
             continue
-        # n_nodes per problem: parquet column (#195) preferred, _NETWORKS /
-        # synthetic-int fallback for older parquets (resolve_n_nodes).
         n_nodes = resolve_n_nodes(dfb, bench)
-
         for family in sorted(dfb["family"].dropna().unique()):
             dff = dfb[dfb["family"] == family]
             if dff.empty:
                 skipped.append(f"{bench}/{family}")
-                logger.info("skip empty family: %s/%s", bench, family)
                 continue
-            process_family(dff, bench, family, aggregation,
-                           n_nodes, n_params_global, output_dir / bench / family)
-            produced += 1
+            produced += process_family(dff, bench, family, aggregation, n_nodes,
+                                       n_params_global, output_dir / bench / family,
+                                       top_nbn=top_nbn)
 
-        # Batch-speed figure (v0.14 #148): auto-detected — rendered when
-        # the parquet carries batched rows (batch_size > 1 anywhere),
-        # i.e. the output of a batch_sizes-sweep run. One figure per
-        # benchmark, faceted by family, at the benchmark level of the
-        # output tree.
-        if "batch_size" in dfb.columns and (dfb["batch_size"] > 1).any():
-            fig_batch_speed(
-                dfb, aggregation,
-                output_dir / bench / "batch_speed.pdf",
-                bench,
-            )
-            produced += 1
-            # Per-family LaTeX tables alongside the figure (#148, Change 3);
-            # same aggregation as the figure for consistency (Change 4).
-            produced += batch_speed_tables(
-                dfb, aggregation, output_dir / bench, bench,
-            )
-
-    logger.info("done: %d cells produced, %d cells skipped (empty)", produced, len(skipped))
+    logger.info("done: %d figures produced, %d families skipped (empty)",
+                produced, len(skipped))
     return 0
