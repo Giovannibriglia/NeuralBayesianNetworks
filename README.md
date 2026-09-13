@@ -273,8 +273,8 @@ comes in two views:
   count.
 
 Shown methods at each x are every non-nbn baseline applicable to the family
-plus the `--top-nbn` best nbn methods (ranked on the view's own aggregate;
-nbn rows carry a dagger in the tables). Output tree, per family:
+plus the `--top-nbn` best nbn methods (ranked on the `all` view and kept
+identical in `common`; nbn rows carry a dagger in the tables). Output tree, per family:
 
 ```
 <output-dir>/<benchmark>/<family>/

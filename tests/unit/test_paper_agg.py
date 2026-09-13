@@ -247,21 +247,25 @@ def test_build_views_end_to_end_pgmpy_case():
     assert vc.loc[("pyro-empirical-importance", 1)]["k"] == 0
 
 
-def test_build_views_common_ranking_falls_back_to_all_when_c0_empty():
-    """Two nbn methods solving disjoint seeds: C0 is empty, so the common
-    ranking reuses the all-view selection."""
-    rows = [_row("nbn-a", s, metric="tv_per_node", value=0.1) for s in (0, 1)]
-    rows += [_row("nbn-b", s, metric="tv_per_node", value=0.2) for s in (2, 3)]
-    rows += [_row("nbn-a", s, metric="tv_per_node", value=float("nan"), status="error")
-             for s in (2, 3)]
-    rows += [_row("nbn-b", s, metric="tv_per_node", value=float("nan"), status="error")
-             for s in (0, 1)]
+def test_build_views_common_reuses_all_selection():
+    """The nbn set is chosen once on the all view and kept in common, even if
+    a different nbn method would win on the common seeds."""
+    rows = [_row("nbn-a", s, metric="tv_per_node", value=v)
+            for s, v in ((0, 0.05), (1, 0.05), (2, 0.05), (3, 0.05), (4, 0.9))]
+    rows += [_row("nbn-b", s, metric="tv_per_node", value=0.2) for s in range(5)]
+    rows += [_row("pgmpy-mle", s, metric="tv_per_node", value=0.1) for s in (3, 4)]
+    rows += [_row("pgmpy-mle", s, metric="tv_per_node", value=float("nan"), status="error")
+             for s in (0, 1, 2)]
     dfx = assign_x(pd.DataFrame(rows), "n_nodes", {"50": 50})
     cells, n_total = cell_table(dfx, "tv_per_node")
     v = build_views(cells, n_total, "mean_std", "tv_per_node", [50], top_n=1)
-    assert v.selection["all"][50] == ["nbn-a"]
-    assert v.selection["common"][50] == ["nbn-a"]
-    assert v.common_sets[50] == ["s0", "s1"]
+    # all view: nbn-a wins (mean 0.22 < 0.2? no: 0.22 > 0.2 -> nbn-b wins)
+    assert v.selection["all"][50] == ["nbn-b"]
+    assert v.selection["common"][50] == ["nbn-b"]
+    assert v.common_sets[50] == ["s3", "s4"]
+    vc = v.common.set_index("method")
+    assert set(vc.index) == {"pgmpy-mle", "nbn-b"}
+    assert vc.loc["nbn-b", "k"] == 2
 
 
 def test_build_views_plus_inf_center_survives():

@@ -19,10 +19,10 @@ Two views share one contract (``docs/v0.18-bar-reporting-all-common.md``):
                failing baseline would empty the column).
 
 Shown methods at each x = every non-nbn baseline applicable to the family plus
-the ``top_n`` nbn methods, ranked on the view's own aggregate (direction-aware
-on the metric center). For ``common`` the ranking uses the intersection over
-all nbn candidates (``C0``), then the final ``C(x)`` is recomputed over the
-selected set; if ``C0`` is empty the ranking falls back to the ``all`` view.
+the ``top_n`` nbn methods, ranked on the ``all`` view (direction-aware on the
+metric center). The ``common`` view reuses exactly that selection, so both
+views always show the same methods and ``C(x)`` is the intersection over
+that fixed set.
 
 Aggregation across seeds is ``iqm_iqr`` (interquartile mean ± IQR/2) or
 ``mean_std``; the per-seed value is the per-cell reduction (mean over queries
@@ -373,10 +373,11 @@ def select_top(view: pd.DataFrame, candidates, kind: str, top_n: int) -> dict:
 
 def build_views(cells: pd.DataFrame, n_total: dict, aggregation: str,
                 metric: str, xs, top_n: int = 2) -> Views:
-    """Assemble the ``all`` and ``common`` views with their nbn selections.
+    """Assemble the ``all`` and ``common`` views with the nbn selection.
 
     ``shown`` marks the rows that make it into the figure / table: every
-    non-nbn method attempted at x, plus the selected nbn methods at x.
+    non-nbn method attempted at x, plus the nbn methods selected on the
+    ``all`` view at x (the same set in both views).
     """
     kind = metric_kind(metric)
     methods = sorted(cells["method"].unique())
@@ -390,16 +391,10 @@ def build_views(cells: pd.DataFrame, n_total: dict, aggregation: str,
         for r in va.itertuples(index=False)
     ]
 
-    # common: rank nbn on the intersection over ALL candidates (C0), then
-    # recompute the intersection over the selected set.
-    c0 = common_sets(cells, methods, xs)
-    v0 = common_view(cells, n_total, aggregation, methods, xs, c0)
-    sel_common = {}
-    for x in xs:
-        if c0.get(x):
-            sel_common[x] = select_top(v0[v0["x"] == x], nbn, kind, top_n).get(x, [])
-        else:
-            sel_common[x] = sel_all.get(x, [])
+    # common: the SAME nbn selection as ``all`` (chosen once, on the all view),
+    # so the two views always show the same methods and are directly
+    # comparable; C(x) is the intersection over that shown set.
+    sel_common = {x: list(sel_all.get(x, [])) for x in xs}
     shown_by_x = {x: non_nbn + sel_common[x] for x in xs}
     sets = {}
     recs = []
@@ -408,7 +403,7 @@ def build_views(cells: pd.DataFrame, n_total: dict, aggregation: str,
         sets[x] = sx
         recs.append(common_view(cells, n_total, aggregation, shown_by_x[x], [x], {x: sx}))
     vc = (pd.concat(recs, ignore_index=True) if recs
-          else v0.iloc[0:0].copy())
+          else _view_frame([]))
     vc["shown"] = True
     return Views(
         metric=metric, kind=kind, xs=list(xs), all=va, common=vc,
