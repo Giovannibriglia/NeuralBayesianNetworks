@@ -248,34 +248,57 @@ generated automatically):
 ### Plot the results
 
 `nbn-bench plot` turns one (or more) run directories into paper figures and
-LaTeX tables. The same command serves every benchmark; the figures it emits
-are decided by what the parquet contains (which metrics have `ok` rows,
-whether `n_train` or `batch_size` is swept), so you never pick a plotter:
+LaTeX tables. The same command serves every benchmark; the x grid is decided
+by what the parquet contains (`batch_size` sweep, `n_train` sweep, bnlearn
+network, else `n_nodes`), so you never pick a plotter:
 
 ```bash
 nbn-bench plot results/benchmark_synthetic_learning_curves_20260908_092714 \
   --output-dir results/figures/learning_curves
 # options: --aggregation iqm_iqr|mean_std (default iqm_iqr)
 #          --benchmark synthetic|bnlearn  (default: every benchmark in the parquet)
+#          --top-nbn N                    (nbn methods shown per x value, default 2)
 ```
 
-Output tree: `<output-dir>/<benchmark>/<family>/all/{plots,tables}/`, plus
-`common/` or `subset<k>/` siblings of `all/` when the baselines do not all
-cover the same problems (`_subsets_overview.txt` explains the split). A
-figure that had unfinished cells gets a `*_dnf.txt` sidecar naming them.
+Every figure is a **grouped bar plot** (one group per x value, one bar per
+method, error bar = aggregation band across seeds) and every figure/table
+comes in two views:
+
+- `all/` — each method aggregated over the seeds **it** solved; a bar or
+  table cell whose method solved fewer than all seeds carries `k/n`; a method
+  that solved none shows its failure code (`timeout`, `oom`, `error`).
+- `common/` — each method aggregated over the seeds solved by **every shown
+  method** at that x, so the bars in a group are computed on the same
+  problems; the table footer and the x label report `|C|`, the common-seed
+  count.
+
+Shown methods at each x are every non-nbn baseline applicable to the family
+plus the `--top-nbn` best nbn methods (ranked on the view's own aggregate;
+nbn rows carry a dagger in the tables). Output tree, per family:
+
+```
+<output-dir>/<benchmark>/<family>/
+  all/plots/<metric>_vs_<x>.pdf     all/tables/<metric>_vs_<x>.tex
+  all/plots/success_rate.pdf        (status breakdown, diagnostic)
+  common/plots/<metric>_vs_<x>.pdf  common/tables/<metric>_vs_<x>.tex
+  common/common_seeds.txt           the common seeds per metric and x
+  selection.txt                     the nbn methods shown per (view, metric, x)
+```
+
 The run-directory name uses the config's `config_name`
 (`complete`, `scalability_complete`, `batch_speed`, `param_learning_complete`,
-`learning_curves`, `bnlearn_complete`), not the YAML file name. Per benchmark:
+`learning_curves`, `bnlearn_complete`), not the YAML file name. Per benchmark
+(`<metric>` below is each accuracy metric present plus the timing ones):
 
-| Benchmark (config) | Run with | Plot with | What you get under `<output-dir>/<benchmark>/<family>/all/` |
+| Benchmark (config) | Run with | x grid | Metrics rendered |
 |---|---|---|---|
-| Synthetic inference (`synthetic/complete/inference_complete.yaml`) | `nbn-bench inference --config …` | `nbn-bench plot <run-dir> --output-dir <out>` | `plots/{tv,jsd,w1}_per_node_vs_{n_nodes,n_parameters}.pdf`, `plots/{fit_time,total_query_time}_vs_{n_nodes,n_parameters}.pdf`, `plots/success_rate.pdf`; `tables/table_overall.tex`, `table_role_<role>.tex`, `table_kind_<kind>.tex` |
-| Inference scalability (`synthetic/complete/inference_scalability_complete.yaml`) | `nbn-bench inference --config …` | same | same set; the time-scaling figures (`*_time_vs_n_nodes.pdf`) are the headline |
-| Inference speed / batching (`synthetic/speed/inference_speed.yaml`, a `batch_sizes` sweep) | `nbn-bench inference --config …` | same | `<output-dir>/<benchmark>/batch_speed.pdf` (per-query time vs batch size, one panel per family) + `batch_speed_table_<family>.tex`, next to the per-family tree above |
-| Parameter learning (`synthetic/complete/parameter_learning_complete.yaml`) | `nbn-bench param-learning --config …` | same | `plots/log_likelihood_vs_{n_nodes,n_parameters}.pdf`, `param_recovery_{tv,kl}_vs_n_nodes.pdf` (discrete), `calibration_{pit_ks,sd_ratio}_vs_n_nodes.pdf` (continuous), `success_rate.pdf`; `tables/table_overall.tex`, `table_role_param_learning.tex`, `table_kind_prediction.tex` |
-| Learning curves / sample efficiency (`synthetic/learning_curves/learning_curves.yaml`, an `n_train_sweep`) | `nbn-bench param-learning --config …` | same | everything in the parameter-learning row **plus** `plots/<metric>_vs_n_train.pdf` and `tables/<metric>_vs_n_train.tex` (rows = baselines, columns = n_train, best per column in bold) for each metric above |
-| bnlearn inference (`bnlearn/complete/inference_complete.yaml`) | `nbn-bench inference --config …` | same | the synthetic-inference set under `<output-dir>/bnlearn/…`, with `*_vs_n_parameters.pdf` as the natural axis (real networks differ in parameter count more than node count) |
-| Calibration vs accuracy divergence (no config: combine two runs) | one `param-learning` run + one `inference` run on the same families | `nbn-bench plot <pl-run-dir> <inference-run-dir> --output-dir <out>` | `plots/divergence_calibration_pit_ks_vs_w1_per_node.pdf` per continuous family (rows are concatenated; engine suffixes such as `-lw` are stripped to align `nbn-mdn-lw` with `nbn-mdn`) |
+| Synthetic inference (`synthetic/complete/inference_complete.yaml`) | `nbn-bench inference --config …` | `n_nodes` | `tv_per_node`, `jsd_per_node` (discrete), `w1_per_node` (continuous), `total_query_time`, `fit_time` |
+| Inference scalability (`synthetic/complete/inference_scalability_complete.yaml`) | `nbn-bench inference --config …` | `n_nodes` | same; the time figures are the headline |
+| Inference speed / batching (`synthetic/speed/inference_speed.yaml`, a `batch_sizes` sweep) | `nbn-bench inference --config …` | `batch_size` | `query_time` (per-query time); non-batchable baselines only have a `B=1` bar and read `--` beyond |
+| Parameter learning (`synthetic/complete/parameter_learning_complete.yaml`) | `nbn-bench param-learning --config …` | `n_nodes` | `log_likelihood`, `param_recovery_{tv,kl}` (discrete), `calibration_{pit_ks,sd_ratio}` (continuous), `fit_time` |
+| Learning curves / sample efficiency (`synthetic/learning_curves/learning_curves.yaml`, an `n_train_sweep`) | `nbn-bench param-learning --config …` | `n_train` | same as parameter learning |
+| bnlearn inference (`bnlearn/complete/inference_complete.yaml`) | `nbn-bench inference --config …` | `network` (sorted by size; split into `_partK` files beyond 8 networks) | as synthetic inference |
+| Calibration vs accuracy divergence (no config: combine two runs) | one `param-learning` run + one `inference` run on the same families | — | `all/plots/divergence_calibration_pit_ks_vs_w1_per_node.pdf` per continuous family (rows are concatenated; engine suffixes such as `-lw` are stripped to align `nbn-mdn-lw` with `nbn-mdn`) |
 
 Two things that bite:
 
@@ -283,13 +306,14 @@ Two things that bite:
   `metrics: log_likelihood` and their baselines carry no `inference_method`,
   so they **must** run under `param-learning`. Under `inference` the loader
   refuses them and prints the command to use.
-- A figure is only written when at least one `ok` row exists for its metric
-  in that family. If a plot you expect is missing, `nbn-bench plot -v` logs
-  `skip empty (...)` with the reason, and `run.log` in the run directory has
-  the per-cell error.
+- A figure is only written when at least one seed was solved for its metric
+  in that family (a seed with any timed-out query counts as unsolved for that
+  cell; an `ok` row with a NaN value counts as unsolved too). If a plot you
+  expect is missing, `nbn-bench plot -v` logs `skip ...` with the reason, and
+  `run.log` in the run directory has the per-cell error.
 
-Design notes and the full figure/table spec live in
-[`docs/v0.13-paper-figures.md`](docs/v0.13-paper-figures.md).
+The aggregation contract lives in
+[`docs/v0.18-bar-reporting-all-common.md`](docs/v0.18-bar-reporting-all-common.md).
 
 ## Configuration
 

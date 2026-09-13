@@ -53,7 +53,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Generate paper figures + LaTeX tables from a benchmark parquet.",
         description=(
             "Read a benchmark parquet (the output of `nbn-bench inference`) and "
-            "produce figures + LaTeX tables per docs/v0.13-paper-figures.md."
+            "produce grouped-bar figures + LaTeX tables in the all/common "
+            "views (docs/v0.18-bar-reporting-all-common.md)."
         ),
     )
     plot.add_argument("parquet", nargs="+",
@@ -70,6 +71,9 @@ def _build_parser() -> argparse.ArgumentParser:
     plot.add_argument("--benchmark", default=None,
                       help="Restrict to one benchmark; default processes all "
                            "present in the parquet.")
+    plot.add_argument("--top-nbn", type=int, default=2,
+                      help="How many nbn methods to show per x value next to "
+                           "every non-nbn baseline (default: 2).")
     plot.add_argument("-v", "--verbose", action="store_true")
 
     return parser
@@ -226,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=Path(args.output_dir),
             aggregation=args.aggregation,
             benchmark=args.benchmark,
+            top_nbn=args.top_nbn,
         )
 
     if args.cmd == "inference":
