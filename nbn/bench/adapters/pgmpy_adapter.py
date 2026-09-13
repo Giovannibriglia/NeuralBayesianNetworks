@@ -202,8 +202,12 @@ class PgmpyAdapter:
             from pgmpy.inference import VariableElimination
             from pgmpy.models import DiscreteBayesianNetwork
         except ImportError as exc:
+            # Keep the underlying message: ``DiscreteBayesianNetwork`` only
+            # exists from pgmpy 1.0 on, so an old install fails here with
+            # pgmpy present (the 2026-09-10 pascal run recorded a bare
+            # "pip install pgmpy" for every discrete cell).
             raise ImportError(
-                "PgmpyAdapter needs pgmpy: pip install pgmpy"
+                f"PgmpyAdapter needs pgmpy>=1.0 (pip install -U pgmpy): {exc}"
             ) from exc
 
         self.problem = problem
@@ -279,7 +283,7 @@ class PgmpyAdapter:
             from pgmpy.models import LinearGaussianBayesianNetwork
         except ImportError as exc:
             raise ImportError(
-                "PgmpyAdapter needs pgmpy: pip install pgmpy"
+                f"PgmpyAdapter needs pgmpy>=1.0 (pip install -U pgmpy): {exc}"
             ) from exc
         try:
             from pgmpy.factors.continuous import LinearGaussianCPD
