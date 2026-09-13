@@ -265,8 +265,9 @@ class TestRunnerPhase2Wiring:
             query_kinds=["diagnosis"],
             evidence_strategies=["random"],
         )
-        assert rows
-        for r in rows:
+        per_query = [r for r in rows if r.metric == "query_time_s"]
+        assert per_query
+        for r in per_query:
             assert r.query_role == "cut"
             assert r.query_kind == "diagnosis"
             assert r.evidence_strategy == "random"

@@ -31,6 +31,12 @@
 # applicable-cell count vs the original VE/LW-only spec (95 → 185 cells,
 # 420 → 960 measurement rows). Hours of wall-clock — a real run, not CI.
 # See inference_speed_smoke.yaml for the fast gate.
+#
+# Output size: TimingOnly emits one query_time_s row per (query, batch_size)
+# -> ~4.9M rows / ~3 GB JSONL at this scale (was 14.5M rows / 9.5 GB before
+# the 2026-09 one-fit-row-per-pass change). The JSONL -> parquet step streams
+# in bounded memory; launch from a plain terminal / nohup, not an IDE
+# terminal (see scripts/run_all_benchmarks.sh header).
 # =============================================================================
 # Training minibatch for every nbn baseline below (extra_kwargs.batch_size).
 # Defined once here as a YAML anchor and referenced as *BATCH_SIZE_FIT.

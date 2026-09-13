@@ -209,8 +209,9 @@ class TestEvidenceModePropagation:
             problem, self._mock_adapter(), [q],
             evidence_modes=modes,
         )
-        assert rows
-        assert all(r.evidence_mode == "empty" for r in rows)
+        per_query = [r for r in rows if r.metric == "query_time_s"]
+        assert per_query
+        assert all(r.evidence_mode == "empty" for r in per_query)
 
     def test_evidence_modes_defaults_to_full(self):
         """Omitting evidence_modes → all rows 'full' (backward-compat)."""
