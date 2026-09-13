@@ -106,7 +106,7 @@ These numbers come from the canonical paper-data run at tag `v0.6c-d`
 
 ### Inference: 9-22× faster on continuous Linear Gaussian networks
 
-![Inference total time vs network size](results/figures/inference_paper_total_time_vs_size.png)
+![Inference total time vs network size](results/benchmark_synthetic_learning_curves_20260908_092714/figures/inference_paper_total_time_vs_size.png)
 
 NBN-lg-lw vs pgmpy-lg-predict on continuous Linear Gaussian networks:
 22× faster at n=10 (1.9 ms vs 42 ms), 12× at n=1000 (0.72 s vs 8.5 s).
@@ -118,7 +118,7 @@ at 108 ms (75× faster).
 
 ### Parameter learning: 2.3× more accurate on discrete networks at scale
 
-![Parameter learning accuracy vs network size](results/figures/parameter_learning_paper_accuracy_vs_size.png)
+![Parameter learning accuracy vs network size](results/benchmark_synthetic_learning_curves_20260908_092714/figures/parameter_learning_paper_accuracy_vs_size.png)
 
 On discrete Bayesian networks, NBN-cat reaches TV ≈ 0.14 across all
 n_nodes ≥ 50; pgmpy-mle saturates at TV ≈ 0.34. The quality gap opens
