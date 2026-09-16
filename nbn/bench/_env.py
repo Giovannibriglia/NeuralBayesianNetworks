@@ -11,6 +11,14 @@ benchmark commands now refuse to start when a library one of their
 baselines needs is missing, too old, or shadowed by a second copy, and
 ``nbn-bench check-env`` prints the same table on demand.
 
+A second run (batch_speed, 2026-09-14) lost pgmpy the same way with pgmpy
+1.x installed: ``pgmpy.models`` imports ``sklearn.utils.validation
+.validate_data`` (scikit-learn >= 1.6) but pgmpy only pins
+``scikit-learn>=1.2``, and the machine had an older copy in ``~/.local``.
+``import pgmpy`` alone passed the check. Hence each requirement can name
+the *submodules the adapters actually import* (``probes``), which are
+imported too, and scikit-learn carries its own pin here.
+
 The requirement table below is the single in-code source of truth and is
 pinned to ``pyproject.toml`` by ``tests/unit/test_env_check.py`` (installed
 package metadata cannot be trusted for this: an editable install keeps the
@@ -31,6 +39,10 @@ class Requirement:
     module: str        # top-level import name
     spec: str          # PEP 440 specifier, e.g. ">=1.0" or ">=1.2,<2.0"
     extra: str         # "core" or the pyproject extra that carries it
+    # Submodules the adapters import, checked in addition to ``module``: a
+    # top-level package can import fine while the submodule that pulls in a
+    # transitive dependency does not (pgmpy.models -> sklearn, see above).
+    probes: tuple[str, ...] = ()
 
 
 # Mirrors [project.dependencies] + the runtime extras of pyproject.toml.
@@ -45,15 +57,22 @@ REQUIREMENTS: tuple[Requirement, ...] = (
     Requirement("tqdm", "tqdm", ">=4.65", "bench"),
     Requirement("pandas", "pandas", ">=2.0", "bench"),
     Requirement("pyarrow", "pyarrow", ">=14.0", "bench"),
-    Requirement("pgmpy", "pgmpy", ">=1.0", "bench"),
-    Requirement("pomegranate", "pomegranate", ">=1.0", "bench"),
+    Requirement("pgmpy", "pgmpy", ">=1.0", "bench", probes=(
+        "pgmpy.models", "pgmpy.inference", "pgmpy.estimators",
+        "pgmpy.factors.continuous")),
+    # pgmpy's own metadata says scikit-learn>=1.2 but pgmpy 1.x calls
+    # ``validate_data`` (1.6+); pip therefore never upgrades a stale copy.
+    Requirement("scikit-learn", "sklearn", ">=1.6", "bench"),
+    Requirement("pomegranate", "pomegranate", ">=1.0", "bench", probes=(
+        "pomegranate.bayesian_network", "pomegranate.distributions")),
     Requirement("matplotlib", "matplotlib", ">=3.7", "bench"),
     Requirement("seaborn", "seaborn", ">=0.12", "bench"),
     Requirement("psutil", "psutil", ">=5.9", "bench"),
     Requirement("packaging", "packaging", ">=23.0", "bench"),
     Requirement("zuko", "zuko", ">=1.2,<2.0", "neural"),
     Requirement("gpytorch", "gpytorch", ">=1.11", "gp"),
-    Requirement("pyro-ppl", "pyro", ">=1.9", "mcmc"),
+    Requirement("pyro-ppl", "pyro", ">=1.9", "mcmc", probes=(
+        "pyro.infer", "pyro.distributions", "pyro.poutine")),
 )
 
 _BY_DIST = {r.dist: r for r in REQUIREMENTS}
@@ -62,7 +81,7 @@ _BY_DIST = {r.dist: r for r in REQUIREMENTS}
 # the runner's own dependencies — core + bench minus the plotting libraries
 # (only ``nbn-bench plot`` imports them) and minus the baseline libraries
 # (required only when a config lists that baseline, see LIBRARY_DISTS).
-_NOT_RUN_BASE = frozenset({"matplotlib", "seaborn", "pgmpy", "pomegranate"})
+_NOT_RUN_BASE = frozenset({"matplotlib", "seaborn", "pgmpy", "scikit-learn", "pomegranate"})
 RUN_BASE: frozenset[str] = frozenset(
     r.dist for r in REQUIREMENTS
     if r.extra in {"core", "bench"} and r.dist not in _NOT_RUN_BASE
@@ -71,7 +90,7 @@ RUN_BASE: frozenset[str] = frozenset(
 # Baseline ``library`` (config field) -> distributions its adapter imports.
 LIBRARY_DISTS: dict[str, frozenset[str]] = {
     "nbn": frozenset(),
-    "pgmpy": frozenset({"pgmpy"}),
+    "pgmpy": frozenset({"pgmpy", "scikit-learn"}),
     "pomegranate": frozenset({"pomegranate"}),
     "pyro": frozenset({"pyro-ppl"}),
 }
@@ -169,6 +188,13 @@ def check_one(req: Requirement) -> Report:
     if f:
         import os
         location = os.path.dirname(os.path.abspath(f))
+    for sub in req.probes:
+        try:
+            importlib.import_module(sub)
+        except Exception as exc:
+            return Report(req.dist, req.module, req.spec, req.extra, installed, imported,
+                          location, "broken",
+                          f"import {sub} failed: {type(exc).__name__}: {exc}")
     if installed is None:
         # importable but no metadata (vendored / PYTHONPATH copy)
         ver = imported
