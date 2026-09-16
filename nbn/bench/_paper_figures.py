@@ -604,15 +604,34 @@ def write_view_table(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name
 
 # --- Orchestration ------------------------------------------------------------
 
-def _filter_unsupported_baselines(dff: pd.DataFrame) -> pd.DataFrame:
+def _filter_unsupported_baselines(dff: pd.DataFrame, family: str = "") -> pd.DataFrame:
     """Drop baselines whose every row in this slice is ``not_supported``, and
     drop ``not_supported`` rows from any remaining baseline: a baseline that
-    never participated is applicability, not a 100% failure."""
+    never participated is applicability, not a 100% failure.
+
+    Says which baselines it dropped: a WARNING when the rows carry the
+    runner's broken-library marker (the baseline should have run; its
+    library was missing / broken in that run), INFO otherwise (genuine
+    applicability)."""
     if "status" not in dff.columns or "baseline" not in dff.columns:
         return dff
     supported = set(
         dff.loc[dff["status"] != "not_supported", "baseline"].unique()
     )
+    from nbn.bench.core.runner import LIBRARY_BROKEN_PREFIX
+    where = f" in {family}" if family else ""
+    for name in sorted(set(dff["baseline"].unique()) - supported):
+        msgs = dff.loc[dff["baseline"] == name, "error_msg"].dropna().astype(str) \
+            if "error_msg" in dff.columns else pd.Series([], dtype=str)
+        broken = msgs[msgs.str.contains(LIBRARY_BROKEN_PREFIX, regex=False)]
+        if not broken.empty:
+            m = broken.iloc[0]
+            m = m[m.find(LIBRARY_BROKEN_PREFIX) + len(LIBRARY_BROKEN_PREFIX):]
+            logger.warning(
+                "omitting %s%s: its library was not usable in that run "
+                "(every cell not_supported) -- %s", name, where, m)
+        else:
+            logger.info("omitting %s%s: not applicable to any problem", name, where)
     return dff[
         dff["baseline"].isin(supported)
         & (dff["status"] != "not_supported")
@@ -647,7 +666,7 @@ def process_family(dff, benchmark, family, aggregation, n_nodes, n_params,
     written."""
     family_dir = Path(family_dir)
     family_dir.mkdir(parents=True, exist_ok=True)
-    dff = _filter_unsupported_baselines(dff)
+    dff = _filter_unsupported_baselines(dff, family)
     if dff.empty:
         logger.info("skip family with no supported baselines: %s", family)
         return 0
