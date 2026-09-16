@@ -39,10 +39,12 @@ library is absent is recorded as `not_supported`, not as an error.
 
 **Check the environment before a run.** The adapters are written against
 specific library versions (pgmpy ≥ 1.0 for `DiscreteBayesianNetwork`,
+scikit-learn ≥ 1.6 because pgmpy 1.x needs it but does not pin it,
 pomegranate ≥ 1.0 for the torch API, …). `nbn-bench check-env` verifies
-every declared requirement — installed, importable, at the required version,
-and not a second copy shadowing the environment's (a stale pgmpy in
-`~/.local` is how one run lost all its pgmpy cells):
+every declared requirement — installed, importable (including the submodules
+the adapters use, e.g. `pgmpy.models`), at the required version, and not a
+second copy shadowing the environment's (a stale pgmpy in `~/.local` lost
+one run all its pgmpy cells; an old scikit-learn there lost another):
 
 ```bash
 nbn-bench check-env                        # every requirement

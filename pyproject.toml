@@ -39,6 +39,7 @@ bench = [
     "pandas>=2.0",
     "pyarrow>=14.0",
     "pgmpy>=1.0",
+    "scikit-learn>=1.6",  # pgmpy 1.x needs validate_data (1.6+) but pins only >=1.2
     "pomegranate>=1.0",
     "matplotlib>=3.7",
     "seaborn>=0.12",

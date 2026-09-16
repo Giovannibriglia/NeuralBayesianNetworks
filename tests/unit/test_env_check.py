@@ -63,14 +63,25 @@ def test_pgmpy_pin_is_at_least_1_0():
 
 # --- per-baseline requirements -----------------------------------------------
 
+def test_pgmpy_probes_cover_what_the_adapter_imports():
+    """The 2026-09-14 run had pgmpy 1.x importable while ``pgmpy.models``
+    failed on an old scikit-learn; the check must import the submodules."""
+    req = next(r for r in REQUIREMENTS if r.dist == "pgmpy")
+    assert {"pgmpy.models", "pgmpy.inference", "pgmpy.estimators"} <= set(req.probes)
+    skl = next(r for r in REQUIREMENTS if r.dist == "scikit-learn")
+    from packaging.specifiers import SpecifierSet
+    assert "1.5.2" not in SpecifierSet(skl.spec) and "1.6.0" in SpecifierSet(skl.spec)
+
+
 def test_required_for_baselines_maps_libraries_and_flow():
     need = required_for_baselines([
         {"library": "nbn", "mechanism": "cat"},
         {"library": "pgmpy", "mechanism": "discrete"},
     ])
-    assert need == RUN_BASE | {"pgmpy"}
+    assert need == RUN_BASE | {"pgmpy", "scikit-learn"}
     assert "matplotlib" not in need and "seaborn" not in need
     assert "pomegranate" not in need and "pgmpy" not in RUN_BASE
+    assert "scikit-learn" not in RUN_BASE
     need = required_for_baselines([
         {"library": "pyro", "mechanism": "empirical"},
         {"library": "nbn", "mechanism": "flow"},
@@ -132,6 +143,25 @@ def test_check_one_missing_and_broken(monkeypatch):
     assert r.status == "broken" and "DiscreteBayesianNetwork" in r.detail
 
 
+def test_check_one_probe_submodule_failure_is_broken(monkeypatch):
+    """Top-level import fine, adapter submodule not (pgmpy.models -> sklearn)."""
+    req = Requirement("fakelib", "fakelib_mod", ">=1.0", "bench",
+                      probes=("fakelib_mod.models",))
+    _fake_metadata(monkeypatch, {"fakelib": "1.1.2"})
+    _fake_module(monkeypatch, "fakelib_mod", "1.1.2")
+    real_import = _env.importlib.import_module
+
+    def _boom(name, *a, **k):
+        if name == "fakelib_mod.models":
+            raise ImportError("cannot import name 'validate_data' from 'sklearn.utils.validation'")
+        return real_import(name, *a, **k)
+    monkeypatch.setattr(_env.importlib, "import_module", _boom)
+    r = check_one(req)
+    assert r.status == "broken"
+    assert "fakelib_mod.models" in r.detail and "validate_data" in r.detail
+    assert r.installed == "1.1.2" and r.location is not None
+
+
 def test_check_one_mismatch_between_metadata_and_module(monkeypatch):
     """Two copies on sys.path: metadata from one, module from the other."""
     req = Requirement("fakelib", "fakelib_mod", ">=1.0", "bench")
@@ -177,6 +207,7 @@ def test_check_env_with_config_restricts_to_baselines(tmp_path):
     res = _cli("check-env", "--config", str(cfg))
     assert res.returncode == 0, res.stdout + res.stderr
     assert "pgmpy" not in res.stdout and "torch" in res.stdout
+    assert "scikit-learn" not in res.stdout
 
 
 def test_run_gate_refuses_then_skip_flag_proceeds(monkeypatch, tmp_path, capsys):

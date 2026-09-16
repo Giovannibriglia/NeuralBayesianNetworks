@@ -46,6 +46,33 @@ _VALID_PARAM_METHODS = frozenset({"mle", "bayes", "lg"})
 _VALID_INFERENCE_METHODS = frozenset({"ve", "predict"})
 
 
+def _pgmpy_import_error(exc: ImportError) -> ImportError:
+    """Rewrap a failed ``from pgmpy.X import Y`` with a message that names the
+    actual culprit.
+
+    Two runs lost every pgmpy cell to ImportError->not_supported with
+    unhelpful text: 2026-09-10 (pgmpy <1.0 in ~/.local: no
+    ``DiscreteBayesianNetwork``) and 2026-09-14 (pgmpy 1.x present, but its
+    ``pgmpy.models`` needs scikit-learn >=1.6 and ~/.local had an older one;
+    the old wrapper blamed the pgmpy version). Only blame pgmpy when the
+    missing name lives in pgmpy; otherwise point at the dependency whose
+    import broke.
+    """
+    name = getattr(exc, "name", None) or ""
+    if name.startswith("pgmpy"):
+        return ImportError(
+            f"PgmpyAdapter needs pgmpy>=1.0 (pip install -U pgmpy): {exc}")
+    if name:
+        top = name.split(".")[0]
+        dist = {"sklearn": "scikit-learn"}.get(top, top)
+        return ImportError(
+            f"PgmpyAdapter: pgmpy's dependency '{top}' is missing or too old "
+            f"(pip install -U {dist}; run `nbn-bench check-env`): {exc}")
+    return ImportError(
+        f"PgmpyAdapter: importing pgmpy failed (pip install -U pgmpy; "
+        f"run `nbn-bench check-env`): {exc}")
+
+
 def _state_axis_index(var: str, states: list, card: int) -> list[int]:
     """Map declared class values ``0..card-1`` to their pgmpy axis positions.
 
@@ -202,13 +229,7 @@ class PgmpyAdapter:
             from pgmpy.inference import VariableElimination
             from pgmpy.models import DiscreteBayesianNetwork
         except ImportError as exc:
-            # Keep the underlying message: ``DiscreteBayesianNetwork`` only
-            # exists from pgmpy 1.0 on, so an old install fails here with
-            # pgmpy present (the 2026-09-10 pascal run recorded a bare
-            # "pip install pgmpy" for every discrete cell).
-            raise ImportError(
-                f"PgmpyAdapter needs pgmpy>=1.0 (pip install -U pgmpy): {exc}"
-            ) from exc
+            raise _pgmpy_import_error(exc) from exc
 
         self.problem = problem
 
@@ -282,9 +303,7 @@ class PgmpyAdapter:
         try:
             from pgmpy.models import LinearGaussianBayesianNetwork
         except ImportError as exc:
-            raise ImportError(
-                f"PgmpyAdapter needs pgmpy>=1.0 (pip install -U pgmpy): {exc}"
-            ) from exc
+            raise _pgmpy_import_error(exc) from exc
         try:
             from pgmpy.factors.continuous import LinearGaussianCPD
         except ImportError as exc:

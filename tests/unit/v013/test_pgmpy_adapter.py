@@ -125,6 +125,31 @@ class TestProtocolConformance:
         assert adapter.n_samples == 512
 
 
+class TestImportErrorMessage:
+    """The rewrapped ImportError names the real culprit (#2026-09-14 run:
+    pgmpy 1.x present, sklearn too old, message blamed pgmpy)."""
+
+    def test_pgmpy_symbol_missing_blames_pgmpy_version(self):
+        from nbn.bench.adapters.pgmpy_adapter import _pgmpy_import_error
+        exc = ImportError("cannot import name 'DiscreteBayesianNetwork' from 'pgmpy.models'",
+                          name="pgmpy.models")
+        msg = str(_pgmpy_import_error(exc))
+        assert "pgmpy>=1.0" in msg and "DiscreteBayesianNetwork" in msg
+
+    def test_dependency_missing_blames_dependency(self):
+        from nbn.bench.adapters.pgmpy_adapter import _pgmpy_import_error
+        exc = ImportError("cannot import name 'validate_data' from 'sklearn.utils.validation'",
+                          name="sklearn.utils.validation")
+        msg = str(_pgmpy_import_error(exc))
+        assert "pgmpy>=1.0" not in msg
+        assert "scikit-learn" in msg and "check-env" in msg and "validate_data" in msg
+
+    def test_unknown_origin_is_generic(self):
+        from nbn.bench.adapters.pgmpy_adapter import _pgmpy_import_error
+        msg = str(_pgmpy_import_error(ImportError("boom")))
+        assert "pgmpy>=1.0" not in msg and "check-env" in msg and "boom" in msg
+
+
 class TestApplicability:
     """is_applicable() returns correct results per (adapter, family)."""
 
