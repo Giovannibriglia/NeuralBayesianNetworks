@@ -800,6 +800,102 @@ class TestFitFailurePath:
             assert math.isnan(r["fit_time_s"])
 
 
+class TestLibraryBrokenSurfacing:
+    """ImportError in fit() stays not_supported in the parquet, but the row is
+    tagged and the runner warns once per baseline + summarises at the end,
+    so a broken library can no longer produce a silently green run (the
+    2026-09-10 / 2026-09-14 pgmpy incidents)."""
+
+    def test_import_error_rows_carry_marker(self, monkeypatch):
+        from nbn.bench.core.cell_worker import _run_cell
+        from nbn.bench.core.runner import LIBRARY_BROKEN_PREFIX
+
+        problem = _minimal_discrete_problem()
+        spec = BaselineSpec("pgmpy", "discrete", "mle", "ve")
+        monkeypatch.setattr(PgmpyAdapter, "fit", lambda self, p, **kw: (_ for _ in ()).throw(
+            ImportError("cannot import name 'validate_data' from 'sklearn.utils.validation'")))
+        rows = _run_cell(_build_test_ctx(problem, spec))
+        assert rows and all(r["status"] == "not_supported" for r in rows)
+        assert all(r["error_msg"].startswith(LIBRARY_BROKEN_PREFIX) for r in rows)
+        assert "validate_data" in rows[0]["error_msg"]
+
+    def test_not_implemented_rows_have_no_marker(self, monkeypatch):
+        from nbn.bench.core.cell_worker import _run_cell
+        from nbn.bench.core.runner import LIBRARY_BROKEN_PREFIX
+
+        problem = _minimal_discrete_problem()
+        spec = BaselineSpec("pgmpy", "discrete", "mle", "ve")
+        monkeypatch.setattr(PgmpyAdapter, "fit", lambda self, p, **kw: (_ for _ in ()).throw(
+            NotImplementedError("refused")))
+        rows = _run_cell(_build_test_ctx(problem, spec))
+        assert all(r["status"] == "not_supported" for r in rows)
+        assert not any(LIBRARY_BROKEN_PREFIX in r["error_msg"] for r in rows)
+
+    def test_runner_warns_once_per_baseline_and_summarises(self, tmp_path, monkeypatch, caplog):
+        import logging
+
+        from nbn.bench.core import cell_runner
+        from nbn.bench.core.runner import LIBRARY_BROKEN_PREFIX
+
+        class _TwoProblems:
+            def iter_problems(self, _cfg):
+                yield _minimal_discrete_problem(seed=0)
+                yield _minimal_discrete_problem(seed=1)
+
+        spec = BaselineSpec("pgmpy", "discrete", "mle", "ve")
+        cfg = _make_runner_cfg(_minimal_discrete_problem(), spec, tmp_path)
+        cfg.problem_source = _TwoProblems()
+
+        def fake_subprocess(ctx, *, timeout_s=None, python_executable=None):
+            row = {
+                "benchmark": "synthetic", "family": "discrete",
+                "problem_id": ctx["problem"].problem_id, "seed": ctx["seed"],
+                "baseline": "pgmpy-mle-ve", "query_role": "", "metric": "status",
+                "value": float("nan"), "status": "not_supported",
+                "fit_time_s": float("nan"), "query_time_s": float("nan"),
+                "metrics_time_s": float("nan"),
+                "error_msg": LIBRARY_BROKEN_PREFIX + "ImportError('sklearn too old')",
+            }
+            return cell_runner.CellRunResult(rows=[row], exit_code=0,
+                                             classification="completed", stderr="")
+        monkeypatch.setattr(cell_runner, "run_cell_in_subprocess", fake_subprocess)
+
+        with caplog.at_level(logging.WARNING, logger="nbn.bench.core.runner"):
+            rows = list(Runner().run(cfg))
+        assert len(rows) == 2 and all(r.status == "not_supported" for r in rows)
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        per_cell = [w for w in warnings if w.startswith("pgmpy-mle-ve: its library is not installed")]
+        assert len(per_cell) == 1 and "sklearn too old" in per_cell[0]
+        assert "check-env" in per_cell[0]
+        summary = [w for w in warnings if w.startswith("1 baseline(s) produced no results")]
+        assert len(summary) == 1 and "pgmpy-mle-ve" in summary[0]
+
+    def test_runner_silent_when_nothing_broken(self, tmp_path, monkeypatch, caplog):
+        import logging
+
+        from nbn.bench.core import cell_runner
+
+        spec = BaselineSpec("pgmpy", "discrete", "mle", "ve")
+        cfg = _make_runner_cfg(_minimal_discrete_problem(), spec, tmp_path)
+
+        def fake_subprocess(ctx, *, timeout_s=None, python_executable=None):
+            row = {
+                "benchmark": "synthetic", "family": "discrete",
+                "problem_id": ctx["problem"].problem_id, "seed": ctx["seed"],
+                "baseline": "pgmpy-mle-ve", "query_role": "", "metric": "status",
+                "value": float("nan"), "status": "not_supported",
+                "fit_time_s": 0.0, "query_time_s": 0.0, "metrics_time_s": 0.0,
+                "error_msg": "pgmpy-mle-ve not applicable to discrete",
+            }
+            return cell_runner.CellRunResult(rows=[row], exit_code=0,
+                                             classification="completed", stderr="")
+        monkeypatch.setattr(cell_runner, "run_cell_in_subprocess", fake_subprocess)
+        with caplog.at_level(logging.WARNING, logger="nbn.bench.core.runner"):
+            list(Runner().run(cfg))
+        assert not [r for r in caplog.records
+                    if r.levelno == logging.WARNING and "library" in r.getMessage()]
+
+
 # ---------------------------------------------------------------------------
 # TestEndToEnd — behavioral matrix (@pytest.mark.slow)
 # ---------------------------------------------------------------------------

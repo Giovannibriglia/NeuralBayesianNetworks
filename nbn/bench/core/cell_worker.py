@@ -181,6 +181,7 @@ def _run_cell(ctx: dict) -> list[dict]:
     from nbn.bench.core.config import build_adapter
     from nbn.bench.core.runner import (
         _NAN,
+        LIBRARY_BROKEN_PREFIX,
         FitBudgetExceeded,
         _classify_exception,
         _evidence_mode_for,
@@ -338,8 +339,12 @@ def _run_cell(ctx: dict) -> list[dict]:
         ))
     except Exception as exc:
         status = _classify_exception(exc)
+        # ImportError = the library itself is missing / broken, not a
+        # refused combination: tag it so the parent can warn (status stays
+        # not_supported, see runner.LIBRARY_BROKEN_PREFIX).
+        prefix = LIBRARY_BROKEN_PREFIX if isinstance(exc, ImportError) else ""
         return _emit(_fit_failure_for_all(
-            fit_time_s=_NAN, status=status, error_msg=repr(exc),
+            fit_time_s=_NAN, status=status, error_msg=prefix + repr(exc),
         ))
     _log_phases(adapter, fit_role, phase, fit_time_s)
 

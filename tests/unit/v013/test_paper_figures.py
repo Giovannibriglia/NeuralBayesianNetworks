@@ -346,6 +346,29 @@ def test_filter_unsupported_baselines_unit():
     assert len(out[out["baseline"] == "C"]) == 1
 
 
+def test_filter_unsupported_baselines_reports_broken_library(caplog):
+    import logging
+
+    from nbn.bench._paper_figures import _filter_unsupported_baselines
+    from nbn.bench.core.runner import LIBRARY_BROKEN_PREFIX
+
+    df = pd.DataFrame([
+        {"baseline": "A", "status": "ok", "error_msg": None},
+        {"baseline": "pgmpy-mle-ve", "status": "not_supported",
+         "error_msg": LIBRARY_BROKEN_PREFIX + "ImportError('sklearn too old')"},
+        {"baseline": "nbn-lg-lw", "status": "not_supported",
+         "error_msg": "nbn-lg-lw not applicable to discrete"},
+    ])
+    with caplog.at_level(logging.INFO, logger="nbn.bench._paper_figures"):
+        out = _filter_unsupported_baselines(df, "discrete")
+    assert set(out["baseline"]) == {"A"}
+    warn = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warn) == 1
+    assert "pgmpy-mle-ve" in warn[0].getMessage() and "sklearn too old" in warn[0].getMessage()
+    info = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any("nbn-lg-lw" in m and "not applicable" in m for m in info)
+
+
 def test_deprecated_shim_still_works_and_warns(tmp_path):
     parquet = _make_minimal_parquet(tmp_path)
     out_dir = tmp_path / "figures_shim"

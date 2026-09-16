@@ -44,6 +44,25 @@ logger = logging.getLogger(__name__)
 
 _NAN = float("nan")
 
+# Prefix of ``error_msg`` when fit() raised ImportError: the baseline's
+# library is missing / broken (not "this adapter refuses this family"). The
+# status stays not_supported so no schema, table or figure changes, but the
+# runner warns once per baseline and summarises at the end, and the plotter
+# says which baselines it omitted for this reason. Two cluster runs
+# (2026-09-10, 2026-09-14) lost every pgmpy cell this way and looked green.
+LIBRARY_BROKEN_PREFIX = "library not usable: "
+
+
+def _library_broken_msg(rows) -> str | None:
+    """The broken-library message carried by a cell's rows, if any (also
+    matches the propagated 'group fitter failed (...)' rows of reloaders)."""
+    for r in rows:
+        msg = r.error_msg or ""
+        i = msg.find(LIBRARY_BROKEN_PREFIX)
+        if i >= 0:
+            return msg[i + len(LIBRARY_BROKEN_PREFIX):]
+    return None
+
 
 def _estimate_total_cells(cfg: RunnerConfig) -> int | None:
     """Best-effort total cell count (problems × baselines) for the progress
@@ -680,6 +699,30 @@ class Runner:
         seed_skip = bool(cfg.batch_sizes)
         failed_configs: dict[tuple, str] = {}
 
+        # Baselines whose fit raised ImportError (library missing / broken),
+        # name -> message. Warned once each as it happens, summarised at
+        # the end; exit code unchanged (the parquet is still valid and
+        # scripts chain runs).
+        library_broken: dict[str, str] = {}
+
+        def _note_library_broken(name: str, cell_rows, pbar) -> None:
+            msg = _library_broken_msg(cell_rows)
+            if msg is None or name in library_broken:
+                return
+            library_broken[name] = msg
+            text = (
+                f"{name}: its library is not installed correctly and cannot "
+                f"be used -- this and every later cell for it will be "
+                f"recorded not_supported.\n  {msg}\n"
+                f"  Fix: pip install -U \"nbn[all]\"  then  "
+                f"nbn-bench check-env --config <run.yaml>"
+            )
+            # WARNING reaches the console (INFO does not) and run.log; lift
+            # the progress bar out of the way so the two do not interleave.
+            pbar.clear()
+            logger.warning(text)
+            pbar.refresh()
+
         # Fit-once-save-reload cache (#191 Path 2). nbn baselines sharing a
         # fit-identity reuse a saved base model. The cache lives under the run
         # dir (cfg.jsonl_path is run_dir/metrics.jsonl), which is timestamp-
@@ -879,6 +922,7 @@ class Runner:
                                     failed_configs, problem, name,
                                     batch_sizes, cell_rows,
                                 )
+                            _note_library_broken(name, cell_rows, pbar)
                             pbar.update(1)
                             continue
                         # The device in the progress line is the ADAPTER's own
@@ -926,6 +970,7 @@ class Runner:
                                 failed_configs, problem, name,
                                 batch_sizes, cell_rows,
                             )
+                        _note_library_broken(name, cell_rows, pbar)
                         pbar.update(1)
                         # Eager cache deletion (#191): this baseline is its
                         # group's LAST live member, so every reloader has now
@@ -939,6 +984,15 @@ class Runner:
                                 pass
         finally:
             pbar.close()
+            if library_broken:
+                names = ", ".join(library_broken)
+                lines = "\n".join(f"  {n}: {m}" for n, m in library_broken.items())
+                logger.warning(
+                    "%d baseline(s) produced no results because their library "
+                    "is not usable: %s\n%s\n  Fix the install (pip install -U "
+                    "\"nbn[all]\"), verify with nbn-bench check-env, and re-run.",
+                    len(library_broken), names, lines,
+                )
             # Leak-proof backstop: remove the whole cache dir even on crash /
             # early generator close, then drop the atexit hook (the Runner is
             # reusable, so a stale hook from a prior run must not linger).
