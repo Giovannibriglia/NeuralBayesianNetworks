@@ -18,6 +18,8 @@ Shown methods per x = all non-nbn baselines applicable to the family + the
 Output layout, at ``<output_dir>/<bench>/<family>/``:
 
   all/plots/<metric>_vs_<x>.pdf      all/tables/<metric>_vs_<x>.tex
+  all/plots/<metric>_vs_<x>_evidence_<mode>.pdf   (+ .tex; one per evidence
+                                     mode when the run has >= 2, fit_time excluded)
   all/plots/success_rate.pdf         (status breakdown, diagnostic)
   all/plots/divergence_*.pdf         (calibration-vs-accuracy panel, if both metrics)
   common/plots/<metric>_vs_<x>.pdf   common/tables/<metric>_vs_<x>.tex
@@ -26,7 +28,10 @@ Output layout, at ``<output_dir>/<bench>/<family>/``:
 
 ``<metric>`` in the accuracy set (w1 skipped for discrete families) plus the
 timing pseudo-metrics: ``query_time`` (per-query, batch_size sweeps) or
-``total_query_time`` + ``fit_time`` (everything else).
+``total_query_time`` + ``fit_time`` (everything else). Runs whose queries mix
+evidence modes (``full`` / ``empty``, paired by the heaviest-query selector)
+also get each query-derived metric per mode, since the two regimes differ
+(empty-evidence batches fall back to sequential queries in nbn).
 """
 from __future__ import annotations
 
@@ -659,6 +664,31 @@ def _family_metrics(dff: pd.DataFrame, family: str, x_axis: str) -> list[str]:
     return metrics
 
 
+def _evidence_modes(dfx: pd.DataFrame) -> list[str]:
+    """Evidence modes present on the per-query rows, or ``[]`` when there is
+    fewer than two: a single mode is the whole run, so a per-mode figure would
+    duplicate the combined one."""
+    if "evidence_mode" not in dfx.columns or "query_role" not in dfx.columns:
+        return []
+    per_query = dfx["query_role"].fillna("") != ""
+    modes = sorted(dfx.loc[per_query, "evidence_mode"].dropna().unique())
+    return modes if len(modes) >= 2 else []
+
+
+def _evidence_slice(dfx: pd.DataFrame, mode: str) -> pd.DataFrame:
+    """Rows of one evidence mode plus every cell-level row (fit / metrics time,
+    whole-cell sentinels — ``query_role == ""``): those apply to the cell
+    whatever the query's evidence, and the sentinels keep a failed cell
+    unsolved in every mode. Per-query status rows follow their own mode.
+
+    Why per mode at all: batched nbn queries with empty evidence fall back to
+    the sequential path (``nbn_adapter.query_batch``), so the combined
+    ``query_time`` figure of a batch_size sweep sits halfway between the two
+    regimes (2026-09-16 run: full-evidence 41x, empty 1x, combined 2x)."""
+    cell_level = dfx["query_role"].fillna("") == ""
+    return dfx[cell_level | (dfx["evidence_mode"] == mode)]
+
+
 def process_family(dff, benchmark, family, aggregation, n_nodes, n_params,
                    family_dir, top_nbn: int = 2) -> int:
     """Per-family orchestrator: the ``all`` and ``common`` trees under
@@ -684,34 +714,44 @@ def process_family(dff, benchmark, family, aggregation, n_nodes, n_params,
     produced = 0
     selection_lines = [f"Shown nbn methods per (view, metric, {x_axis}) — top-{top_nbn}", ""]
     common_lines = [f"Common seeds C(x) per metric and {x_axis}", ""]
+    modes = _evidence_modes(dfx)
     for metric in _family_metrics(dff, family, x_axis):
-        cells, n_total = cell_table(dfx, metric)
-        if cells.empty or not cells["solved"].any():
-            logger.info("skip %s/%s: no solved cell", family, metric)
-            continue
-        views = build_views(cells, n_total, aggregation, metric, xs, top_n=top_nbn)
         stem = f"{metric}_vs_{x_axis}"
-        for view_name, vdf in (("all", views.all), ("common", views.common)):
-            vdir = family_dir / view_name
-            paths = fig_bars(vdf, xs, x_axis, metric, view_name,
-                             vdir / "plots" / f"{stem}.pdf", title,
-                             common_sets=views.common_sets)
-            produced += len(paths)
-            write_view_table(vdf, xs, x_axis, metric, view_name,
-                             vdir / "tables" / f"{stem}.tex", caption_prefix,
-                             label=f"{lbl}_{view_name}_{_table_slug(stem)}",
-                             common_sets=views.common_sets, top_nbn=top_nbn)
-            sel = views.selection[view_name]
+        # (rows, file stem, title/caption suffix) per rendered slice: the
+        # combined figure plus one per evidence mode when the run has >= 2.
+        slices = [(dfx, stem, "")]
+        if metric != "fit_time":
+            slices += [(_evidence_slice(dfx, mode), f"{stem}_evidence_{mode}",
+                        f" [evidence={mode}]") for mode in modes]
+        for dfs, s_stem, suffix in slices:
+            cells, n_total = cell_table(dfs, metric)
+            if cells.empty or not cells["solved"].any():
+                logger.info("skip %s/%s%s: no solved cell", family, metric, suffix)
+                continue
+            views = build_views(cells, n_total, aggregation, metric, xs, top_n=top_nbn)
+            tag = f"{metric}{suffix}"
+            for view_name, vdf in (("all", views.all), ("common", views.common)):
+                vdir = family_dir / view_name
+                paths = fig_bars(vdf, xs, x_axis, metric, view_name,
+                                 vdir / "plots" / f"{s_stem}.pdf", title + suffix,
+                                 common_sets=views.common_sets)
+                produced += len(paths)
+                write_view_table(vdf, xs, x_axis, metric, view_name,
+                                 vdir / "tables" / f"{s_stem}.tex",
+                                 caption_prefix + suffix.replace("[", "(").replace("]", ")"),
+                                 label=f"{lbl}_{view_name}_{_table_slug(s_stem)}",
+                                 common_sets=views.common_sets, top_nbn=top_nbn)
+                sel = views.selection[view_name]
+                for x in xs:
+                    if x in sel:
+                        selection_lines.append(
+                            f"{view_name}\t{tag}\t{x_axis}={_tick(x, x_axis)}\t"
+                            + (", ".join(sel[x]) if sel[x] else "(none)"))
             for x in xs:
-                if x in sel:
-                    selection_lines.append(
-                        f"{view_name}\t{metric}\t{x_axis}={_tick(x, x_axis)}\t"
-                        + (", ".join(sel[x]) if sel[x] else "(none)"))
-        for x in xs:
-            insts = views.common_sets.get(x, [])
-            common_lines.append(
-                f"{metric}\t{x_axis}={_tick(x, x_axis)}\t|C|={len(insts)}\t"
-                + (", ".join(insts) if insts else "(empty)"))
+                insts = views.common_sets.get(x, [])
+                common_lines.append(
+                    f"{tag}\t{x_axis}={_tick(x, x_axis)}\t|C|={len(insts)}\t"
+                    + (", ".join(insts) if insts else "(empty)"))
 
     all_plots = family_dir / "all" / "plots"
     fig_status_stacked(dff, all_plots / "success_rate.pdf", title)
