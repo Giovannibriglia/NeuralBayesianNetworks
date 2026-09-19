@@ -184,3 +184,75 @@ class TestSpeedSmokeRoundTrip:
         out = tmp_path / "figs"
         assert run_plot(parquet=runs[-1], output_dir=out, aggregation="iqm_iqr") == 0
         assert list(out.rglob("query_time_vs_batch_size.pdf"))
+
+
+class TestEvidenceModeSplit:
+    """Runs whose queries mix ``full`` / ``empty`` evidence render every
+    query-derived metric once per mode next to the combined figure: nbn's
+    batched path only covers full evidence (empty batches fall back to
+    sequential), so the combined per-query time hides the batching gain."""
+
+    @staticmethod
+    def _mixed_df() -> pd.DataFrame:
+        rows = []
+        for bs in (1, 16):
+            for seed in (0, 1):
+                # full evidence batches (16x at B=16); empty evidence does not
+                rows.append({**_row(batch_size=bs, seed=seed, value=0.016 / bs),
+                             "evidence_mode": "full"})
+                rows.append({**_row(batch_size=bs, seed=seed, value=0.016),
+                             "evidence_mode": "empty"})
+                # a cell-level fit row: no query_role, default "full" mode
+                rows.append({**_row(batch_size=bs, seed=seed, value=1.0,
+                                    metric="fit_time_s"),
+                             "query_role": "", "evidence_mode": "full"})
+        return pd.DataFrame(rows)
+
+    @staticmethod
+    def _b16(tex: str) -> str:
+        line = [ln for ln in tex.splitlines() if ln.startswith("nbn-cat-ve")][0]
+        cell = line.split("&")[2].strip().rstrip("\\").strip()
+        return cell.removeprefix("\\textbf{").removesuffix("}")
+
+    def test_per_mode_figures_and_tables(self, tmp_path):
+        out = _render(self._mixed_df(), tmp_path)
+        base = out / "synthetic" / "discrete"
+        for view in ("all", "common"):
+            for stem in ("query_time_vs_batch_size",
+                         "query_time_vs_batch_size_evidence_full",
+                         "query_time_vs_batch_size_evidence_empty"):
+                assert (base / view / "plots" / f"{stem}.pdf").exists(), stem
+                assert (base / view / "tables" / f"{stem}.tex").exists(), stem
+        tables = base / "all" / "tables"
+        assert self._b16((tables / "query_time_vs_batch_size_evidence_full.tex").read_text()) \
+            .startswith("0.001")
+        assert self._b16((tables / "query_time_vs_batch_size_evidence_empty.tex").read_text()) \
+            .startswith("0.016")
+        # combined = mean of the two modes, the midpoint that motivated the split
+        assert self._b16((tables / "query_time_vs_batch_size.tex").read_text()) \
+            .startswith("0.0085")
+        full_tex = (tables / "query_time_vs_batch_size_evidence_full.tex").read_text()
+        assert "(evidence=full)" in full_tex
+        assert "_evidence_full}" in full_tex          # distinct \label per mode
+        sel = (base / "selection.txt").read_text()
+        assert "all\tquery_time [evidence=full]\tbatch_size=16\tnbn-cat-ve" in sel
+
+    def test_single_mode_run_has_no_per_mode_files(self, tmp_path):
+        df = _make_sweep_df(families=("discrete",))
+        df["evidence_mode"] = "full"
+        out = _render(df, tmp_path)
+        assert not list(out.rglob("*_evidence_*"))
+
+    def test_cell_sentinel_fails_every_mode(self, tmp_path):
+        """A whole-cell failure sentinel (query_role "") marks the seed
+        unsolved in both per-mode views, not only the default 'full' one."""
+        df = self._mixed_df()
+        df = pd.concat([df, pd.DataFrame([{
+            **_row(batch_size=16, seed=1, value=float("nan"), metric="status",
+                   status="timeout"),
+            "query_role": "", "evidence_mode": "full"}])], ignore_index=True)
+        out = _render(df, tmp_path)
+        tables = out / "synthetic" / "discrete" / "all" / "tables"
+        for mode in ("full", "empty"):
+            tex = (tables / f"query_time_vs_batch_size_evidence_{mode}.tex").read_text()
+            assert "(1/2)" in self._b16(tex), mode
