@@ -83,6 +83,22 @@ def test_sweep_axis_detection():
     assert sweep_axis(lc, "synthetic") == "n_train"
 
 
+def test_sweep_axis_per_problem_n_train_is_not_a_sweep():
+    # bnlearn sizes n_train per network (asia 10240, barley 81920, ...): n_train
+    # varies across problems but is constant within each one, so the x grid is
+    # still the network, not n_train.
+    df = _batch_speed_pgmpy_case()
+    plain = df[df["batch_size"] == 1].copy()
+    half = len(plain) // 2
+    plain["problem_id"] = ["asia"] * half + ["barley"] * (len(plain) - half)
+    plain["n_train"] = [10240] * half + [81920] * (len(plain) - half)
+    assert sweep_axis(plain, "bnlearn") == "network"
+    assert sweep_axis(plain, "synthetic") == "n_nodes"
+    # ... while a real sweep (n_train varying inside a problem) still wins.
+    lc = plain.assign(n_train=[4096 if i % 2 else 8192 for i in range(len(plain))])
+    assert sweep_axis(lc, "bnlearn") == "n_train"
+
+
 def test_assign_x_instances_factor_out_the_axis():
     df = _batch_speed_pgmpy_case()
     dfx = assign_x(df, "batch_size", {})

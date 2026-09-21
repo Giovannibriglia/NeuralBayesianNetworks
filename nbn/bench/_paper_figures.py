@@ -59,6 +59,7 @@ from nbn.bench._paper_agg import (  # noqa: F401  (re-exported for callers/tests
     build_views,
     cell_table,
     clip_band,
+    is_n_train_sweep,
     is_nbn,
     metric_kind,
     parse_baseline,
@@ -490,7 +491,7 @@ def _benchmark_caption(df_view) -> str:
         if "status" in cols else set(df_view["metric"])
     has_pl = bool(ok_metrics & _PL_METRICS)
     has_inf = bool(ok_metrics & _INFERENCE_METRICS)
-    if ("n_train" in cols and df_view["n_train"].dropna().nunique() > 1 and has_pl):
+    if is_n_train_sweep(df_view) and has_pl:
         return "SAMPLE EFFICIENCY PARAMETER LEARNING"
     benchmark = (df_view["benchmark"].dropna().iloc[0]
                  if "benchmark" in cols and not df_view["benchmark"].dropna().empty
