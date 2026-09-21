@@ -137,16 +137,32 @@ def rank_key(center: float, kind: str) -> float:
 
 # --- x axis / instance assignment ---------------------------------------------
 
+def is_n_train_sweep(dff: pd.DataFrame) -> bool:
+    """True when some problem was fit at >= 2 distinct ``n_train`` values
+    (a learning-curves sweep). A parquet where each problem has its own
+    single ``n_train`` (bnlearn sizes the training set per network) is not
+    a sweep, even though ``n_train`` varies across problems."""
+    if "n_train" not in dff.columns:
+        return False
+    n_train = dff["n_train"].dropna()
+    if n_train.nunique() <= 1:
+        return False
+    if "problem_id" not in dff.columns:
+        return True
+    per_problem = dff.loc[n_train.index].groupby("problem_id")["n_train"].nunique()
+    return bool((per_problem > 1).any())
+
+
 def sweep_axis(dff: pd.DataFrame, benchmark: str) -> str:
     """Which column is the x grid for this family slice.
 
     ``batch_size`` when the parquet carries batched rows (a batch_sizes sweep),
-    ``n_train`` when >= 2 distinct values are present (learning curves),
+    ``n_train`` when some problem was fit at >= 2 values (learning curves),
     ``network`` for bnlearn (one bar group per real network), else ``n_nodes``.
     """
     if "batch_size" in dff.columns and (dff["batch_size"].fillna(0) > 1).any():
         return "batch_size"
-    if "n_train" in dff.columns and dff["n_train"].dropna().nunique() > 1:
+    if is_n_train_sweep(dff):
         return "n_train"
     if str(benchmark).lower() == "bnlearn":
         return "network"
