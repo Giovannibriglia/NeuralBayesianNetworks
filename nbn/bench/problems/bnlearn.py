@@ -321,11 +321,12 @@ class _BnlearnContinuousModel:
 
     Doubles as (a) the data generator for train/test/reference rows and
     (b) ``problem.true_model`` for the oracle's
-    ``forward_with_clamp_posterior_samples``, which calls
-    ``true_model.sample(n=N, evidence=ev)`` and indexes the result by node
-    name. ``sample`` therefore returns ``{node: tensor[N]}`` (long for
-    discrete nodes, float for continuous), and clamps any node present in
-    ``evidence`` to its observed value instead of drawing it.
+    ``conditional_posterior_samples``, which calls
+    ``true_model.weighted_sample(n, evidence, keep)`` — clamped ancestral
+    particles plus their likelihood weights (#288). ``sample`` returns
+    ``{node: tensor[N]}`` (long for discrete nodes, float for continuous),
+    and clamps any node present in ``evidence`` to its observed value
+    instead of drawing it.
     """
 
     def __init__(
@@ -375,6 +376,91 @@ class _BnlearnContinuousModel:
             dtype = torch.long if is_discrete else torch.float32
             out[node] = torch.as_tensor(values[node], dtype=dtype)
         return out
+
+    def weighted_sample(
+        self, n: int, evidence: dict, keep: list[str],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Likelihood-weighted particles for the oracle (#288).
+
+        Ancestral sampling over the ancestral closure of ``keep ∪ evidence``
+        with evidence clamped; each row's log-weight is
+        ``Σ_{j∈E} log p(e_j | pa_j)``.  Returns ``(keep columns [n, len(keep)]
+        float32, log-weights [n])``.
+        """
+        import numpy as np
+
+        need, stack = set(), list(keep) + list(evidence)
+        while stack:
+            nd = stack.pop()
+            if nd not in need:
+                need.add(nd)
+                stack.extend(self._parents(nd))
+        rng = np.random.default_rng()
+        values: dict[str, Any] = {}
+        logw = np.zeros(n, dtype=np.float64)
+        for node in self._topo:
+            if node not in need:
+                continue
+            cpd = self._cpds[node]
+            ntype = cpd["type"]
+            if node in evidence:
+                values[node] = self._clamp(node, evidence[node], n)
+                logw += self._log_prob_node(cpd, values[node], values)
+            elif ntype == "gaussian":
+                values[node] = self._sample_gaussian_node(cpd, values, n, rng)
+            elif ntype == "discrete":
+                values[node] = self._sample_discrete_node(cpd, values, n, rng)
+            elif ntype == "clg_continuous":
+                values[node] = self._sample_clg_node(cpd, values, n, rng)
+            else:
+                raise ValueError(f"Unknown node type {ntype!r} for {node!r}")
+        cols = torch.stack(
+            [torch.as_tensor(np.asarray(values[k], dtype=np.float64)) for k in keep],
+            dim=-1,
+        ).float()
+        return cols, torch.as_tensor(logw, dtype=torch.float32)
+
+    def _parents(self, node: str) -> list[str]:
+        cpd = self._cpds[node]
+        if cpd["type"] == "gaussian":
+            return list(cpd["coefficients"])
+        if cpd["type"] == "clg_continuous":
+            return list(cpd["discrete_parents"]) + list(cpd["continuous_parents"])
+        return list(cpd.get("parents", []))
+
+    def _log_prob_node(self, cpd, x, values):
+        """``log p(x | parents)`` per row, parents taken from ``values``."""
+        import numpy as np
+
+        def normal(x, mean, sd):
+            return -0.5 * ((x - mean) / sd) ** 2 - np.log(sd) - 0.5 * np.log(2 * np.pi)
+
+        ntype = cpd["type"]
+        if ntype == "gaussian":
+            mean = np.full(len(x), float(cpd["intercept"]), dtype=np.float64)
+            for parent, beta in cpd["coefficients"].items():
+                mean = mean + float(beta) * values[parent]
+            return normal(x, mean, float(cpd["sd"]))
+        if ntype == "clg_continuous":
+            config = np.zeros(len(x), dtype=np.int64)
+            mult = 1
+            for dp in cpd["discrete_parents"]:
+                config += values[dp].astype(np.int64) * mult
+                mult *= len(cpd["dlevels"][dp])
+            mean = np.asarray(cpd["intercepts"], dtype=np.float64)[config].copy()
+            for cp in cpd["continuous_parents"]:
+                coefs = np.asarray(cpd["coefficients"][cp], dtype=np.float64)
+                mean += coefs[config] * values[cp]
+            return normal(x, mean, np.asarray(cpd["sds"], dtype=np.float64)[config])
+        k = len(cpd["states"])
+        prob = np.asarray(cpd["prob"], dtype=np.float64).reshape(cpd["prob_dim"], order="F")
+        parents = cpd.get("parents", [])
+        if parents:
+            probs = prob[(slice(None),) + tuple(values[p].astype(np.int64) for p in parents)]
+        else:
+            probs = np.broadcast_to(prob.reshape(k, 1), (k, len(x)))
+        probs = probs / probs.sum(axis=0, keepdims=True).clip(min=1e-12)
+        return np.log(probs[x.astype(np.int64), np.arange(len(x))].clip(min=1e-300))
 
     # -- per-node samplers (numpy arrays) -----------------------------------
 

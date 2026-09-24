@@ -18,7 +18,7 @@ overhead.  This implementation uses two strictly sequential phases:
 
     Phase 2 — **Accuracy scoring** (``metrics_time_s``):
         For each (query, posterior) pair:
-            Build oracle (filter_ground_truth or forward_with_clamp)
+            Build oracle (filter_ground_truth or conditional_posterior_samples)
             Build cpd_pair (discrete) or sample_pair (continuous)
         Call _compute_metrics_per_node(cpd_pairs, sample_pairs)
         metrics_time_s = perf_counter() - t_metrics_start
@@ -51,7 +51,7 @@ from typing import Any
 
 import torch
 
-from nbn.bench.core.oracle import filter_ground_truth, forward_with_clamp_posterior_samples
+from nbn.bench.core.oracle import filter_ground_truth, conditional_posterior_samples
 from nbn.bench.core.results import CellResult
 from nbn.bench.domains.base import BenchmarkProblem, Query
 from nbn.bench.metrics import _compute_metrics_per_node
@@ -468,7 +468,7 @@ class AccuracyAndTiming:
 
         else:
             # Continuous or hybrid-continuous target.
-            oracle = forward_with_clamp_posterior_samples(
+            oracle = conditional_posterior_samples(
                 problem, [target], ev_row, n_samples=self.n_oracle_samples,
             )
             if oracle is None or oracle.shape[0] < 100:

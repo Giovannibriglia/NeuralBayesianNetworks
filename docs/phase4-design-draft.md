@@ -280,7 +280,7 @@ The existing oracle (`nbn/bench/core/oracle.py`) dispatches on the
 - **Discrete target**: `filter_ground_truth` does exact-match rejection
   on `problem.ground_truth.samples` (a pre-sampled reference pool). Used
   for discrete queries in both discrete and CLG networks.
-- **Continuous target**: `forward_with_clamp_posterior_samples` calls
+- **Continuous target**: `conditional_posterior_samples` calls
   `problem.true_model.sample(n, evidence)` for evidence-clamped ancestral
   sampling. Used for continuous queries in both Gaussian and CLG networks.
 

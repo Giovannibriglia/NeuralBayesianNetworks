@@ -1,7 +1,7 @@
 """Ground-truth oracle helpers for v0.13 accuracy measurements.
 
 Extracted from ``nbn/bench/crash_test_runner.py`` (v0.12 private helpers
-``_filter_ground_truth`` and ``_forward_with_clamp_posterior_samples``),
+``_filter_ground_truth`` and ``_conditional_posterior_samples``),
 adapted to work against ``BenchmarkProblem`` instead of ``SyntheticBN``.
 
 These helpers are *core* capabilities shared by ``AccuracyAndTiming`` and
@@ -136,70 +136,176 @@ def filter_ground_truth(
 
 
 # ---------------------------------------------------------------------------
-# Oracle 2: continuous/hybrid — forward-with-clamp ancestral sampling
+# Oracle 2: continuous/hybrid — likelihood weighting on the true model
 # ---------------------------------------------------------------------------
 
-def forward_with_clamp_posterior_samples(
+# Resampled ESS below this → the oracle cannot represent p(T | e) and returns
+# None (cell absent, not zero), the continuous analogue of ``n_eff_min``.
+_ORACLE_MIN_ESS = 100.0
+# Particle cap as a multiple of ``n_samples``: particles are drawn in chunks
+# until the ESS reaches ``n_samples`` or this cap is hit.
+_ORACLE_MAX_PARTICLE_FACTOR = 50
+# Rows per sampler call — bounds peak memory on large networks.
+_ORACLE_MAX_CHUNK = 20_000
+
+
+def conditional_posterior_samples(
     problem: BenchmarkProblem,
     targets: list[str],
     evidence: dict[str, torch.Tensor],
     *,
     n_samples: int = 2000,
+    max_particles: int | None = None,
+    min_ess: float = _ORACLE_MIN_ESS,
 ) -> torch.Tensor | None:
-    """Posterior samples via ancestral sampling with evidence clamped.
+    """Samples from ``p(T | E=e)`` under ``problem.true_model``.
 
     Used for **continuous** and **hybrid-continuous-target** queries.
 
-    For SCMs of the form ``X_j = f_j(X_{pa(j)}) + ε_j`` with ε_j
-    independent of ``{X_k : k ≠ j}``, ancestral sampling that *clamps*
-    evidence nodes to their observed values yields exact samples from
-    ``p(T | E=e)``.  This is what ``true_model.sample(n, evidence=...)``
-    implements.
+    Likelihood weighting on the ground-truth parameters: particles are drawn
+    by ancestral sampling with the evidence clamped (the proposal) and each is
+    weighted by ``Π_{j∈E} p(e_j | pa_j)``; ``n_samples`` draws are then
+    resampled by weight.  Clamping alone samples ``p(T | do(E=e))``, which
+    differs from the conditional whenever an evidence node has an unobserved
+    ancestor d-connected to T — e.g. evidence downstream of the target (#288).
+    When the weights are constant (no such ancestor) the first ``n_samples``
+    particles are returned as is: exact, at the old clamped-sampling cost.
 
-    Adapted from ``crash_test_runner._forward_with_clamp_posterior_samples``
-    (v0.12).  Structural change: accepts ``BenchmarkProblem`` instead of
-    ``SyntheticBN``; uses ``problem.true_model`` instead of ``bn.true_model``.
+    Only the ancestral closure of ``targets ∪ E`` is sampled — no other node
+    can affect the posterior — and particles are drawn until the ESS reaches
+    ``n_samples`` or ``max_particles`` (default ``50 · n_samples``).
 
     Parameters
     ----------
     problem:
-        A ``BenchmarkProblem`` with ``true_model`` populated.  Returns
-        ``None`` immediately if ``problem.true_model`` is ``None`` (bnlearn
-        networks, Phase 4).
+        A ``BenchmarkProblem`` with ``true_model`` populated: a
+        ``NeuralBayesianNetwork`` (synthetic) or a model exposing
+        ``weighted_sample(n, evidence, keep)`` (bnlearn Gaussian / CLG).
     targets:
-        List of target node names whose posterior to sample.
+        Target node names.
     evidence:
-        A ``{node: scalar_tensor_or_value}`` dict for one query row.
-        Scalars and 0-dim tensors are both handled.
+        ``{node: scalar_tensor_or_value}`` for one query row; ``None`` values
+        (Phase 3 empty mode) are marginalized.
     n_samples:
-        Number of posterior samples to draw.
+        Posterior samples returned.
 
     Returns
     -------
-    Tensor of shape ``[n_samples, len(targets)]`` on CPU, float32.
-    ``None`` on any exception or if ``true_model`` is unavailable.
+    Tensor ``[n_samples, len(targets)]`` on CPU, float32, or ``None`` when the
+    true model is unavailable / unsupported, sampling raised, or the ESS stayed
+    below ``min_ess``.
     """
-    if problem.true_model is None:
+    tm = problem.true_model
+    if tm is None:
         return None
 
-    # Normalise 0-dim tensors to [1]-shaped for the engine contract.
-    # Empty-mode evidence (None values, Phase 3) is skipped so the engine
-    # marginalizes over those variables rather than conditioning on them.
     ev = {
         k: (v.reshape(1) if isinstance(v, torch.Tensor) and v.dim() == 0 else v)
         for k, v in evidence.items()
         if v is not None
     }
+    cap = int(max_particles or _ORACLE_MAX_PARTICLE_FACTOR * n_samples)
     with torch.no_grad():
         try:
-            samples = problem.true_model.sample(n=n_samples, evidence=ev)
+            draw = _weighted_sampler(tm, list(targets), ev)
+            if draw is None:
+                return None
+            cols, logws = [], []
+            drawn, chunk = 0, int(n_samples)
+            while True:
+                c, lw = draw(min(chunk, _ORACLE_MAX_CHUNK))
+                cols.append(c)
+                logws.append(lw)
+                drawn += c.shape[0]
+                logw = torch.cat(logws)
+                w = torch.softmax(logw, dim=0)
+                ess = float(1.0 / w.pow(2).sum())
+                if ess >= n_samples or drawn >= cap:
+                    break
+                # Grow towards the particle count the current ESS rate implies.
+                need = int(drawn * (n_samples / max(ess, 1.0) - 1.0)) + 1
+                chunk = max(1, min(cap - drawn, max(chunk, need)))
         except Exception:
             return None
 
+    x = torch.cat(cols)
+    if float(logw.max() - logw.min()) < 1e-9:
+        return x[:n_samples]
+    if ess < min_ess:
+        return None
+    idx = torch.multinomial(w, n_samples, replacement=True)
+    return x[idx]
+
+
+def _ancestral_closure(parents_of, nodes) -> set[str]:
+    need, stack = set(), list(nodes)
+    while stack:
+        nd = stack.pop()
+        if nd in need:
+            continue
+        need.add(nd)
+        stack.extend(parents_of(nd))
+    return need
+
+
+def _weighted_sampler(tm, targets: list[str], ev: dict):
+    """``draw(n) -> (target columns [n, T] float32 CPU, log-weights [n])``.
+
+    ``None`` when evidence is present but the model cannot score it (unknown
+    true-model type) — returning clamped samples there would be the #288 bias.
+    """
+    from nbn.core.network import NeuralBayesianNetwork
+
+    if isinstance(tm, NeuralBayesianNetwork):
+        return _nbn_sampler(tm, targets, ev)
+    if hasattr(tm, "weighted_sample"):
+        return lambda n: tm.weighted_sample(n, ev, targets)
+    if ev:
+        return None
+
+    def prior(n):
+        s = tm.sample(n=n, evidence={})
+        return _target_columns(s, targets, n), torch.zeros(n)
+    return prior
+
+
+def _target_columns(samples: dict, targets: list[str], n: int) -> torch.Tensor:
     cols = []
     for t in targets:
         col = samples[t]
         if col.dim() >= 2 and col.shape[-1] == 1:
             col = col.squeeze(-1)
-        cols.append(col.float().cpu().reshape(n_samples, -1))
+        cols.append(col.float().cpu().reshape(n, -1))
     return torch.cat(cols, dim=-1)
+
+
+def _nbn_sampler(model, targets: list[str], ev: dict):
+    """Pruned ancestral sampler with LW weights for a ``NeuralBayesianNetwork``.
+
+    Mirrors ``nbn.sampling.ancestral.ancestral_sample`` node by node, over the
+    ancestral closure of ``targets ∪ E`` only.
+    """
+    dag = model.dag
+    need = _ancestral_closure(dag.parents, list(targets) + list(ev))
+    order = [nd for nd in dag.topological_order() if nd in need]
+    dev = model.device
+
+    def draw(n: int):
+        out: dict[str, torch.Tensor] = {}
+        logw = torch.zeros(n, device=dev)
+        for node in order:
+            parents = dag.parents(node)
+            pa = (torch.cat([out[p].reshape(n, -1) for p in parents], dim=-1)
+                  if parents else None)
+            mech = model.mechanisms[node]
+            if node in ev:
+                val = torch.as_tensor(ev[node]).to(dev).reshape(1, -1).expand(n, -1)
+                out[node] = val
+                logw = logw + mech.log_prob(val, pa).reshape(n)
+            elif pa is None:
+                out[node] = mech.sample(None, n=n).squeeze(0).reshape(n, -1)
+            else:
+                out[node] = mech.sample(pa, n=1).squeeze(1).reshape(n, -1)
+        return _target_columns(out, targets, n), logw.float().cpu()
+
+    return draw
