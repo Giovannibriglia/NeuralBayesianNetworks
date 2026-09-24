@@ -85,13 +85,29 @@ _MIN_TRAIN_STEPS = 300
 # runs on every network (continuous, n > 12) — every benchmark-scale cell.
 _GAIN_FALLBACK_THRESHOLD = 0.0
 
+# Beating the naive prior is necessary but not sufficient: at n≥50 on
+# continuous_lg a q 0.5–1.2 sd away from LW still "beat" a prior that was even
+# further off, and shipped (benchmark W1 0.5–1.5 vs LW 0.05) — a mean-field
+# posterior underestimates marginal variance on strongly correlated nets.  So
+# q must also be about as close to the LW reference as an INDEPENDENT LW run
+# is (``d_ref``, the reference's own Monte-Carlo noise), up to a tolerance:
+# per pattern ``slack = d_q − d_ref − tol``, and q is kept only when the mean
+# slack is ≤ 0.  Only patterns where the reference is trustworthy count — at
+# least ``_MIN_REF_EFFECTIVE_PARTICLES`` effective LW particles; with 50 %
+# of 100 nodes observed LW's ESS is ~0.4 % (≈8 particles), and there d_q,
+# d_prior and d_ref are all noise.  No trustworthy pattern → q cannot be
+# verified → LW fallback (the engine is never knowingly worse than LW).
+_TOL_DISCRETE = 0.02      # TV
+_TOL_CONTINUOUS = 0.10    # sd-normalised quantile distance
+_MIN_REF_EFFECTIVE_PARTICLES = 100.0
+
 # Training early stop on the held-out ELBO (#249): checked on the same FIXED
 # evidence patterns every ``check_every`` steps / ``check_every_s`` seconds;
 # stop after ``patience`` checks without a ``min_delta`` (nats per latent)
 # improvement; the best checkpoint is restored.
 _ELBO_PATIENCE = 5
 _ELBO_MIN_DELTA = 0.01
-_EVAL_PATTERNS = 4
+_EVAL_PATTERNS = 8
 _EVAL_ROWS_PER_PATTERN = 8
 _EVAL_MC = 128
 # LW reference particles for the gate: at least this many, or the engine's
@@ -99,6 +115,21 @@ _EVAL_MC = 128
 # LW's ESS is ~2.5 %, so 256 particles leave ~6 effective ones and the
 # reference is noise for q and naive prior alike.
 _EVAL_PARTICLES_MIN = 256
+
+
+def _observed_fraction(rows: int, n_nodes: int, generator=None) -> torch.Tensor:
+    """Per-row fraction of observed nodes, log-uniform on ``[1/n_nodes, 1]``.
+
+    Used for the gate's held-out patterns.  A fixed 50 % rate observes ~n/2
+    nodes, unlike the benchmark's 0–3-evidence queries, and leaves LW (the
+    reference) with ~0.4 % ESS at n=100; log-uniform weights sparse and dense
+    patterns equally at every network size.  Training keeps the fixed rate:
+    log-uniform training masks made discrete n=100 AVI worse (TV vs VE
+    0.08 → 0.44) and did not help lg.
+    """
+    u = torch.rand(rows, 1, generator=generator)
+    lo = torch.log(torch.tensor(1.0 / max(n_nodes, 1)))
+    return torch.exp(lo * (1.0 - u))
 
 
 def _weighted_quantiles(x: torch.Tensor, w: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
@@ -293,20 +324,39 @@ class AmortizedVIEngine(InferenceEngine):
 
         quality = self._estimate_quality(model, eval_set) if quality_gate else None
         proposal_used = "learned"
-        if quality is not None and quality["gain"] < _GAIN_FALLBACK_THRESHOLD:
+        reject = None
+        if quality is not None:
             # Diagnostic ("why") and action ("what we did") as distinct records,
             # mirroring the AIS gate.
+            if quality["gain"] < _GAIN_FALLBACK_THRESHOLD:
+                reject = f"fit-time gain {quality['gain']:.3f} < threshold {_GAIN_FALLBACK_THRESHOLD:.2f}"
+                logger.warning(
+                    "AmortizedVIEngine variational posterior is no closer to the LW "
+                    "reference than the naive clamped prior on held-out evidence "
+                    "(d_q ≈ %.3f vs d_prior ≈ %.3f; LW ESS ≈ %.1f%%). Consider more "
+                    "training samples/steps.", quality["d_q"], quality["d_prior"],
+                    100.0 * quality["lw_ess"],
+                )
+            elif not quality.get("n_reliable", 1):
+                reject = "no held-out pattern with a trustworthy LW reference"
+                logger.warning(
+                    "AmortizedVIEngine: every held-out pattern had fewer than %.0f "
+                    "effective LW particles (mean ESS ≈ %.1f%%); the variational "
+                    "posterior cannot be verified.",
+                    _MIN_REF_EFFECTIVE_PARTICLES, 100.0 * quality["lw_ess"],
+                )
+            elif (quality.get("slack") or 0.0) > 0.0:
+                reject = f"mean slack {quality['slack']:.3f} > 0"
+                logger.warning(
+                    "AmortizedVIEngine variational posterior is further from the LW "
+                    "reference than LW's own Monte-Carlo noise allows (d_q ≈ %.3f vs "
+                    "d_ref ≈ %.3f over %d trustworthy patterns).",
+                    quality["d_q"], quality["d_ref"], quality["n_reliable"],
+                )
+        if reject is not None:
             logger.warning(
-                "AmortizedVIEngine variational posterior is no closer to the LW "
-                "reference than the naive clamped prior on held-out evidence "
-                "(d_q ≈ %.3f vs d_prior ≈ %.3f; LW ESS ≈ %.1f%%). Consider more "
-                "training samples/steps.", quality["d_q"], quality["d_prior"],
-                100.0 * quality["lw_ess"],
-            )
-            logger.warning(
-                "AVI posterior rejected (fit-time gain %.3f < threshold %.2f); "
-                "falling back to LW for this engine.",
-                quality["gain"], _GAIN_FALLBACK_THRESHOLD,
+                "AVI posterior rejected (%s); falling back to LW for this engine.",
+                reject,
             )
             self.recognition_net = None
             self._fallback = LikelihoodWeightingEngine(n_samples=self.n_samples)
@@ -320,6 +370,10 @@ class AmortizedVIEngine(InferenceEngine):
             "d_q": None if quality is None else quality["d_q"],
             "d_prior": None if quality is None else quality["d_prior"],
             "lw_ess": None if quality is None else quality["lw_ess"],
+            "d_ref": None if quality is None else quality.get("d_ref"),
+            "slack": None if quality is None else quality.get("slack"),
+            "n_reliable": None if quality is None else quality.get("n_reliable"),
+            "per_pattern": None if quality is None else quality.get("per_pattern"),
             "early_stopped": early_stopped, "best_step": best_step,
             "elbo_history": elbo_history, "train_time_s": train_time_s,
         }
@@ -330,12 +384,14 @@ class AmortizedVIEngine(InferenceEngine):
 
     def _make_eval_set(
         self, model, n_patterns: int = _EVAL_PATTERNS,
-        rows_per_pattern: int = _EVAL_ROWS_PER_PATTERN, mask_prob: float = 0.5,
+        rows_per_pattern: int = _EVAL_ROWS_PER_PATTERN, mask_prob: float | None = None,
         seed: int = 0,
     ) -> List[Dict[str, object]] | None:
         """Fixed held-out evidence patterns from fresh prior samples.
 
-        Each pattern observes a random subset of nodes (``mask_prob``, at
+        Each pattern observes a random subset of nodes (``mask_prob``, or by
+        default a log-uniform observed fraction as in training — sparse
+        patterns like the benchmark's 0–3-evidence queries included; at
         least one observed and one latent — so downstream evidence occurs,
         unlike a "first half of topo order" split) and names one random
         latent target; ``rows_per_pattern`` rows share the pattern so LW can
@@ -353,7 +409,9 @@ class AmortizedVIEngine(InferenceEngine):
                     model, n=n_patterns * rows_per_pattern, device=str(dev))
             patterns = []
             for k in range(n_patterns):
-                obs = (torch.rand(n_nodes, generator=g) < mask_prob)
+                p_obs = (mask_prob if mask_prob is not None
+                         else float(_observed_fraction(1, n_nodes, generator=g)))
+                obs = (torch.rand(n_nodes, generator=g) < p_obs)
                 if bool(obs.all()):
                     obs[int(torch.randint(n_nodes, (1,), generator=g))] = False
                 if not bool(obs.any()):
@@ -450,7 +508,12 @@ class AmortizedVIEngine(InferenceEngine):
         clamped-prior marginal —, LW weighted).  TV for discrete targets, a
         sd-normalised mean absolute quantile difference (W1) for continuous.
         ``gain = d_prior − d_q`` averaged over rows and patterns; ``lw_ess`` is
-        the reference's own mean ESS fraction.  ``None`` on any failure.
+        the reference's own mean ESS fraction.  A second, independent LW run
+        gives ``d_ref`` = distance(replicate, reference) — the reference's
+        own noise; on patterns with ≥ ``_MIN_REF_EFFECTIVE_PARTICLES``
+        effective particles ``slack = d_q − d_ref − tol`` is averaged
+        (``n_reliable`` such patterns, ``slack`` None when there are none).
+        ``None`` on any failure.
         """
         try:
             net = self.recognition_net
@@ -458,7 +521,7 @@ class AmortizedVIEngine(InferenceEngine):
             if n_particles is None:
                 n_particles = max(_EVAL_PARTICLES_MIN, int(self.n_samples))
             probe = LikelihoodWeightingEngine(n_samples=n_particles)
-            d_q_all, d_p_all, ess_all = [], [], []
+            d_q_all, d_p_all, d_r_all, ess_all, slack = [], [], [], [], []
             u = torch.linspace(0.02, 0.98, 49)
             for pat in eval_set:
                 tgt, ev = pat["target"], pat["evidence"]
@@ -469,6 +532,11 @@ class AmortizedVIEngine(InferenceEngine):
                     state = get_inference_state(
                         model, [tgt], tuple(sorted(ev.keys())), (), probe._cache)
                     x = buf[..., state.node_slices[state.node_to_idx[tgt]]][..., 0]  # [B, S]
+                    # Independent LW replicate: its distance to the reference
+                    # is the reference's own Monte-Carlo noise on this pattern.
+                    log_w2, buf2 = probe._run(model, [tgt], ev, {}, n_particles)
+                    w2 = torch.softmax(log_w2, dim=-1)
+                    x2 = buf2[..., state.node_slices[state.node_to_idx[tgt]]][..., 0]
                     q_marg = self._target_marginal(model, net, tgt, ev, n_particles)
                     B = x.shape[0]
                     if net.is_discrete(tgt):
@@ -477,8 +545,11 @@ class AmortizedVIEngine(InferenceEngine):
                         lw = torch.zeros(B, K, device=x.device).scatter_add_(1, cls, w)
                         naive = torch.zeros(B, K, device=x.device).scatter_add_(
                             1, cls, torch.full_like(w, 1.0 / n_particles))
+                        lw2 = torch.zeros(B, K, device=x.device).scatter_add_(
+                            1, x2.long().clamp(0, K - 1), w2)
                         d_q = 0.5 * (q_marg.to(lw.device) - lw).abs().sum(-1)
                         d_p = 0.5 * (naive - lw).abs().sum(-1)
+                        d_r = 0.5 * (lw2 - lw).abs().sum(-1)
                     else:
                         uu = u.to(x.device)
                         q_lw = _weighted_quantiles(x, w, uu)
@@ -490,12 +561,21 @@ class AmortizedVIEngine(InferenceEngine):
                         sd = (w * (x - mean).pow(2)).sum(-1, keepdim=True).sqrt().clamp_min(1e-6)
                         d_q = ((q_q - q_lw).abs() / sd).mean(-1)
                         d_p = ((q_naive - q_lw).abs() / sd).mean(-1)
+                        d_r = ((_weighted_quantiles(x2, w2, uu) - q_lw).abs() / sd).mean(-1)
                     d_q_all.append(float(d_q.mean()))
                     d_p_all.append(float(d_p.mean()))
+                    d_r_all.append(float(d_r.mean()))
+                    if ess_all[-1] * n_particles >= _MIN_REF_EFFECTIVE_PARTICLES:
+                        tol = _TOL_DISCRETE if net.is_discrete(tgt) else _TOL_CONTINUOUS
+                        slack.append(d_q_all[-1] - d_r_all[-1] - tol)
             d_q_m = sum(d_q_all) / len(d_q_all)
             d_p_m = sum(d_p_all) / len(d_p_all)
             return {"d_q": d_q_m, "d_prior": d_p_m, "gain": d_p_m - d_q_m,
-                    "lw_ess": sum(ess_all) / len(ess_all)}
+                    "d_ref": sum(d_r_all) / len(d_r_all),
+                    "n_reliable": len(slack),
+                    "slack": (sum(slack) / len(slack)) if slack else None,
+                    "lw_ess": sum(ess_all) / len(ess_all),
+                    "per_pattern": list(zip(d_q_all, d_p_all, d_r_all, ess_all))}
         except Exception as exc:  # pragma: no cover - diagnostic safety
             logger.warning(
                 "AmortizedVIEngine: fit-time quality gate SKIPPED (diagnostic "

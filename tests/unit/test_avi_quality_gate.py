@@ -123,6 +123,48 @@ def test_gate_prefers_q_on_downstream_evidence():
     assert m["proposal_used"] == "learned" and m["gain"] > 0.1, m
 
 
+@pytest.mark.slow
+def test_q_beating_prior_but_far_from_lw_is_rejected(discrete_problem, caplog):
+    """lg-avi regression: at n>=50 a q 0.5-1.2 sd from LW beat a prior that was
+    further off (gain > 0) and shipped with benchmark W1 0.5-1.5 vs LW 0.05.
+    Positive gain is not enough — q must sit within LW's own noise + tol."""
+    model = _fit_adapter("cat", "ve", discrete_problem, epochs=5).model
+    eng = AmortizedVIEngine(n_samples=256)
+    far = {"d_q": 0.55, "d_prior": 0.9, "gain": 0.35, "lw_ess": 0.2,
+           "d_ref": 0.1, "n_reliable": 3, "slack": 0.35}
+    eng._estimate_quality = lambda *a, **k: dict(far)  # type: ignore[assignment]
+    with caplog.at_level(logging.WARNING):
+        m = eng.train_proposal(model, n_training_samples=500, n_epochs=2, device="cpu")
+    assert m["proposal_used"] == "lw_fallback" and m["slack"] == 0.35
+    assert eng.recognition_net is None
+    assert any("Monte-Carlo noise" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.slow
+def test_q_without_trustworthy_reference_is_rejected(discrete_problem, caplog):
+    """Every pattern below the effective-particle floor: q cannot be verified."""
+    model = _fit_adapter("cat", "ve", discrete_problem, epochs=5).model
+    eng = AmortizedVIEngine(n_samples=256)
+    blind = {"d_q": 0.5, "d_prior": 1.6, "gain": 1.1, "lw_ess": 0.004,
+             "d_ref": 0.8, "n_reliable": 0, "slack": None}
+    eng._estimate_quality = lambda *a, **k: dict(blind)  # type: ignore[assignment]
+    with caplog.at_level(logging.WARNING):
+        m = eng.train_proposal(model, n_training_samples=500, n_epochs=2, device="cpu")
+    assert m["proposal_used"] == "lw_fallback"
+    assert any("cannot be verified" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.slow
+def test_quality_reports_lw_noise_and_slack(discrete_problem):
+    model = _fit_adapter("cat", "ve", discrete_problem, epochs=5).model
+    eng = AmortizedVIEngine(n_samples=256)
+    torch.manual_seed(0)
+    m = eng.train_proposal(model, device="cpu")
+    assert m["d_ref"] is not None and m["d_ref"] >= 0.0
+    assert m["n_reliable"] >= 1 and m["slack"] is not None
+    assert m["proposal_used"] == ("learned" if m["slack"] <= 0 else "lw_fallback")
+
+
 # ---- early stopping on the held-out ELBO ---------------------------------------
 
 @pytest.mark.slow
