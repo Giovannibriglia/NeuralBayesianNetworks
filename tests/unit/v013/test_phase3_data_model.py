@@ -4,7 +4,7 @@ Covers:
 - Query.evidence accepting None values (type signature change).
 - CellResult.evidence_mode field + backward-compat default.
 - _evidence_mode_for helper classification.
-- Oracle (filter_ground_truth + forward_with_clamp) skipping None evidence.
+- Oracle (filter_ground_truth + conditional_posterior_samples) skipping None evidence.
 - evidence_mode propagation Query → Measurement → CellResult.
 
 Adapter None-handling lands in Stage 3.
@@ -20,7 +20,7 @@ import torch
 
 from nbn.bench.core.oracle import (
     filter_ground_truth,
-    forward_with_clamp_posterior_samples,
+    conditional_posterior_samples,
 )
 from nbn.bench.core.results import VALID_EVIDENCE_MODES, CellResult
 from nbn.bench.core.runner import _evidence_mode_for
@@ -159,7 +159,7 @@ class TestOracleNoneHandling:
         )
         assert out is None or out.dim() == 1
 
-    def test_forward_with_clamp_skips_none(self):
+    def test_conditional_oracle_skips_none(self):
         """None evidence values are dropped before reaching true_model.sample."""
         problem = _make_minimal_problem()
         captured = {}
@@ -170,7 +170,7 @@ class TestOracleNoneHandling:
                 return {"X": torch.zeros(n, 1)}
 
         problem.true_model = _FakeModel()
-        out = forward_with_clamp_posterior_samples(
+        out = conditional_posterior_samples(
             problem, targets=["X"], evidence={"Y": None}, n_samples=5
         )
         assert out is not None

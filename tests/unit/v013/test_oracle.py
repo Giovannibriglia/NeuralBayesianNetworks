@@ -18,8 +18,8 @@ import pytest
 import torch
 
 from nbn.bench.core.oracle import (
+    conditional_posterior_samples,
     filter_ground_truth,
-    forward_with_clamp_posterior_samples,
 )
 from nbn.bench.problems import SyntheticConfig, SyntheticProblemSource
 
@@ -69,11 +69,11 @@ def _scm_matrices(problem):
 
 
 # ---------------------------------------------------------------------------
-# Test 1 — forward-with-clamp matches analytic LG posterior
+# Test 1 — conditional oracle matches analytic LG posterior (upstream evidence)
 # ---------------------------------------------------------------------------
 
 def test_forward_clamp_matches_analytic_lg_posterior() -> None:
-    """forward_with_clamp_posterior_samples on continuous_lg must match
+    """conditional_posterior_samples on continuous_lg must match
     the closed-form Gaussian posterior within 5% of analytic std."""
     torch.manual_seed(0)
     problem = _make_problem("continuous_lg", n_nodes=5, seed=0)
@@ -104,7 +104,7 @@ def test_forward_clamp_matches_analytic_lg_posterior() -> None:
 
     # v0.13 oracle (scalar evidence → reshape to [1])
     ev_row = {k: v.reshape(-1)[0] for k, v in evidence.items()}
-    samples = forward_with_clamp_posterior_samples(
+    samples = conditional_posterior_samples(
         problem, [target], ev_row, n_samples=10_000,
     )
     assert samples is not None and samples.shape[0] == 10_000
@@ -120,8 +120,124 @@ def test_forward_clamp_matches_analytic_lg_posterior() -> None:
     )
 
 
+def _analytic_posterior(problem, target, evidence):
+    A, b, d, nodes = _scm_matrices(problem)
+    M = torch.linalg.inv(torch.eye(len(A)) - A)
+    mu = M @ b
+    Sigma = M @ torch.diag(d) @ M.T
+    t = nodes.index(target)
+    e = [nodes.index(n) for n in evidence]
+    ev = torch.tensor([float(torch.as_tensor(v).reshape(-1)[0]) for v in evidence.values()])
+    gain = torch.linalg.solve(Sigma[e][:, e], Sigma[e, t])
+    mean = mu[t] + gain @ (ev - mu[e])
+    var = Sigma[t, t] - Sigma[t, e] @ gain
+    return float(mean), float(var.clamp_min(1e-12).sqrt()), float(mu[t]), float(Sigma[t, t].sqrt())
+
+
+def _chain_ends(problem):
+    """(root, descendant) pair with the strongest ancestor→descendant link."""
+    import networkx as nx
+
+    g = nx.DiGraph()
+    g.add_nodes_from(problem.variables)
+    g.add_edges_from(problem.dag)
+    A, b, d, nodes = _scm_matrices(problem)
+    M = torch.linalg.inv(torch.eye(len(A)) - A)
+    Sigma = M @ torch.diag(d) @ M.T
+    sd = Sigma.diag().sqrt()
+    corr = Sigma / sd[:, None] / sd[None, :]
+    best = max(
+        ((a, c) for a in nodes for c in nx.descendants(g, a)),
+        key=lambda ac: abs(float(corr[nodes.index(ac[0]), nodes.index(ac[1])])),
+    )
+    return best
+
+
+def test_conditional_oracle_matches_analytic_on_downstream_evidence() -> None:
+    """#288: evidence on a DESCENDANT of the target.  Clamped ancestral
+    sampling returns the target's prior here (p(T | do(E)) = p(T)); the
+    oracle must return the conditional p(T | E=e)."""
+    torch.manual_seed(0)
+    problem = _make_problem("continuous_lg", n_nodes=5, seed=0)
+    target, child = _chain_ends(problem)
+    A, b, d, nodes = _scm_matrices(problem)
+    M = torch.linalg.inv(torch.eye(len(A)) - A)
+    mu, Sigma = M @ b, M @ torch.diag(d) @ M.T
+    c = nodes.index(child)
+    # Evidence 2 sd above the child's mean, so the conditional is clearly
+    # separated from the clamped (prior) answer.
+    evidence = {child: torch.tensor(float(mu[c] + 2.0 * Sigma[c, c].sqrt()))}
+    post_mean, post_std, prior_mean, prior_std = _analytic_posterior(problem, target, evidence)
+    assert abs(post_mean - prior_mean) > 0.5 * prior_std, "test needs a real shift"
+
+    samples = conditional_posterior_samples(problem, [target], evidence, n_samples=10_000)
+    assert samples is not None and samples.shape == (10_000, 1)
+    m, s = float(samples.mean()), float(samples.std())
+    assert abs(m - post_mean) < 0.05 * post_std + 0.02, (m, post_mean, prior_mean)
+    assert abs(s - post_std) < 0.10 * post_std, (s, post_std, prior_std)
+
+
+def test_conditional_oracle_returns_none_when_ess_collapses() -> None:
+    """Evidence far in the tail of a strong descendant: too few effective
+    particles within the cap → None (cell absent), never a biased answer."""
+    torch.manual_seed(0)
+    problem = _make_problem("continuous_lg", n_nodes=5, seed=0)
+    target, child = _chain_ends(problem)
+    out = conditional_posterior_samples(
+        problem, [target], {child: torch.tensor(1e4)}, n_samples=500,
+        max_particles=1000, min_ess=100,
+    )
+    assert out is None
+
+
+def test_conditional_oracle_constant_weights_skip_resampling() -> None:
+    """Evidence only on a root: weights are constant, so the particles are
+    returned as drawn (no multinomial duplicates) — the old exact case."""
+    torch.manual_seed(0)
+    problem = _make_problem("continuous_lg", n_nodes=5, seed=0)
+    parents = {n: [a for a, b in problem.dag if b == n] for n in problem.variables}
+    root = next(n for n in problem.variables
+                if not parents[n] and any(a == n for a, _ in problem.dag))
+    child = next(b for a, b in problem.dag if a == root)
+    out = conditional_posterior_samples(
+        problem, [child], {root: torch.tensor(0.3)}, n_samples=1000)
+    assert out is not None and out.shape == (1000, 1)
+    assert torch.unique(out).numel() > 990
+
+
+def test_bnlearn_weighted_sample_matches_analytic_diagnosis() -> None:
+    """bnlearn Gaussian true model: X -> Y, Y observed, target X."""
+    from nbn.bench.domains.base import BenchmarkProblem, GroundTruth
+    from nbn.bench.problems.bnlearn import _BnlearnContinuousModel
+
+    data = {
+        "kind": "gaussian", "nodes": ["X", "Y"], "edges": [["X", "Y"]],
+        "cpds": [
+            {"name": "X", "type": "gaussian", "intercept": 1.0, "coefficients": {}, "sd": 2.0},
+            {"name": "Y", "type": "gaussian", "intercept": 0.5,
+             "coefficients": {"X": 1.5}, "sd": 1.0},
+        ],
+    }
+    variables = {"X": ("continuous", None), "Y": ("continuous", None)}
+    tm = _BnlearnContinuousModel(data, variables)
+    problem = BenchmarkProblem(
+        name="xy", dag=[("X", "Y")], variables=variables, train_data=None,
+        test_data=None, queries=[], ground_truth=GroundTruth(samples=None),
+        true_model=tm, family="continuous_gauss", problem_id="xy", seed=0,
+    )
+    # Var X = 4, Var Y = 1.5^2*4 + 1 = 10, Cov = 6; E[Y] = 0.5 + 1.5 = 2.
+    y = 8.0
+    post_mean = 1.0 + 6.0 / 10.0 * (y - 2.0)
+    post_std = math.sqrt(4.0 - 36.0 / 10.0)
+    samples = conditional_posterior_samples(problem, ["X"], {"Y": torch.tensor(y)},
+                                            n_samples=10_000)
+    assert samples is not None
+    assert abs(float(samples.mean()) - post_mean) < 0.05
+    assert abs(float(samples.std()) - post_std) < 0.05 * post_std + 0.02
+
+
 # ---------------------------------------------------------------------------
-# Test 2 — forward-with-clamp matches tight rejection at marginal mean
+# Test 2 — conditional oracle matches tight rejection at marginal mean
 # ---------------------------------------------------------------------------
 
 def test_forward_clamp_matches_tight_rejection_at_marginal_mean() -> None:
@@ -160,7 +276,7 @@ def test_forward_clamp_matches_tight_rejection_at_marginal_mean() -> None:
     rejection_std = float(rejection_target.std().item())
     se = rejection_std / math.sqrt(max(1, n_eff))
 
-    fwc_samples = forward_with_clamp_posterior_samples(
+    fwc_samples = conditional_posterior_samples(
         problem, [target], evidence, n_samples=10_000,
     )
     assert fwc_samples is not None
@@ -175,7 +291,7 @@ def test_forward_clamp_matches_tight_rejection_at_marginal_mean() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 3 — forward-with-clamp handles degenerate (scalar) evidence
+# Test 3 — conditional oracle handles degenerate (scalar) evidence
 # ---------------------------------------------------------------------------
 
 def test_forward_clamp_handles_degenerate_evidence_dim() -> None:
@@ -184,7 +300,7 @@ def test_forward_clamp_handles_degenerate_evidence_dim() -> None:
     problem = _make_problem("continuous_lg", n_nodes=4, seed=0)
 
     nodes = list(problem.variables.keys())
-    samples = forward_with_clamp_posterior_samples(
+    samples = conditional_posterior_samples(
         problem, [nodes[-1]], {nodes[0]: torch.tensor(0.5)}, n_samples=200,
     )
     assert samples is not None and samples.shape == (200, 1)

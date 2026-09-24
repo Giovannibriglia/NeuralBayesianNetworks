@@ -22,7 +22,7 @@ Three layers across a six-network representative subset:
       for networks too large for exact inference.
     - Skip only if Tier B also fails (should not happen on this subset).
   For continuous/CLG networks pgmpy exact does not apply; Layer 3 instead does
-  a summary-statistics sanity check on the clamped-sample oracle.
+  a summary-statistics sanity check on the continuous oracle.
 
 The oracle is sample-based at ``n_reference`` samples; this suite bumps the
 fixture to ``n_reference=20000`` (vs the 5000 default) to tighten the oracle's
@@ -342,13 +342,13 @@ class TestOracleDiscrete:
 class TestOracleContinuous:
     def test_clamped_marginal_stats(self, loaded_problem, network_name):
         """pgmpy exact does not apply to continuous/CLG. Instead verify the
-        clamped-sample oracle's marginal (no evidence == ancestral) has
+        continuous oracle's marginal (no evidence == ancestral) has
         mean/std consistent with a direct large ancestral sample. Scale-free
         tolerances (10% mean, 20% std) avoid flakiness on large-scale nodes."""
         if loaded_problem.family in DISCRETE_FAMILIES:
             pytest.skip(f"{network_name}: discrete (handled by TestOracleDiscrete)")
         from nbn.bench.core.oracle import (
-            _column_order, forward_with_clamp_posterior_samples,
+            _column_order, conditional_posterior_samples,
         )
 
         cont = [n for n, (k, _) in loaded_problem.variables.items() if k == "continuous"]
@@ -356,11 +356,11 @@ class TestOracleContinuous:
             pytest.skip(f"{network_name}: no continuous targets")
         target = sorted(cont)[0]
 
-        oracle = forward_with_clamp_posterior_samples(
+        oracle = conditional_posterior_samples(
             loaded_problem, [target], {}, n_samples=2000,
         )
         if oracle is None:
-            pytest.skip(f"{network_name}: clamped-sample oracle unavailable")
+            pytest.skip(f"{network_name}: continuous oracle unavailable")
         o = oracle.reshape(-1).numpy()
 
         col_idx = {n: i for i, n in enumerate(_column_order(loaded_problem))}
