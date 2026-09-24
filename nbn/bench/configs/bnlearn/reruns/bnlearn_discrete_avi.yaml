@@ -1,0 +1,58 @@
+# =============================================================================
+# v0.19.0 partial rerun — discrete networks, nbn-cat-avi only (AVI gate fix)
+# =============================================================================
+# Generated from bnlearn/complete/inference_complete.yaml; every non-baseline setting and every kept baseline
+# line is identical to it, so problems, seeds, queries and budgets match the
+# original run cell for cell.
+#
+# Why: v0.19.0 fixed the continuous oracle (#288: it sampled p(T | do(E)),
+# now p(T | E)) and the AVI quality gate (#286).  Continuous-target scores
+# and every *-avi cell of runs made with <= v0.18.3 are stale; discrete-target
+# scores of the other baselines and non-AVI timings are not.
+#
+# After the run, splice the new cells into the original parquet:
+#   nbn-bench merge <bnlearn_complete run dir> <this run dir> -o <merged>.parquet
+# then plot <merged>.parquet as usual.
+# =============================================================================
+
+BATCH_SIZE_FIT: &BATCH_SIZE_FIT 1024
+version: "v0.13"
+benchmark: bnlearn
+config_name: bnlearn_rerun_discrete_avi
+metrics: all
+source:
+  networks:
+    - asia
+    - sachs
+    - barley
+    - mildew
+    - hailfinder
+    - diabetes
+    - link
+    - munin
+  seeds: [0, 1, 2, 3, 4]
+  n_train:
+    tiers:
+      - { max_n_params: 1000,   value: 10240 }
+      - { max_n_params: 10000,  value: 20480 }
+      - { max_n_params: 100000, value: 40960 }
+      - { max_n_params: null,   value: 81920 }
+  n_test: 1024
+  n_reference:
+    tiers:
+      - { max_n_params: 1000,   value: 10240 }
+      - { max_n_params: 10000,  value: 20480 }
+      - { max_n_params: 100000, value: 40960 }
+      - { max_n_params: null,   value: 81920 }
+selector:
+  type: topological
+  target_allocation:
+    hub: 0.30
+    cut: 0.30
+    terminal: 0.30
+    random: 0.10
+n_queries_per_cell: 128
+baselines:
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
+per_cell_timeout_s: 1200.0
+fit_timeout_s: 1200

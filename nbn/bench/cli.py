@@ -92,6 +92,22 @@ def _build_parser() -> argparse.ArgumentParser:
                            "every non-nbn baseline (default: 2).")
     plot.add_argument("-v", "--verbose", action="store_true")
 
+    merge = sub.add_parser(
+        "merge",
+        help="Splice a partial rerun's cells into an earlier run's parquet.",
+        description=(
+            "Replace every cell (benchmark, family, problem_id, seed, baseline) "
+            "present in UPDATE with the update's rows; keep all other cells of "
+            "BASE. For the partial reruns in nbn/bench/configs/*/reruns/."
+        ),
+    )
+    merge.add_argument("base", help="Original run: parquet or run directory.")
+    merge.add_argument("updates", nargs="+",
+                       help="Rerun parquet(s) or run directories; later wins.")
+    merge.add_argument("-o", "--output", required=True,
+                       help="Merged *_metrics.parquet to write.")
+    merge.add_argument("-v", "--verbose", action="store_true")
+
     return parser
 
 
@@ -302,6 +318,11 @@ def main(argv: list[str] | None = None) -> int:
             benchmark=args.benchmark,
             top_nbn=args.top_nbn,
         )
+
+    if args.cmd == "merge":
+        from nbn.bench._merge import merge_runs
+        merge_runs(args.base, args.updates, args.output)
+        return 0
 
     if args.cmd == "inference":
         from nbn.bench.core.yaml_config import load_runner_config
