@@ -77,7 +77,7 @@ FAMILY_TITLE = {
     "continuous_nongauss": "continuous (non-Gaussian)",
     "hybrid": "hybrid",
     "continuous_gauss": "Gaussian",
-    "clg": "conditional linear Gaussian",
+    "clg": "CLG",
 }
 
 PARAMETRIC_MECHS = frozenset({"cat", "neuralcat", "lg", "mdn", "flow"})
@@ -91,10 +91,13 @@ _HEADLINE_CONTINUOUS = ("w1_per_node", "calibration_pit_ks", "log_likelihood",
 
 # Metrics rendered per group; "accuracy" = the family's headline accuracy
 # metric (may differ across panels: TV vs W1). Each entry: (file tag, metric
-# or "accuracy", evidence mode or None for the combined slice).
-_PLAN: dict[str, list[tuple[str, str, str | None]]] = {
+# or "accuracy" or a tuple of those for a stacked figure with one row per
+# metric and a single shared legend, evidence mode or None for the combined
+# slice).
+_PLAN: dict[str, list[tuple[str, str | tuple[str, ...], str | None]]] = {
     "inference": [("accuracy", "accuracy", None),
                   ("total_query_time", "total_query_time", None),
+                  ("accuracy_time", ("accuracy", "total_query_time"), None),
                   ("fit_time", "fit_time", None)],
     "scalability": [("accuracy", "accuracy", None),
                     ("accuracy_full", "accuracy", "full"),
@@ -103,7 +106,8 @@ _PLAN: dict[str, list[tuple[str, str, str | None]]] = {
     "speed": [("query_time_full", "query_time", "full"),
               ("query_time_empty", "query_time", "empty")],
     "bnlearn": [("accuracy", "accuracy", None),
-                ("total_query_time", "total_query_time", None)],
+                ("total_query_time", "total_query_time", None),
+                ("accuracy_time", ("accuracy", "total_query_time"), None)],
     "param_learning": [("log_likelihood", "log_likelihood", None),
                        ("param_recovery_tv", "param_recovery_tv", None),
                        ("calibration_pit_ks", "calibration_pit_ks", None),
@@ -507,19 +511,32 @@ def fig_family_row(panels: list[tuple], metric_of: dict[str, str], out_path: Pat
     common_sets)], ``metric_of[family]`` = the metric drawn in that panel.
     Families with more than ``_MAX_GROUPS_PER_PANEL`` x values are split into
     consecutive panels; panels are packed into rows of width 7 in."""
-    split = []
-    for fam, vdf, xs, x_axis, methods, common in panels:
-        chunks = _chunk(list(xs), _MAX_GROUPS_PER_PANEL)
-        for ci, chunk in enumerate(chunks):
-            title = FAMILY_TITLE.get(fam, fam)
-            if len(chunks) > 1:
-                title += f" ({ci + 1}/{len(chunks)})"
-            split.append((fam, vdf, chunk, x_axis, methods, common, title))
-    rows = _layout_rows(split)
+    return fig_family_rows([(panels, metric_of)], out_path, view_name)
+
+
+def fig_family_rows(panel_rows: list[tuple[list[tuple], dict[str, str]]],
+                    out_path: Path, view_name: str) -> bool:
+    """Write one figure with one block of panel rows per ``(panels,
+    metric_of)`` entry (e.g. accuracy above query time), all rows sharing a
+    single legend at the top. See :func:`fig_family_row` for the panel tuple."""
+    rows: list[list[tuple]] = []
+    split_all: list[tuple] = []
+    for panels, metric_of in panel_rows:
+        split = []
+        for fam, vdf, xs, x_axis, methods, common in panels:
+            chunks = _chunk(list(xs), _MAX_GROUPS_PER_PANEL)
+            for ci, chunk in enumerate(chunks):
+                title = FAMILY_TITLE.get(fam, fam)
+                if len(chunks) > 1:
+                    title += f" ({ci + 1}/{len(chunks)})"
+                split.append((fam, vdf, chunk, x_axis, methods, common, title,
+                              metric_of))
+        rows += _layout_rows(split)
+        split_all += split
     if not rows:
         return False
     all_methods: list[str] = []
-    for p in split:
+    for p in split_all:
         for m in p[4]:
             if m not in all_methods:
                 all_methods.append(m)
@@ -533,13 +550,14 @@ def fig_family_row(panels: list[tuple], metric_of: dict[str, str], out_path: Pat
         n_rows = len(rows)
         height = 1.9 * n_rows + head
         fig = plt.figure(figsize=(7.0, height))
-        outer = fig.add_gridspec(n_rows, 1, hspace=0.55, top=1 - head / height,
+        outer = fig.add_gridspec(n_rows, 1, hspace=0.42, top=1 - head / height,
                                  bottom=0.02)
         drew_any = False
         for ri, row in enumerate(rows):
             ratios = [max(len(p[2]), 2) for p in row]
             gs = outer[ri].subgridspec(1, len(row), width_ratios=ratios, wspace=0.28)
-            for pi, (fam, vdf, chunk, x_axis, methods, common, title) in enumerate(row):
+            for pi, (fam, vdf, chunk, x_axis, methods, common, title,
+                     metric_of) in enumerate(row):
                 ax = fig.add_subplot(gs[0, pi])
                 metric = metric_of[fam]
                 drew = _draw_panel(ax, vdf, chunk, x_axis, metric, methods,
@@ -548,7 +566,9 @@ def fig_family_row(panels: list[tuple], metric_of: dict[str, str], out_path: Pat
                 if not drew:
                     ax.text(0.5, 0.5, "no solved cell", ha="center", va="center",
                             transform=ax.transAxes, fontsize=6, color="gray")
-                ax.set_title(title, pad=2)
+                # panel titles only on the first block of a stacked figure
+                if metric_of is panel_rows[0][1]:
+                    ax.set_title(title, pad=2)
                 ax.set_xlabel(_X_LABEL.get(x_axis, x_axis), labelpad=1)
                 # y label per panel when metrics differ, else first panel only
                 ylab = f"{_Y_LABEL.get(metric, metric)}"
@@ -640,42 +660,61 @@ def render_group(fds: list[FamilyData], group: str, out_dir: Path, aggregation: 
     """All figures + tables of one benchmark group."""
     written: list[Path] = []
     tables = out_dir / "tables"
-    for tag, metric_spec, mode in _PLAN[group]:
-        panels, metric_of = [], {}
-        for fd in fds:
-            metric = fd.headline if metric_spec == "accuracy" else metric_spec
-            if metric is None or (metric_spec == "accuracy" and metric in TIME_METRICS):
-                continue   # no accuracy metric in this run (e.g. batch speed)
-            dfx = fd.dfx
-            if mode is not None:
-                if mode not in _present_modes(dfx):
-                    continue
-                dfx = _evidence_slice(dfx, mode)
-            cells, n_total = cell_table(dfx, metric)
-            if cells.empty or not cells["solved"].any():
-                logger.info("%s/%s/%s%s: no solved cell", group, fd.family, metric,
-                            f"[{mode}]" if mode else "")
-                continue
-            views = views_for_methods(cells, n_total, aggregation, metric, fd.xs, fd.shown)
-            vdf = views.all if view_name == "all" else views.common
-            panels.append((fd.family, vdf, fd.xs, fd.x_axis, fd.shown, views.common_sets))
-            metric_of[fd.family] = metric
-            suffix = f"_{mode}" if mode else ""
-            tex = tables / f"{group}_{fd.family}_{metric}{suffix}.tex"
-            write_view_table(
-                vdf, fd.xs, fd.x_axis, metric, view_name, tex,
-                caption_prefix=f"{group.replace('_', ' ')}, {FAMILY_TITLE.get(fd.family, fd.family)}"
-                               + (f", evidence={mode}" if mode else ""),
-                label=f"tab:{group}_{fd.family}_{metric}{suffix}",
-                common_sets=views.common_sets,
-                dagger_note="best parametric / best non-parametric nbn method of the family")
-        if not panels:
-            continue
+    for tag, spec, mode in _PLAN[group]:
+        specs = spec if isinstance(spec, tuple) else (spec,)
+        panel_rows = []
+        for metric_spec in specs:
+            panels, metric_of = _metric_panels(fds, group, metric_spec, mode, aggregation,
+                                               view_name, tables, write_tables=not
+                                               isinstance(spec, tuple))
+            if panels:
+                panel_rows.append((panels, metric_of))
+        if len(panel_rows) < len(specs):
+            continue   # a stacked figure needs every metric row
         path = out_dir / f"{group}_{tag}.pdf"
-        if fig_family_row(panels, metric_of, path, view_name):
+        if fig_family_rows(panel_rows, path, view_name):
             written.append(path)
             logger.info("wrote %s", path)
     return written
+
+
+def _metric_panels(fds: list[FamilyData], group: str, metric_spec: str, mode,
+                   aggregation: str, view_name: str, tables: Path,
+                   write_tables: bool = True) -> tuple[list[tuple], dict[str, str]]:
+    """The panel tuples (one per family) of one metric spec, plus the metric
+    drawn per family; writes the matching LaTeX tables unless told not to
+    (stacked figures reuse the tables of their single-metric siblings)."""
+    panels, metric_of = [], {}
+    for fd in fds:
+        metric = fd.headline if metric_spec == "accuracy" else metric_spec
+        if metric is None or (metric_spec == "accuracy" and metric in TIME_METRICS):
+            continue   # no accuracy metric in this run (e.g. batch speed)
+        dfx = fd.dfx
+        if mode is not None:
+            if mode not in _present_modes(dfx):
+                continue
+            dfx = _evidence_slice(dfx, mode)
+        cells, n_total = cell_table(dfx, metric)
+        if cells.empty or not cells["solved"].any():
+            logger.info("%s/%s/%s%s: no solved cell", group, fd.family, metric,
+                        f"[{mode}]" if mode else "")
+            continue
+        views = views_for_methods(cells, n_total, aggregation, metric, fd.xs, fd.shown)
+        vdf = views.all if view_name == "all" else views.common
+        panels.append((fd.family, vdf, fd.xs, fd.x_axis, fd.shown, views.common_sets))
+        metric_of[fd.family] = metric
+        if not write_tables:
+            continue
+        suffix = f"_{mode}" if mode else ""
+        tex = tables / f"{group}_{fd.family}_{metric}{suffix}.tex"
+        write_view_table(
+            vdf, fd.xs, fd.x_axis, metric, view_name, tex,
+            caption_prefix=f"{group.replace('_', ' ')}, {FAMILY_TITLE.get(fd.family, fd.family)}"
+                           + (f", evidence={mode}" if mode else ""),
+            label=f"tab:{group}_{fd.family}_{metric}{suffix}",
+            common_sets=views.common_sets,
+            dagger_note="best parametric / best non-parametric nbn method of the family")
+    return panels, metric_of
 
 
 def run_paper(groups: dict[str, list], output_dir: Path, aggregation: str = "iqm_iqr",

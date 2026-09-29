@@ -233,7 +233,7 @@ class TestEndToEnd:
         out = tmp_path / "figs"
         assert run_paper({"inference": [run]}, out) == 0
         for f in ("inference_accuracy.pdf", "inference_total_query_time.pdf",
-                  "inference_fit_time.pdf"):
+                  "inference_accuracy_time.pdf", "inference_fit_time.pdf"):
             assert (out / f).exists(), f
         sel = (out / "selection.txt").read_text()
         # discrete: no non-parametric nbn -> two best parametric engines
