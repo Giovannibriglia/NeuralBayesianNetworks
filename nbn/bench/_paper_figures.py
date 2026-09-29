@@ -544,7 +544,8 @@ def _x_header(x, x_axis: str) -> str:
 
 def write_view_table(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name: str,
                      out_path: Path, caption_prefix: str, label: str,
-                     common_sets: dict | None = None, top_nbn: int = 2) -> bool:
+                     common_sets: dict | None = None, top_nbn: int = 2,
+                     dagger_note: str | None = None) -> bool:
     """Rows = shown methods (nbn rows marked $^\\dagger$), columns = x values.
 
     ``all``:    ``c±h (k/n)`` with the ``(k/n)`` only when k < n; failure code
@@ -591,19 +592,19 @@ def write_view_table(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name
     if view_name == "common" and common_sets is not None:
         footer = (["$|C|$ (common seeds)"]
                   + [str(len(common_sets.get(x, []))) for x in xs],)
+    fixed = dagger_note is not None
+    tail = "" if fixed else ", or an nbn method outside the top-N at that column"
     if view_name == "all":
         rule = ("(k/n) = seeds solved / seeds run, shown when k<n; a failure "
-                "code = no seed solved; -- = not run, or an nbn method outside "
-                "the top-N at that column")
+                f"code = no seed solved; -- = not run{tail}")
     else:
         rule = ("each value over the seeds solved by every shown method at "
                 "that column (|C| row); methods with no solved seed are DNF "
-                "and do not constrain C; -- = not run, or an nbn method "
-                "outside the top-N at that column")
+                f"and do not constrain C; -- = not run{tail}")
+    dagger = dagger_note if fixed else f"top-{top_nbn} nbn per column"
     caption = (f"{caption_prefix}. {METRIC_LABEL.get(metric, metric)} "
                f"({_direction(metric)}) vs {x_axis}, view={view_name}. "
-               f"Center$\\pm$band across seeds; $\\dagger$ = top-{top_nbn} nbn "
-               f"per column; {rule}.")
+               f"Center$\\pm$band across seeds; $\\dagger$ = {dagger}; {rule}.")
     _write_table(out_path, header, rows, caption, label=label, footer_rows=footer)
     return True
 

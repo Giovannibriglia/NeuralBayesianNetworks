@@ -91,6 +91,36 @@ def _build_parser() -> argparse.ArgumentParser:
                            "every non-nbn baseline (default: 2).")
     plot.add_argument("-v", "--verbose", action="store_true")
 
+    paper = sub.add_parser(
+        "paper",
+        help="Publication figures: one multi-panel PDF per (benchmark, metric).",
+        description=(
+            "Render the paper's figures from the benchmark runs: one PDF per "
+            "(benchmark group, metric) with one panel per data family, showing "
+            "every non-nbn baseline plus the best parametric and the best "
+            "non-parametric nbn method of each family (chosen once per family "
+            "on its headline metric). Each group takes a base run followed by "
+            "any partial reruns, which are spliced in as `nbn-bench merge` does."
+        ),
+    )
+    for group, helptext in (
+        ("inference", "synthetic inference run (complete/inference_complete.yaml)"),
+        ("scalability", "inference scalability run"),
+        ("speed", "batch-speed run (speed/inference_speed.yaml)"),
+        ("bnlearn", "bnlearn inference run"),
+        ("param-learning", "parameter-learning run"),
+        ("learning-curves", "learning-curves run (n_train sweep)"),
+    ):
+        paper.add_argument(f"--{group}", nargs="+", metavar="RUN", default=None,
+                           help=f"{helptext}: base run dir or parquet, then reruns.")
+    paper.add_argument("--output-dir", required=True,
+                       help="Directory for <group>_<metric>.pdf, tables/ and selection.txt.")
+    paper.add_argument("--aggregation", choices=["iqm_iqr", "mean_std"],
+                       default="iqm_iqr", help="Aggregation statistic (default: iqm_iqr).")
+    paper.add_argument("--view", choices=["all", "common"], default="all",
+                       help="Seed view (docs/v0.18-bar-reporting-all-common.md); default all.")
+    paper.add_argument("-v", "--verbose", action="store_true")
+
     merge = sub.add_parser(
         "merge",
         help="Splice a partial rerun's cells into an earlier run's parquet.",
@@ -317,6 +347,14 @@ def main(argv: list[str] | None = None) -> int:
             benchmark=args.benchmark,
             top_nbn=args.top_nbn,
         )
+
+    if args.cmd == "paper":
+        from pathlib import Path
+
+        from nbn.bench._paper_panels import GROUPS, run_paper
+        groups = {g: getattr(args, g) for g in GROUPS if getattr(args, g, None)}
+        return run_paper(groups, output_dir=Path(args.output_dir),
+                         aggregation=args.aggregation, view=args.view)
 
     if args.cmd == "merge":
         from nbn.bench._merge import merge_runs
