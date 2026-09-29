@@ -14,7 +14,6 @@ import pandas as pd
 import pytest
 
 from nbn.bench._paper_panels import (
-    Ranking,
     headline_metric,
     method_color,
     nbn_category,
@@ -67,48 +66,74 @@ class TestLabelsAndCategories:
         assert headline_metric("discrete", set()) is None
 
 
-class TestSelection:
-    def test_rank_more_x_solved_wins_then_lower_score(self):
-        view = pd.DataFrame([
-            # method, x, center, k
-            dict(method="nbn-cat-ve", x=10, center=0.05, k=5),
-            dict(method="nbn-cat-ve", x=50, center=0.05, k=5),
-            dict(method="nbn-cat-lw", x=10, center=0.01, k=5),   # better but 1 x only
-            dict(method="nbn-cat-lw", x=50, center=float("nan"), k=0),
-            dict(method="nbn-cat-ais", x=10, center=0.06, k=5),
-            dict(method="nbn-cat-ais", x=50, center=0.06, k=5),
-            dict(method="pgmpy-mle-ve", x=10, center=0.0, k=5),
-        ])
-        view["lo"] = view["hi"] = view["center"]
-        view["n"] = 5
-        view["code"] = None
-        ranked = rank_nbn(view, "tv_per_node")
-        assert [r.method for r in ranked] == ["nbn-cat-ve", "nbn-cat-ais", "nbn-cat-lw"]
-        assert ranked[0].n_x_solved == 2 and ranked[2].n_x_solved == 1
+def _view(rows):
+    """rows: (method, x, center, k) -> an ``all`` view frame."""
+    v = pd.DataFrame(rows, columns=["method", "x", "center", "k"])
+    v["lo"] = v["hi"] = v["center"]
+    v["n"] = 5
+    v["code"] = None
+    return v
 
-    def test_select_best_parametric_and_best_nonparametric(self):
-        ranking = [
-            Ranking("nbn-lg-lw", "parametric", 5, 0.2),
-            Ranking("nbn-mdn-lw", "parametric", 5, 0.3),
-            Ranking("nbn-knn-lw", "nonparametric", 5, 0.4),
-            Ranking("nbn-kde-lw", "nonparametric", 5, 0.5),
-        ]
-        assert select_nbn(ranking) == ["nbn-lg-lw", "nbn-knn-lw"]
+
+class TestSelection:
+    def test_candidates_need_half_coverage_and_rank_on_common_x(self):
+        # MDN better than LG where both ran, but DNF at n >= 500 (fit budget).
+        # Coverage 3/5 >= ceil(5/2)=3 -> candidate; X* = {10, 50, 100};
+        # ranked on X*, MDN wins.
+        v = _view([
+            ("nbn-lg-lw", 10, 0.13, 5), ("nbn-lg-lw", 50, 0.22, 5),
+            ("nbn-lg-lw", 100, 0.09, 5), ("nbn-lg-lw", 500, 0.10, 5),
+            ("nbn-lg-lw", 1000, 0.15, 5),
+            ("nbn-mdn-lw", 10, 0.05, 5), ("nbn-mdn-lw", 50, 0.06, 5),
+            ("nbn-mdn-lw", 100, 0.06, 5), ("nbn-mdn-lw", 500, float("nan"), 0),
+            ("nbn-kde-lw", 10, 0.04, 5), ("nbn-kde-lw", 50, float("nan"), 0),
+            ("nbn-knn-lw", 10, 0.07, 5), ("nbn-knn-lw", 50, 0.10, 5),
+            ("nbn-knn-lw", 100, 0.07, 5),
+            ("pgmpy-lg-predict", 10, 0.1, 5),
+        ])
+        xs = [10, 50, 100, 500, 1000]
+        rk = rank_nbn(v, "w1_per_node", xs)
+        par = rk["parametric"]
+        assert par.x_star == [10, 50, 100]
+        assert [r.method for r in par.ranked] == ["nbn-mdn-lw", "nbn-lg-lw"]
+        assert par.ranked[0].score == pytest.approx((0.05 + 0.06 + 0.06) / 3)
+        assert par.ranked[1].score == pytest.approx((0.13 + 0.22 + 0.09) / 3)
+        non = rk["nonparametric"]
+        # kde solved 1/5 x < 3 -> not a candidate; knn is the only candidate
+        assert non.x_star == [10, 50, 100]
+        assert [(r.method, r.candidate) for r in non.ranked] == \
+            [("nbn-knn-lw", True), ("nbn-kde-lw", False)]
+        assert select_nbn(rk) == ["nbn-mdn-lw", "nbn-knn-lw"]
+
+    def test_relaxed_rule_when_nobody_reaches_half_coverage(self):
+        v = _view([
+            ("nbn-cat-ve", 10, 0.05, 5),
+            ("nbn-cat-lw", 10, 0.01, 5), ("nbn-cat-lw", 50, 0.02, 5),
+        ])
+        rk = rank_nbn(v, "tv_per_node", [10, 50, 100, 500, 1000, 5000])
+        par = rk["parametric"]
+        assert all(r.candidate for r in par.ranked)
+        assert par.x_star == [10]
+        assert [r.method for r in par.ranked] == ["nbn-cat-lw", "nbn-cat-ve"]
 
     def test_select_fills_missing_category_with_runner_up(self):
-        ranking = [
-            Ranking("nbn-cat-ve", "parametric", 5, 0.1),
-            Ranking("nbn-cat-lw", "parametric", 5, 0.2),
-            Ranking("nbn-cat-avi", "parametric", 5, 0.3),
-        ]
-        assert select_nbn(ranking) == ["nbn-cat-ve", "nbn-cat-lw"]
+        v = _view([
+            ("nbn-cat-ve", 10, 0.1, 5), ("nbn-cat-ve", 50, 0.1, 5),
+            ("nbn-cat-lw", 10, 0.2, 5), ("nbn-cat-lw", 50, 0.2, 5),
+            ("nbn-cat-avi", 10, 0.3, 5), ("nbn-cat-avi", 50, 0.3, 5),
+        ])
+        rk = rank_nbn(v, "tv_per_node", [10, 50])
+        assert "nonparametric" not in rk
+        assert select_nbn(rk) == ["nbn-cat-ve", "nbn-cat-lw"]
 
-    def test_select_skips_methods_that_solved_nothing(self):
-        ranking = [
-            Ranking("nbn-lg-lw", "parametric", 5, 0.2),
-            Ranking("nbn-kde-lw", "nonparametric", 0, float("inf")),
-        ]
-        assert select_nbn(ranking) == ["nbn-lg-lw"]
+    def test_methods_that_solved_nothing_are_never_ranked(self):
+        v = _view([
+            ("nbn-lg-lw", 10, 0.2, 5),
+            ("nbn-kde-lw", 10, float("nan"), 0),
+        ])
+        rk = rank_nbn(v, "w1_per_node", [10])
+        assert "nonparametric" not in rk
+        assert select_nbn(rk) == ["nbn-lg-lw"]
 
 
 # --- End-to-end -----------------------------------------------------------------

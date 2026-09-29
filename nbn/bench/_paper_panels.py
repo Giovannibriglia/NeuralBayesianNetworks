@@ -243,41 +243,90 @@ def headline_metric(family: str, available: set[str]) -> str | None:
 class Ranking:
     method: str
     category: str | None
-    n_x_solved: int
-    score: float          # mean rank_key over solved x (lower is better)
+    solved_xs: list               # x values with >= 1 solved seed
+    candidate: bool               # coverage >= half of the x grid (or the relaxed rule)
+    score: float                  # mean rank_key over X* (lower is better)
+
+    @property
+    def n_x_solved(self) -> int:
+        return len(self.solved_xs)
 
 
-def rank_nbn(view: pd.DataFrame, kind: str) -> list[Ranking]:
-    """Rank the nbn methods of an ``all`` view: more x values with >= 1 solved
-    seed first, then lower mean direction-aware center, then name."""
-    out = []
-    for m, g in view.groupby("method"):
-        if not is_nbn(m):
-            continue
-        solved = g[g["k"] > 0]
-        keys = [rank_key(c, kind) for c in solved["center"]]
+@dataclass
+class CategoryRanking:
+    category: str
+    x_star: list                  # common solved x of the candidates
+    ranked: list[Ranking]         # candidates first (by score), then the rest
+
+
+def _solved_xs(view: pd.DataFrame, method: str, xs) -> list:
+    """x values (in grid order) with >= 1 solved seed for ``method``."""
+    g = view[(view["method"] == method) & (view["k"] > 0) & view["center"].notna()]
+    have = set(g["x"].unique())
+    return [x for x in xs if x in have]
+
+
+def rank_category(view: pd.DataFrame, kind: str, xs, methods) -> CategoryRanking | None:
+    """Rank the nbn ``methods`` of one category on an ``all`` view.
+
+    1. candidates = methods that solved >= 1 seed at >= ceil(|xs| / 2) x
+       values; if none, every method with >= 1 solved x.
+    2. X* = intersection of the candidates' solved-x sets.
+    3. score = mean direction-aware center (:func:`rank_key`) over X*;
+       rank by score, then more solved x, then name. Non-candidates follow,
+       scored on X* ∩ their solved x (∞ when empty).
+    Returns None when no method of the category solved anything."""
+    solved = {m: _solved_xs(view, m, xs) for m in methods}
+    solved = {m: v for m, v in solved.items() if v}
+    if not solved:
+        return None
+    half = int(np.ceil(len(xs) / 2))
+    cands = [m for m, v in solved.items() if len(v) >= half] or list(solved)
+    x_star = set.intersection(*(set(solved[m]) for m in cands))
+    centers = {(r.method, r.x): r.center for r in view.itertuples(index=False)}
+
+    def score(m):
+        keys = [rank_key(centers[(m, x)], kind) for x in x_star if x in solved[m]]
         keys = [k for k in keys if np.isfinite(k)]
-        score = float(np.mean(keys)) if keys else float("inf")
-        out.append(Ranking(m, nbn_category(m), int(len(solved)), score))
-    return sorted(out, key=lambda r: (-r.n_x_solved, r.score, r.method))
+        return float(np.mean(keys)) if keys else float("inf")
+
+    cat = nbn_category(next(iter(methods)))
+    ranked = [Ranking(m, cat, solved[m], m in cands, score(m)) for m in solved]
+    ranked.sort(key=lambda r: (not r.candidate, r.score, -r.n_x_solved, r.method))
+    return CategoryRanking(cat or "", [x for x in xs if x in x_star], ranked)
 
 
-def select_nbn(ranking: list[Ranking]) -> list[str]:
-    """Best parametric + best non-parametric; a missing category is filled by
-    the runner-up of the other so two methods are shown when two exist.
-    Methods that solved nothing are never selected."""
-    ranking = [r for r in ranking if r.n_x_solved > 0]
+def rank_nbn(view: pd.DataFrame, kind: str, xs) -> dict[str, CategoryRanking]:
+    """``{category: CategoryRanking}`` for the nbn methods of an ``all`` view."""
+    out = {}
+    for cat in ("parametric", "nonparametric"):
+        methods = sorted(m for m in view["method"].unique() if nbn_category(m) == cat)
+        if methods:
+            cr = rank_category(view, kind, xs, methods)
+            if cr is not None:
+                out[cat] = cr
+    return out
+
+
+def select_nbn(rankings: dict[str, CategoryRanking]) -> list[str]:
+    """Best parametric + best non-parametric (the first candidate of each
+    category); a missing category is filled by the runner-up of the other so
+    two methods are shown when two exist."""
     chosen: list[str] = []
     for cat in ("parametric", "nonparametric"):
-        for r in ranking:
-            if r.category == cat and r.method not in chosen:
-                chosen.append(r.method)
-                break
-    for r in ranking:
-        if len(chosen) >= 2:
-            break
-        if r.method not in chosen:
-            chosen.append(r.method)
+        cr = rankings.get(cat)
+        if cr is not None and cr.ranked:
+            chosen.append(cr.ranked[0].method)
+    if len(chosen) < 2:
+        for cat in ("parametric", "nonparametric"):
+            cr = rankings.get(cat)
+            if cr is None:
+                continue
+            for r in cr.ranked:
+                if len(chosen) >= 2:
+                    break
+                if r.method not in chosen and np.isfinite(r.score):
+                    chosen.append(r.method)
     return chosen[:2]
 
 
@@ -309,7 +358,7 @@ class FamilyData:
     xs: list
     headline: str | None
     shown: list[str]             # non-nbn + selected nbn
-    ranking: list[Ranking] = field(default_factory=list)
+    ranking: dict[str, CategoryRanking] = field(default_factory=dict)
 
 
 def _available_metrics(dff: pd.DataFrame) -> set[str]:
@@ -336,13 +385,13 @@ def prepare_family(group: str, benchmark: str, family: str, dff: pd.DataFrame,
     headline = headline_metric(family, _available_metrics(dfx))
     methods = sorted(dfx["baseline"].unique())
     non_nbn = [m for m in methods if not is_nbn(m)]
-    ranking: list[Ranking] = []
+    ranking: dict[str, CategoryRanking] = {}
     chosen: list[str] = []
     if headline is not None:
         cells, n_total = cell_table(dfx, headline)
         if not cells.empty:
             va = all_view(cells, n_total, aggregation)
-            ranking = rank_nbn(va, metric_kind(headline))
+            ranking = rank_nbn(va, metric_kind(headline), xs)
             chosen = select_nbn(ranking)
     return FamilyData(group, benchmark, family, dfx, x_axis, xs, headline,
                       non_nbn + chosen, ranking)
@@ -559,20 +608,29 @@ def _prepare_group(group: str, df: pd.DataFrame, aggregation: str) -> list[Famil
 
 
 def _selection_report(fds: list[FamilyData]) -> str:
-    lines = ["nbn method selection per (benchmark group, family)",
-             "rule: all non-nbn baselines + best parametric nbn + best non-parametric nbn,",
-             "ranked on the headline metric (all view) by #x solved, then mean center.", ""]
+    lines = [
+        "nbn method selection per (benchmark group, family)",
+        "rule: all non-nbn baselines + best parametric nbn + best non-parametric nbn.",
+        "per category: candidates = methods that solved >= 1 seed at >= half of the",
+        "x grid (else every method with >= 1 solved x); X* = common solved x of the",
+        "candidates; score = mean direction-aware center over X* (lower is better);",
+        "rank by score, then coverage, then name. Non-candidates are listed after,",
+        "scored on X* ∩ their solved x. An empty category is filled by the other's",
+        "runner-up.", ""]
     for fd in fds:
         nbn_shown = [m for m in fd.shown if is_nbn(m)]
         lines.append(f"[{fd.group}] {fd.benchmark}/{fd.family}  headline={fd.headline}  "
-                     f"x={fd.x_axis}")
+                     f"x={fd.x_axis}  grid={[_tick(x, fd.x_axis) for x in fd.xs]}")
         lines.append(f"  shown: {', '.join(fd.shown) if fd.shown else '(none)'}")
         lines.append(f"  selected nbn: {', '.join(nbn_shown) if nbn_shown else '(none)'}")
-        if fd.ranking:
-            lines.append(f"  {'rank':<4} {'method':<26} {'category':<14} {'#x':>3} {'score':>10}")
-            for i, r in enumerate(fd.ranking, 1):
-                lines.append(f"  {i:<4} {r.method:<26} {str(r.category):<14} "
-                             f"{r.n_x_solved:>3} {r.score:>10.4g}")
+        for cat, cr in fd.ranking.items():
+            lines.append(f"  {cat}: X* = {[_tick(x, fd.x_axis) for x in cr.x_star]}")
+            lines.append(f"    {'rank':<4} {'method':<26} {'cand':<5} {'#x':>3} "
+                         f"{'score on X*':>12}  solved x")
+            for i, r in enumerate(cr.ranked, 1):
+                lines.append(f"    {i:<4} {r.method:<26} {'yes' if r.candidate else 'no':<5} "
+                             f"{r.n_x_solved:>3} {r.score:>12.4g}  "
+                             f"{[_tick(x, fd.x_axis) for x in r.solved_xs]}")
         lines.append("")
     return "\n".join(lines) + "\n"
 
