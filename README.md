@@ -349,6 +349,38 @@ Two things that bite:
 The aggregation contract lives in
 [`docs/v0.18-bar-reporting-all-common.md`](docs/v0.18-bar-reporting-all-common.md).
 
+### Paper figures
+
+`nbn-bench paper` renders the figures used in the paper: one PDF per
+(benchmark, metric), a row of panels with one panel per data family and one
+shared legend, 7 in wide (ACM text width). Each benchmark option takes the
+base run followed by any partial reruns (`nbn/bench/configs/*/reruns/`),
+which are spliced in cell by cell as `nbn-bench merge` does:
+
+```bash
+nbn-bench paper \
+  --inference   results/benchmark_synthetic_complete_<stamp> [rerun ...] \
+  --scalability results/benchmark_synthetic_scalability_complete_<stamp> \
+  --speed       results/benchmark_synthetic_batch_speed_<stamp> \
+  --bnlearn     results/benchmark_bnlearn_bnlearn_complete_<stamp> [rerun ...] \
+  --param-learning results/benchmark_synthetic_param_learning_complete_<stamp> \
+  --learning-curves results/benchmark_synthetic_learning_curves_<stamp> \
+  --output-dir paper/figures        # options: --aggregation, --view all|common
+```
+
+Per family the panels show **every non-nbn baseline plus the best parametric
+nbn method (cat, lg, mdn, flow) and the best non-parametric one (kde, knn,
+flexcode)**, chosen once per family on its headline metric (TV for discrete,
+W1 for continuous / hybrid; per-query time when the run has no accuracy
+metric) by the number of x values solved and then the mean center. The same
+two methods appear in every panel and table of that family; when a category
+has no method in the family (discrete runs have no non-parametric nbn) the
+slot goes to the runner-up of the other. Output: `<group>_<metric>.pdf`
+(`inference_accuracy.pdf`, `scalability_query_time_full.pdf`,
+`speed_query_time_{full,empty}.pdf`, `bnlearn_accuracy.pdf`, ...),
+`tables/<group>_<family>_<metric>.tex`, and `selection.txt` with the ranking
+behind each choice.
+
 ## Configuration
 
 Each config is a YAML file with these fields:
