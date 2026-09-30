@@ -22,9 +22,15 @@ table of that family; ``selection.txt`` records the ranking.
 Inputs are run directories (or parquets); each benchmark group takes a base
 run followed by any number of partial reruns, spliced in with
 :func:`nbn.bench._merge.merge_frames` (cells in a rerun replace the base's).
+
+``exclude`` (baseline globs such as ``nbn-flow-*`` or ``nbn-*-ais``) and
+``exclude_families`` remove methods / data families from every group before
+the selection, so a paper can leave out methods it does not discuss without
+touching the parquets.
 """
 from __future__ import annotations
 
+import fnmatch
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -128,6 +134,7 @@ _Y_LABEL.update({"query_time": "Time per query (s)",
 _MAX_GROUPS_PER_PANEL = 8       # x values per panel before a family is chunked
 _MAX_GROUPS_PER_ROW = 20        # bar groups per figure row
 _MAX_PANELS_PER_ROW = 4
+_ROW_HEIGHT_IN = 1.9            # default height of one row of panels, inches
 _LEGEND_COLS = 6
 
 _STYLE = {
@@ -506,19 +513,21 @@ def _layout_rows(panels: list[tuple]) -> list[list[tuple]]:
 
 
 def fig_family_row(panels: list[tuple], metric_of: dict[str, str], out_path: Path,
-                   view_name: str) -> bool:
+                   view_name: str, row_height: float = _ROW_HEIGHT_IN) -> bool:
     """Write one figure: ``panels`` = [(family, view_df, xs, x_axis, methods,
     common_sets)], ``metric_of[family]`` = the metric drawn in that panel.
     Families with more than ``_MAX_GROUPS_PER_PANEL`` x values are split into
     consecutive panels; panels are packed into rows of width 7 in."""
-    return fig_family_rows([(panels, metric_of)], out_path, view_name)
+    return fig_family_rows([(panels, metric_of)], out_path, view_name, row_height)
 
 
 def fig_family_rows(panel_rows: list[tuple[list[tuple], dict[str, str]]],
-                    out_path: Path, view_name: str) -> bool:
+                    out_path: Path, view_name: str,
+                    row_height: float = _ROW_HEIGHT_IN) -> bool:
     """Write one figure with one block of panel rows per ``(panels,
     metric_of)`` entry (e.g. accuracy above query time), all rows sharing a
-    single legend at the top. See :func:`fig_family_row` for the panel tuple."""
+    single legend at the top; each row of panels is ``row_height`` inches
+    tall. See :func:`fig_family_row` for the panel tuple."""
     rows: list[list[tuple]] = []
     split_all: list[tuple] = []
     for panels, metric_of in panel_rows:
@@ -548,7 +557,7 @@ def fig_family_rows(panel_rows: list[tuple[list[tuple], dict[str, str]]],
 
     with plt.rc_context(_STYLE):
         n_rows = len(rows)
-        height = 1.9 * n_rows + head
+        height = row_height * n_rows + head
         fig = plt.figure(figsize=(7.0, height))
         outer = fig.add_gridspec(n_rows, 1, hspace=0.42, top=1 - head / height,
                                  bottom=0.02)
@@ -600,6 +609,19 @@ def load_group(paths) -> pd.DataFrame:
     logger.info("%s: merged %d rerun(s): %d rows replaced by %d",
                 paths[0].name, len(paths) - 1, stats["dropped"], stats["added"])
     return merged
+
+
+def drop_excluded(df: pd.DataFrame, exclude=(), exclude_families=()) -> pd.DataFrame:
+    """``df`` without the baselines matching any ``exclude`` glob
+    (``fnmatch`` on the baseline name) and without ``exclude_families``."""
+    keep = pd.Series(True, index=df.index)
+    if exclude:
+        names = df["baseline"].dropna().unique()
+        gone = {b for b in names if any(fnmatch.fnmatchcase(b, pat) for pat in exclude)}
+        keep &= ~df["baseline"].isin(gone)
+    if exclude_families:
+        keep &= ~df["family"].isin(set(exclude_families))
+    return df[keep]
 
 
 def _present_modes(dfx: pd.DataFrame) -> set[str]:
@@ -656,7 +678,7 @@ def _selection_report(fds: list[FamilyData]) -> str:
 
 
 def render_group(fds: list[FamilyData], group: str, out_dir: Path, aggregation: str,
-                 view_name: str) -> list[Path]:
+                 view_name: str, row_height: float = _ROW_HEIGHT_IN) -> list[Path]:
     """All figures + tables of one benchmark group."""
     written: list[Path] = []
     tables = out_dir / "tables"
@@ -672,7 +694,7 @@ def render_group(fds: list[FamilyData], group: str, out_dir: Path, aggregation: 
         if len(panel_rows) < len(specs):
             continue   # a stacked figure needs every metric row
         path = out_dir / f"{group}_{tag}.pdf"
-        if fig_family_rows(panel_rows, path, view_name):
+        if fig_family_rows(panel_rows, path, view_name, row_height):
             written.append(path)
             logger.info("wrote %s", path)
     return written
@@ -718,13 +740,16 @@ def _metric_panels(fds: list[FamilyData], group: str, metric_spec: str, mode,
 
 
 def run_paper(groups: dict[str, list], output_dir: Path, aggregation: str = "iqm_iqr",
-              view: str = "all") -> int:
+              view: str = "all", exclude=(), exclude_families=(),
+              row_height: float = _ROW_HEIGHT_IN) -> int:
     """Entry point of ``nbn-bench paper``.
 
     ``groups``: ``{group_name: [base_run, rerun, ...]}`` for any subset of
     :data:`GROUPS`. Writes ``<output_dir>/<group>_<metric>.pdf``,
     ``<output_dir>/tables/<group>_<family>_<metric>.tex`` and
-    ``<output_dir>/selection.txt``. Returns a process exit code."""
+    ``<output_dir>/selection.txt``. ``exclude`` / ``exclude_families``: see
+    :func:`drop_excluded`; ``row_height``: inches per row of panels. Returns a
+    process exit code."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     unknown = set(groups) - set(GROUPS)
@@ -740,13 +765,18 @@ def run_paper(groups: dict[str, list], output_dir: Path, aggregation: str = "iqm
     for group in GROUPS:
         if group not in groups or not groups[group]:
             continue
-        df = load_group(groups[group])
+        df = drop_excluded(load_group(groups[group]), exclude, exclude_families)
         fds = _prepare_group(group, df, aggregation)
         if not fds:
             logger.warning("%s: nothing to plot", group)
             continue
         all_fds += fds
-        written += render_group(fds, group, output_dir, aggregation, view)
-    (output_dir / "selection.txt").write_text(_selection_report(all_fds))
+        written += render_group(fds, group, output_dir, aggregation, view, row_height)
+    report = _selection_report(all_fds)
+    if exclude or exclude_families:
+        report = (f"excluded baselines: {', '.join(exclude) or '(none)'}\n"
+                  f"excluded families: {', '.join(exclude_families) or '(none)'}\n\n"
+                  + report)
+    (output_dir / "selection.txt").write_text(report)
     logger.info("done: %d figure(s) in %s", len(written), output_dir)
     return 0

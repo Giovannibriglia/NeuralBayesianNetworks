@@ -120,6 +120,13 @@ def _build_parser() -> argparse.ArgumentParser:
                        default="iqm_iqr", help="Aggregation statistic (default: iqm_iqr).")
     paper.add_argument("--view", choices=["all", "common"], default="all",
                        help="Seed view (docs/v0.18-bar-reporting-all-common.md); default all.")
+    paper.add_argument("--exclude", nargs="+", metavar="GLOB", default=[],
+                       help="Baseline globs left out of every figure, table and "
+                            "selection, e.g. 'nbn-flow-*' 'nbn-*-ais'.")
+    paper.add_argument("--exclude-families", nargs="+", metavar="FAMILY", default=[],
+                       help="Data families left out of every figure, e.g. hybrid clg.")
+    paper.add_argument("--row-height", type=float, default=1.9, metavar="INCHES",
+                       help="Height of one row of panels (default 1.9; figures are 7 in wide).")
     paper.add_argument("-v", "--verbose", action="store_true")
 
     merge = sub.add_parser(
@@ -355,7 +362,9 @@ def main(argv: list[str] | None = None) -> int:
         from nbn.bench._paper_panels import GROUPS, run_paper
         groups = {g: getattr(args, g) for g in GROUPS if getattr(args, g, None)}
         return run_paper(groups, output_dir=Path(args.output_dir),
-                         aggregation=args.aggregation, view=args.view)
+                         aggregation=args.aggregation, view=args.view,
+                         exclude=args.exclude, exclude_families=args.exclude_families,
+                         row_height=args.row_height)
 
     if args.cmd == "merge":
         from nbn.bench._merge import merge_runs
