@@ -14,6 +14,7 @@ import pandas as pd
 import pytest
 
 from nbn.bench._paper_panels import (
+    drop_excluded,
     headline_metric,
     method_color,
     nbn_category,
@@ -288,6 +289,41 @@ class TestEndToEnd:
         assert "x=n_train" in (out / "selection.txt").read_text()
         tex = (out / "tables" / "learning_curves_discrete_param_recovery_tv.tex").read_text()
         assert "$n_{tr}=64$" in tex and "$n_{tr}=256$" in tex
+
+    def test_exclude_removes_methods_and_families_before_selection(self, tmp_path):
+        run = _run_dir(tmp_path, "complete", _inference_df())
+        out = tmp_path / "figs"
+        assert run_paper({"inference": [run]}, out, exclude=["nbn-kde-*", "nbn-*-lw"],
+                         exclude_families=["discrete"]) == 0
+        sel = (out / "selection.txt").read_text()
+        assert sel.startswith("excluded baselines: nbn-kde-*, nbn-*-lw\n"
+                              "excluded families: discrete\n")
+        assert "synthetic/discrete" not in sel
+        assert "nbn-kde-lw" not in sel and "nbn-mdn-lw" not in sel
+        assert not (out / "tables" / "inference_discrete_tv_per_node.tex").exists()
+        # every nbn method of the family was excluded: only the external baseline is left
+        tex = (out / "tables" / "inference_continuous_lg_w1_per_node.tex").read_text()
+        assert "pgmpy-lg-predict" in tex and "nbn-" not in tex
+
+    def test_drop_excluded_is_a_glob_on_the_baseline_name(self):
+        df = _inference_df()
+        kept = drop_excluded(df, exclude=["nbn-*-ais"])
+        assert "nbn-cat-ais" not in set(kept["baseline"])
+        assert {"nbn-cat-ve", "nbn-cat-lw", "pgmpy-mle-ve"} <= set(kept["baseline"])
+        assert len(drop_excluded(df)) == len(df)
+
+    def test_row_height_sets_the_figure_height(self, tmp_path):
+        pymupdf = pytest.importorskip("pymupdf")
+        run = _run_dir(tmp_path, "complete", _inference_df())
+        heights = {}
+        for rh in (1.9, 1.2):
+            out = tmp_path / f"figs_{rh}"
+            assert run_paper({"inference": [run]}, out, row_height=rh) == 0
+            with pymupdf.open(out / "inference_accuracy_time.pdf") as doc:
+                heights[rh] = doc[0].rect.height
+        # two stacked rows of panels: 2 * (1.9 - 1.2) in = 100.8 pt shorter, up to the
+        # tight-bbox crop
+        assert heights[1.9] - heights[1.2] == pytest.approx(2 * 0.7 * 72, abs=12)
 
     def test_unknown_group_is_an_error(self, tmp_path):
         assert run_paper({"bogus": [tmp_path]}, tmp_path / "o") == 1
