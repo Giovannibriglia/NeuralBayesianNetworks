@@ -398,9 +398,18 @@ def batched_throughput(batch_size: int, total_time_s: float) -> MetricResult:
 
 
 def gpu_peak_mb(device: torch.device) -> MetricResult:
-    if device.type != "cuda":
+    """Accelerator memory in MiB; ``0.0`` on CPU.
+
+    CUDA reports the process high-water mark.  MPS has no peak counter, so
+    the figure there is the allocation *at measurement time* — a lower
+    bound on the peak (see :func:`nbn.utils.device.peak_memory_bytes`).
+    """
+    from nbn.utils.device import peak_memory_bytes
+
+    peak = peak_memory_bytes(device)
+    if peak is None:
         return MetricResult("gpu_peak_mb", 0.0)
-    return MetricResult("gpu_peak_mb", torch.cuda.max_memory_allocated() / (1024 * 1024))
+    return MetricResult("gpu_peak_mb", peak / (1024 * 1024))
 
 
 # ── new in v0.3: histogram-TV and k-NN KL for continuous samples ────────────

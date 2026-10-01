@@ -71,3 +71,46 @@ jobs:
         with:
           files: ./coverage.xml
           fail_ci_if_error: false
+
+  # Apple Silicon lane. GitHub's macos-latest runners are arm64 Macs with a
+  # Metal-capable GPU, so ``torch.backends.mps.is_available()`` is True and
+  # the device-parametrised tests (tests/conftest.py::available_devices)
+  # run on ``mps`` for real -- the only place in CI that exercises the
+  # float64-free accumulation paths and the CPU-hop linear solves.
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install --prefer-binary -e ".[dev,bench,neural,gp,mcmc]"
+
+      - name: Check environment
+        # Prints the accelerator line: expected ``mps (Apple Metal; ...)``.
+        run: nbn-bench check-env
+
+      - name: Report MPS availability
+        run: |
+          python - <<'EOF'
+          import torch
+          from nbn.utils.device import resolve_device, accelerator_summary
+          print("torch", torch.__version__)
+          print("mps built:", torch.backends.mps.is_built(), "available:", torch.backends.mps.is_available())
+          print("auto ->", resolve_device("auto"), "|", accelerator_summary())
+          EOF
+
+      - name: Test
+        run: pytest -n auto -m "not gpu"
+
+      - name: Inference smoke on the default device (mps when available)
+        run: nbn-bench inference --config nbn/bench/configs/synthetic/smoke_tests/inference_smoke.yaml --device auto
+        timeout-minutes: 15

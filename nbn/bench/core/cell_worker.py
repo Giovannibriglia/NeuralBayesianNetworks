@@ -98,6 +98,16 @@ def _apply_memory_limit() -> None:
         return
 
 
+#: Largest interval ``setitimer`` accepts everywhere. Linux takes anything
+#: that fits a ``time_t``; macOS (XNU ``itimerfix``) rejects ``tv_sec >
+#: 100_000_000`` with EINVAL — and because that raise happened *inside* the
+#: ``with _fit_deadline`` block, a budget like the test harness's ``1e9``
+#: was classified as a fit error before ``fit`` ever ran. A budget beyond
+#: three years is "no deadline" in every practical sense, so clamping it
+#: changes nothing observable.
+_MAX_TIMER_S = 100_000_000 - 1
+
+
 @contextlib.contextmanager
 def _fit_deadline(budget_s: float, exc_type: type):
     """Raise ``exc_type`` from a SIGALRM once ``budget_s`` elapses.
@@ -108,6 +118,9 @@ def _fit_deadline(budget_s: float, exc_type: type):
     no-op and the post-hoc fit check remains the only guard. The alarm is
     cleared on exit either way, so a later phase (save / queries) can never be
     interrupted by a stale timer.
+
+    The interval is clamped to :data:`_MAX_TIMER_S`, and a kernel that still
+    refuses it degrades to the no-op path rather than failing the fit.
     """
     usable = (
         hasattr(signal, "SIGALRM")
@@ -122,7 +135,14 @@ def _fit_deadline(budget_s: float, exc_type: type):
         raise exc_type(f"fit budget of {budget_s:.0f}s exceeded")
 
     previous = signal.signal(signal.SIGALRM, _on_alarm)
-    signal.setitimer(signal.ITIMER_REAL, budget_s)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, min(float(budget_s), _MAX_TIMER_S))
+    except (OSError, OverflowError, ValueError):
+        # The kernel refused the interval: run without the pre-emptive
+        # deadline (the post-hoc budget check still applies).
+        signal.signal(signal.SIGALRM, previous)
+        yield
+        return
     try:
         yield
     finally:

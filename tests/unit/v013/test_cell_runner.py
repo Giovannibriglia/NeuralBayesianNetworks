@@ -8,6 +8,7 @@ exercises a full synthetic cell end-to-end via run_cell_in_subprocess.
 from __future__ import annotations
 
 import pytest
+import sys
 
 from nbn.bench.core.cell_runner import (
     _classification_to_status,
@@ -276,6 +277,10 @@ class TestFailureModes:
         # Partial output (flushed before the kill) survives.
         assert any(r.get("stage") == "preamble" for r in rows)
 
+    @pytest.mark.skipif(
+        sys.platform == "darwin",
+        reason="macOS accepts RLIMIT_AS but does not enforce it",
+    )
     def test_memory_limit_enforced(self):
         """RLIMIT_AS in the worker bounds subprocess allocation.
 

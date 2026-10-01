@@ -8,6 +8,7 @@ import torch.nn as nn
 from torch.distributions import Categorical
 
 from nbn.learning.weighting import validate_weights
+from nbn.utils.device import accum_dtype
 from nbn.mechanisms.base import Mechanism
 from nbn.utils.batching import ensure_2d, flatten_samples
 
@@ -166,14 +167,13 @@ class CategoricalTableMechanism(Mechanism):
         # digits exactly where the per-parent-state normaliser needs them.
         # Unweighted counts of 1.0 are integers well inside float32's exact
         # range, so the default result is unchanged by the wider accumulator.
-        w = validate_weights(weights, n, where="CategoricalTableMechanism.fit_local")
-        contrib = (
-            torch.ones(n, device=device, dtype=torch.float64)
-            if w is None else w.to(device)
+        # (``accum_dtype`` is float64 wherever it exists; MPS has none.)
+        acc = accum_dtype(device)
+        w = validate_weights(
+            weights, n, where="CategoricalTableMechanism.fit_local", device=device,
         )
-        counts = torch.zeros(
-            n_parent_states * k, device=device, dtype=torch.float64,
-        )
+        contrib = torch.ones(n, device=device, dtype=acc) if w is None else w
+        counts = torch.zeros(n_parent_states * k, device=device, dtype=acc)
         counts.scatter_add_(0, flat_idx, contrib)
         counts = counts.reshape(n_parent_states, k).to(torch.float)
 

@@ -135,9 +135,7 @@ class MDNMechanism(Mechanism):
         x = ensure_2d(x)  # [N, D_x]
         n, d_x = x.shape
         device = x.device
-        w_vec = validate_weights(weights, n, where="MDNMechanism.fit_local")
-        if w_vec is not None:
-            w_vec = w_vec.to(device)
+        w_vec = validate_weights(weights, n, where="MDNMechanism.fit_local", device=device)
         k = self.num_components
 
         is_root = parents is None or parents.shape[-1] == 0

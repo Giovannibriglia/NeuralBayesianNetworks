@@ -48,7 +48,8 @@ def psis_khat(log_weights: torch.Tensor) -> float | None:
     (``M = min(0.2N, 3√N) < 5``), or any non-finite intermediate — which
     downstream treats as "no reliability concern / not measurable".
     """
-    lw = log_weights.detach().reshape(-1).to(torch.float64).cpu().numpy()
+    # ``.cpu()`` before ``.double()``: an MPS tensor cannot be cast to float64.
+    lw = log_weights.detach().reshape(-1).cpu().to(torch.float64).numpy()
     n = lw.shape[0]
     if n < 25 or not np.isfinite(lw).all():
         return None

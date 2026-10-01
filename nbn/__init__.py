@@ -1,5 +1,6 @@
 """NeuralBayesianNetworks (NBN) — PyTorch-native Bayesian Networks with neural mechanisms."""
 
+import nbn._mps_env  # noqa: F401  (must precede torch: macOS MPS fallback env)
 from nbn.core.dag import DAG
 from nbn.core.network import NeuralBayesianNetwork
 from nbn.core.query import NBNQuery

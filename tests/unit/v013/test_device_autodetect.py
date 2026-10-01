@@ -30,7 +30,16 @@ from nbn.bench.adapters import (
 from nbn.bench.core._device import resolve_device
 
 _HAS_CUDA = torch.cuda.is_available()
-_EXPECTED_AUTO = "cuda" if _HAS_CUDA else "cpu"
+_HAS_MPS = bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
+# auto resolves cuda > mps > cpu (nbn.utils.device.resolve_device).
+_EXPECTED_AUTO = "cuda" if _HAS_CUDA else ("mps" if _HAS_MPS else "cpu")
+
+
+@pytest.fixture
+def no_accelerator(monkeypatch):
+    """Simulate a host with neither CUDA nor MPS."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
 
 
 # ---------------------------------------------------------------------------
@@ -42,17 +51,21 @@ class TestResolveDevice:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         assert resolve_device(None) == "cuda"
 
-    def test_none_resolves_to_cpu_when_unavailable(self, monkeypatch):
-        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    def test_none_resolves_to_cpu_when_unavailable(self, no_accelerator):
         assert resolve_device(None) == "cpu"
 
     def test_auto_resolves_to_cuda_when_available(self, monkeypatch):
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         assert resolve_device("auto") == "cuda"
 
-    def test_auto_resolves_to_cpu_when_unavailable(self, monkeypatch):
-        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    def test_auto_resolves_to_cpu_when_unavailable(self, no_accelerator):
         assert resolve_device("auto") == "cpu"
+
+    def test_auto_resolves_to_mps_when_only_mps(self, monkeypatch):
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+        assert resolve_device("auto") == "mps"
+        assert resolve_device(None) == "mps"
 
     def test_cpu_passes_through(self, monkeypatch):
         # Even with CUDA "available", an explicit "cpu" is honoured.
