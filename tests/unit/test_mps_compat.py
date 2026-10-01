@@ -233,3 +233,42 @@ def test_float32_accumulation_matches_float64_results(monkeypatch):
         torch.testing.assert_close(a, b, rtol=1e-5, atol=1e-6)
     for (_, a), (_, b) in zip(ref_lg.state_dict().items(), got_lg.state_dict().items()):
         torch.testing.assert_close(a, b, rtol=1e-4, atol=1e-5)
+
+
+# --- fit deadline on macOS -----------------------------------------------------
+
+def test_fit_deadline_clamps_interval_to_portable_max(monkeypatch):
+    """macOS ``setitimer`` rejects intervals above 1e8 s (EINVAL); the worker
+    clamps instead of failing the fit, and still runs the body."""
+    import signal
+
+    from nbn.bench.core import cell_worker as cw
+
+    seen = []
+    real = signal.setitimer
+
+    def spy(which, seconds, interval=0.0):
+        seen.append(seconds)
+        return real(which, seconds, interval)
+
+    monkeypatch.setattr(signal, "setitimer", spy)
+    ran = False
+    with cw._fit_deadline(1e9, TimeoutError):
+        ran = True
+    assert ran
+    assert seen and seen[0] <= cw._MAX_TIMER_S and seen[-1] == 0
+
+
+def test_fit_deadline_survives_a_kernel_that_refuses_the_timer(monkeypatch):
+    import signal
+
+    from nbn.bench.core import cell_worker as cw
+
+    def refuse(which, seconds, interval=0.0):
+        raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(signal, "setitimer", refuse)
+    ran = False
+    with cw._fit_deadline(60.0, TimeoutError):
+        ran = True
+    assert ran

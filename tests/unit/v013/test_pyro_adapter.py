@@ -157,18 +157,17 @@ class TestProtocolConformance:
         was "cpu"; it now resolves via resolve_device() so the adapter uses
         the GPU when one is present. Pin device="cpu" in config to force CPU.
         """
-        import torch
+        from nbn.bench.core._device import resolve_device
 
         adapter = PyroAdapter(mechanism="empirical", inference_method="importance")
-        expected = "cuda" if torch.cuda.is_available() else "cpu"
-        assert adapter.device == expected
+        assert adapter.device == resolve_device(None)   # cuda > mps > cpu
 
     def test_device_auto_resolves_at_init(self):
-        """device='auto' must be replaced with 'cpu' or 'cuda' at __init__ time."""
+        """device='auto' must be replaced with a concrete device at __init__ time."""
         adapter = PyroAdapter(
             mechanism="empirical", inference_method="importance", device="auto",
         )
-        assert adapter.device in {"cpu", "cuda"}
+        assert adapter.device in {"cpu", "cuda", "mps"}
         assert adapter.device != "auto"
 
     def test_kwargs_silently_accepted(self):
