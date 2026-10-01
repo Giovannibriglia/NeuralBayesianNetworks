@@ -196,7 +196,7 @@ class PgmpyAdapter:
         # was explicitly requested, log the override so it isn't silently
         # surprising in the device column.
         resolved = resolve_device(device)
-        if resolved.startswith("cuda"):
+        if resolved != "cpu":
             logger.info(
                 "PgmpyAdapter: device=%r requested but pgmpy is CPU-only; "
                 "running on cpu.", resolved,

@@ -14,6 +14,8 @@ from dataclasses import dataclass
 
 import torch
 
+from nbn.utils.device import accum_dtype, linalg_device
+
 
 @dataclass
 class NormalEquationState:
@@ -46,14 +48,15 @@ def batch_statistics(parents, x, weights=None):
     x2 = x.reshape(x.shape[0], -1)
     z = design_matrix(parents, x2)
     input_dim = 0 if z.shape[1] == 1 else z.shape[1] - 1
-    zd, xd = z.to(torch.float64), x2.to(torch.float64)
+    acc = accum_dtype(x2.device)   # float64, or float32 on MPS (no float64 there)
+    zd, xd = z.to(acc), x2.to(acc)
     if weights is None:
         A = zd.transpose(0, 1) @ zd
         B = zd.transpose(0, 1) @ xd
         c = (xd * xd).sum(dim=0)
-        N = torch.tensor(float(x2.shape[0]), dtype=torch.float64, device=x2.device)
+        N = torch.tensor(float(x2.shape[0]), dtype=acc, device=x2.device)
     else:
-        w = weights.reshape(-1, 1).to(device=x2.device, dtype=torch.float64)
+        w = weights.reshape(-1, 1).to(device=x2.device, dtype=acc)
         zw = zd * w
         A = zw.transpose(0, 1) @ zd
         B = zw.transpose(0, 1) @ xd
@@ -77,7 +80,10 @@ def solve(state, *, ridge: float = 1e-6, min_scale: float = 1e-3):
     reg = ridge * torch.eye(p1, device=device, dtype=dtype)
     if p1 >= 1:
         reg[-1, -1] = 0.0  # do not regularise the intercept
-    theta = torch.linalg.solve(A + reg, B)
+    # Solve where a LAPACK kernel exists (CPU on MPS, the device elsewhere);
+    # the system is ``[D_pa+1, D_pa+1]`` so the hop costs nothing.
+    ld = linalg_device(device)
+    theta = torch.linalg.solve((A + reg).to(ld), B.to(ld)).to(device)
     if state.input_dim == 0:
         weight = torch.zeros(0, d_x, device=device, dtype=dtype); bias = theta[-1]
     else:

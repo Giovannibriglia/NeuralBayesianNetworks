@@ -60,6 +60,7 @@ import torch
 from torch.distributions import Distribution
 
 from nbn.learning.weighting import validate_weights, weighted_moments, weighted_quantile
+from nbn.utils.device import accum_dtype
 from nbn.mechanisms.base import Mechanism
 from nbn.utils.batching import _sanitise_parents, ensure_2d, flatten_samples
 
@@ -194,7 +195,9 @@ class ConditionalKDEMechanism(Mechanism):
         _, std = weighted_moments(data, weights, unbiased=True)
         # Robust scale: min(std, IQR/1.349) when IQR is informative.
         q = weighted_quantile(
-            data, torch.tensor([0.25, 0.75], device=data.device, dtype=torch.float64), weights,
+            data,
+            torch.tensor([0.25, 0.75], device=data.device, dtype=accum_dtype(data.device)),
+            weights,
         )
         iqr = (q[1] - q[0]) / 1.349
         scale = torch.where((iqr > 0) & (iqr < std), iqr, std).clamp_min(self.min_bandwidth)
@@ -227,7 +230,7 @@ class ConditionalKDEMechanism(Mechanism):
         """
         w = validate_weights(
             weights, ensure_2d(x).shape[0],
-            where="ConditionalKDEMechanism.fit_local",
+            where="ConditionalKDEMechanism.fit_local", device=x.device,
         )
         if self.bw_factor == "auto":
             self.bw_factor = self._select_bw_factor(x, parents)
@@ -277,6 +280,7 @@ class ConditionalKDEMechanism(Mechanism):
             )
         w_new = validate_weights(
             weights, n_new, where="ConditionalKDEMechanism.update_local",
+            device=x.device,
         )
         has_pa = parents is not None and parents.shape[-1] > 0
         if has_pa != (self._d_pa > 0) or (has_pa and parents.shape[-1] != self._d_pa):
@@ -298,12 +302,13 @@ class ConditionalKDEMechanism(Mechanism):
             info = self._fit_core(y_pool, pa_pool)
             self._train_logw = None
         else:
+            acc = accum_dtype(device)
             logw_old = (
-                torch.zeros(n_old, dtype=torch.float64, device=device)
-                if self._train_logw is None else self._train_logw.double()
+                torch.zeros(n_old, dtype=acc, device=device)
+                if self._train_logw is None else self._train_logw.to(acc)
             ) + math.log(forgetting)
             logw_new = (
-                torch.zeros(n_new, dtype=torch.float64, device=device)
+                torch.zeros(n_new, dtype=acc, device=device)
                 if w_new is None else torch.log(w_new.to(device))
             )
             logw_pool = torch.cat([logw_old, logw_new])

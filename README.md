@@ -3,7 +3,8 @@
 A PyTorch-native Bayesian network library where each mechanism is learnt
 by a neural network. Every node carries a learnable, batched, GPU-resident
 conditional distribution; every query is a batched tensor operation;
-inference and parameter learning both run end-to-end on cuda.
+inference and parameter learning both run end-to-end on cuda (and on Apple
+Silicon via `mps`).
 
 NBN is **9-22× faster** than pgmpy on continuous Linear Gaussian inference
 and **2.3× more accurate** on discrete parameter learning at scale, and is
@@ -71,6 +72,43 @@ nbn-bench check-env
 
 `dev` is the test and docs toolchain. Releases are cut by pushing a `v*` tag;
 `.github/workflows/publish.yml` builds from the tag and uploads to PyPI.
+
+### macOS / Apple Silicon
+
+NBN runs on macOS, and on Apple-Silicon Macs it uses the GPU through
+PyTorch's Metal backend (`mps`). Nothing to configure: `device="auto"` (the
+default everywhere — `model.fit(data)`, `nbn-bench --device auto`, YAML
+`device: auto`) resolves to `cuda` if there is one, else `mps` if available,
+else `cpu`. `nbn-bench check-env` prints the accelerator it will use:
+
+```
+platform darwin; accelerator mps (Apple Metal; float64 unavailable, accumulations run in float32)
+```
+
+What the MPS backend changes, and how NBN handles it:
+
+- **No float64.** Metal has no double precision, so the sufficient-statistic
+  accumulations NBN does in float64 elsewhere (weighted counts, normal
+  equations, weighted moments and quantiles) run in float32 on `mps`
+  (`nbn.utils.device.accum_dtype`). Results on CPU/CUDA are unchanged; on
+  `mps` they agree to float32 precision.
+- **No `linalg.lstsq` kernel.** The small closed-form Gaussian solves hop to
+  the CPU and back (`nbn.utils.device.linalg_device`); the matrices are
+  `[D_pa+1, D_pa+1]`, so this costs nothing.
+- **Other missing kernels.** `import nbn` sets
+  `PYTORCH_ENABLE_MPS_FALLBACK=1` on macOS (only if you have not set it),
+  so an op a third-party library (zuko, gpytorch, pyro) needs that Metal
+  lacks runs on the CPU with a one-time warning instead of failing. Set
+  `PYTORCH_ENABLE_MPS_FALLBACK=0` before importing to turn that off.
+- **Benchmark baselines.** pgmpy is CPU-only on every platform; pomegranate
+  and pyro follow the resolved device. `gpu_peak_mb` on `mps` reports the
+  allocation at measurement time (Metal exposes no high-water mark), a lower
+  bound on the peak. The per-cell `RLIMIT_AS` memory cap is not enforced by
+  macOS; cells rely on the fit/query time budgets there.
+
+CI runs the test suite on an Apple-Silicon runner (`test-macos` in
+`.github/workflows/ci.yml`), where the device-parametrised tests execute on
+a real `mps` device. Intel Macs run on CPU.
 
 ### Run the benchmark suite
 

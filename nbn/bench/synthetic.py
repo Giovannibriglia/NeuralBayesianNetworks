@@ -635,11 +635,16 @@ class _scoped_seed:
         self.device = device
         self._cpu_state: torch.Tensor | None = None
         self._cuda_state: torch.Tensor | None = None
+        self._mps_state: torch.Tensor | None = None
 
     def __enter__(self) -> _scoped_seed:
         self._cpu_state = torch.random.get_rng_state()
         if torch.cuda.is_available():
             self._cuda_state = torch.cuda.get_rng_state()
+        if _mps_available():
+            self._mps_state = torch.mps.get_rng_state()
+        # ``torch.manual_seed`` seeds every backend (CPU, CUDA, MPS) at once;
+        # the explicit CUDA call is kept for multi-GPU hosts.
         torch.manual_seed(self.seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(self.seed)
@@ -650,14 +655,21 @@ class _scoped_seed:
             torch.random.set_rng_state(self._cpu_state)
         if self._cuda_state is not None:
             torch.cuda.set_rng_state(self._cuda_state)
+        if self._mps_state is not None:
+            torch.mps.set_rng_state(self._mps_state)
+
+
+def _mps_available() -> bool:
+    from nbn.utils.device import mps_available
+
+    return mps_available()
 
 
 def _resolve_device(device: str | torch.device) -> torch.device:
-    if isinstance(device, torch.device):
-        return device
-    if device == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device(device)
+    """``'auto'`` follows the library's own preference (cuda > mps > cpu)."""
+    from nbn.utils.device import resolve_device
+
+    return resolve_device(device)
 
 
 # ---------------------------------------------------------------------- #

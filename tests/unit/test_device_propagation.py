@@ -16,9 +16,9 @@ from nbn.mechanisms import (
 )
 from nbn.utils.device import assert_on_device, resolve_device, to_device
 
-DEVICES = ["cpu"]
-if torch.cuda.is_available():
-    DEVICES.append("cuda")
+from tests.conftest import available_devices
+
+DEVICES = available_devices()
 
 
 def test_resolve_device_auto():

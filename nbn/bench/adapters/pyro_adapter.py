@@ -284,8 +284,13 @@ class PyroAdapter:
             cols.append(oh[:, :-1])  # k-1 indicator columns, last category dropped
 
         X = torch.cat([c.reshape(len(y), -1) for c in cols], dim=1)
-        driver = "gels" if self.device.startswith("cuda") else "gelsd"
-        beta = torch.linalg.lstsq(X, y, driver=driver).solution.reshape(-1)
+        if self.device.startswith("mps"):
+            # No ``lstsq`` kernel on Metal: solve the small system on the CPU.
+            beta = torch.linalg.lstsq(X.cpu(), y.cpu(), driver="gelsd").solution
+            beta = beta.to(X.device).reshape(-1)
+        else:
+            driver = "gels" if self.device.startswith("cuda") else "gelsd"
+            beta = torch.linalg.lstsq(X, y, driver=driver).solution.reshape(-1)
         residuals = y - X @ beta
         sigma = residuals.std().clamp_min(1e-3)
         self._gaussian[node] = (beta, sigma, cont_parents, disc_parents, disc_cards)

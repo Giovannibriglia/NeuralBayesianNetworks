@@ -87,6 +87,15 @@ class PomegranateAdapter:
         self._topo: list[str] = []
         self.problem: BenchmarkProblem | None = None
 
+    def _table_dtype(self, probs: torch.Tensor) -> torch.Tensor:
+        """CPT precision: float64, except on MPS which has no float64.
+
+        The tables are built on CPU and the finished model is ``.to(device)``'d
+        in :meth:`fit`; a float64 parameter cannot be moved onto an MPS device,
+        so the cast has to be decided here, at build time.
+        """
+        return probs.float() if self.device.startswith("mps") else probs.double()
+
     # -------------------------------------------------------------------------
     # Fit
     # -------------------------------------------------------------------------
@@ -136,7 +145,7 @@ class PomegranateAdapter:
                 counts = torch.zeros(k)
                 counts.scatter_add_(0, x, torch.ones_like(x, dtype=torch.float))
                 probs = counts / counts.sum()
-                dist_objs.append(Categorical(probs.reshape(1, k).double()))
+                dist_objs.append(Categorical(self._table_dtype(probs.reshape(1, k))))
             else:
                 pa_cards = [self._cards[p] for p in parents]
                 strides: list[int] = []
@@ -160,7 +169,7 @@ class PomegranateAdapter:
                 cnt = cnt.reshape(n_pa, k)
                 probs = cnt / cnt.sum(-1, keepdim=True)
                 # Reshape into pomegranate's [*pa_cards, K] layout
-                probs = probs.reshape(*pa_cards, k).double()
+                probs = self._table_dtype(probs.reshape(*pa_cards, k))
                 dist_objs.append(ConditionalCategorical([probs]))
 
         edges_obj = [
