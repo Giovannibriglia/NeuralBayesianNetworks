@@ -41,12 +41,25 @@ def cuda_required():
     )
 
 
-def device_params():
-    """Parametrizes a test over ``cpu`` and (if available) ``cuda``."""
+def available_devices() -> list[str]:
+    """``cpu`` plus whichever accelerators this host has (``cuda``, ``mps``).
+
+    Tests that parametrize over devices use this so the macOS CI lane
+    exercises the MPS code paths for real; on a Linux box it is ``["cpu"]``
+    or ``["cpu", "cuda"]`` exactly as before.
+    """
     devs = ["cpu"]
     if torch.cuda.is_available():
         devs.append("cuda")
-    return pytest.mark.parametrize("device", devs)
+    mps = getattr(torch.backends, "mps", None)
+    if mps is not None and mps.is_available():
+        devs.append("mps")
+    return devs
+
+
+def device_params():
+    """Parametrizes a test over ``cpu`` and the available accelerators."""
+    return pytest.mark.parametrize("device", available_devices())
 
 
 @pytest.fixture(autouse=True)

@@ -83,16 +83,23 @@ def setup_run_logging(cfg) -> Dict[str, Any]:
     meta["git_sha"] = git_sha
 
     try:
+        from nbn.utils.device import accelerator_summary, mps_available
+
         meta["torch_version"] = torch.__version__
         meta["cuda_available"] = bool(torch.cuda.is_available())
         meta["cuda_device"] = (
             torch.cuda.get_device_name(0)
             if torch.cuda.is_available() else None
         )
+        meta["mps_available"] = mps_available()
+        # What ``device: auto`` resolves to on this host (cuda > mps > cpu).
+        meta["accelerator"] = accelerator_summary()
     except Exception:  # pragma: no cover  (torch.cuda probe failed)
         meta["torch_version"] = "unknown"
         meta["cuda_available"] = False
         meta["cuda_device"] = None
+        meta["mps_available"] = False
+        meta["accelerator"] = "unknown"
 
     try:
         meta["config"] = dataclasses.asdict(cfg)

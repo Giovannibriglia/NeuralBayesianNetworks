@@ -239,7 +239,18 @@ def format_reports(reports) -> str:
     out.insert(1, "-" * len(out[0]))
     out.append("")
     out.append(f"python {sys.version.split()[0]} at {sys.executable}")
+    out.append(f"platform {sys.platform}; accelerator {_accelerator()}")
     return "\n".join(out)
+
+
+def _accelerator() -> str:
+    """What ``device: auto`` picks here — so a Mac user can see MPS is used."""
+    try:
+        from nbn.utils.device import accelerator_summary
+
+        return accelerator_summary()
+    except Exception:  # pragma: no cover  (torch missing/broken: reported above)
+        return "unknown"
 
 
 def problems(reports) -> list[Report]:

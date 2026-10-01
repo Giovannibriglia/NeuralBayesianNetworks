@@ -8,6 +8,7 @@ from torch.distributions import Categorical
 
 from nbn.learning.warm_start import check_branch, check_shapes
 from nbn.learning.weighting import select, validate_weights, weighted_mean
+from nbn.utils.device import accum_dtype
 from nbn.mechanisms.base import Mechanism
 from nbn.mechanisms.parametric.mdn import _build_mlp
 from nbn.update import online_laplace
@@ -87,9 +88,8 @@ class NeuralCategoricalMechanism(Mechanism):
         device = x.device
         w_vec = validate_weights(
             weights, x.shape[0], where="NeuralCategoricalMechanism.fit_local",
+            device=device,
         )
-        if w_vec is not None:
-            w_vec = w_vec.to(device)
 
         is_root = parents is None or parents.shape[-1] == 0
         # ``n_classes`` is fixed at construction and fit_local never widens it,
@@ -135,10 +135,11 @@ class NeuralCategoricalMechanism(Mechanism):
             # Root MLE is the empirical log-frequency; weighting makes those
             # frequencies weighted counts.  float64 accumulation for the same
             # reason as CategoricalTableMechanism.
+            acc = accum_dtype(device)
             if w_vec is None:
-                counts = torch.bincount(x, minlength=k).to(torch.float64)
+                counts = torch.bincount(x, minlength=k).to(acc)
             else:
-                counts = torch.zeros(k, device=device, dtype=torch.float64)
+                counts = torch.zeros(k, device=device, dtype=acc)
                 counts.scatter_add_(0, x, w_vec)
             counts = counts.float() + 1e-8
             log_freq = torch.log(counts / counts.sum())

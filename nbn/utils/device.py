@@ -6,6 +6,14 @@
   including ``torch.distributions.Distribution`` objects.
 * ``assert_on_device`` raises with a useful name if any part of an object
   is on a wrong device — used by tests to catch silent CPU fallbacks.
+* ``supports_float64`` / ``accum_dtype`` / ``linalg_device`` encode what a
+  backend can do: Apple's Metal backend (``mps``) has no float64 kernels and
+  no LAPACK-backed solvers, so double-precision accumulations and small dense
+  solves consult these instead of hard-coding ``torch.float64`` / the data
+  device.
+* ``synchronize`` / ``empty_cache`` / ``peak_memory_bytes`` /
+  ``accelerator_summary`` are the backend-neutral spellings of the
+  ``torch.cuda.*`` calls the benchmark suite uses.
 """
 from __future__ import annotations
 
@@ -21,9 +29,9 @@ def resolve_device(spec: str | torch.device | None) -> torch.device:
     Parameters
     ----------
     spec:
-        ``'auto'`` → CUDA if available, else MPS if available, else CPU.
-        ``None`` → ``'cpu'``.
-        Otherwise: passed straight to ``torch.device``.
+        ``'auto'`` → CUDA if available, else MPS (Apple Silicon) if
+        available, else CPU.  ``None`` → ``'cpu'``.  Otherwise: passed
+        straight to ``torch.device``.
     """
     if spec is None:
         return torch.device("cpu")
@@ -87,3 +95,109 @@ def assert_on_device(obj: Any, device: torch.device, name: str = "") -> None:
                 _check(v, f"{path}[{i}]")
 
     _check(obj, name)
+
+
+# ---------------------------------------------------------------------------
+# Backend capabilities
+# ---------------------------------------------------------------------------
+# The library was written on CUDA, where everything torch offers on CPU is
+# also available on the device.  Apple's Metal backend is not like that:
+#
+# * it has no float64 tensors at all (``torch.zeros(1, dtype=torch.float64,
+#   device="mps")`` raises), and
+# * several LAPACK-backed ``torch.linalg`` kernels (``lstsq`` among them)
+#   are not implemented for it.
+#
+# NBN accumulates sufficient statistics in float64 on purpose (EM weights are
+# long runs of repeated small values; see nbn/learning/weighting.py) and
+# fits its Gaussian families by closed-form solves.  Rather than sprinkle
+# ``if device.type == "mps"`` through every mechanism, those sites ask the
+# helpers below.  On CPU and CUDA the answers are the historical ones, so
+# results there are unchanged.
+
+
+def supports_float64(device: str | torch.device) -> bool:
+    """Whether ``device`` can hold float64 tensors (everything but ``mps``)."""
+    return torch.device(device).type != "mps"
+
+
+def accum_dtype(device: str | torch.device) -> torch.dtype:
+    """Widest float dtype ``device`` supports, for precision-sensitive sums.
+
+    ``torch.float64`` on CPU / CUDA; ``torch.float32`` on ``mps``, where
+    float64 does not exist and the only alternative would be to refuse to
+    run.  Call sites cast back to the data dtype afterwards, so the choice
+    never leaks into a model's parameters.
+    """
+    return torch.float64 if supports_float64(device) else torch.float32
+
+
+def linalg_device(device: str | torch.device) -> torch.device:
+    """Device on which to run a small dense solve for tensors living on ``device``.
+
+    The normal-equation / least-squares solves in the Gaussian families are
+    over ``[D_pa+1, D_pa+1]`` matrices — tiny, and absent from the MPS
+    backend (``torch.linalg.lstsq`` has no Metal kernel).  Run them on the CPU
+    there and move the solution back; elsewhere the device itself.
+    """
+    d = torch.device(device)
+    return torch.device("cpu") if d.type == "mps" else d
+
+
+def synchronize(device: str | torch.device) -> None:
+    """Block until queued work on ``device`` has finished (no-op on CPU).
+
+    Wall-clock timings of GPU work must bracket the computation with this,
+    or they measure kernel *launch* time; ``torch.cuda.synchronize`` and
+    ``torch.mps.synchronize`` are the two backends' spellings.
+    """
+    d = torch.device(device)
+    if d.type == "cuda":
+        torch.cuda.synchronize(d)
+    elif d.type == "mps":
+        torch.mps.synchronize()
+
+
+def empty_cache(device: str | torch.device) -> None:
+    """Release cached allocator blocks on ``device`` back to the driver."""
+    d = torch.device(device)
+    if d.type == "cuda":
+        torch.cuda.empty_cache()
+    elif d.type == "mps":
+        torch.mps.empty_cache()
+
+
+def peak_memory_bytes(device: str | torch.device) -> float | None:
+    """Accelerator memory held by this process, or ``None`` when unmeasurable.
+
+    CUDA reports the true high-water mark (``max_memory_allocated``).  The
+    MPS allocator exposes no peak counter, so the *current* allocation is
+    returned there — a lower bound on the peak, flagged as such wherever the
+    number is recorded.  CPU devices return ``None``.
+    """
+    d = torch.device(device)
+    if d.type == "cuda":
+        return float(torch.cuda.max_memory_allocated(d))
+    if d.type == "mps":
+        fn = getattr(torch.mps, "current_allocated_memory", None)
+        return float(fn()) if fn is not None else None
+    return None
+
+
+def mps_available() -> bool:
+    """``torch.backends.mps.is_available()`` guarded for builds without MPS."""
+    mps = getattr(torch.backends, "mps", None)
+    return bool(mps is not None and mps.is_available())
+
+
+def accelerator_summary() -> str:
+    """One line naming the accelerator ``resolve_device('auto')`` would pick."""
+    if torch.cuda.is_available():
+        try:
+            name = torch.cuda.get_device_name(0)
+        except Exception:  # pragma: no cover  (driver probe failed)
+            name = "unknown"
+        return f"cuda ({name}; {torch.cuda.device_count()} device(s))"
+    if mps_available():
+        return "mps (Apple Metal; float64 unavailable, accumulations run in float32)"
+    return "none (cpu only)"

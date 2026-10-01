@@ -30,10 +30,17 @@ Weights arriving from an EM E-step are per-group responsibilities broadcast to
 many rows: long runs of repeated values, some very small.  Summing thousands
 of those in float32 loses digits exactly where the normaliser needs them, so
 accumulation happens in float64 and casts back at the end.
+
+"float64" here means :func:`nbn.utils.device.accum_dtype` of the data's
+device: float64 everywhere it exists, float32 on Apple's MPS backend, which
+has no double precision at all.  The cast back to the data dtype is what the
+callers see either way.
 """
 from __future__ import annotations
 
 import torch
+
+from nbn.utils.device import accum_dtype
 
 #: Guards ``0/0`` if a caller slips an all-zero vector past validation.
 _MIN_TOTAL_WEIGHT = 1e-12
@@ -44,8 +51,9 @@ def validate_weights(
     n_rows: int,
     *,
     where: str,
+    device: torch.device | str | None = None,
 ) -> torch.Tensor | None:
-    """Return ``weights`` as a validated 1-D float64 tensor, or ``None``.
+    """Return ``weights`` as a validated 1-D accumulation-dtype tensor, or ``None``.
 
     Parameters
     ----------
@@ -55,6 +63,12 @@ def validate_weights(
         Number of data rows the weights must align with.
     where:
         Caller name, quoted in error messages.
+    device:
+        Device the data lives on.  The result is placed there, in that
+        device's :func:`~nbn.utils.device.accum_dtype` (float64 except on
+        MPS).  ``None`` keeps the weights' own device.  Pass it rather than
+        calling ``.to(device)`` on the result: a float64 tensor cannot be
+        moved onto an MPS device at all.
     """
     if weights is None:
         return None
@@ -66,7 +80,8 @@ def validate_weights(
             f"{where}: weights has {w.numel()} entries but the data has "
             f"{n_rows} rows; weights are per-sample and must align with them."
         )
-    w = w.to(torch.float64)
+    target = w.device if device is None else torch.device(device)
+    w = w.to(device=target, dtype=accum_dtype(target))
     if not torch.isfinite(w).all():
         raise ValueError(f"{where}: weights contains NaN or infinite values.")
     if (w < 0).any():
@@ -96,8 +111,9 @@ def weighted_mean(
     if weights is None:
         return values.mean()
     v = values.reshape(-1)
-    w = weights.reshape(-1).to(device=v.device, dtype=torch.float64)
-    num = (w * v.to(torch.float64)).sum()
+    acc = accum_dtype(v.device)
+    w = weights.reshape(-1).to(device=v.device, dtype=acc)
+    num = (w * v.to(acc)).sum()
     den = w.sum().clamp_min(_MIN_TOTAL_WEIGHT)
     return (num / den).to(values.dtype)
 
@@ -121,8 +137,9 @@ def weighted_moments(
     """
     if weights is None:
         return t.mean(0), t.std(0, unbiased=unbiased)
-    td = t.to(torch.float64)
-    wd = weights.reshape(-1, 1).to(device=t.device, dtype=torch.float64)
+    acc = accum_dtype(t.device)
+    td = t.to(acc)
+    wd = weights.reshape(-1, 1).to(device=t.device, dtype=acc)
     tot = wd.sum().clamp_min(_MIN_TOTAL_WEIGHT)
     mean = (wd * td).sum(0) / tot
     denom = (tot - 1.0).clamp_min(_MIN_TOTAL_WEIGHT) if unbiased else tot
@@ -145,11 +162,12 @@ def weighted_quantile(
     generalise naturally (``M`` is then real) and a zero weight drops the row
     exactly.  Accumulated in float64.
     """
-    q = torch.as_tensor(q, device=t.device, dtype=torch.float64).reshape(-1)
+    acc = accum_dtype(t.device)
+    q = torch.as_tensor(q, device=t.device, dtype=acc).reshape(-1)
     if weights is None:
         return torch.quantile(t, q.to(t.dtype), dim=0)
-    td = t.to(torch.float64)
-    w = weights.reshape(-1).to(device=t.device, dtype=torch.float64)
+    td = t.to(acc)
+    w = weights.reshape(-1).to(device=t.device, dtype=acc)
     order = td.argsort(dim=0)                                  # [N, D]
     xs = torch.gather(td, 0, order)                            # sorted per column
     cum = w[order].cumsum(0)                                   # [N, D]

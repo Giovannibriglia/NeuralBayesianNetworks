@@ -237,6 +237,7 @@ class FlexCodeMechanism(Mechanism):
         # ask for.
         w_all = validate_weights(
             kwargs.pop("weights", None), n, where="FlexCodeMechanism.fit_local",
+            device=y.device,
         )
         sub_kwargs = dict(kwargs)
         sub_kwargs["weights"] = None if w_all is None else w_all[fit_idx]
@@ -282,9 +283,8 @@ class FlexCodeMechanism(Mechanism):
                 })
         w_vec = validate_weights(
             kwargs.get("weights"), n, where="FlexCodeMechanism.fit_local",
+            device=device,
         )
-        if w_vec is not None:
-            w_vec = w_vec.to(device)
         epochs = int(kwargs.get("epochs", self.epochs))
         lr = float(kwargs.get("lr", self.lr))
         batch_size = int(kwargs.get("batch_size", self.batch_size))

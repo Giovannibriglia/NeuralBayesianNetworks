@@ -17,23 +17,28 @@ def resolve_device(raw: str | None) -> str:
 
     Each adapter calls this in its ``__init__`` to translate the raw
     config value (``None``, ``"auto"``, ``"cpu"``, ``"cuda"``,
-    ``"cuda:0"``, ...) into a concrete device string the adapter will
-    pin tensors/models to.
+    ``"cuda:0"``, ``"mps"``, ...) into a concrete device string the
+    adapter will pin tensors/models to.
 
     Resolution::
 
-        None       -> "cuda" if CUDA available else "cpu"
-        "auto"     -> "cuda" if CUDA available else "cpu"
+        None       -> "cuda" if CUDA available, else "mps" if available, else "cpu"
+        "auto"     -> same as None
         "cpu"      -> "cpu"
         "cuda"     -> "cuda"  (caller validates availability)
         "cuda:N"   -> "cuda:N"
+        "mps"      -> "mps"   (Apple Silicon; caller validates availability)
 
-    Does NOT validate that ``"cuda"`` / ``"cuda:N"`` actually works —
-    that raises at tensor-allocation time, which is appropriate (it lets
-    the runner record an error row rather than failing at import time).
+    The auto branch is :func:`nbn.utils.device.resolve_device` — the same
+    preference order the library itself uses, so an adapter and the NBN
+    model it wraps land on the same accelerator.
+
+    Does NOT validate that a concrete spec actually works — that raises at
+    tensor-allocation time, which is appropriate (it lets the runner record
+    an error row rather than failing at import time).
     """
-    import torch
-
     if raw is None or raw == "auto":
-        return "cuda" if torch.cuda.is_available() else "cpu"
+        from nbn.utils.device import resolve_device as _resolve
+
+        return _resolve("auto").type
     return raw

@@ -37,7 +37,7 @@ class BaselineSpec:
     ``device`` is optional and passed through verbatim (``None`` |
     ``"auto"`` | a concrete string). Each adapter calls
     ``resolve_device()`` in its ``__init__`` to translate ``None`` /
-    ``"auto"`` into cuda-if-available-else-cpu.
+    ``"auto"`` into cuda-if-available, else mps, else cpu.
     """
 
     library: str                          # 'nbn' | 'pgmpy' | 'pomegranate' | 'pyro'

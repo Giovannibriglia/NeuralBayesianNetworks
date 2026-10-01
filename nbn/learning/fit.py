@@ -146,9 +146,8 @@ def fit(
     }
 
     n_rows = next(iter(data_dev.values())).shape[0]
-    w_vec = validate_weights(weights, n_rows, where="fit")
+    w_vec = validate_weights(weights, n_rows, where="fit", device=dev)
     if w_vec is not None:
-        w_vec = w_vec.to(dev)
         # Fail before any node is fitted, not after half the network is done.
         # The check has to be explicit: every fit_local ends in **kwargs, so a
         # `weights=` a mechanism does not implement would be swallowed in

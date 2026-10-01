@@ -7,6 +7,7 @@ import torch.nn as nn
 from torch.distributions import Independent, Normal
 
 from nbn.learning.weighting import validate_weights, weighted_moments
+from nbn.utils.device import linalg_device
 from nbn.mechanisms.base import Mechanism
 from nbn.update import recursive_gaussian
 from nbn.utils.batching import ensure_2d, flatten_samples
@@ -93,9 +94,9 @@ class LinearGaussianMechanism(Mechanism):
         n, d_x = x.shape
         device = x.device
         self.output_dim = d_x
-        w_vec = validate_weights(weights, n, where="LinearGaussianMechanism.fit_local")
-        if w_vec is not None:
-            w_vec = w_vec.to(device)
+        w_vec = validate_weights(
+            weights, n, where="LinearGaussianMechanism.fit_local", device=device,
+        )
 
         if parents is None or (parents.numel() > 0 and parents.shape[-1] == 0):
             # Root node: fit a simple Gaussian
@@ -135,7 +136,12 @@ class LinearGaussianMechanism(Mechanism):
             else:
                 x_aug_r, y_r = x_fit, y_fit
 
-            theta = torch.linalg.lstsq(x_aug_r, y_r).solution  # [D_pa+1, D_x]
+            # ``lstsq`` has no MPS kernel: solve on ``linalg_device`` (the
+            # data device everywhere else) and bring the tiny result back.
+            ld = linalg_device(device)
+            theta = torch.linalg.lstsq(
+                x_aug_r.to(ld), y_r.to(ld),
+            ).solution.to(device)  # [D_pa+1, D_x]
             w = theta[:-1]       # [D_pa, D_x]
             b = theta[-1]        # [D_x]
             # Residual scale on the *unscaled* rows, weighted by w.
