@@ -26,7 +26,10 @@ run followed by any number of partial reruns, spliced in with
 ``exclude`` (baseline globs such as ``nbn-flow-*`` or ``nbn-*-ais``) and
 ``exclude_families`` remove methods / data families from every group before
 the selection, so a paper can leave out methods it does not discuss without
-touching the parquets.
+touching the parquets. ``always_show`` (``[group/]baseline-glob``) adds a
+method to every panel of a family where it is applicable, after the two
+selected ones, e.g. ``scalability/nbn-lg-lw`` to keep the one mechanism that
+reaches the largest networks visible even when it is not the most accurate.
 """
 from __future__ import annotations
 
@@ -368,8 +371,9 @@ class FamilyData:
     x_axis: str
     xs: list
     headline: str | None
-    shown: list[str]             # non-nbn + selected nbn
+    shown: list[str]             # non-nbn + selected nbn + forced
     ranking: dict[str, CategoryRanking] = field(default_factory=dict)
+    forced: list[str] = field(default_factory=list)   # always_show methods added
 
 
 def _available_metrics(dff: pd.DataFrame) -> set[str]:
@@ -382,8 +386,20 @@ def _available_metrics(dff: pd.DataFrame) -> set[str]:
     return out
 
 
+def forced_methods(group: str, methods, always_show=()) -> list[str]:
+    """The ``methods`` (applicable baselines of one family) matched by an
+    ``always_show`` pattern, which is ``glob`` or ``group/glob``."""
+    out: list[str] = []
+    for pat in always_show:
+        g, _, glob = pat.rpartition("/")
+        if g and g != group:
+            continue
+        out += [m for m in methods if fnmatch.fnmatchcase(m, glob) and m not in out]
+    return out
+
+
 def prepare_family(group: str, benchmark: str, family: str, dff: pd.DataFrame,
-                   aggregation: str, n_nodes: dict) -> FamilyData | None:
+                   aggregation: str, n_nodes: dict, always_show=()) -> FamilyData | None:
     dff = _filter_unsupported_baselines(dff, family)
     if dff.empty:
         return None
@@ -404,8 +420,9 @@ def prepare_family(group: str, benchmark: str, family: str, dff: pd.DataFrame,
             va = all_view(cells, n_total, aggregation)
             ranking = rank_nbn(va, metric_kind(headline), xs)
             chosen = select_nbn(ranking)
+    forced = [m for m in forced_methods(group, methods, always_show) if m not in chosen]
     return FamilyData(group, benchmark, family, dfx, x_axis, xs, headline,
-                      non_nbn + chosen, ranking)
+                      non_nbn + chosen + forced, ranking, forced)
 
 
 def _family_sort_key(f: str) -> tuple[int, str]:
@@ -636,14 +653,15 @@ def _families(df: pd.DataFrame) -> list[str]:
     return sorted(df["family"].dropna().unique(), key=_family_sort_key)
 
 
-def _prepare_group(group: str, df: pd.DataFrame, aggregation: str) -> list[FamilyData]:
+def _prepare_group(group: str, df: pd.DataFrame, aggregation: str,
+                   always_show=()) -> list[FamilyData]:
     out = []
     for bench in sorted(df["benchmark"].dropna().unique()):
         dfb = df[df["benchmark"] == bench]
         n_nodes = resolve_n_nodes(dfb, bench)
         for fam in _families(dfb):
             fd = prepare_family(group, bench, fam, dfb[dfb["family"] == fam],
-                                aggregation, n_nodes)
+                                aggregation, n_nodes, always_show)
             if fd is not None:
                 out.append(fd)
     return out
@@ -660,11 +678,13 @@ def _selection_report(fds: list[FamilyData]) -> str:
         "scored on X* ∩ their solved x. An empty category is filled by the other's",
         "runner-up.", ""]
     for fd in fds:
-        nbn_shown = [m for m in fd.shown if is_nbn(m)]
+        nbn_shown = [m for m in fd.shown if is_nbn(m) and m not in fd.forced]
         lines.append(f"[{fd.group}] {fd.benchmark}/{fd.family}  headline={fd.headline}  "
                      f"x={fd.x_axis}  grid={[_tick(x, fd.x_axis) for x in fd.xs]}")
         lines.append(f"  shown: {', '.join(fd.shown) if fd.shown else '(none)'}")
         lines.append(f"  selected nbn: {', '.join(nbn_shown) if nbn_shown else '(none)'}")
+        if fd.forced:
+            lines.append(f"  always shown (not selected): {', '.join(fd.forced)}")
         for cat, cr in fd.ranking.items():
             lines.append(f"  {cat}: X* = {[_tick(x, fd.x_axis) for x in cr.x_star]}")
             lines.append(f"    {'rank':<4} {'method':<26} {'cand':<5} {'#x':>3} "
@@ -741,15 +761,15 @@ def _metric_panels(fds: list[FamilyData], group: str, metric_spec: str, mode,
 
 def run_paper(groups: dict[str, list], output_dir: Path, aggregation: str = "iqm_iqr",
               view: str = "all", exclude=(), exclude_families=(),
-              row_height: float = _ROW_HEIGHT_IN) -> int:
+              row_height: float = _ROW_HEIGHT_IN, always_show=()) -> int:
     """Entry point of ``nbn-bench paper``.
 
     ``groups``: ``{group_name: [base_run, rerun, ...]}`` for any subset of
     :data:`GROUPS`. Writes ``<output_dir>/<group>_<metric>.pdf``,
     ``<output_dir>/tables/<group>_<family>_<metric>.tex`` and
     ``<output_dir>/selection.txt``. ``exclude`` / ``exclude_families``: see
-    :func:`drop_excluded`; ``row_height``: inches per row of panels. Returns a
-    process exit code."""
+    :func:`drop_excluded`; ``always_show``: see :func:`forced_methods`;
+    ``row_height``: inches per row of panels. Returns a process exit code."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     unknown = set(groups) - set(GROUPS)
@@ -766,16 +786,17 @@ def run_paper(groups: dict[str, list], output_dir: Path, aggregation: str = "iqm
         if group not in groups or not groups[group]:
             continue
         df = drop_excluded(load_group(groups[group]), exclude, exclude_families)
-        fds = _prepare_group(group, df, aggregation)
+        fds = _prepare_group(group, df, aggregation, always_show)
         if not fds:
             logger.warning("%s: nothing to plot", group)
             continue
         all_fds += fds
         written += render_group(fds, group, output_dir, aggregation, view, row_height)
     report = _selection_report(all_fds)
-    if exclude or exclude_families:
+    if exclude or exclude_families or always_show:
         report = (f"excluded baselines: {', '.join(exclude) or '(none)'}\n"
-                  f"excluded families: {', '.join(exclude_families) or '(none)'}\n\n"
+                  f"excluded families: {', '.join(exclude_families) or '(none)'}\n"
+                  f"always shown: {', '.join(always_show) or '(none)'}\n\n"
                   + report)
     (output_dir / "selection.txt").write_text(report)
     logger.info("done: %d figure(s) in %s", len(written), output_dir)

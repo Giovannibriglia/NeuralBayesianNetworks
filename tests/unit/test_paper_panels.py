@@ -15,6 +15,7 @@ import pytest
 
 from nbn.bench._paper_panels import (
     drop_excluded,
+    forced_methods,
     headline_metric,
     method_color,
     nbn_category,
@@ -324,6 +325,27 @@ class TestEndToEnd:
         # two stacked rows of panels: 2 * (1.9 - 1.2) in = 100.8 pt shorter, up to the
         # tight-bbox crop
         assert heights[1.9] - heights[1.2] == pytest.approx(2 * 0.7 * 72, abs=12)
+
+    def test_always_show_adds_a_method_after_the_selected_ones(self, tmp_path):
+        run = _run_dir(tmp_path, "complete", _inference_df())
+        out = tmp_path / "figs"
+        # continuous_lg selects mdn + kde; nbn-lg-lw is forced in, discrete is untouched
+        assert run_paper({"inference": [run]}, out, always_show=["inference/nbn-lg-*"]) == 0
+        sel = (out / "selection.txt").read_text()
+        assert "always shown: inference/nbn-lg-*" in sel
+        assert "selected nbn: nbn-mdn-lw, nbn-kde-lw\n  always shown (not selected): nbn-lg-lw" in sel
+        tex = (out / "tables" / "inference_continuous_lg_w1_per_node.tex").read_text()
+        assert "nbn-lg-lw" in tex
+        # a group prefix that does not match leaves the selection alone
+        out2 = tmp_path / "figs2"
+        assert run_paper({"inference": [run]}, out2, always_show=["scalability/nbn-lg-*"]) == 0
+        assert "always shown (not selected)" not in (out2 / "selection.txt").read_text()
+
+    def test_forced_methods_glob_and_group_scope(self):
+        methods = ["nbn-lg-lw", "nbn-lg-avi", "nbn-mdn-lw", "pgmpy-lg-predict"]
+        assert forced_methods("scalability", methods, ["nbn-lg-*"]) == ["nbn-lg-lw", "nbn-lg-avi"]
+        assert forced_methods("scalability", methods, ["speed/nbn-lg-lw"]) == []
+        assert forced_methods("speed", methods, ["speed/nbn-lg-lw", "nbn-lg-lw"]) == ["nbn-lg-lw"]
 
     def test_unknown_group_is_an_error(self, tmp_path):
         assert run_paper({"bogus": [tmp_path]}, tmp_path / "o") == 1
