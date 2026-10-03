@@ -98,6 +98,48 @@ def test_resolve_device_auto_prefers_cuda_over_mps(monkeypatch):
     assert bench_resolve_device("auto") == "cuda"
 
 
+@pytest.mark.parametrize("cuda,mps,want", [
+    (True, True, "cuda"),
+    (False, True, "mps"),     # Apple Silicon: GPU-only baselines land on Metal
+    (False, False, "cuda"),   # no accelerator: fail into an error row, never cpu
+])
+def test_bench_gpu_spec_resolves_to_an_accelerator(monkeypatch, cuda, mps, want):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: mps)
+    assert bench_resolve_device("gpu") == want
+
+
+@pytest.mark.parametrize("spec,want", [(None, "cpu"), ("auto", "cpu"), ("mps", "mps")])
+def test_pyro_auto_skips_mps(monkeypatch, spec, want):
+    """pyro's launch-bound sampler times out on mps; auto keeps it on cpu."""
+    pytest.importorskip("pyro")
+    from nbn.bench.adapters.pyro_adapter import PyroAdapter
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+    adapter = PyroAdapter(mechanism="empirical", inference_method="importance", device=spec)
+    assert adapter.device == want
+
+
+def test_shipped_configs_pin_accelerators_portably():
+    """No shipped config hard-codes ``cuda``: Macs would get error rows."""
+    from pathlib import Path
+
+    import yaml
+
+    root = Path(__file__).resolve().parents[2] / "nbn" / "bench" / "configs"
+    configs = sorted(root.rglob("*.yaml"))
+    assert configs
+    for path in configs:
+        cfg = yaml.safe_load(path.read_text())
+        for b in cfg.get("baselines") or []:
+            device = str(b.get("device") or "")
+            assert not device.startswith("cuda"), (
+                f"{path.relative_to(root)}: {b['library']}-{b['mechanism']} "
+                f"pins device={device!r}; use 'gpu' (cuda > mps)"
+            )
+
+
 def test_mps_oom_is_classified_as_oom():
     exc = RuntimeError(
         "MPS backend out of memory (MPS allocated: 9.01 GB, other allocations: "

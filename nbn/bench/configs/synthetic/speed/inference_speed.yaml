@@ -114,9 +114,9 @@ baselines:
   - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
   # Non-parametric -lw baselines (#228) — n_samples=16 makes per-query latency
   # trivial; flexcode fit (~9s/cell at n_nodes=50) is well under per_cell_timeout.
-  - {library: nbn,         mechanism: kde,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}, device: cuda}
-  - {library: nbn,         mechanism: knn,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}, device: cuda}
-  - {library: nbn,         mechanism: flexcode,  param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}, device: cuda}
+  - {library: nbn,         mechanism: kde,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}, device: gpu}
+  - {library: nbn,         mechanism: knn,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}, device: gpu}
+  - {library: nbn,         mechanism: flexcode,  param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}, device: gpu}
   # nbn-hybrid (hybrid router)
   #- {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router,    extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
   # other libraries

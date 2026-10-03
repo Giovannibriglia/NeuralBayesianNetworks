@@ -34,16 +34,32 @@ squaring, so larger batches underestimate ``F``, slacken the EWC penalty, and
 weaken protection of the old task.  Use it only when consolidation cost dominates
 and you accept that bias; the default is the faithful per-sample estimate.
 
-# TODO: a future opt-in could compute the exact per-sample empirical Fisher in a
-# single vectorized pass via ``torch.func.vmap(grad(functional_call(...)))`` —
-# deferred (would add a torch.func code path; the per-row loop here is correct
-# and bounded by sample_cap).
+At ``fisher_batch_size = 1`` the per-sample gradients are computed in one
+vectorised pass (``torch.func.vmap(grad(functional_call(...)))``, chunked to
+bound memory) instead of ``sample_cap`` sequential backward passes.  The two
+agree to float rounding; the vectorised pass is ~25x faster on CPU and avoids
+thousands of tiny kernel launches on cuda / mps, where the loop dominated
+``fit()``.  On mps the pass runs on a CPU copy (see
+``_per_sample_fisher_vmap``).  A mechanism whose ``log_prob`` cannot be traced by ``vmap`` falls
+back to the loop.
 """
 from __future__ import annotations
 
+import copy
+import logging
 from typing import List
 
 import torch
+from torch import nn
+from torch.func import functional_call, grad, vmap
+
+from nbn.utils.batching import assume_finite_parents
+
+logger = logging.getLogger(__name__)
+
+# Upper bound on per-sample-gradient elements materialised at once by the
+# vectorised Fisher (chunk_size * n_params); 2**24 float32s = 64 MiB.
+_VMAP_MAX_ELEMENTS = 2 ** 24
 
 # Default EWC penalty strength.  This is the stability<->plasticity knob: too
 # large freezes the weights (no adaptation to new data), too small fails to
@@ -90,10 +106,19 @@ def _estimate_fisher(mech, x, parents, *, fisher_batch_size: int, sample_cap: in
             parents = parents.index_select(0, idx)
         n = sample_cap
 
+    bs = max(int(fisher_batch_size), 1)
+    if bs == 1:
+        try:
+            return params, _per_sample_fisher_vmap(mech, x, parents)
+        except Exception as exc:  # a log_prob vmap cannot trace -> exact loop
+            logger.debug(
+                "%s: vectorised Fisher unavailable (%s: %s); using the "
+                "per-sample loop", type(mech).__name__, type(exc).__name__, exc,
+            )
+
     fisher = [torch.zeros_like(p) for p in params]
     was_training = mech.training
     mech.eval()
-    bs = max(int(fisher_batch_size), 1)
     num_batches = 0
     with torch.enable_grad():
         for i in range(0, n, bs):
@@ -112,6 +137,70 @@ def _estimate_fisher(mech, x, parents, *, fisher_batch_size: int, sample_cap: in
 
     inv = 1.0 / max(num_batches, 1)
     return params, [f * inv for f in fisher]
+
+
+class _LogProb(nn.Module):
+    """Expose ``mech.log_prob`` as ``forward`` so ``functional_call`` can drive it."""
+
+    def __init__(self, mech) -> None:
+        super().__init__()
+        self.mech = mech
+
+    def forward(self, x, parents):
+        return self.mech.log_prob(x, parents)
+
+
+def _per_sample_fisher_vmap(mech, x, parents) -> List[torch.Tensor]:
+    """Exact per-sample empirical Fisher in one chunked ``vmap`` pass.
+
+    Same estimator as the ``fisher_batch_size = 1`` loop: the mean over rows
+    of the squared gradient of that row's NLL.  Parents are sanitised once,
+    outside the traced region, and ``torch.distributions`` argument
+    validation is off inside it: both are data-dependent Python branches that
+    ``vmap`` cannot trace, and the rows are the fit's own training data.
+
+    On ``mps`` the pass runs on a CPU copy of the mechanism and the result is
+    moved back.  The vmapped gradients come out wrong on some Metal devices
+    (GitHub's virtualised macOS runners: every element off, up to 200x) while
+    matching on others, so Metal is not trusted with it.  At <= ``sample_cap``
+    rows the CPU pass takes tens of milliseconds.
+    """
+    if x.device.type == "mps":
+        cpu_mech = copy.deepcopy(mech).to("cpu")
+        fisher = _per_sample_fisher_vmap(
+            cpu_mech, x.cpu(), None if parents is None else parents.cpu(),
+        )
+        return [f.to(x.device) for f in fisher]
+    if parents is not None:
+        from nbn.utils.batching import _sanitise_parents
+
+        parents = _sanitise_parents(parents, mech_name=type(mech).__name__)
+    wrapper = _LogProb(mech)
+    names = [k for k, p in wrapper.named_parameters() if p.requires_grad]
+    params = {k: p.detach() for k, p in wrapper.named_parameters() if p.requires_grad}
+    buffers = dict(wrapper.named_buffers())
+
+    def nll(p, xi, pi):
+        pa = None if pi is None else pi.unsqueeze(0)
+        return -functional_call(wrapper, (p, buffers), (xi.unsqueeze(0), pa)).sum()
+
+    n_params = max(sum(p.numel() for p in params.values()), 1)
+    chunk = max(1, min(int(x.shape[0]), _VMAP_MAX_ELEMENTS // n_params))
+    was_training = mech.training
+    was_validating = torch.distributions.Distribution._validate_args
+    mech.eval()
+    torch.distributions.Distribution.set_default_validate_args(False)
+    try:
+        with torch.enable_grad(), assume_finite_parents():
+            per_sample = vmap(
+                grad(nll), in_dims=(None, 0, None if parents is None else 0),
+                chunk_size=chunk,
+            )(params, x, parents)
+    finally:
+        torch.distributions.Distribution.set_default_validate_args(was_validating)
+        if was_training:
+            mech.train()
+    return [per_sample[k].pow(2).mean(0) for k in names]
 
 
 def _store(mech, mu: torch.Tensor, fisher: torch.Tensor) -> None:

@@ -69,6 +69,7 @@ REQUIREMENTS: tuple[Requirement, ...] = (
     Requirement("seaborn", "seaborn", ">=0.12", "bench"),
     Requirement("psutil", "psutil", ">=5.9", "bench"),
     Requirement("packaging", "packaging", ">=23.0", "bench"),
+    Requirement("certifi", "certifi", ">=2023.7", "bench"),
     Requirement("zuko", "zuko", ">=1.2,<2.0", "neural"),
     Requirement("gpytorch", "gpytorch", ">=1.11", "gp"),
     Requirement("pyro-ppl", "pyro", ">=1.9", "mcmc", probes=(

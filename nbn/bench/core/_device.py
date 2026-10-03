@@ -28,6 +28,13 @@ def resolve_device(raw: str | None) -> str:
         "cuda"     -> "cuda"  (caller validates availability)
         "cuda:N"   -> "cuda:N"
         "mps"      -> "mps"   (Apple Silicon; caller validates availability)
+        "gpu"      -> "cuda" if CUDA available, else "mps" if available, else
+                      "cuda" (so a GPU-only baseline on a CPU-only host fails
+                      into an error row instead of silently running on CPU)
+
+    ``"gpu"`` is what the shipped configs use for baselines too slow to run
+    on a CPU (KDE/kNN/FlexCode LW, neural mechanisms at paper scale): it pins
+    them to an accelerator without tying the config to NVIDIA hardware.
 
     The auto branch is :func:`nbn.utils.device.resolve_device` — the same
     preference order the library itself uses, so an adapter and the NBN
@@ -41,4 +48,12 @@ def resolve_device(raw: str | None) -> str:
         from nbn.utils.device import resolve_device as _resolve
 
         return _resolve("auto").type
+    if raw == "gpu":
+        import torch
+
+        from nbn.utils.device import mps_available
+
+        if not torch.cuda.is_available() and mps_available():
+            return "mps"
+        return "cuda"
     return raw

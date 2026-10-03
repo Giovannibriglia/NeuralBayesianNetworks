@@ -147,15 +147,24 @@ def test_convergence_to_ve(discrete_problem):
 
 @pytest.mark.slow
 def test_batching_speedup(discrete_problem):
-    ais = _fit_adapter("cat", "ais", discrete_problem, n_samples=1024, epochs=5)
+    # n_samples=64 keeps the per-call overhead -- what batching amortises --
+    # dominant. At 1024 the work is compute-bound and B=64 beat B=1 by only
+    # ~1.2x on one core, a margin CI-runner noise flipped (master after #292,
+    # macOS lane); at 64 it is ~6x.
+    ais = _fit_adapter("cat", "ais", discrete_problem, n_samples=64, epochs=5)
 
     def per_query_time(b: int) -> float:
         queries = [_discrete_evidence_query(v % 2) for v in range(b)]
         ais.query_batch(queries)  # warmup
-        t0 = time.perf_counter()
-        for _ in range(3):
+        # Best of 5, not the mean: on a shared CI runner (xdist workers on the
+        # same cores) a single preempted call can swamp the mean and flip the
+        # comparison; the minimum is what the engine can do.
+        times = []
+        for _ in range(5):
+            t0 = time.perf_counter()
             ais.query_batch(queries)
-        return (time.perf_counter() - t0) / 3 / b
+            times.append(time.perf_counter() - t0)
+        return min(times) / b
 
     pq1 = per_query_time(1)
     pq_big = per_query_time(64)
