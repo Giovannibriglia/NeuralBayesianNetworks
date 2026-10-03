@@ -160,7 +160,8 @@ class TestProtocolConformance:
         from nbn.bench.core._device import resolve_device
 
         adapter = PyroAdapter(mechanism="empirical", inference_method="importance")
-        assert adapter.device == resolve_device(None)   # cuda > mps > cpu
+        want = resolve_device(None)                     # cuda > mps > cpu ...
+        assert adapter.device == ("cpu" if want == "mps" else want)  # ... minus mps
 
     def test_device_auto_resolves_at_init(self):
         """device='auto' must be replaced with a concrete device at __init__ time."""

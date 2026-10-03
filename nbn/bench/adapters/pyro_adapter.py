@@ -23,8 +23,11 @@ pyro.sample() triggers a CUDA kernel launch (~5–10 µs), and at benchmark
 scale (50 particles × 1024 queries × up to 50 nodes) the launch overhead
 dominates.  Pin ``device: cpu`` in the config for a pyro baseline whose
 wall-clock matters; auto-detect is the default so smoke runs exercise the
-GPU path locally.  The lstsq driver follows self.device (gels on CUDA,
-gelsd on CPU).
+GPU path locally.  The exception is Apple's ``mps``: ``auto`` never picks
+it for pyro, because there the per-site launch overhead turns every smoke
+cell into a timeout instead of exercising anything (an explicit
+``device: mps`` is still honoured).  The lstsq driver follows self.device
+(gels on CUDA, gelsd on CPU).
 
 n_samples: default 50.  Reduced from the old default of 200 to fit the
 600s per-cell budget (200 particles projected ~1273s at B=1024 batch size;
@@ -121,6 +124,10 @@ class PyroAdapter:
         # that self.device.startswith("cuda") works for the lstsq driver
         # check below (gels on CUDA, gelsd on CPU).
         self.device: str = resolve_device(device)
+        if device in (None, "auto") and self.device == "mps":
+            # See the module docstring: pyro's sampler is launch-bound, and on
+            # mps every cell of the bnlearn smoke run timed out.
+            self.device = "cpu"
         self.name = (
             f"pyro-{mechanism}-{inference_method}"
             if inference_method is not None else f"pyro-{mechanism}"

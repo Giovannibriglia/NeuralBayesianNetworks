@@ -43,9 +43,9 @@ baselines:
   - {library: pyro,        mechanism: empirical, param_method: mle}
   - {library: nbn,         mechanism: cat,      param_method: mle}
   - {library: pgmpy, mechanism: lg,       param_method: mle}
-  - { library: nbn,   mechanism: kde,      param_method: mle, device: cuda}
-  - { library: nbn,   mechanism: knn,      param_method: mle, device: cuda}
-  - { library: nbn,   mechanism: flexcode, param_method: mle, device: cuda}
+  - { library: nbn,   mechanism: kde,      param_method: mle, device: gpu}
+  - { library: nbn,   mechanism: knn,      param_method: mle, device: gpu}
+  - { library: nbn,   mechanism: flexcode, param_method: mle, device: gpu}
 
 n_queries_per_cell: 2
 per_cell_timeout_s: 120.0

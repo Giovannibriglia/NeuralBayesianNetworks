@@ -34,7 +34,7 @@ def _build_parser() -> argparse.ArgumentParser:
     pl.add_argument("--config", required=True,
                     help="Path to a parameter-learning YAML config.")
     pl.add_argument("--device", default="auto",
-                    help="'auto' (default; cuda > mps > cpu), 'cpu', 'cuda[:i]', or 'mps'.")
+                    help="'auto' (default; cuda > mps > cpu), 'gpu' (cuda > mps), 'cpu', 'cuda[:i]', or 'mps'.")
     pl.add_argument("--skip-env-check", action="store_true",
                     help="Start even if a library a baseline needs is missing "
                          "or too old (those cells will be not_supported).")
@@ -47,7 +47,7 @@ def _build_parser() -> argparse.ArgumentParser:
     inf.add_argument("--config", required=True,
                      help="Path to an inference YAML config.")
     inf.add_argument("--device", default="auto",
-                     help="'auto' (default; cuda > mps > cpu), 'cpu', 'cuda[:i]', or 'mps'.")
+                     help="'auto' (default; cuda > mps > cpu), 'gpu' (cuda > mps), 'cpu', 'cuda[:i]', or 'mps'.")
     inf.add_argument("--skip-env-check", action="store_true",
                      help="Start even if a library a baseline needs is missing "
                           "or too old (those cells will be not_supported).")

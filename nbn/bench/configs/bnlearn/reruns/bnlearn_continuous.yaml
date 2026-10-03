@@ -59,9 +59,9 @@ baselines:
   - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
   - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
   - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 100,  batch_size: *BATCH_SIZE_FIT, n_samples: 2048}}
-  - { library: nbn,   mechanism: kde,      param_method: mle,   inference_method: lw,      extra_kwargs: { batch_size: *BATCH_SIZE_FIT, n_samples: 2048 }, device: cuda }
-  - { library: nbn,   mechanism: knn,      param_method: mle,   inference_method: lw,      extra_kwargs: { batch_size: *BATCH_SIZE_FIT, n_samples: 2048 }, device: cuda }
-  - { library: nbn,   mechanism: flexcode, param_method: mle,   inference_method: lw,      extra_kwargs: { batch_size: *BATCH_SIZE_FIT, n_samples: 2048 }, device: cuda }
+  - { library: nbn,   mechanism: kde,      param_method: mle,   inference_method: lw,      extra_kwargs: { batch_size: *BATCH_SIZE_FIT, n_samples: 2048 }, device: gpu }
+  - { library: nbn,   mechanism: knn,      param_method: mle,   inference_method: lw,      extra_kwargs: { batch_size: *BATCH_SIZE_FIT, n_samples: 2048 }, device: gpu }
+  - { library: nbn,   mechanism: flexcode, param_method: mle,   inference_method: lw,      extra_kwargs: { batch_size: *BATCH_SIZE_FIT, n_samples: 2048 }, device: gpu }
   - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance, device: cpu}
   - {library: pgmpy,       mechanism: lg,        param_method: lg,    inference_method: predict}
 per_cell_timeout_s: 1200.0

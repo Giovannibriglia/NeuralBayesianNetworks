@@ -35,6 +35,13 @@ _HAS_MPS = bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_a
 _EXPECTED_AUTO = "cuda" if _HAS_CUDA else ("mps" if _HAS_MPS else "cpu")
 
 
+def _expected_auto(adapter_cls) -> str:
+    """pyro's auto skips mps (launch-bound sampler; see pyro_adapter docstring)."""
+    if adapter_cls.__name__ == "PyroAdapter" and _EXPECTED_AUTO == "mps":
+        return "cpu"
+    return _EXPECTED_AUTO
+
+
 @pytest.fixture
 def no_accelerator(monkeypatch):
     """Simulate a host with neither CUDA nor MPS."""
@@ -112,12 +119,12 @@ class TestAdapterDeviceResolution:
     @pytest.mark.parametrize("adapter_cls", _GPU_CAPABLE)
     def test_default_none_auto_detects(self, adapter_cls):
         adapter = _make(adapter_cls)(device=None)
-        assert str(adapter.device) == resolve_device(None)
+        assert str(adapter.device) == _expected_auto(adapter_cls)
 
     @pytest.mark.parametrize("adapter_cls", _GPU_CAPABLE)
     def test_auto_auto_detects(self, adapter_cls):
         adapter = _make(adapter_cls)(device="auto")
-        assert str(adapter.device) == _EXPECTED_AUTO
+        assert str(adapter.device) == _expected_auto(adapter_cls)
 
     @pytest.mark.parametrize("adapter_cls", _GPU_CAPABLE)
     def test_explicit_cpu(self, adapter_cls):

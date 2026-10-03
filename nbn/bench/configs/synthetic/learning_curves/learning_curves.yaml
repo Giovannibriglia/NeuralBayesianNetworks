@@ -62,11 +62,11 @@ baselines:
   # - {library: nbn,   mechanism: hybrid,   param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}}
   # Non-parametric continuous baselines (#223 / PR 8) — parametric-vs-non-
   # parametric calibration comparison. KDE + KNN are cheap; flexcode trains a
-  # 200-epoch MLP per continuous node, so it carries a per-baseline device: cuda
+  # 200-epoch MLP per continuous node, so it carries a per-baseline device: gpu
   # override (the global default stays CPU; mdn/flow are a separate device call).
-  - {library: nbn,   mechanism: kde,      param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}, device: cuda}
-  - {library: nbn,   mechanism: knn,      param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}, device: cuda}
-  - {library: nbn,   mechanism: flexcode, param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}, device: cuda}
+  - {library: nbn,   mechanism: kde,      param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}, device: gpu}
+  - {library: nbn,   mechanism: knn,      param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}, device: gpu}
+  - {library: nbn,   mechanism: flexcode, param_method: mle, extra_kwargs: {batch_size: *BATCH_SIZE_FIT}, device: gpu}
   # - {library: gpytorch,    mechanism: gp,       param_method: mle}
   - {library: pomegranate, mechanism: discrete, param_method: mle}
   - {library: pyro, mechanism: empirical, param_method: mle, device: cpu}

@@ -91,9 +91,13 @@ MAX_PARALLEL=2 bash scripts/run_all_benchmarks.sh    # fewer in flight (8 GB GPU
 DEVICE=cpu     bash scripts/run_all_benchmarks.sh    # force CPU
 ```
 
-`--device` takes `auto` (cuda > mps > cpu), `cpu`, `cuda[:i]` or `mps`;
-per-baseline `device:` keys in the YAML override it. pgmpy is CPU-only on
-every platform. The complete configs are paper-scale: expect 10–20 h each on
+`--device` takes `auto` (cuda > mps > cpu), `gpu` (cuda > mps), `cpu`,
+`cuda[:i]` or `mps`; per-baseline `device:` keys in the YAML override it.
+The shipped configs pin baselines that are too slow on a CPU (KDE/kNN/FlexCode
+likelihood weighting, paper-scale neural fits) to `device: gpu`, so the same
+config runs on an NVIDIA machine and on an Apple-Silicon Mac. pgmpy is
+CPU-only on every platform, and Pyro's importance sampler runs on the CPU
+under `auto` on a Mac (it is launch-bound and times out on `mps`). The complete configs are paper-scale: expect 10–20 h each on
 a single consumer GPU. `scripts/run_all_benchmarks.sh` works with the
 bash 3.2 that macOS ships, runs `check-env` first, and sets
 `PYTHONNOUSERSITE=1` so user-site packages cannot shadow the environment.
@@ -115,7 +119,9 @@ artefact (figures and tables are never generated automatically):
 The runner appends to `metrics.jsonl` after every finished cell, so an
 interrupted run keeps its completed cells.
 
-**macOS notes.** On Apple Silicon, `--device auto` resolves to `mps`.
+**macOS notes.** On Apple Silicon, `--device auto` resolves to `mps`, and
+bnlearn networks download over HTTPS with certifi's CA bundle, so the
+python.org Python needs no extra certificate setup.
 `gpu_peak_mb` reports the allocation at measurement time (Metal exposes no
 high-water mark), so it is a lower bound on the peak. macOS does not enforce
 the per-cell `RLIMIT_AS` memory cap, so cells rely on the fit and query time
