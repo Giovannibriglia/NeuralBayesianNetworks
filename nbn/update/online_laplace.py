@@ -39,11 +39,13 @@ vectorised pass (``torch.func.vmap(grad(functional_call(...)))``, chunked to
 bound memory) instead of ``sample_cap`` sequential backward passes.  The two
 agree to float rounding; the vectorised pass is ~25x faster on CPU and avoids
 thousands of tiny kernel launches on cuda / mps, where the loop dominated
-``fit()``.  A mechanism whose ``log_prob`` cannot be traced by ``vmap`` falls
+``fit()``.  On mps the pass runs on a CPU copy (see
+``_per_sample_fisher_vmap``).  A mechanism whose ``log_prob`` cannot be traced by ``vmap`` falls
 back to the loop.
 """
 from __future__ import annotations
 
+import copy
 import logging
 from typing import List
 
@@ -156,7 +158,19 @@ def _per_sample_fisher_vmap(mech, x, parents) -> List[torch.Tensor]:
     outside the traced region, and ``torch.distributions`` argument
     validation is off inside it: both are data-dependent Python branches that
     ``vmap`` cannot trace, and the rows are the fit's own training data.
+
+    On ``mps`` the pass runs on a CPU copy of the mechanism and the result is
+    moved back.  The vmapped gradients come out wrong on some Metal devices
+    (GitHub's virtualised macOS runners: every element off, up to 200x) while
+    matching on others, so Metal is not trusted with it.  At <= ``sample_cap``
+    rows the CPU pass takes tens of milliseconds.
     """
+    if x.device.type == "mps":
+        cpu_mech = copy.deepcopy(mech).to("cpu")
+        fisher = _per_sample_fisher_vmap(
+            cpu_mech, x.cpu(), None if parents is None else parents.cpu(),
+        )
+        return [f.to(x.device) for f in fisher]
     if parents is not None:
         from nbn.utils.batching import _sanitise_parents
 

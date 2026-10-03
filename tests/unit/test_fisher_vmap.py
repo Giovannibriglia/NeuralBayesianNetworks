@@ -85,6 +85,21 @@ def test_estimate_fisher_falls_back_to_loop_when_vmap_fails(monkeypatch):
         torch.testing.assert_close(g, w)
 
 
+@pytest.mark.skipif("mps" not in available_devices(), reason="needs mps")
+def test_vmap_fisher_on_mps_runs_on_cpu_copy():
+    """Metal is not trusted with the vmapped gradients (wrong on CI runners):
+    the result must equal the CPU computation on the same parameters, and the
+    mechanism itself must stay on mps."""
+    mech, x, pa = _case("mdn", False, "mps")
+    got = ol._per_sample_fisher_vmap(mech, x, pa)
+    assert all(f.device.type == "mps" for f in got)
+    assert all(p.device.type == "mps" for p in mech.parameters())
+    import copy
+    want = ol._per_sample_fisher_vmap(copy.deepcopy(mech).cpu(), x.cpu(), pa.cpu())
+    for g, w in zip(got, want):
+        torch.testing.assert_close(g.cpu(), w)
+
+
 def test_vmap_fisher_restores_mode_and_validation():
     mech, x, pa = _case("mdn", False, "cpu")
     mech.train()
