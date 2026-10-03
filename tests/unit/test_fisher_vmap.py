@@ -6,6 +6,8 @@ passes, which dominated ``fit()`` on cuda / mps.  The vmap pass must compute
 the *same* estimator — the mean of per-sample squared NLL gradients — and fall
 back to the loop for a mechanism vmap cannot trace.
 """
+import copy
+
 import pytest
 import torch
 
@@ -53,12 +55,19 @@ def _case(kind, root, device):
 @pytest.mark.parametrize("kind", ["mdn", "neural_categorical"])
 def test_vmap_fisher_matches_per_sample_loop(kind, root, device):
     mech, x, pa = _case(kind, root, device)
-    want = _loop_fisher(mech, x, pa)
+    # Reference: the per-row loop on a CPU copy of the same parameters. Not
+    # the loop on ``device``: on GitHub's virtualised macOS runners, per-row
+    # backward passes on mps return wrong gradients (deterministically, up to
+    # 200x off) while CPU agrees with itself everywhere -- which is also why
+    # the vmap pass itself hops to CPU on mps.
+    want = _loop_fisher(
+        copy.deepcopy(mech).cpu(), x.cpu(), None if pa is None else pa.cpu(),
+    )
     got = ol._per_sample_fisher_vmap(mech, x, pa)
     assert len(got) == len(want)
     for g, w in zip(got, want):
-        assert g.shape == w.shape and g.device == w.device
-        torch.testing.assert_close(g, w, rtol=1e-4, atol=1e-7)
+        assert g.shape == w.shape and g.device.type == x.device.type
+        torch.testing.assert_close(g.cpu(), w, rtol=1e-4, atol=1e-7)
 
 
 def test_estimate_fisher_uses_vmap_by_default(monkeypatch):
@@ -94,7 +103,6 @@ def test_vmap_fisher_on_mps_runs_on_cpu_copy():
     got = ol._per_sample_fisher_vmap(mech, x, pa)
     assert all(f.device.type == "mps" for f in got)
     assert all(p.device.type == "mps" for p in mech.parameters())
-    import copy
     want = ol._per_sample_fisher_vmap(copy.deepcopy(mech).cpu(), x.cpu(), pa.cpu())
     for g, w in zip(got, want):
         torch.testing.assert_close(g.cpu(), w)
