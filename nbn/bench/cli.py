@@ -8,9 +8,8 @@ The benchmark → figures workflow is two-phase, both under this one CLI:
 ``inference`` runs the benchmark and writes the JSONL + parquet (the
 canonical run artifact); ``plot`` reads that parquet and renders the paper
 figures + LaTeX tables on demand into a chosen output dir
-(docs/v0.13-paper-figures.md). ``param-learning`` is structurally preserved
-but stubbed — the ParamLearningMeasurement is deferred to a later v0.13 phase.
-See issue #109 for status.
+(docs/v0.13-paper-figures.md). ``param-learning`` runs the parameter-learning
+benchmark the same way (configs with ``metrics: log_likelihood``).
 """
 from __future__ import annotations
 
@@ -30,7 +29,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     pl = sub.add_parser(
         "param-learning",
-        help="Parameter-learning benchmark (stubbed in v0.13; use inference).",
+        help="Parameter-learning benchmark: CPD accuracy + fit time across baselines.",
     )
     pl.add_argument("--config", required=True,
                     help="Path to a parameter-learning YAML config.")

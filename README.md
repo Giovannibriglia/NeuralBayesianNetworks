@@ -1,439 +1,315 @@
 # NeuralBayesianNetworks (NBN)
 
-A PyTorch-native Bayesian network library where each mechanism is learnt
-by a neural network. Every node carries a learnable, batched, GPU-resident
-conditional distribution; every query is a batched tensor operation;
-inference and parameter learning both run end-to-end on cuda (and on Apple
-Silicon via `mps`).
+[![CI](https://github.com/Giovannibriglia/NeuralBayesianNetworks/actions/workflows/ci.yml/badge.svg)](https://github.com/Giovannibriglia/NeuralBayesianNetworks/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/nbn.svg)](https://pypi.org/project/nbn/)
+[![Python](https://img.shields.io/pypi/pyversions/nbn.svg)](https://pypi.org/project/nbn/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-NBN is **9-22× faster** than pgmpy on continuous Linear Gaussian inference
-and **2.3× more accurate** on discrete parameter learning at scale, and is
-the only library in our benchmark suite that handles hybrid (mixed
-continuous-discrete) networks at scale.
+**PyTorch-native Bayesian networks with neural conditional distributions and
+GPU-batched inference.**
 
-## Quick start (from a checkout)
+NBN represents a Bayesian network over a known DAG as an `nn.Module`. Each node
+holds a learnable conditional distribution P(X | parents(X)), called a
+*mechanism*: a probability table, a linear-Gaussian model, a mixture density
+network or a normalising flow. You fit the network from data, then answer
+conditional and interventional queries. Thousands of queries run as one
+batched tensor operation on CUDA, on Apple-Silicon GPUs (`mps`) or on the CPU.
+
+- **One API for discrete, continuous and hybrid networks.** Mixed
+  discrete/continuous networks with non-Gaussian continuous nodes are a
+  first-class case.
+- **Swappable mechanisms.** Every mechanism is an `nn.Module` behind the same
+  interface, from closed-form tables to neural density estimators.
+- **Batched inference.** `query_batch` answers B queries with different
+  evidence in one call: exact variable elimination for discrete networks,
+  likelihood weighting elsewhere, picked automatically.
+- **Causal queries.** `do=` interventions work in every engine and can vary
+  per batch row.
+- **Autograd-friendly.** Likelihoods and samples are differentiable, so NBN
+  composes with your own PyTorch models.
+- **Reproducible benchmarks.** A suite (`nbn-bench`) compares NBN with pgmpy,
+  pomegranate and Pyro on networks with known ground truth.
+
+## Contents
+
+- [Installation](#installation): [Linux](#linux) · [macOS](#macos-apple-silicon-and-intel) · [from source](#from-source)
+- [Quick start](#quick-start)
+- [Core concepts](#core-concepts)
+- [Hardware acceleration](#hardware-acceleration)
+- [Benchmark highlights](#benchmark-highlights)
+- [Running the benchmarks](#running-the-benchmarks)
+- [Development](#development)
+- [Citing NBN](#citing-nbn) · [License](#license)
+
+## Installation
+
+NBN needs **Python ≥ 3.10** and **PyTorch ≥ 2.2**. The PyPI package is `nbn`,
+and so is the import name.
 
 ```bash
-pip install -U -e ".[all]" && nbn-bench check-env
+pip install nbn                  # core library
+pip install "nbn[neural]"        # + normalising flows (zuko)
+pip install "nbn[all]"           # + benchmark suite and every baseline library
 ```
 
-This installs the library plus everything the benchmark suite needs at the
-pinned versions, then verifies the environment (`nbn-bench check-env` must
-print `environment OK`; the run commands refuse to start otherwise). Run it
-again after every `git pull` on a benchmark machine.
+| Extra | Adds |
+|---|---|
+| `neural` | zuko, for `NormalizingFlowMechanism` / `ConditionalFlowMechanism` |
+| `bench` | the `nbn-bench` runner, pgmpy, pomegranate, pandas, plotting |
+| `mcmc` | the Pyro baseline for the benchmark suite |
+| `all` | everything a benchmark run needs |
+| `dev` | tests, linters and docs toolchain (from a checkout) |
 
-## Install
+Using a virtual environment is recommended.
+
+### Linux
 
 ```bash
-pip install nbn                 # the library
-pip install "nbn[neural]"       # + zuko-backed flows / MDNs (NBN's headline mechanisms)
-pip install "nbn[bench]"        # + the benchmark suite (`nbn-bench`, `nbn.bench`)
-pip install "nbn[all]"          # everything a benchmark run needs (bench + neural + gp + mcmc)
+python3 -m venv .venv && source .venv/bin/activate
+pip install -U pip
+pip install "nbn[neural]"
 ```
 
-The import name is `nbn`. The `[neural]` extra adds zuko-backed flows/MDNs;
-`bench` pulls in the benchmark runner's own dependencies (pandas, pyarrow,
-scipy, yaml, tqdm), the external-baseline libraries (pgmpy, pomegranate) and
-plotting (matplotlib, seaborn); `gp`/`mcmc` add the gpytorch and pyro
-baselines; `all` is the union. Use `all` for benchmark runs: a baseline whose
-library is absent is recorded as `not_supported`, not as an error.
-
-**Check the environment before a run.** The adapters are written against
-specific library versions (pgmpy ≥ 1.0 for `DiscreteBayesianNetwork`,
-scikit-learn ≥ 1.6 because pgmpy 1.x needs it but does not pin it,
-pomegranate ≥ 1.0 for the torch API, …). `nbn-bench check-env` verifies
-every declared requirement — installed, importable (including the submodules
-the adapters use, e.g. `pgmpy.models`), at the required version, and not a
-second copy shadowing the environment's (a stale pgmpy in `~/.local` lost
-one run all its pgmpy cells; an old scikit-learn there lost another):
+For an NVIDIA GPU, install a CUDA build of PyTorch first by following the
+selector at [pytorch.org](https://pytorch.org/get-started/locally/). After
+that, `pip install nbn` keeps the build you have. Check it with:
 
 ```bash
-nbn-bench check-env                        # every requirement
-nbn-bench check-env --config <run.yaml>    # only what that config's baselines need
+python -c "import torch; print(torch.cuda.is_available())"   # True
 ```
 
-`nbn-bench inference` and `nbn-bench param-learning` run the same check for
-their config's baselines and **refuse to start** on a problem (exit code 2);
-`--skip-env-check` overrides that. `scripts/run_all_benchmarks.sh` runs it
-too and sets `PYTHONNOUSERSITE=1` so user-site packages cannot shadow the
-environment. If the check fails, `pip install -U "nbn[all]"` (or
-`pip install -U -e ".[all]"` from a checkout) brings everything up to the
-pinned versions.
+### macOS (Apple Silicon and Intel)
 
-Working from a checkout (development, or reproducing the paper runs, whose
-YAML configs are addressed by repo-relative path):
+On Apple-Silicon Macs (M1 and later), NBN uses the GPU through PyTorch's Metal
+backend (`mps`). The standard PyPI PyTorch wheel includes it, so there is
+nothing extra to install and nothing to configure.
+
+**1. Get Python ≥ 3.10.** macOS does not ship a usable one. Check with
+`python3 --version`, and if it is missing or older, install it with either:
+
+```bash
+brew install python@3.12        # Homebrew (https://brew.sh)
+```
+
+or the official installer from [python.org](https://www.python.org/downloads/macos/).
+On macOS the command is `python3` (Homebrew also provides `python3.12`), and
+there is no plain `python` until you activate a virtual environment.
+
+**2. Create a virtual environment and install NBN.**
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install "nbn[neural]"        # or "nbn[all]" for the benchmark suite
+```
+
+**3. Check that the GPU is visible.**
+
+```bash
+python -c "import torch; print(torch.backends.mps.is_available())"   # True
+```
+
+With the `bench` extra, `nbn-bench check-env` checks the whole environment.
+It ends with a line like
+`platform darwin; accelerator mps (Apple Metal; float64 unavailable, accumulations run in float32)`.
+
+> **Intel Macs** run NBN on the CPU. PyTorch stopped publishing Intel-macOS
+> wheels after 2.2, so pip installs torch 2.2.x there. If you then see a
+> NumPy ABI error, run `pip install "numpy<2"`.
+
+### From source
 
 ```bash
 git clone https://github.com/Giovannibriglia/NeuralBayesianNetworks.git
 cd NeuralBayesianNetworks
+python3 -m venv .venv && source .venv/bin/activate
+pip install -U pip
 pip install -e ".[dev,all]"
-nbn-bench check-env
+pytest -m "not slow"             # fast test suite
 ```
-
-`dev` is the test and docs toolchain. Releases are cut by pushing a `v*` tag;
-`.github/workflows/publish.yml` builds from the tag and uploads to PyPI.
-
-### macOS / Apple Silicon
-
-NBN runs on macOS, and on Apple-Silicon Macs it uses the GPU through
-PyTorch's Metal backend (`mps`). Nothing to configure: `device="auto"` (the
-default everywhere — `model.fit(data)`, `nbn-bench --device auto`, YAML
-`device: auto`) resolves to `cuda` if there is one, else `mps` if available,
-else `cpu`. `nbn-bench check-env` prints the accelerator it will use:
-
-```
-platform darwin; accelerator mps (Apple Metal; float64 unavailable, accumulations run in float32)
-```
-
-What the MPS backend changes, and how NBN handles it:
-
-- **No float64.** Metal has no double precision, so the sufficient-statistic
-  accumulations NBN does in float64 elsewhere (weighted counts, normal
-  equations, weighted moments and quantiles) run in float32 on `mps`
-  (`nbn.utils.device.accum_dtype`). Results on CPU/CUDA are unchanged; on
-  `mps` they agree to float32 precision.
-- **No `linalg.lstsq` kernel.** The small closed-form Gaussian solves hop to
-  the CPU and back (`nbn.utils.device.linalg_device`); the matrices are
-  `[D_pa+1, D_pa+1]`, so this costs nothing.
-- **Other missing kernels.** `import nbn` sets
-  `PYTORCH_ENABLE_MPS_FALLBACK=1` on macOS (only if you have not set it),
-  so an op a third-party library (zuko, gpytorch, pyro) needs that Metal
-  lacks runs on the CPU with a one-time warning instead of failing. Set
-  `PYTORCH_ENABLE_MPS_FALLBACK=0` before importing to turn that off.
-- **Benchmark baselines.** pgmpy is CPU-only on every platform; pomegranate
-  and pyro follow the resolved device. `gpu_peak_mb` on `mps` reports the
-  allocation at measurement time (Metal exposes no high-water mark), a lower
-  bound on the peak. The per-cell `RLIMIT_AS` memory cap is not enforced by
-  macOS; cells rely on the fit/query time budgets there.
-
-CI runs the test suite on an Apple-Silicon runner (`test-macos` in
-`.github/workflows/ci.yml`), where the device-parametrised tests execute on
-a real `mps` device. Intel Macs run on CPU.
-
-### Run the benchmark suite
-
-From the repo root, launch the six paper-scale benchmarks. At most three run
-in parallel; the next starts as soon as one finishes:
-
-```bash
-bash scripts/run_all_benchmarks.sh
-```
-
-Override the pool size or device via `MAX_PARALLEL=2 bash …` or
-`DEVICE=cpu bash …` (three GPU benchmarks in flight can exceed an 8 GB card).
-Each benchmark leaves a run directory under `results/`; turn it into figures
-and tables with `nbn-bench plot` (see [Plot the results](#plot-the-results)).
-
-## Why NBN
-
-NBN is to Bayesian Networks what GPyTorch is to Gaussian Processes:
-a torch-native, batchable, autograd-friendly framework where every
-conditional distribution is a swappable, learnable module, and every
-query is a batched tensor operation.
-
-| Library         | Discrete BN  | Continuous       | Batched queries | Neural CPDs | Hybrid native |
-|-----------------|:------------:|:----------------:|:---------------:|:-----------:|:-------------:|
-| pgmpy           | ✅ exact     | ✅ Gaussian only | ❌              | ❌          | ⚠️ CG only    |
-| pomegranate     | ✅           | ✅               | partial         | ❌          | ⚠️ limited    |
-| GPyTorch        | ❌           | ✅ GP            | ✅              | ✅          | ❌            |
-| Pyro / NumPyro  | ✅ via enum  | ✅               | partial         | ✅          | ✅ universal  |
-| **NBN**         | **✅ exact** | **✅ MDN/Flow/GP** | **✅ batched VE** | **✅** | **✅ native** |
-
-## Headline results
-
-These numbers come from the canonical paper-data run at tag `v0.6c-d`
-(see [Reproducibility](#reproducibility) below).
-
-### Inference: 9-22× faster on continuous Linear Gaussian networks
-
-![Inference total time vs network size](results/benchmark_synthetic_learning_curves_20260908_092714/figures/inference_paper_total_time_vs_size.png)
-
-NBN-lg-lw vs pgmpy-lg-predict on continuous Linear Gaussian networks:
-22× faster at n=10 (1.9 ms vs 42 ms), 12× at n=1000 (0.72 s vs 8.5 s).
-Accuracy matches pgmpy within 0.02 W₁ at every n_nodes — speed gain
-comes without quality regression.
-
-On discrete networks at n=10, NBN-cat-ve runs at 1.4 ms vs pgmpy-mle-ve
-at 108 ms (75× faster).
-
-### Parameter learning: 2.3× more accurate on discrete networks at scale
-
-![Parameter learning accuracy vs network size](results/benchmark_synthetic_learning_curves_20260908_092714/figures/parameter_learning_paper_accuracy_vs_size.png)
-
-On discrete Bayesian networks, NBN-cat reaches TV ≈ 0.14 across all
-n_nodes ≥ 50; pgmpy-mle saturates at TV ≈ 0.34. The quality gap opens
-at n=50 (0.10 vs 0.25) and persists through n=1000 (0.146 vs 0.340).
-NBN's gradient-based fitting scales past pgmpy's sample-complexity wall.
-
-On continuous Linear Gaussian networks, NBN matches pgmpy quality
-(W₁ ≈ 0.083 across all n) at 2× the speed.
-
-### Hybrid networks
-
-NBN-hybrid handles mixed continuous-discrete networks across all n_nodes
-in our benchmark (n ∈ {10, 50, 100, 500, 1000}). Among the external
-libraries, only pyro covers hybrid inference (Importance sampler); pgmpy,
-gpytorch, and pomegranate have no applicable hybrid baselines.
 
 ## Quick start
 
 ```python
 import torch
-from nbn import NeuralBayesianNetwork, TensorVariableElimination
-from nbn.mechanisms import CategoricalTableMechanism
+from nbn import NeuralBayesianNetwork
 
-# A → B → C, all categorical with cardinality 4
-edges = [("A", "B"), ("B", "C")]
+# Rain → WetGrass ← Sprinkler, and WetGrass → SoilMoisture (continuous)
 model = NeuralBayesianNetwork(
-    edges,
-    variables={"A": ("discrete", 4), "B": ("discrete", 4), "C": ("discrete", 4)},
+    [("Rain", "WetGrass"), ("Sprinkler", "WetGrass"), ("WetGrass", "SoilMoisture")],
+    variables={
+        "Rain": ("discrete", 2),
+        "Sprinkler": ("discrete", 2),
+        "WetGrass": ("discrete", 2),
+        "SoilMoisture": ("continuous", 1),
+    },
+    device="auto",  # cuda > mps (Apple Silicon) > cpu
 )
 
-# Fit each node's mechanism from data
-data = {"A": torch.randint(0, 4, (10_000,)),
-        "B": torch.randint(0, 4, (10_000,)),
-        "C": torch.randint(0, 4, (10_000,))}
-for node in model.dag.topological_order():
-    parents = model.dag.parents(node)
-    pa = torch.stack([data[p] for p in parents], dim=-1).float() if parents else None
-    mech = CategoricalTableMechanism()
-    mech.fit_local(data[node], pa, parent_cards=[4] * len(parents))
-    model.set_mechanism(node, mech)
+# Toy data from a known process
+n = 10_000
+rain = torch.bernoulli(torch.full((n,), 0.3)).long()
+sprinkler = torch.bernoulli(torch.full((n,), 0.4)).long()
+wet = ((rain | sprinkler).bool() & (torch.rand(n) < 0.9)).long()
+soil = (2.0 * wet + 0.5 * torch.randn(n)).unsqueeze(-1)
+data = {"Rain": rain, "Sprinkler": sprinkler, "WetGrass": wet, "SoilMoisture": soil}
 
-# Batched query: P(C | A=a) for 4 evidence rows at once
-engine = TensorVariableElimination()
-posterior = engine.query_batch(model, ["C"], {"A": torch.tensor([0, 1, 2, 3])})
-# posterior shape: (B=4, 1, 4) — a distribution over C for each evidence row
+model.auto_mechanisms()  # tables for discrete nodes, mixture density networks for continuous
+model.fit(data)
+
+# P(Rain | WetGrass = 1)                     ≈ [0.48, 0.52]
+print(model.query(["Rain"], evidence={"WetGrass": 1}))
+
+# 1,024 conditional queries in one batched call → shape [1024, 2]
+evidence = {"WetGrass": torch.randint(0, 2, (1024,))}
+print(model.query_batch(["Rain"], evidence).shape)
+
+# Intervention: P(WetGrass | do(Sprinkler = 1)) ≈ [0.10, 0.90]
+print(model.query(["WetGrass"], do={"Sprinkler": 1}))
+
+# Ancestral samples and the (differentiable) log-likelihood of data
+samples = model.sample(5)
+print(model.log_prob(data).mean())
 ```
 
-For continuous, hybrid, and neural-mechanism examples, see the test suite
-under `tests/integration/`.
+To choose a mechanism per node instead of `auto_mechanisms()`, call
+`model.set_mechanism("SoilMoisture", LinearGaussianMechanism())` (all
+mechanisms import from `nbn`) before `fit`. More
+end-to-end examples (continuous, hybrid, neural, interventional) are in
+[`tests/integration/`](tests/integration).
 
-### Gradients
+## Core concepts
 
-Parent values and `do=` values are gradient-transparent — a parent computed by
-your own `nn.Module` carries autograd back into it:
+**Network.** `NeuralBayesianNetwork(edges, variables, device=...)` holds the
+DAG, the variable types (`("discrete", cardinality)` or
+`("continuous", dim)`) and one mechanism per node. The main methods are
+`fit` (all mechanisms, node by node), `update` (fold in new data without
+retraining), `query` / `query_batch`, `sample`, `log_prob` and `intervene`.
 
-| path | differentiable |
+**Mechanisms** (`nbn.mechanisms`) are the conditional distributions:
+
+| Node type | Mechanisms |
 |---|---|
-| `mechanism.log_prob(x, parents)` | yes |
-| `model.log_prob(data)`, incl. `per_node=True` | yes |
-| `model.sample(n)` / `model.sample(n, do=v)` | yes, w.r.t. parameters **and** `v` |
-| `model.query` / `model.query_batch` | **no** — VE detaches at factor build, LW runs under `torch.inference_mode()` |
-| `model.intervene(do=...)` | **no** — returns a `deepcopy`, so its parameters are fresh leaves |
+| Discrete | `CategoricalTableMechanism` (closed-form counts), `NeuralCategoricalMechanism` (MLP), `SmoothedEmpiricalCategoricalMechanism`, `BinningCategoricalTable` (continuous parents) |
+| Continuous, parametric | `LinearGaussianMechanism` (closed form), `MDNMechanism` (mixture density network), `NormalizingFlowMechanism` / `ConditionalFlowMechanism` (`[neural]` extra) |
+| Continuous, non-parametric | `ConditionalKDEMechanism`, `KNNConditionalMechanism`, `FlexCodeMechanism` |
+| Fixed | `DeterministicMechanism`, `DiracGaussianMechanism` |
 
-The last two are deliberate. **When you need gradients through an
-intervention, use `model.sample(n, do=...)`**, which applies it against the
-live parameters; `intervene()` is for building a mutilated model to *query*.
-The contract is pinned by `tests/unit/test_parent_gradient_contract.py`.
+**Inference engines** (`nbn.inference`):
 
-### Snapshotting parameters
+| Engine | Use |
+|---|---|
+| `TensorVariableElimination` | Exact, log-domain, einsum-based VE for discrete networks; batched over evidence rows |
+| `LikelihoodWeightingEngine` | Batched importance sampling; works with any mechanism |
+| `HybridRouter` (default) | VE when every node is discrete and the treewidth is ≤ 25, otherwise likelihood weighting |
 
-To take an optimisation step and be able to reject it (backtracking an M-step
-that decreased the objective, say), use torch's `state_dict` / `load_state_dict`
-— but **copy the snapshot**:
+Pass `engine=` to `query` / `query_batch` to override the default.
 
-```python
-snap = copy.deepcopy(mech.state_dict())   # NOT mech.state_dict()
-...                                       # optimiser step
-mech.load_state_dict(snap)                # reverts exactly
-```
+**Gradients.** `log_prob` and `sample` (including `sample(n, do=...)`) are
+differentiable with respect to the parameters, and parent values or `do=`
+values computed by your own `nn.Module` carry gradients back into it.
+`query` / `query_batch` are not differentiable (VE detaches at factor build;
+likelihood weighting runs under `inference_mode`). `intervene()` returns a
+deep copy for querying. To get gradients through an intervention, use
+`sample(n, do=...)`.
 
-`state_dict()` returns tensors sharing storage with the live parameters, and
-optimisers update in place, so an uncopied snapshot is mutated by the step it
-is meant to undo — silently, with nothing raising. Pinned by
-`tests/unit/test_parameter_snapshot_contract.py`.
+**Snapshotting.** To revert an optimisation step, copy the state dict:
+`snap = copy.deepcopy(mech.state_dict())`. A plain `state_dict()` shares
+storage with the live parameters, so an optimiser step silently changes the
+snapshot too.
 
-## Repository layout
+## Hardware acceleration
 
-    nbn/                Library code (mechanisms, inference, sampling, core).
-    nbn/bench/          Benchmark suite: runner, baseline adapters, configs, data.
-    notebooks/          Colab-ready notebooks for the six paper-scale benchmarks.
-    scripts/            run_all_benchmarks.sh and other operational helpers.
-    results/            Where nbn-bench writes runs (gitignored).
-    tests/              Unit + integration tests.
-    RESEARCH.md         Paper outline and contribution claims.
+`device="auto"` (the default for models, `nbn-bench --device` and YAML
+configs) picks **CUDA**, then **MPS** (Apple Silicon), then **CPU**. The
+results are the same on every backend, up to floating-point precision and
+Monte-Carlo noise.
 
-## Reproducibility
+On MPS, NBN works around the Metal backend's gaps for you:
 
-The headline numbers above are anchored at tag `v0.6c-d`
-(commit `2e0dd32`):
+- **No float64 on Metal.** Sufficient statistics (counts, normal equations,
+  weighted moments) accumulate in float32 on `mps` and in float64 elsewhere.
+- **No `linalg.lstsq` kernel.** The small closed-form Gaussian solves run
+  on the CPU. They are `[D_pa+1, D_pa+1]` matrices, so this costs nothing.
+- **Other missing kernels.** `import nbn` sets
+  `PYTORCH_ENABLE_MPS_FALLBACK=1` on macOS unless you have set it. Any op a
+  dependency needs that Metal lacks then runs on the CPU with a one-time
+  warning instead of failing. Set it to `0` before importing to opt out.
 
-```bash
-git checkout v0.6c-d          # the suite lived at benchmarking/ at this tag
-nbn-bench inference \
-  --config benchmarking/configs/inference_paper_laptop.yaml
-nbn-bench param-learning \
-  --config benchmarking/configs/parameter_learning_paper_laptop.yaml
-```
+**When the GPU helps.** GPUs pay off on large batches: many queries per
+`query_batch` call, large training sets, wide networks. A toy network like
+the quick start is often faster on `device="cpu"`, because kernel-launch
+overhead dominates. CI runs the full test suite on Linux and on an
+Apple-Silicon macOS runner, where the device-parametrised tests use a real
+`mps` device.
 
-- **Hardware**: NVIDIA GeForce RTX 4070 Laptop (8 GB VRAM)
-- **PyTorch**: 2.11.0+cu130
-- **Wall time**: 11.4 h inference + 6.5 h parameter-learning
-- **Paper data anchor**: see [`docs/v0.6c-d/run_summary.md`](docs/v0.6c-d/run_summary.md) for full headline tables and [`docs/v0.6c-d/dnf_cells.md`](docs/v0.6c-d/dnf_cells.md) for the DNF table
+## Benchmark highlights
 
-Numerical values vary within MC noise across hardware; STATUS counts
-and qualitative findings (cluster, speedup, quality gap) are stable.
-The committed parquets, tables, and figures under
-`results/{raw,tables,figures}/` are the canonical paper
-artefacts.
+These numbers come from the paper-data run at tag `v0.6c-d` (RTX 4070 Laptop
+GPU, 5 seeds, networks of 10–1000 nodes). The full tables and the list of
+cells that did not finish are in
+[`docs/v0.6c-d/run_summary.md`](docs/v0.6c-d/run_summary.md).
 
-## Crash tests
-
-NBN ships two crash tests on synthetic Bayesian networks with **known
-ground truth**, sweeping network size on the x-axis:
-
-1. **Parameter-learning crash test** — measures accuracy of fitted CPDs
-   against the true generative process. Speed is not measured.
-2. **Inference crash test** — measures both accuracy and total time for
-   `Q` conditional queries. NBN uses `query_batch(B=Q)` (one batched
-   call); other libraries loop over the same `Q` queries in Python.
-
-Each crash test has a smoke config (CI, < 60s) and a paper config
-(local reproduction, ~17.9 h on RTX 4070 Laptop 8 GB; CPU not supported for paper-config).
-
-### Reproduce
-
-```bash
-# Smoke (runs in CI):
-nbn-bench param-learning --config nbn/bench/configs/synthetic/smoke_tests/parameter_learning_smoke.yaml
-nbn-bench inference      --config nbn/bench/configs/synthetic/smoke_tests/inference_smoke.yaml
-
-# Paper (8 GB VRAM, the laptop variant used for v0.6c-d paper data):
-nbn-bench param-learning --config nbn/bench/configs/synthetic/complete/parameter_learning_complete_laptop.yaml
-nbn-bench inference      --config nbn/bench/configs/synthetic/complete/inference_complete_laptop.yaml
-
-# Paper (≥16 GB VRAM, canonical config without batch reductions):
-nbn-bench param-learning --config nbn/bench/configs/synthetic/complete/parameter_learning_complete.yaml
-nbn-bench inference      --config nbn/bench/configs/synthetic/complete/inference_complete.yaml
-```
-
-Each invocation writes one run directory under `results/`; the parquet is
-the single canonical artefact of a run (figures and tables are never
-generated automatically):
-
-    results/benchmark_<benchmark>_<config_name>_<YYYYMMDD_HHMMSS>/
-        <config_name>_metrics.parquet     one row per (cell, metric)
-        metrics.jsonl                     the same rows, streamed while running
-        run.log                           per-cell log (fit/query phases, errors)
-
-### Plot the results
-
-`nbn-bench plot` turns one (or more) run directories into paper figures and
-LaTeX tables. The same command serves every benchmark; the x grid is decided
-by what the parquet contains (`batch_size` sweep, `n_train` sweep, bnlearn
-network, else `n_nodes`), so you never pick a plotter:
-
-```bash
-nbn-bench plot results/benchmark_synthetic_learning_curves_20260908_092714 \
-  --output-dir results/figures/learning_curves
-# options: --aggregation iqm_iqr|mean_std (default iqm_iqr)
-#          --benchmark synthetic|bnlearn  (default: every benchmark in the parquet)
-#          --top-nbn N                    (nbn methods shown per x value, default 2)
-```
-
-Every figure is a **grouped bar plot** (one group per x value, one bar per
-method, error bar = aggregation band across seeds) and every figure/table
-comes in two views:
-
-- `all/` — each method aggregated over the seeds **it** solved; a bar or
-  table cell whose method solved fewer than all seeds carries `k/n`; a method
-  that solved none shows its failure code (`timeout`, `oom`, `error`).
-- `common/` — each method aggregated over the seeds solved by **every shown
-  method** at that x, so the bars in a group are computed on the same
-  problems; the table footer and the x label report `|C|`, the common-seed
-  count.
-
-Shown methods at each x are every non-nbn baseline applicable to the family
-plus the `--top-nbn` best nbn methods (ranked on the `all` view and kept
-identical in `common`; nbn rows carry a dagger in the tables). Output tree, per family:
-
-```
-<output-dir>/<benchmark>/<family>/
-  all/plots/<metric>_vs_<x>.pdf     all/tables/<metric>_vs_<x>.tex
-  all/plots/success_rate.pdf        (status breakdown, diagnostic)
-  common/plots/<metric>_vs_<x>.pdf  common/tables/<metric>_vs_<x>.tex
-  common/common_seeds.txt           the common seeds per metric and x
-  selection.txt                     the nbn methods shown per (view, metric, x)
-```
-
-The run-directory name uses the config's `config_name`
-(`complete`, `scalability_complete`, `batch_speed`, `param_learning_complete`,
-`learning_curves`, `bnlearn_complete`), not the YAML file name. Per benchmark
-(`<metric>` below is each accuracy metric present plus the timing ones):
-
-| Benchmark (config) | Run with | x grid | Metrics rendered |
+| Setting | NBN | Best external baseline | Result |
 |---|---|---|---|
-| Synthetic inference (`synthetic/complete/inference_complete.yaml`) | `nbn-bench inference --config …` | `n_nodes` | `tv_per_node`, `jsd_per_node` (discrete), `w1_per_node` (continuous), `total_query_time`, `fit_time` |
-| Inference scalability (`synthetic/complete/inference_scalability_complete.yaml`) | `nbn-bench inference --config …` | `n_nodes` | same; the time figures are the headline |
-| Inference speed / batching (`synthetic/speed/inference_speed.yaml`, a `batch_sizes` sweep) | `nbn-bench inference --config …` | `batch_size` | `query_time` (per-query time); non-batchable baselines only have a `B=1` bar and read `--` beyond |
-| Parameter learning (`synthetic/complete/parameter_learning_complete.yaml`) | `nbn-bench param-learning --config …` | `n_nodes` | `log_likelihood`, `param_recovery_{tv,kl}` (discrete), `calibration_{pit_ks,sd_ratio}` (continuous), `fit_time` |
-| Learning curves / sample efficiency (`synthetic/learning_curves/learning_curves.yaml`, an `n_train_sweep`) | `nbn-bench param-learning --config …` | `n_train` | same as parameter learning |
-| bnlearn inference (`bnlearn/complete/inference_complete.yaml`) | `nbn-bench inference --config …` | `network` (sorted by size; split into `_partK` files beyond 8 networks) | as synthetic inference |
-| Calibration vs accuracy divergence (no config: combine two runs) | one `param-learning` run + one `inference` run on the same families | — | `all/plots/divergence_calibration_pit_ks_vs_w1_per_node.pdf` per continuous family (rows are concatenated; engine suffixes such as `-lw` are stripped to align `nbn-mdn-lw` with `nbn-mdn`) |
+| Inference, continuous linear-Gaussian, 10–1000 nodes | `nbn-lg-lw` | pgmpy `predict` | **8–22× faster** (0.72 s vs 8.5 s at n=1000); W₁ within 0.02 of pgmpy at every size |
+| Inference, discrete, n=10 | `nbn-cat-ve` | pgmpy VE | **75× faster** (1.4 ms vs 108 ms) |
+| Parameter learning, discrete, n ≥ 50 | `nbn-cat` | pgmpy MLE | **~2.3× lower TV error** (0.146 vs 0.340 at n=1000) |
+| Parameter learning, continuous linear-Gaussian | `nbn-lg` | pgmpy | Same accuracy (W₁ ≈ 0.083), **2× faster** at n=1000 |
+| Hybrid networks, 10–1000 nodes | `nbn-hybrid` | — | All 25 cells finished (W₁ ≈ 0.08–0.10); no external library in that run had an applicable hybrid baseline |
 
-Two things that bite:
+Pyro's importance sampler was added as a hybrid baseline after that run.
+Numbers vary within Monte-Carlo noise across hardware.
 
-- `learning_curves.yaml` and `parameter_learning_complete.yaml` declare
-  `metrics: log_likelihood` and their baselines carry no `inference_method`,
-  so they **must** run under `param-learning`. Under `inference` the loader
-  refuses them and prints the command to use.
-- A figure is only written when at least one seed was solved for its metric
-  in that family (a seed with any timed-out query counts as unsolved for that
-  cell; an `ok` row with a NaN value counts as unsolved too). If a plot you
-  expect is missing, `nbn-bench plot -v` logs `skip ...` with the reason, and
-  `run.log` in the run directory has the per-cell error.
+## Running the benchmarks
 
-The aggregation contract lives in
-[`docs/v0.18-bar-reporting-all-common.md`](docs/v0.18-bar-reporting-all-common.md).
+```bash
+pip install -U "nbn[all]" && nbn-bench check-env          # must print "environment OK"
+nbn-bench inference --config nbn/bench/configs/synthetic/smoke_tests/inference_smoke.yaml
+nbn-bench plot results/benchmark_synthetic_smoke_<timestamp> --output-dir results/figures
+```
 
-## Configuration
+The configs, metrics, the paper-scale runs (`scripts/run_all_benchmarks.sh`),
+the figures and how to reproduce the published numbers are documented in
+**[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)**. Colab notebooks for each
+paper-scale benchmark are in [`notebooks/`](notebooks).
 
-Each config is a YAML file with these fields:
+## Development
 
-    mode:                 'parameter_learning' | 'inference'
-    families:             list of families ∈ {discrete, continuous_lg,
-                          continuous_nongauss, hybrid}
-    n_nodes:              list of network sizes
-    n_seeds:              number of seeds per cell (mean ± std reported)
-    n_queries_per_cell:   number of queries per cell
-    nbn_batch_size:       B for NBN's query_batch (inference mode only)
-    baselines:            list of baseline spec dicts, each with required
-                          fields {library, mechanism, param_method} plus
-                          optional inference_method and device (cpu|cuda|auto)
-    per_cell_timeout_s:   wall-clock cap per (family, n_nodes, seed, baseline)
+```bash
+pip install -e ".[dev,all]"
+pytest -m "not slow"                  # fast suite
+pytest                                # everything (slow tests download bnlearn networks)
+ruff check nbn/ tests/ scripts/ && mypy nbn/core nbn/mechanisms
+```
 
-See `nbn/bench/configs/**/*.yaml` for all shipped configs.
+Repository layout:
 
-## Status
+    nbn/                 the library: core/, mechanisms/, inference/, learning/, sampling/, update/
+    nbn/bench/           benchmark suite: runner, baseline adapters, configs, bnlearn data
+    tests/               unit and integration tests
+    notebooks/           Colab notebooks for the paper-scale benchmarks
+    scripts/             run_all_benchmarks.sh and other helpers
+    docs/                benchmark guide, design notes and audits
 
-Current release: **v0.6c-d** (paper-data anchor). The library is in
-publishable empirical state.
+Releases are cut by pushing a `v*` tag; `.github/workflows/publish.yml` builds
+and uploads to PyPI. Known limitations and the roadmap are tracked in the
+[issues](https://github.com/Giovannibriglia/NeuralBayesianNetworks/issues).
 
-| Component | Status |
-| --- | --- |
-| Core (DAG, Variables, Factor) | ✅ |
-| Mechanisms (Categorical, NeuralCategorical, LG, MDN, Flow, GP, Hybrid) | ✅ |
-| Tensor VE + LW + HybridRouter | ✅ |
-| Vectorised batched `query_batch` | ✅ |
-| Synthetic crash-test framework | ✅ |
-| Method-keyed baseline registry | ✅ v0.6c-C |
-| Aggregator + tables (CSV/MD/parquet/TEX) | ✅ v0.6c-C-3 |
-| Paper-grade figures + paper-data anchor | ✅ v0.6c-d |
-| Multi-library baselines (pgmpy, gpytorch, pomegranate, pyro) | ✅ |
-| Per-baseline YAML device override | ✅ v0.12 |
-| README enrichment | ✅ v0.6d |
+## Citing NBN
 
-Active backlog (v0.7, none paper-blocking):
+If you use NBN in your research, please cite the software:
 
-- Plotter polish: W₁ band lower-clip (#42), parameter-learning accuracy panels for non-discrete families (#44)
-- Adapter audits: pgmpy-mle vs pgmpy-bayes / nbn-cat vs nbn-neuralcat fit-path distinctness (#43)
-- HybridRouter cuda assert at hybrid n ≥ 10 (#30)
-- NeuralCategorical-VE engine refactor (#26)
-- pyro inference speedup (v0.8 candidate) — current Importance sampler is Python-bound and CPU-only; GPU is 11× slower at benchmark scale, so speedup requires `pyro.plate` vectorisation or alternative inference modes (SVI, NUTS). See `docs/audits/v0.12-pyro-gpu-investigation.md`.
-
-See the [open issues](https://github.com/Giovannibriglia/NeuralBayesianNetworks/issues) for the full v0.7 backlog.
+```bibtex
+@software{briglia_nbn,
+  author  = {Briglia, Giovanni},
+  title   = {{NeuralBayesianNetworks}: PyTorch-native Bayesian networks with neural mechanisms and GPU-batched inference},
+  url     = {https://github.com/Giovannibriglia/NeuralBayesianNetworks},
+  license = {Apache-2.0}
+}
+```
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE).

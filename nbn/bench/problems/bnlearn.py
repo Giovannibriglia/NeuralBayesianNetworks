@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import gzip
 import logging
+import ssl
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -179,6 +180,22 @@ _URL_DIRECTORY_OVERRIDES: dict[str, str] = {
 _DOWNLOAD_TIMEOUT_S = 30.0
 
 
+def _ssl_context() -> ssl.SSLContext:
+    """TLS context verified against certifi's CA bundle when it is installed.
+
+    The python.org macOS installer ships an OpenSSL with no system roots until
+    the user runs its ``Install Certificates.command``, so the default context
+    fails every download with ``CERTIFICATE_VERIFY_FAILED``.  certifi (a
+    ``bench`` dependency) carries the Mozilla bundle and works everywhere;
+    without it, fall back to the platform default.
+    """
+    try:
+        import certifi
+    except ImportError:
+        return ssl.create_default_context()
+    return ssl.create_default_context(cafile=certifi.where())
+
+
 def _bif_url(name: str) -> str:
     """URL for the bnlearn discrete ``.bif`` file (gzipped)."""
     directory = _URL_DIRECTORY_OVERRIDES.get(name, name)
@@ -199,7 +216,9 @@ def _ensure_cached(name: str) -> Path:
     logger.info("Downloading bnlearn network %s from %s", name, url)
     local_gz = _CACHE_DIR / f"{name}.bif.gz"
     try:
-        with urllib.request.urlopen(url, timeout=_DOWNLOAD_TIMEOUT_S) as response:
+        with urllib.request.urlopen(
+            url, timeout=_DOWNLOAD_TIMEOUT_S, context=_ssl_context(),
+        ) as response:
             local_gz.write_bytes(response.read())
     except Exception as e:  # noqa: BLE001 — re-raised with context
         raise RuntimeError(f"Failed to download {name}.bif.gz from {url}: {e}") from e

@@ -1,11 +1,29 @@
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, Iterator, List, Tuple
 
 import torch
 
 logger = logging.getLogger(__name__)
+
+# Set while a caller that has already sanitised its parents runs a
+# ``torch.func`` transform, whose tracing cannot branch on tensor values.
+_PARENTS_KNOWN_FINITE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "nbn_parents_known_finite", default=False,
+)
+
+
+@contextlib.contextmanager
+def assume_finite_parents() -> Iterator[None]:
+    """Make :func:`_sanitise_parents` a no-op for parents already sanitised."""
+    token = _PARENTS_KNOWN_FINITE.set(True)
+    try:
+        yield
+    finally:
+        _PARENTS_KNOWN_FINITE.reset(token)
 
 
 def _sanitise_parents(
@@ -30,9 +48,10 @@ def _sanitise_parents(
     count)`` so silent corruption is visible in run logs without
     flooding them.
 
-    Pure no-op on already-finite input.
+    Pure no-op on already-finite input, and inside
+    :func:`assume_finite_parents`.
     """
-    if torch.isfinite(parents).all():
+    if _PARENTS_KNOWN_FINITE.get() or torch.isfinite(parents).all():
         return parents
     invalid = ~torch.isfinite(parents)
     n_invalid = int(invalid.sum().item())

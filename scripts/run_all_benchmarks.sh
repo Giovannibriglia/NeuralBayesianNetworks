@@ -29,7 +29,7 @@
 # benchmark together -- with no traceback in run.log (2026-09-12 batch_speed
 # run: 20 h of cells completed, then killed during conversion).
 #
-# Requires bash >= 4.3 (for `wait -n`).
+# Portable to the bash 3.2 that macOS ships (no `wait -n`, no assoc arrays).
 # =============================================================================
 set -uo pipefail
 
@@ -118,19 +118,32 @@ launch() {
       echo "[$(date +%H:%M:%S)] FAIL   ${name} (exit ${rc}) — see ${LOG_DIR}/${name}.log"
     fi
   ) &
+  PIDS+=("$!")
+}
+
+# ── drop finished jobs from PIDS. `kill -0` fails once bash has reaped the
+#    child. `${PIDS[@]+...}` keeps `set -u` quiet on an empty array in bash 3.2.
+PIDS=()
+reap() {
+  local alive=() pid
+  for pid in ${PIDS[@]+"${PIDS[@]}"}; do
+    kill -0 "${pid}" 2>/dev/null && alive+=("${pid}")
+  done
+  PIDS=(${alive[@]+"${alive[@]}"})
 }
 
 # ── bounded worker pool: keep at most MAX_PARALLEL jobs in flight; launch the
-#    next as soon as `wait -n` reports one has finished.
-running=0
+#    next as soon as one has finished. Polling instead of `wait -n` keeps the
+#    script working on macOS's bash 3.2; a 2 s tick is noise next to
+#    multi-hour jobs.
 for entry in "${JOBS[@]}"; do
   IFS='|' read -r name sub cfg <<<"${entry}"
-  while (( running >= MAX_PARALLEL )); do
-    wait -n
-    running=$(( running - 1 ))
+  reap
+  while (( ${#PIDS[@]} >= MAX_PARALLEL )); do
+    sleep 2
+    reap
   done
   launch "${name}" "${sub}" "${cfg}"
-  running=$(( running + 1 ))
 done
 
 # drain the remaining jobs
