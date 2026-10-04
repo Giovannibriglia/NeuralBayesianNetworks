@@ -130,6 +130,11 @@ def _build_parser() -> argparse.ArgumentParser:
                             "or 'nbn-lg-lw' for every group.")
     paper.add_argument("--row-height", type=float, default=1.9, metavar="INCHES",
                        help="Height of one row of panels (default 1.9; figures are 7 in wide).")
+    paper.add_argument("--all-nbn", action="store_true",
+                       help="Show every applicable nbn method instead of the two selected "
+                            "per family (complete results).")
+    paper.add_argument("--panels-per-row", type=int, default=4, metavar="N",
+                       help="Maximum number of panels per figure row (default 4).")
     paper.add_argument("-v", "--verbose", action="store_true")
 
     merge = sub.add_parser(
@@ -367,7 +372,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_paper(groups, output_dir=Path(args.output_dir),
                          aggregation=args.aggregation, view=args.view,
                          exclude=args.exclude, exclude_families=args.exclude_families,
-                         row_height=args.row_height, always_show=args.always_show)
+                         row_height=args.row_height, always_show=args.always_show,
+                         all_nbn=args.all_nbn, max_panels=args.panels_per_row)
 
     if args.cmd == "merge":
         from nbn.bench._merge import merge_runs

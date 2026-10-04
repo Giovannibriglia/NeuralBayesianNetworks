@@ -10,8 +10,8 @@ with timeout / oom / error) was emitted for the cell.
 Two views share one contract (``docs/v0.18-bar-reporting-all-common.md``):
 
 * ``all``    — each method is aggregated over the seeds *it* solved. The
-               table / bar annotation reports ``k/n`` (solved / total seeds at
-               that x) whenever ``k < n``; a method with ``k == 0`` shows its
+               table / bar annotation reports ``f/n`` (failed / total seeds at
+               that x) whenever ``f > 0``; a method with ``k == 0`` shows its
                failure code instead of a value.
 * ``common`` — each method is aggregated over ``C(x)``, the seeds solved by
                **every shown method** at that x (methods with ``k == 0`` are
@@ -24,8 +24,9 @@ metric center). The ``common`` view reuses exactly that selection, so both
 views always show the same methods and ``C(x)`` is the intersection over
 that fixed set.
 
-Aggregation across seeds is ``iqm_iqr`` (interquartile mean ± IQR/2) or
-``mean_std``; the per-seed value is the per-cell reduction (mean over queries
+Aggregation across seeds is ``iqm_iqr`` (interquartile mean ± IQR/2 in the
+tables; the bars draw the min / max of the interquartile values, see
+:func:`plot_band`) or ``mean_std``; the per-seed value is the per-cell reduction (mean over queries
 for accuracy and per-query time, sum for total query time, first for fit time).
 """
 from __future__ import annotations
@@ -108,6 +109,28 @@ def aggregate(values, method: str) -> tuple[float, float, float]:
         half = float((q3 - q1) / 2)
         return c, c - half, c + half
     raise ValueError(f"unknown aggregation: {method!r}")
+
+
+def plot_band(values, method: str) -> tuple[float, float]:
+    """(lower, upper) of the error bar drawn around :func:`aggregate`'s center.
+
+    iqm_iqr:  the smallest and the largest observed value among those that
+              enter the interquartile mean (the values in [Q1, Q3]), so the
+              bar spans real per-seed results and always contains the IQM.
+    mean_std: mean -/+ 1 std (the table band).
+    Empty or any +inf -> (nan, nan)."""
+    values = np.asarray(list(values), dtype=float)
+    values = values[~np.isnan(values)]
+    if values.size == 0 or np.isposinf(values).any():
+        return float("nan"), float("nan")
+    if method == "iqm_iqr":
+        q1, q3 = np.percentile(values, [25, 75])
+        mid = values[(values >= q1) & (values <= q3)]
+        if mid.size == 0:
+            mid = values
+        return float(mid.min()), float(mid.max())
+    _, lo, hi = aggregate(values, method)
+    return lo, hi
 
 
 def clip_band(kind: str, lower: float, upper: float) -> tuple[float, float]:
@@ -296,7 +319,7 @@ class Views:
     metric: str
     kind: str
     xs: list
-    all: pd.DataFrame            # method, x, center, lo, hi, k, n, code, shown
+    all: pd.DataFrame            # method, x, center, lo, hi, plo, phi, k, n, code, shown
     common: pd.DataFrame         # same columns
     common_sets: dict = field(default_factory=dict)   # x -> sorted list of inst
     selection: dict = field(default_factory=dict)     # view -> {x: [nbn methods]}
@@ -312,7 +335,7 @@ def _fail_code(g: pd.DataFrame):
 
 
 def _view_frame(recs) -> pd.DataFrame:
-    cols = ["method", "x", "center", "lo", "hi", "k", "n", "code"]
+    cols = ["method", "x", "center", "lo", "hi", "plo", "phi", "k", "n", "code"]
     df = pd.DataFrame.from_records(recs, columns=cols)
     # keep ``code`` a plain str-or-None column (pandas would coerce None to
     # NaN, which is truthy and would print as "nan" in a table cell).
@@ -326,7 +349,9 @@ def all_view(cells: pd.DataFrame, n_total: dict, aggregation: str) -> pd.DataFra
     for (m, x), g in cells.groupby(["method", "x"]):
         solved = g[g["solved"]]
         c, lo, hi = _agg_cell(solved["value"], aggregation)
-        recs.append(dict(method=m, x=x, center=c, lo=lo, hi=hi, k=int(len(solved)),
+        plo, phi = plot_band(solved["value"], aggregation)
+        recs.append(dict(method=m, x=x, center=c, lo=lo, hi=hi, plo=plo, phi=phi,
+                         k=int(len(solved)),
                          n=int(n_total.get(x, len(g))), code=_fail_code(g)))
     return _view_frame(recs)
 
@@ -365,7 +390,8 @@ def common_view(cells: pd.DataFrame, n_total: dict, aggregation: str,
                 continue
             solved = g[g["solved"] & g["inst"].isin(C)]
             c, lo, hi = _agg_cell(solved["value"], aggregation)
-            recs.append(dict(method=m, x=x, center=c, lo=lo, hi=hi,
+            plo, phi = plot_band(solved["value"], aggregation)
+            recs.append(dict(method=m, x=x, center=c, lo=lo, hi=hi, plo=plo, phi=phi,
                              k=int(len(solved)), n=int(len(C)), code=_fail_code(g)))
     return _view_frame(recs)
 

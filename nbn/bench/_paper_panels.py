@@ -117,11 +117,13 @@ _PLAN: dict[str, list[tuple[str, str | tuple[str, ...], str | None]]] = {
     "bnlearn": [("accuracy", "accuracy", None),
                 ("total_query_time", "total_query_time", None),
                 ("accuracy_time", ("accuracy", "total_query_time"), None)],
-    "param_learning": [("log_likelihood", "log_likelihood", None),
+    "param_learning": [("accuracy", "accuracy", None),
+                       ("log_likelihood", "log_likelihood", None),
                        ("param_recovery_tv", "param_recovery_tv", None),
                        ("calibration_pit_ks", "calibration_pit_ks", None),
                        ("fit_time", "fit_time", None)],
-    "learning_curves": [("log_likelihood", "log_likelihood", None),
+    "learning_curves": [("accuracy", "accuracy", None),
+                        ("log_likelihood", "log_likelihood", None),
                         ("param_recovery_tv", "param_recovery_tv", None),
                         ("calibration_pit_ks", "calibration_pit_ks", None),
                         ("fit_time", "fit_time", None)],
@@ -169,6 +171,11 @@ _FIXED_COLORS = {
     "pgmpy-lg-predict": "#08306b",
     "pomegranate-discrete-ve": "#9467bd",
     "pyro-empirical-importance": "#8c564b",
+    # parameter-learning names (no inference engine)
+    "pgmpy-mle": "#1f77b4",
+    "pgmpy-bayes": "#7fbde0",
+    "pyro-empirical": "#8c564b",
+    "nbn-cat-bayes": "#e08a8a",
 }
 _MECH_HUE = {
     "cat": "#b2182b", "neuralcat": "#d6604d", "lg": "#c2185b", "mdn": "#7f0a13",
@@ -204,6 +211,10 @@ _BASELINE_LABEL = {
     "pgmpy-lg-predict": "pgmpy LG",
     "pomegranate-discrete-ve": "pomegranate",
     "pyro-empirical-importance": "pyro IS",
+    "pgmpy-mle": "pgmpy MLE",
+    "pgmpy-bayes": "pgmpy Bayes",
+    "pyro-empirical": "pyro",
+    "nbn-cat-bayes": "NBN cat-Bayes",
 }
 
 
@@ -399,7 +410,8 @@ def forced_methods(group: str, methods, always_show=()) -> list[str]:
 
 
 def prepare_family(group: str, benchmark: str, family: str, dff: pd.DataFrame,
-                   aggregation: str, n_nodes: dict, always_show=()) -> FamilyData | None:
+                   aggregation: str, n_nodes: dict, always_show=(),
+                   all_nbn: bool = False) -> FamilyData | None:
     dff = _filter_unsupported_baselines(dff, family)
     if dff.empty:
         return None
@@ -420,6 +432,8 @@ def prepare_family(group: str, benchmark: str, family: str, dff: pd.DataFrame,
             va = all_view(cells, n_total, aggregation)
             ranking = rank_nbn(va, metric_kind(headline), xs)
             chosen = select_nbn(ranking)
+    if all_nbn:
+        chosen = [m for m in methods if is_nbn(m)]
     forced = [m for m in forced_methods(group, methods, always_show) if m not in chosen]
     return FamilyData(group, benchmark, family, dfx, x_axis, xs, headline,
                       non_nbn + chosen + forced, ranking, forced)
@@ -462,7 +476,7 @@ def _draw_panel(ax, view: pd.DataFrame, xs, x_axis: str, metric: str,
                 continue
             if np.isnan(r.center):
                 continue
-            lo, hi = clip_band(kind, r.lo, r.hi)
+            lo, hi = clip_band(kind, r.plo, r.phi)
             if np.isnan(lo) or np.isnan(hi):
                 lo, hi = r.center, r.center
             poss.append(pos)
@@ -470,7 +484,7 @@ def _draw_panel(ax, view: pd.DataFrame, xs, x_axis: str, metric: str,
             los.append(lo)
             his.append(hi)
             if view_name == "all" and r.k < r.n:
-                notes.append((pos, "kn", f"{r.k}/{r.n}", "black", hi))
+                notes.append((pos, "kn", f"{r.n - r.k}/{r.n}", "black", hi))
         if not poss:
             continue
         drew = True
@@ -479,9 +493,9 @@ def _draw_panel(ax, view: pd.DataFrame, xs, x_axis: str, metric: str,
                color=method_color(m), edgecolor="black" if is_nbn(m) else "none",
                linewidth=0.35, error_kw=dict(lw=0.5, capthick=0.5))
         finite += centers + his
-    positives = [v for v in finite if v > 0]
-    wide = len(positives) >= 2 and max(positives) / min(positives) > 30
-    if (kind == "time" and positives) or wide:
+    # Linear y everywhere; only the batch-size sweep (time per query over
+    # several decades) is drawn on a log axis.
+    if x_axis == "batch_size" and any(v > 0 for v in finite):
         ax.set_yscale("log")
     y0, y1 = ax.get_ylim()
     for pos, nk, text, col, y in notes:
@@ -506,20 +520,35 @@ def _draw_panel(ax, view: pd.DataFrame, xs, x_axis: str, metric: str,
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
     ax.tick_params(length=2, pad=1.5)
+    # the "1e7" multiplier of a large linear axis must not run into the title
+    ax.yaxis.get_offset_text().set(fontsize=5, ha="right")
     return drew
+
+
+def _needs_own_axis(view: pd.DataFrame, xs, x_axis: str, methods) -> bool:
+    """True for a network axis whose best value differs by more than 100x
+    between networks (asked for accuracy metrics only: continuous real
+    networks are scored in each network's own data units): on a shared linear axis all but one network would be
+    flat, so every network gets its own panel."""
+    if x_axis != "network" or len(xs) < 2:
+        return False
+    v = view[view["shown"] & view["method"].isin(methods) & (view["k"] > 0)]
+    best = v[np.isfinite(v["center"]) & (v["center"] > 0)].groupby("x")["center"].min()
+    return len(best) >= 2 and best.max() / best.min() > 100
 
 
 def _chunk(xs: list, size: int) -> list[list]:
     return [xs[i:i + size] for i in range(0, len(xs), size)]
 
 
-def _layout_rows(panels: list[tuple]) -> list[list[tuple]]:
+def _layout_rows(panels: list[tuple],
+                 max_panels: int = _MAX_PANELS_PER_ROW) -> list[list[tuple]]:
     """Pack panels (each carrying its x chunk) into rows of at most
-    ``_MAX_PANELS_PER_ROW`` panels and ``_MAX_GROUPS_PER_ROW`` bar groups."""
+    ``max_panels`` panels and ``_MAX_GROUPS_PER_ROW`` bar groups."""
     rows, cur, cur_groups = [], [], 0
     for p in panels:
         n = len(p[2])
-        if cur and (len(cur) >= _MAX_PANELS_PER_ROW or cur_groups + n > _MAX_GROUPS_PER_ROW):
+        if cur and (len(cur) >= max_panels or cur_groups + n > _MAX_GROUPS_PER_ROW):
             rows.append(cur)
             cur, cur_groups = [], 0
         cur.append(p)
@@ -530,17 +559,20 @@ def _layout_rows(panels: list[tuple]) -> list[list[tuple]]:
 
 
 def fig_family_row(panels: list[tuple], metric_of: dict[str, str], out_path: Path,
-                   view_name: str, row_height: float = _ROW_HEIGHT_IN) -> bool:
+                   view_name: str, row_height: float = _ROW_HEIGHT_IN,
+                   max_panels: int = _MAX_PANELS_PER_ROW) -> bool:
     """Write one figure: ``panels`` = [(family, view_df, xs, x_axis, methods,
     common_sets)], ``metric_of[family]`` = the metric drawn in that panel.
     Families with more than ``_MAX_GROUPS_PER_PANEL`` x values are split into
     consecutive panels; panels are packed into rows of width 7 in."""
-    return fig_family_rows([(panels, metric_of)], out_path, view_name, row_height)
+    return fig_family_rows([(panels, metric_of)], out_path, view_name, row_height,
+                           max_panels)
 
 
 def fig_family_rows(panel_rows: list[tuple[list[tuple], dict[str, str]]],
                     out_path: Path, view_name: str,
-                    row_height: float = _ROW_HEIGHT_IN) -> bool:
+                    row_height: float = _ROW_HEIGHT_IN,
+                    max_panels: int = _MAX_PANELS_PER_ROW) -> bool:
     """Write one figure with one block of panel rows per ``(panels,
     metric_of)`` entry (e.g. accuracy above query time), all rows sharing a
     single legend at the top; each row of panels is ``row_height`` inches
@@ -550,21 +582,24 @@ def fig_family_rows(panel_rows: list[tuple[list[tuple], dict[str, str]]],
     for panels, metric_of in panel_rows:
         split = []
         for fam, vdf, xs, x_axis, methods, common in panels:
-            chunks = _chunk(list(xs), _MAX_GROUPS_PER_PANEL)
+            per_x = (metric_of[fam] not in TIME_METRICS
+                     and _needs_own_axis(vdf, xs, x_axis, methods))
+            chunks = _chunk(list(xs), 1 if per_x else _MAX_GROUPS_PER_PANEL)
             for ci, chunk in enumerate(chunks):
                 title = FAMILY_TITLE.get(fam, fam)
-                if len(chunks) > 1:
+                if len(chunks) > 1 and not per_x:
                     title += f" ({ci + 1}/{len(chunks)})"
                 split.append((fam, vdf, chunk, x_axis, methods, common, title,
                               metric_of))
-        rows += _layout_rows(split)
+        rows += _layout_rows(split, max_panels)
         split_all += split
     if not rows:
         return False
     all_methods: list[str] = []
     for p in split_all:
+        present = set(p[1].loc[p[1]["x"].isin(p[2]), "method"])
         for m in p[4]:
-            if m not in all_methods:
+            if m in present and m not in all_methods:
                 all_methods.append(m)
     all_methods = ([m for m in all_methods if not is_nbn(m)]
                    + [m for m in all_methods if is_nbn(m)])
@@ -596,9 +631,11 @@ def fig_family_rows(panel_rows: list[tuple[list[tuple], dict[str, str]]],
                 if metric_of is panel_rows[0][1]:
                     ax.set_title(title, pad=2)
                 ax.set_xlabel(_X_LABEL.get(x_axis, x_axis), labelpad=1)
-                # y label per panel when metrics differ, else first panel only
+                # y label on the first panel and wherever the metric changes
                 ylab = f"{_Y_LABEL.get(metric, metric)}"
-                if len(set(metric_of.values())) > 1 or pi == 0:
+                if metric == "log_likelihood" and x_axis == "n_nodes":
+                    ylab += " per node"
+                if pi == 0 or metric_of[row[pi - 1][0]] != metric:
                     if metric not in TIME_METRICS:
                         ylab += f" ({_direction(metric).replace(' better', ' is better')})"
                     ax.set_ylabel(ylab, labelpad=2)
@@ -654,14 +691,14 @@ def _families(df: pd.DataFrame) -> list[str]:
 
 
 def _prepare_group(group: str, df: pd.DataFrame, aggregation: str,
-                   always_show=()) -> list[FamilyData]:
+                   always_show=(), all_nbn: bool = False) -> list[FamilyData]:
     out = []
     for bench in sorted(df["benchmark"].dropna().unique()):
         dfb = df[df["benchmark"] == bench]
         n_nodes = resolve_n_nodes(dfb, bench)
         for fam in _families(dfb):
             fd = prepare_family(group, bench, fam, dfb[dfb["family"] == fam],
-                                aggregation, n_nodes, always_show)
+                                aggregation, n_nodes, always_show, all_nbn)
             if fd is not None:
                 out.append(fd)
     return out
@@ -698,7 +735,8 @@ def _selection_report(fds: list[FamilyData]) -> str:
 
 
 def render_group(fds: list[FamilyData], group: str, out_dir: Path, aggregation: str,
-                 view_name: str, row_height: float = _ROW_HEIGHT_IN) -> list[Path]:
+                 view_name: str, row_height: float = _ROW_HEIGHT_IN,
+                 max_panels: int = _MAX_PANELS_PER_ROW) -> list[Path]:
     """All figures + tables of one benchmark group."""
     written: list[Path] = []
     tables = out_dir / "tables"
@@ -714,7 +752,7 @@ def render_group(fds: list[FamilyData], group: str, out_dir: Path, aggregation: 
         if len(panel_rows) < len(specs):
             continue   # a stacked figure needs every metric row
         path = out_dir / f"{group}_{tag}.pdf"
-        if fig_family_rows(panel_rows, path, view_name, row_height):
+        if fig_family_rows(panel_rows, path, view_name, row_height, max_panels):
             written.append(path)
             logger.info("wrote %s", path)
     return written
@@ -741,6 +779,10 @@ def _metric_panels(fds: list[FamilyData], group: str, metric_spec: str, mode,
             logger.info("%s/%s/%s%s: no solved cell", group, fd.family, metric,
                         f"[{mode}]" if mode else "")
             continue
+        per_node = metric == "log_likelihood" and fd.x_axis == "n_nodes"
+        if per_node:
+            # the joint LL grows linearly with the network: report it per node
+            cells = cells.assign(value=cells["value"] / cells["x"].astype(float))
         views = views_for_methods(cells, n_total, aggregation, metric, fd.xs, fd.shown)
         vdf = views.all if view_name == "all" else views.common
         panels.append((fd.family, vdf, fd.xs, fd.x_axis, fd.shown, views.common_sets))
@@ -752,7 +794,8 @@ def _metric_panels(fds: list[FamilyData], group: str, metric_spec: str, mode,
         write_view_table(
             vdf, fd.xs, fd.x_axis, metric, view_name, tex,
             caption_prefix=f"{group.replace('_', ' ')}, {FAMILY_TITLE.get(fd.family, fd.family)}"
-                           + (f", evidence={mode}" if mode else ""),
+                           + (f", evidence={mode}" if mode else "")
+                           + (", per node" if per_node else ""),
             label=f"tab:{group}_{fd.family}_{metric}{suffix}",
             common_sets=views.common_sets,
             dagger_note="best parametric / best non-parametric nbn method of the family")
@@ -761,7 +804,8 @@ def _metric_panels(fds: list[FamilyData], group: str, metric_spec: str, mode,
 
 def run_paper(groups: dict[str, list], output_dir: Path, aggregation: str = "iqm_iqr",
               view: str = "all", exclude=(), exclude_families=(),
-              row_height: float = _ROW_HEIGHT_IN, always_show=()) -> int:
+              row_height: float = _ROW_HEIGHT_IN, always_show=(),
+              all_nbn: bool = False, max_panels: int = _MAX_PANELS_PER_ROW) -> int:
     """Entry point of ``nbn-bench paper``.
 
     ``groups``: ``{group_name: [base_run, rerun, ...]}`` for any subset of
@@ -769,7 +813,9 @@ def run_paper(groups: dict[str, list], output_dir: Path, aggregation: str = "iqm
     ``<output_dir>/tables/<group>_<family>_<metric>.tex`` and
     ``<output_dir>/selection.txt``. ``exclude`` / ``exclude_families``: see
     :func:`drop_excluded`; ``always_show``: see :func:`forced_methods`;
-    ``row_height``: inches per row of panels. Returns a process exit code."""
+    ``row_height``: inches per row of panels; ``all_nbn``: show every nbn
+    method instead of the two selected ones (complete-results appendix);
+    ``max_panels``: panels per figure row. Returns a process exit code."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     unknown = set(groups) - set(GROUPS)
@@ -786,12 +832,13 @@ def run_paper(groups: dict[str, list], output_dir: Path, aggregation: str = "iqm
         if group not in groups or not groups[group]:
             continue
         df = drop_excluded(load_group(groups[group]), exclude, exclude_families)
-        fds = _prepare_group(group, df, aggregation, always_show)
+        fds = _prepare_group(group, df, aggregation, always_show, all_nbn)
         if not fds:
             logger.warning("%s: nothing to plot", group)
             continue
         all_fds += fds
-        written += render_group(fds, group, output_dir, aggregation, view, row_height)
+        written += render_group(fds, group, output_dir, aggregation, view, row_height,
+                                max_panels)
     report = _selection_report(all_fds)
     if exclude or exclude_families or always_show:
         report = (f"excluded baselines: {', '.join(exclude) or '(none)'}\n"

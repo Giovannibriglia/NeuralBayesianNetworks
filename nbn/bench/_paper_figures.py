@@ -9,7 +9,7 @@ Every figure is a **grouped bar plot** over the benchmark's discrete x grid
 figure and table comes in two views (``docs/v0.18-bar-reporting-all-common.md``,
 aggregation in :mod:`nbn.bench._paper_agg`):
 
-  all/      each method over the seeds it solved; ``k/n`` annotated when k<n
+  all/      each method over the seeds it solved; ``f/n`` (failed / run) annotated when f>0
   common/   each method over the seeds solved by every shown method at that x
 
 Shown methods per x = all non-nbn baselines applicable to the family + the
@@ -135,13 +135,6 @@ def baseline_colors(baselines) -> dict[str, tuple]:
             rgb = base * (1 - t) + np.array([1.0, 1.0, 1.0]) * t
             colors[b] = (*rgb, 1.0)
     return colors
-
-
-def _log_or_linear(ax, vals, axis: str) -> None:
-    """Use log scale if the positive dynamic range exceeds ~1.5 decades."""
-    pos = [v for v in vals if v is not None and v > 0 and not np.isnan(v)]
-    if len(pos) >= 2 and max(pos) / min(pos) > 30:
-        (ax.set_xscale if axis == "x" else ax.set_yscale)("log")
 
 
 def _direction(metric) -> str:
@@ -340,8 +333,8 @@ def _tick(x, x_axis: str) -> str:
 def fig_bars(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name: str,
              out_path: Path, title: str, common_sets: dict | None = None) -> list[Path]:
     """Grouped bar plot: one group per x, one bar per shown method, error bar =
-    aggregation band. Annotations: ``k/n`` above a bar whose method solved
-    fewer than all seeds (``all`` view); the failure code in a slot whose
+    plot band (:func:`plot_band`). Annotations: ``f/n`` (failed / run seeds)
+    above a bar whose method solved fewer than all seeds (``all`` view); the failure code in a slot whose
     method solved none; ``+∞`` for an infinite center. ``common`` groups carry
     ``|C|=k`` under the x label. The x grid is split into ``_partK`` files
     beyond :data:`_MAX_GROUPS_PER_FIGURE` groups.
@@ -380,7 +373,7 @@ def fig_bars(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name: str,
                     continue
                 if np.isnan(r.center):
                     continue
-                lo, hi = clip_band(kind, r.lo, r.hi)
+                lo, hi = clip_band(kind, r.plo, r.phi)
                 if np.isnan(lo) or np.isnan(hi):
                     lo, hi = r.center, r.center
                 centers.append(r.center)
@@ -388,7 +381,7 @@ def fig_bars(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name: str,
                 his.append(hi)
                 poss.append(pos)
                 if view_name == "all" and r.k < r.n:
-                    notes.append((pos, "kn", f"{r.k}/{r.n}", colors[m], hi))
+                    notes.append((pos, "kn", f"{r.n - r.k}/{r.n}", colors[m], hi))
             if not poss:
                 # no bar in this chunk (DNF / +inf everywhere): keep the legend
                 # entry so the failure-code / +∞ annotation is attributable.
@@ -399,11 +392,9 @@ def fig_bars(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name: str,
                    color=colors[m], edgecolor="white", linewidth=0.5, label=m,
                    error_kw=dict(lw=0.8))
             finite_vals += centers + his
-        positives = [v for v in finite_vals if v > 0]
-        if kind == "time" and positives and len(positives) == len(finite_vals):
+        # Linear y everywhere except the batch-size sweep.
+        if x_axis == "batch_size" and any(v > 0 for v in finite_vals):
             ax.set_yscale("log")
-        else:
-            _log_or_linear(ax, finite_vals, "y")
         y0, y1 = ax.get_ylim()
         for pos, nk, text, col, y in notes:
             if nk == "kn":
@@ -548,7 +539,7 @@ def write_view_table(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name
                      dagger_note: str | None = None) -> bool:
     """Rows = shown methods (nbn rows marked $^\\dagger$), columns = x values.
 
-    ``all``:    ``c±h (k/n)`` with the ``(k/n)`` only when k < n; failure code
+    ``all``:    ``c±h (f/n)``, f = failed seeds, only when f > 0; failure code
                 when no seed was solved; ``--`` when the method did not run or
                 is not among the top-N nbn at that column.
     ``common``: ``c±h`` over C(x); a footer row gives |C(x)| per column.
@@ -575,7 +566,7 @@ def write_view_table(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name
                 continue
             s = _fmt(r.center, r.lo, r.hi)
             if view_name == "all" and r.k < r.n:
-                s += f" ({r.k}/{r.n})"
+                s += f" ({r.n - r.k}/{r.n})"
             cells[m][x] = s
             centrals[m][x] = r.center if np.isfinite(r.center) else None
     bold = {x: _bold_best({m: centrals[m][x] for m in slots}, kind) for x in xs}
@@ -595,7 +586,8 @@ def write_view_table(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name
     fixed = dagger_note is not None
     tail = "" if fixed else ", or an nbn method outside the top-N at that column"
     if view_name == "all":
-        rule = ("(k/n) = seeds solved / seeds run, shown when k<n; a failure "
+        rule = ("(f/n) = seeds failed (timeout, out of memory, NaN, error) / "
+                "seeds run, shown when f>0; a failure "
                 f"code = no seed solved; -- = not run{tail}")
     else:
         rule = ("each value over the seeds solved by every shown method at "
@@ -604,7 +596,7 @@ def write_view_table(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name
     dagger = dagger_note if fixed else f"top-{top_nbn} nbn per column"
     caption = (f"{caption_prefix}. {METRIC_LABEL.get(metric, metric)} "
                f"({_direction(metric)}) vs {x_axis}, view={view_name}. "
-               f"Center$\\pm$band across seeds; $\\dagger$ = {dagger}; {rule}.")
+               f"IQM$\\pm$IQR/2 across seeds; $\\dagger$ = {dagger}; {rule}.")
     _write_table(out_path, header, rows, caption, label=label, footer_rows=footer)
     return True
 
