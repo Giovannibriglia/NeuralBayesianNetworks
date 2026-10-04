@@ -240,18 +240,26 @@ class TestQueryBatchEdgeCases:
         for bp, sp in zip(batched, sequential):
             assert torch.allclose(bp.probs, sp.probs, atol=1e-6)
 
-    def test_all_empty_mode_batch_falls_back(self, cat_ve_adapter):
-        """All-None evidence (empty mode, e.g. heaviest V2 queries):
-        engines infer B from evidence tensors, so an evidence-free batch
-        must take the sequential fallback and still return B posteriors.
-        Regression for the PR 5 speed-smoke failure (shape (1, K) for B=4).
+    def test_all_empty_mode_batch_answered_once(self, cat_ve_adapter, monkeypatch):
+        """All-None evidence (empty mode, e.g. heaviest V2 queries): the B
+        queries are one and the same marginal, so it is answered by a single
+        ``query`` call and returned B times (it used to be B sequential
+        calls, which made the per-query time flat in B). Still B posteriors
+        of shape (K,): regression for the PR 5 speed-smoke failure
+        (shape (1, K) for B=4).
         """
         queries = [
             Query(targets=("X2",), evidence={"X0": None}, kind="marginal")
             for _ in range(4)
         ]
+        expected = cat_ve_adapter.query(queries[0])
+        calls = []
+        real_query = cat_ve_adapter.query
+        monkeypatch.setattr(cat_ve_adapter, "query",
+                            lambda q: calls.append(q) or real_query(q))
         batched = cat_ve_adapter.query_batch(queries)
-        sequential = [cat_ve_adapter.query(q) for q in queries]
+        assert len(calls) == 1
         assert len(batched) == 4
-        for bp, sp in zip(batched, sequential):
-            assert torch.allclose(bp.probs, sp.probs, atol=1e-6)
+        for bp in batched:
+            assert bp.probs.shape == expected.probs.shape
+            assert torch.allclose(bp.probs, expected.probs, atol=1e-6)

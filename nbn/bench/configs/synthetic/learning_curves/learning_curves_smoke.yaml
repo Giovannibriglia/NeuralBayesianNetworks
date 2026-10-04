@@ -42,7 +42,7 @@ baselines:
   - {library: pomegranate, mechanism: discrete, param_method: mle}
   - {library: pyro,        mechanism: empirical, param_method: mle}
   - {library: nbn,         mechanism: cat,      param_method: mle}
-  - {library: pgmpy, mechanism: lg,       param_method: mle}
+  - {library: pgmpy, mechanism: lg,       param_method: lg}
   - { library: nbn,   mechanism: kde,      param_method: mle, device: gpu}
   - { library: nbn,   mechanism: knn,      param_method: mle, device: gpu}
   - { library: nbn,   mechanism: flexcode, param_method: mle, device: gpu}

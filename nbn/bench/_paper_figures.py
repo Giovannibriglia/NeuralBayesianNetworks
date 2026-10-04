@@ -31,7 +31,7 @@ timing pseudo-metrics: ``query_time`` (per-query, batch_size sweeps) or
 ``total_query_time`` + ``fit_time`` (everything else). Runs whose queries mix
 evidence modes (``full`` / ``empty``, paired by the heaviest-query selector)
 also get each query-derived metric per mode, since the two regimes differ
-(empty-evidence batches fall back to sequential queries in nbn).
+(up to v0.20.1 nbn answered an empty-evidence batch one query at a time).
 """
 from __future__ import annotations
 

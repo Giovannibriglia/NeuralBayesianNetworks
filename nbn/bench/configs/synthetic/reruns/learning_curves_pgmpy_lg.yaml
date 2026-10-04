@@ -1,0 +1,55 @@
+# =============================================================================
+# v0.20.2 partial rerun — continuous families, pgmpy linear-Gaussian only
+# =============================================================================
+# Generated from synthetic/learning_curves/learning_curves.yaml; every non-baseline setting and every kept baseline
+# line is identical to it, so problems, seeds and budgets match the original
+# run cell for cell.
+#
+# Why: up to v0.20.1 the config declared the pgmpy linear-Gaussian baseline with
+# `param_method: mle`, which builds a second copy of the discrete pgmpy-mle
+# baseline, and the pgmpy adapter could not score a linear-Gaussian model.
+# The continuous panels therefore had no external baseline. v0.20.2 fixes the
+# config line (`param_method: lg` -> label pgmpy-lg) and adds held-out
+# log-likelihood and calibration (PIT-KS, SD-ratio) for it. The fit is closed
+# form: the run takes minutes and needs no GPU.
+#
+# After the run, splice the new cells into the original parquet:
+#   nbn-bench merge <learning_curves run dir> <this run dir> -o <merged>.parquet
+# then plot <merged>.parquet as usual.
+# =============================================================================
+
+BATCH_SIZE_FIT: &BATCH_SIZE_FIT 1024
+
+version: "v0.13"
+benchmark: synthetic
+config_name: learning_curves_rerun_pgmpy_lg
+metrics: log_likelihood
+selector: uniform_random
+
+source:
+  families: [continuous_lg, continuous_nongauss]
+  n_nodes_list: [50]
+  seeds: [0, 1, 2, 3, 4]
+  n_train_sweep: [4096, 16384, 32768, 65536]
+  n_test: 4096
+  n_reference: 50000
+  edge_density: 0.20
+  max_in_degree: 4
+  cardinality: 4
+  fraction_continuous: 0.5
+
+
+# Baseline knobs:
+#   extra_kwargs.batch_size (nbn only): minibatch size for the SGD-trained
+#     mechanisms (neuralcat, mdn, flow, flexcode). Set once via the top-level
+#     BATCH_SIZE_FIT anchor and referenced as *BATCH_SIZE_FIT; omitted -> each
+#     mechanism's own default (512). Closed-form mechanisms (cat, cat-bayes,
+#     lg, kde, knn) ignore it. It is part of the fit-once cache identity
+#     (runner._fit_identity), so keep it identical across baselines that
+#     should share a fit.
+baselines:
+  - {library: pgmpy, mechanism: lg,       param_method: lg}
+n_queries_per_cell: 12
+per_cell_timeout_s: 1200.0
+fit_timeout_s: 1200
+

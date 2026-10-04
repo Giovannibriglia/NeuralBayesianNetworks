@@ -164,6 +164,21 @@ class PgmpyAdapter:
     # flag=True and let the cell-level gate decide.
     supports_param_recovery: bool = True
 
+    # Parameter-learning scoring and calibration: implemented for the
+    # linear-Gaussian model only (closed-form Gaussian conditionals, see
+    # score_data / predictive_samples). The discrete mle / bayes paths keep
+    # reporting not_supported.
+    @property
+    def supports_scoring(self) -> bool:
+        return self.param_method == "lg"
+
+    @property
+    def supports_calibration(self) -> bool:
+        return self.param_method == "lg"
+
+    # Predictive samples per continuous node (same S as NBNAdapter).
+    N_CALIBRATION_SAMPLES: int = 400
+
     def __init__(
         self,
         param_method: str,
@@ -212,6 +227,8 @@ class PgmpyAdapter:
         self._model: Any | None = None          # DiscreteBayesianNetwork | LGBN
         self._infer: Any | None = None          # VariableElimination (discrete)
         self._lg_topo: list[str] | None = None  # topological order (LG path)
+        # node -> (parents, beta [1+P] float64, std): the fitted LG conditionals
+        self._lg_params: dict[str, tuple[list[str], torch.Tensor, float]] = {}
         self.problem: BenchmarkProblem | None = None
 
     # -------------------------------------------------------------------------
@@ -334,6 +351,8 @@ class PgmpyAdapter:
                 cpd = LinearGaussianCPD(
                     variable=node, beta=[mean], std=var ** 0.5, evidence=[],
                 )
+                self._lg_params[node] = (
+                    [], torch.tensor([mean], dtype=torch.float64), var ** 0.5)
             else:
                 pa = torch.cat(
                     [problem.train_data[p].cpu().float().reshape(-1, 1)
@@ -352,11 +371,71 @@ class PgmpyAdapter:
                     std=var ** 0.5,
                     evidence=parents,
                 )
+                self._lg_params[node] = (parents, theta.double(), var ** 0.5)
             bn.add_cpds(cpd)
 
         self._model = bn
         self._lg_topo = topo
         self._kind = "continuous_lg"
+
+    # -------------------------------------------------------------------------
+    # Parameter-learning scoring (linear-Gaussian model)
+    # -------------------------------------------------------------------------
+
+    def _lg_means(self, data: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Conditional mean ``[N]`` of every node given its parents' values in
+        ``data`` (the fitted ``beta0 + sum_j beta_j * parent_j``)."""
+        if self._kind != "continuous_lg" or not self._lg_params:
+            raise RuntimeError(
+                "Adapter not fitted with param_method='lg'. Call fit() first."
+            )
+        cols = {k: torch.as_tensor(v).cpu().double().reshape(-1)
+                for k, v in data.items()}
+        n = int(next(iter(cols.values())).shape[0])
+        means = {}
+        for node, (parents, beta, _std) in self._lg_params.items():
+            mean = beta[0].expand(n).clone()
+            for j, p in enumerate(parents):
+                mean = mean + beta[1 + j] * cols[p]
+            means[node] = mean
+        return means
+
+    def score_data(self, test_data: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Per-row joint log-density ``[N]`` of held-out rows under the fitted
+        linear-Gaussian network: the sum over nodes of
+        ``log N(x_i; beta0_i + beta_i . pa_i, std_i^2)`` (same convention as
+        ``NBNAdapter.score_data``: sum over nodes, the measurement takes the
+        mean over rows)."""
+        means = self._lg_means(test_data)
+        total = None
+        for node, (_parents, _beta, std) in self._lg_params.items():
+            x = torch.as_tensor(test_data[node]).cpu().double().reshape(-1)
+            lp = torch.distributions.Normal(means[node], std).log_prob(x)
+            total = lp if total is None else total + lp
+        return total.float()
+
+    def predictive_samples(
+        self, test_data: dict[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        """``{node: samples[N, S]}``: ``S = N_CALIBRATION_SAMPLES`` draws from
+        each node's fitted conditional ``N(mean(parents of row i), std^2)``
+        for every test row (same contract as ``NBNAdapter.predictive_samples``;
+        a root node's rows share one unconditional distribution). Stochastic:
+        the measurement seeds the global RNG around the call."""
+        means = self._lg_means(test_data)
+        s = self.N_CALIBRATION_SAMPLES
+        out = {}
+        for node in self._lg_topo or list(self._lg_params):
+            std = self._lg_params[node][2]
+            mean = means[node]
+            if not self._lg_params[node][0]:
+                # root: one unconditional predictive, expanded over the rows
+                draw = mean[:1, None] + std * torch.randn(1, s, dtype=torch.float64)
+                out[node] = draw.expand(mean.shape[0], -1).float()
+            else:
+                out[node] = (mean[:, None] + std * torch.randn(
+                    mean.shape[0], s, dtype=torch.float64)).float()
+        return out
 
     # -------------------------------------------------------------------------
     # Query

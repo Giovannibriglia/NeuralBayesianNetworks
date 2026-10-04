@@ -1,0 +1,91 @@
+# =============================================================================
+# v0.20.2 partial rerun — all families, nbn baselines only (evidence-free batches are now answered once)
+# =============================================================================
+# Generated from synthetic/speed/inference_speed.yaml; every non-baseline setting and every kept baseline
+# line is identical to it, so problems, seeds and budgets match the original
+# run cell for cell.
+#
+# Why: up to v0.20.1 a batch of evidence-free queries (the `empty` evidence mode)
+# fell back to B sequential calls in the nbn adapter, so the per-query time
+# of every nbn baseline was flat in B. v0.20.2 answers the shared marginal
+# once per batch. A cell holds both evidence modes, so every nbn cell is rerun;
+# the other libraries are unchanged.
+#
+# After the run, splice the new cells into the original parquet:
+#   nbn-bench merge <batch_speed run dir> <this run dir> -o <merged>.parquet
+# then plot <merged>.parquet as usual.
+# =============================================================================
+
+BATCH_SIZE_FIT: &BATCH_SIZE_FIT 1024
+
+version: "v0.14"
+benchmark: synthetic
+config_name: batch_speed_rerun_nbn
+metrics: timing
+
+batch_sizes: [1, 128, 512, 1024]
+n_batch_queries: 1024
+
+source:
+  families: [discrete, continuous_lg, continuous_nongauss, hybrid]
+  n_nodes_list: [50]
+  seeds: [0, 1, 2, 3, 4]
+  n_train: 4096        # 2x n_batch_queries: variant sampling without replacement
+  n_test: 1024
+  n_reference: 10000
+  edge_density: 0.20
+  max_in_degree: 4
+  cardinality: 4
+  fraction_continuous: 0.5
+
+selector:
+  type: heaviest_by_role
+  # n_batch_queries comes from the top-level field above.
+
+# Baselines: all applicable per family (§5.2); inapplicable (baseline,
+# family) cells emit not_supported rows via is_applicable, as everywhere.
+# Batchable (no explicit batch_size — follows the sweep): nbn-*, pomegranate.
+# Non-batchable (batch_size: 1 pinned — runs once): pyro-*, pgmpy-*.
+# Grouped by mechanism, then engine (ve, lw, ais, avi).
+#
+# extra_kwargs: {epochs: 2} caps neural-mechanism training at 2 epochs for
+# speed (the adapter reads kwargs["epochs"]; omitted = each mechanism's own
+# designed budget — nbn_adapter.py).
+# Harmless no-op on closed-form mechanisms (cat tabular MLE, lg). NOTE: the
+# probe used {fit_epochs:2}, which was a double no-op — malformed YAML key
+# AND the adapter reads `epochs`, not `fit_epochs` — so it silently ran 20
+# epochs. {epochs: 2} is the corrected form that actually caps fitting.
+#
+#   extra_kwargs.batch_size (nbn only) is the TRAINING minibatch — distinct
+#     from the per-baseline top-level `batch_size:` (query-batch pin) and the
+#     top-level `batch_sizes:` sweep above. It is the minibatch size for the SGD-trained
+#     mechanisms (neuralcat, mdn, flow, flexcode). Set once via the top-level
+#     BATCH_SIZE_FIT anchor and referenced as *BATCH_SIZE_FIT; omitted -> each
+#     mechanism's own default (512). Closed-form mechanisms (cat, cat-bayes,
+#     lg, kde, knn) ignore it. It is part of the fit-once cache identity
+#     (runner._fit_identity), so keep it identical across baselines that
+#     should share a fit.
+baselines:
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ve,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
+  - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
+  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
+  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
+  - {library: nbn,         mechanism: mdn,       param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
+  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
+  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: ais,    extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
+  - {library: nbn,         mechanism: flow,      param_method: mle, inference_method: avi,    extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}}
+  - {library: nbn,         mechanism: kde,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}, device: gpu}
+  - {library: nbn,         mechanism: knn,       param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}, device: gpu}
+  - {library: nbn,         mechanism: flexcode,  param_method: mle, inference_method: lw,     extra_kwargs: {epochs: 1,  batch_size: *BATCH_SIZE_FIT, n_samples: 16}, device: gpu}
+# n_queries_per_cell is ignored by heaviest_by_role (fixed up-to-12
+# positions per DAG) but required by the schema.
+n_queries_per_cell: 12
+# Aggressive per-cell budget (§8.1): batchable baselines finish in
+# seconds; sequential baselines at N=10240 hit this and DNF by design.
+per_cell_timeout_s: 600.0
+fit_timeout_s: 1200
