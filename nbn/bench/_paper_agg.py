@@ -77,6 +77,51 @@ def is_nbn(baseline: str) -> bool:
     return parse_baseline(baseline)[0] == "nbn"
 
 
+# --- Method style (shared by every figure) ---------------------------------------
+# One colour per approach, the same in every figure, from colour-blind-safe
+# palettes (Okabe-Ito + Paul Tol "muted"): a colour per external baseline and
+# per nbn mechanism. The inference engine of an nbn method is a hatch, so
+# "cat + VE" and "cat + LW" share the colour of the cat mechanism.
+_APPROACH_COLOR = {
+    "pgmpy-mle": "#0072B2", "pgmpy-bayes": "#56B4E9", "pgmpy-lg": "#332288",
+    "pomegranate": "#AA4499", "pyro": "#999999",
+    "nbn-cat": "#D55E00", "nbn-cat-bayes": "#E69F00", "nbn-neuralcat": "#F0E442",
+    "nbn-lg": "#CC6677", "nbn-mdn": "#882255", "nbn-flow": "#117733",
+    "nbn-kde": "#44AA99", "nbn-knn": "#999933", "nbn-flexcode": "#DDCC77",
+    "nbn-smoothed": "#661100", "nbn-hybrid": "#000000",
+}
+_ENGINE_HATCH = {"ve": "", "lw": "/////", "ais": ".....", "avi": "xxxxx"}
+_STYLE_FALLBACK = "#BBBBBB"
+
+
+def approach(baseline: str) -> tuple[str, str]:
+    """(approach key, engine) of a baseline: 'nbn-cat-bayes' -> ('nbn-cat-bayes',
+    ''), 'nbn-mdn-lw' -> ('nbn-mdn', 'lw'), 'pgmpy-mle-ve' -> ('pgmpy-mle', ''),
+    'pyro-empirical-importance' -> ('pyro', '')."""
+    lib, rest = parse_baseline(baseline)
+    parts = rest.split("-") if rest else []
+    if lib != "nbn":
+        if lib == "pgmpy" and parts:
+            return f"pgmpy-{parts[0]}", ""
+        return lib, ""
+    engine = parts[-1] if parts and parts[-1] in _ENGINE_HATCH else ""
+    mech = parts[:-1] if engine else parts
+    if len(mech) > 1 and mech[1] == "router":
+        mech = mech[:1]
+    return "nbn-" + "-".join(mech), engine
+
+
+def method_style(baseline: str) -> tuple[str, str]:
+    """(hex colour, hatch) of a method, identical in every figure."""
+    key, engine = approach(baseline)
+    return _APPROACH_COLOR.get(key, _STYLE_FALLBACK), _ENGINE_HATCH.get(engine, "")
+
+
+def log_axis_ok(metric: str) -> bool:
+    """Figures use a log y axis except for metrics that take negative values."""
+    return metric not in HIGHER_IS_BETTER   # log-likelihood
+
+
 def metric_kind(metric: str) -> str:
     """``"time"`` for the timing pseudo-metrics, else the metric name itself
     (the key used by :func:`clip_band` / :func:`rank_key`)."""

@@ -57,6 +57,8 @@ from nbn.bench._paper_agg import (
     common_sets,
     common_view,
     is_nbn,
+    log_axis_ok,
+    method_style,
     metric_kind,
     parse_baseline,
     rank_key,
@@ -140,7 +142,8 @@ _MAX_GROUPS_PER_PANEL = 8       # x values per panel before a family is chunked
 _MAX_GROUPS_PER_ROW = 20        # bar groups per figure row
 _MAX_PANELS_PER_ROW = 4
 _ROW_HEIGHT_IN = 1.9            # default height of one row of panels, inches
-_LEGEND_COLS = 6
+_LEGEND_COL_IN = 0.78          # width of one legend column, inches
+_LEGEND_FONT = 5.5
 
 _STYLE = {
     "font.family": "serif",
@@ -159,45 +162,17 @@ _STYLE = {
     "ps.fonttype": 42,
     "savefig.bbox": "tight",
     "savefig.pad_inches": 0.02,
+    "hatch.linewidth": 0.3,
 }
-
-# Colours are fixed per method so a method looks the same in every figure:
-# one colour per non-nbn baseline; nbn methods take a hue per mechanism
-# (reds / magentas for parametric, oranges for non-parametric) lightened by
-# engine (VE darkest, then LW, AIS, AVI).
-_FIXED_COLORS = {
-    "pgmpy-mle-ve": "#1f77b4",
-    "pgmpy-bayes-ve": "#7fbde0",
-    "pgmpy-lg-predict": "#08306b",
-    "pomegranate-discrete-ve": "#9467bd",
-    "pyro-empirical-importance": "#8c564b",
-    # parameter-learning names (no inference engine)
-    "pgmpy-mle": "#1f77b4",
-    "pgmpy-bayes": "#7fbde0",
-    "pyro-empirical": "#8c564b",
-    "nbn-cat-bayes": "#e08a8a",
-}
-_MECH_HUE = {
-    "cat": "#b2182b", "neuralcat": "#d6604d", "lg": "#c2185b", "mdn": "#7f0a13",
-    "flow": "#e7298a", "hybrid": "#a50f15",
-    "kde": "#e6550d", "knn": "#fd8d3c", "flexcode": "#f7b267", "smoothed": "#fdd0a2",
-}
-_ENGINE_TINT = {"ve": 0.0, "lw": 0.18, "ais": 0.36, "avi": 0.52, "router": 0.0}
-_FALLBACK_COLOR = "#7f7f7f"
-
 
 def method_color(baseline: str) -> str:
-    """Hex colour of a method (see the palette comment above)."""
-    if baseline in _FIXED_COLORS:
-        return _FIXED_COLORS[baseline]
-    if not is_nbn(baseline):
-        return _FALLBACK_COLOR
-    parts = parse_baseline(baseline)[1].split("-")
-    hue = _MECH_HUE.get(parts[0], _FALLBACK_COLOR)
-    tint = _ENGINE_TINT.get(parts[1], 0.0) if len(parts) > 1 else 0.0
-    rgb = np.array(matplotlib.colors.to_rgb(hue))
-    rgb = rgb * (1 - tint) + np.ones(3) * tint
-    return matplotlib.colors.to_hex(rgb)
+    """Hex colour of a method (shared palette, :func:`method_style`)."""
+    return method_style(baseline)[0]
+
+
+def _bar_style(baseline: str) -> dict:
+    color, hatch = method_style(baseline)
+    return dict(facecolor=color, hatch=hatch, edgecolor="black", linewidth=0.35)
 
 
 _MECH_LABEL = {"cat": "cat", "neuralcat": "neural-cat", "lg": "LG", "mdn": "MDN",
@@ -456,6 +431,7 @@ def _draw_panel(ax, view: pd.DataFrame, xs, x_axis: str, metric: str,
     view = view[view["shown"] & view["method"].isin(methods)]
     by_key = {(r.method, r.x): r for r in view.itertuples(index=False)}
     kind = metric_kind(metric)
+    log_y = log_axis_ok(metric)
     n_x, n_s = len(xs), len(methods)
     width = 0.82 / max(n_s, 1)
     finite, notes = [], []
@@ -479,6 +455,10 @@ def _draw_panel(ax, view: pd.DataFrame, xs, x_axis: str, metric: str,
             lo, hi = clip_band(kind, r.plo, r.phi)
             if np.isnan(lo) or np.isnan(hi):
                 lo, hi = r.center, r.center
+            if log_y and r.center <= 0:
+                continue               # not drawable on a log axis
+            if log_y and lo <= 0:
+                lo = r.center
             poss.append(pos)
             centers.append(r.center)
             los.append(lo)
@@ -490,12 +470,10 @@ def _draw_panel(ax, view: pd.DataFrame, xs, x_axis: str, metric: str,
         drew = True
         yerr = [np.array(centers) - np.array(los), np.array(his) - np.array(centers)]
         ax.bar(poss, centers, width=width * 0.92, yerr=yerr, capsize=1.2,
-               color=method_color(m), edgecolor="black" if is_nbn(m) else "none",
-               linewidth=0.35, error_kw=dict(lw=0.5, capthick=0.5))
+               error_kw=dict(lw=0.5, capthick=0.5), **_bar_style(m))
         finite += centers + his
-    # Linear y everywhere; only the batch-size sweep (time per query over
-    # several decades) is drawn on a log axis.
-    if x_axis == "batch_size" and any(v > 0 for v in finite):
+    # Log y everywhere, except metrics with negative values (log-likelihood).
+    if log_y and any(v > 0 for v in finite):
         ax.set_yscale("log")
     y0, y1 = ax.get_ylim()
     for pos, nk, text, col, y in notes:
@@ -520,21 +498,7 @@ def _draw_panel(ax, view: pd.DataFrame, xs, x_axis: str, metric: str,
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
     ax.tick_params(length=2, pad=1.5)
-    # the "1e7" multiplier of a large linear axis must not run into the title
-    ax.yaxis.get_offset_text().set(fontsize=5, ha="right")
     return drew
-
-
-def _needs_own_axis(view: pd.DataFrame, xs, x_axis: str, methods) -> bool:
-    """True for a network axis whose best value differs by more than 100x
-    between networks (asked for accuracy metrics only: continuous real
-    networks are scored in each network's own data units): on a shared linear axis all but one network would be
-    flat, so every network gets its own panel."""
-    if x_axis != "network" or len(xs) < 2:
-        return False
-    v = view[view["shown"] & view["method"].isin(methods) & (view["k"] > 0)]
-    best = v[np.isfinite(v["center"]) & (v["center"] > 0)].groupby("x")["center"].min()
-    return len(best) >= 2 and best.max() / best.min() > 100
 
 
 def _chunk(xs: list, size: int) -> list[list]:
@@ -582,12 +546,10 @@ def fig_family_rows(panel_rows: list[tuple[list[tuple], dict[str, str]]],
     for panels, metric_of in panel_rows:
         split = []
         for fam, vdf, xs, x_axis, methods, common in panels:
-            per_x = (metric_of[fam] not in TIME_METRICS
-                     and _needs_own_axis(vdf, xs, x_axis, methods))
-            chunks = _chunk(list(xs), 1 if per_x else _MAX_GROUPS_PER_PANEL)
+            chunks = _chunk(list(xs), _MAX_GROUPS_PER_PANEL)
             for ci, chunk in enumerate(chunks):
                 title = FAMILY_TITLE.get(fam, fam)
-                if len(chunks) > 1 and not per_x:
+                if len(chunks) > 1:
                     title += f" ({ci + 1}/{len(chunks)})"
                 split.append((fam, vdf, chunk, x_axis, methods, common, title,
                               metric_of))
@@ -595,31 +557,55 @@ def fig_family_rows(panel_rows: list[tuple[list[tuple], dict[str, str]]],
         split_all += split
     if not rows:
         return False
-    all_methods: list[str] = []
-    for p in split_all:
-        present = set(p[1].loc[p[1]["x"].isin(p[2]), "method"])
-        for m in p[4]:
-            if m in present and m not in all_methods:
-                all_methods.append(m)
-    all_methods = ([m for m in all_methods if not is_nbn(m)]
-                   + [m for m in all_methods if is_nbn(m)])
-    ncol = min(len(all_methods), _LEGEND_COLS)
-    legend_rows = int(np.ceil(len(all_methods) / max(ncol, 1)))
-    head = 0.16 + 0.13 * legend_rows          # inches reserved for the legend
+
+    def present(p) -> list[str]:
+        """Methods of panel ``p`` with a row at one of its x values, externals
+        first: the entries of the legend drawn above that panel."""
+        have = set(p[1].loc[p[1]["x"].isin(p[2]), "method"])
+        ms = [m for m in p[4] if m in have]
+        return [m for m in ms if not is_nbn(m)] + [m for m in ms if is_nbn(m)]
+
+    # Every panel carries its own legend (only the methods it shows); the
+    # legend sits in a strip above the panel whose height follows the row's
+    # longest legend.
+    fig_w, usable = 7.0, 6.3
+    layout = []                       # per row: (ncols per panel, strip height in)
+    for row in rows:
+        ratios = [max(len(p[2]), 2) for p in row]
+        ncols = [max(1, int(usable * r / sum(ratios) / _LEGEND_COL_IN)) for r in ratios]
+        n_lines = max(int(np.ceil(len(present(p)) / nc)) for p, nc in zip(row, ncols))
+        layout.append((ncols, 0.20 + 0.125 * n_lines))
 
     with plt.rc_context(_STYLE):
-        n_rows = len(rows)
-        height = row_height * n_rows + head
-        fig = plt.figure(figsize=(7.0, height))
-        outer = fig.add_gridspec(n_rows, 1, hspace=0.42, top=1 - head / height,
-                                 bottom=0.02)
+        heights = [row_height + strip for _, strip in layout]
+        # inches between rows: x label, plus rotated network names
+        gap = 0.62 if any(p[3] == "network" for row in rows for p in row) else 0.36
+        fig = plt.figure(figsize=(fig_w, sum(heights) + gap * (len(rows) - 1)))
+        outer = fig.add_gridspec(len(rows), 1, height_ratios=heights, top=0.99,
+                                 bottom=0.02,
+                                 hspace=gap * len(rows) / sum(heights))
         drew_any = False
         for ri, row in enumerate(rows):
+            ncols, strip = layout[ri]
             ratios = [max(len(p[2]), 2) for p in row]
-            gs = outer[ri].subgridspec(1, len(row), width_ratios=ratios, wspace=0.28)
+            gs = outer[ri].subgridspec(2, len(row), width_ratios=ratios, wspace=0.28,
+                                       height_ratios=[strip, row_height], hspace=0.03)
             for pi, (fam, vdf, chunk, x_axis, methods, common, title,
                      metric_of) in enumerate(row):
-                ax = fig.add_subplot(gs[0, pi])
+                lax = fig.add_subplot(gs[0, pi])
+                lax.axis("off")
+                handles = [Patch(label=short_label(m), **_bar_style(m))
+                           for m in present(row[pi])]
+                if handles:
+                    lax.legend(handles=handles, loc="lower center", ncol=ncols[pi],
+                               frameon=False, bbox_to_anchor=(0.5, 0.0),
+                               fontsize=_LEGEND_FONT, handlelength=1.1,
+                               handleheight=0.9, handletextpad=0.35,
+                               columnspacing=0.8, labelspacing=0.25, borderaxespad=0.0)
+                # panel titles only on the first block of a stacked figure
+                if metric_of is panel_rows[0][1]:
+                    lax.set_title(title, pad=1)
+                ax = fig.add_subplot(gs[1, pi])
                 metric = metric_of[fam]
                 drew = _draw_panel(ax, vdf, chunk, x_axis, metric, methods,
                                    view_name, common)
@@ -627,9 +613,6 @@ def fig_family_rows(panel_rows: list[tuple[list[tuple], dict[str, str]]],
                 if not drew:
                     ax.text(0.5, 0.5, "no solved cell", ha="center", va="center",
                             transform=ax.transAxes, fontsize=6, color="gray")
-                # panel titles only on the first block of a stacked figure
-                if metric_of is panel_rows[0][1]:
-                    ax.set_title(title, pad=2)
                 ax.set_xlabel(_X_LABEL.get(x_axis, x_axis), labelpad=1)
                 # y label on the first panel and wherever the metric changes
                 ylab = f"{_Y_LABEL.get(metric, metric)}"
@@ -637,13 +620,10 @@ def fig_family_rows(panel_rows: list[tuple[list[tuple], dict[str, str]]],
                     ylab += " per node"
                 if pi == 0 or metric_of[row[pi - 1][0]] != metric:
                     if metric not in TIME_METRICS:
-                        ylab += f" ({_direction(metric).replace(' better', ' is better')})"
+                        # arrow = direction of "better"; the words do not fit a short axis
+                        ylab += {"lower better": " ↓", "higher better": " ↑"}.get(
+                            _direction(metric), "")
                     ax.set_ylabel(ylab, labelpad=2)
-        handles = [Patch(facecolor=method_color(m), edgecolor="black" if is_nbn(m) else "none",
-                         linewidth=0.35, label=short_label(m)) for m in all_methods]
-        fig.legend(handles=handles, loc="upper center", ncol=min(len(handles), 8),
-                   frameon=False, bbox_to_anchor=(0.5, 1.0), handlelength=1.0,
-                   handletextpad=0.4, columnspacing=1.0, borderaxespad=0.0)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(out_path)
         plt.close(fig)

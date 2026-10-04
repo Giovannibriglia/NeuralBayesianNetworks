@@ -44,16 +44,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from nbn.bench._paper_agg import (  # noqa: F401  (re-exported for callers/tests)
+from nbn.bench._paper_agg import (
+    log_axis_ok,
+    method_style,  # noqa: F401  (re-exported for callers/tests)
     ACCURACY_METRICS,
     CLOSER_TO_VALUE,
     DISCRETE_FAMILIES,
-    FAILURE_STATUSES,
     HIGHER_IS_BETTER,
     LOWER_IS_BETTER,
     METRIC_LABEL,
     TIME_METRICS,
-    Views,
     aggregate,
     assign_x,
     build_views,
@@ -62,7 +62,6 @@ from nbn.bench._paper_agg import (  # noqa: F401  (re-exported for callers/tests
     is_n_train_sweep,
     is_nbn,
     metric_kind,
-    parse_baseline,
     sweep_axis,
     x_order,
 )
@@ -81,15 +80,6 @@ _DIVERGENCE_PAIRS = (("calibration_pit_ks", "w1_per_node"),)
 # PARAMETER-LEARNING baselines; stripped to align nbn-mdn-lw <-> nbn-mdn.
 _ENGINE_SUFFIXES = frozenset({"lw", "ve", "ais", "avi", "router", "predict",
                               "importance"})
-
-# Library -> base color (v0.12 convention).
-LIBRARY_COLORS = {
-    "pgmpy": "tab:blue",
-    "nbn": "tab:red",
-    "pomegranate": "tab:purple",
-    "pyro": "tab:brown",
-}
-_FALLBACK_COLOR = "tab:gray"
 
 # Status -> color for the 100%-stacked status breakdown.
 STATUS_COLORS = {
@@ -118,23 +108,6 @@ def _mechanism_key(baseline: str) -> str:
     if sep and last in _ENGINE_SUFFIXES:
         return head
     return baseline
-
-
-def baseline_colors(baselines) -> dict[str, tuple]:
-    """Library base color, lightened by a distinct factor per baseline within
-    the same library."""
-    by_lib: dict[str, list[str]] = {}
-    for b in sorted(baselines):
-        by_lib.setdefault(parse_baseline(b)[0], []).append(b)
-    colors: dict[str, tuple] = {}
-    for lib, members in by_lib.items():
-        base = np.array(matplotlib.colors.to_rgb(LIBRARY_COLORS.get(lib, _FALLBACK_COLOR)))
-        n = len(members)
-        for i, b in enumerate(members):
-            t = 0.0 if n == 1 else 0.55 * i / (n - 1)
-            rgb = base * (1 - t) + np.array([1.0, 1.0, 1.0]) * t
-            colors[b] = (*rgb, 1.0)
-    return colors
 
 
 def _direction(metric) -> str:
@@ -345,8 +318,10 @@ def fig_bars(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name: str,
         logger.info("skip empty (no solved seeds): %s", out_path.name)
         return []
     slots = _slot_order(view)
-    colors = baseline_colors(slots)
+    colors = {m: method_style(m)[0] for m in slots}
+    hatches = {m: method_style(m)[1] for m in slots}
     kind = metric_kind(metric)
+    log_y = log_axis_ok(metric)
     xs = list(xs)
     chunks = [xs[i:i + _MAX_GROUPS_PER_FIGURE]
               for i in range(0, len(xs), _MAX_GROUPS_PER_FIGURE)]
@@ -376,6 +351,10 @@ def fig_bars(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name: str,
                 lo, hi = clip_band(kind, r.plo, r.phi)
                 if np.isnan(lo) or np.isnan(hi):
                     lo, hi = r.center, r.center
+                if log_y and r.center <= 0:
+                    continue           # not drawable on a log axis
+                if log_y and lo <= 0:
+                    lo = r.center
                 centers.append(r.center)
                 los.append(lo)
                 his.append(hi)
@@ -385,15 +364,17 @@ def fig_bars(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name: str,
             if not poss:
                 # no bar in this chunk (DNF / +inf everywhere): keep the legend
                 # entry so the failure-code / +∞ annotation is attributable.
-                ax.bar([0.0], [np.nan], color=colors[m], label=m)
+                ax.bar([0.0], [np.nan], facecolor=colors[m], hatch=hatches[m],
+                       edgecolor="black", linewidth=0.5, label=m)
                 continue
             yerr = [np.array(centers) - np.array(los), np.array(his) - np.array(centers)]
             ax.bar(poss, centers, width=width * 0.95, yerr=yerr, capsize=2,
-                   color=colors[m], edgecolor="white", linewidth=0.5, label=m,
+                   facecolor=colors[m], hatch=hatches[m], edgecolor="black",
+                   linewidth=0.5, label=m,
                    error_kw=dict(lw=0.8))
             finite_vals += centers + his
-        # Linear y everywhere except the batch-size sweep.
-        if x_axis == "batch_size" and any(v > 0 for v in finite_vals):
+        # Log y everywhere except metrics with negative values (LL).
+        if log_y and any(v > 0 for v in finite_vals):
             ax.set_yscale("log")
         y0, y1 = ax.get_ylim()
         for pos, nk, text, col, y in notes:
@@ -552,9 +533,9 @@ def write_view_table(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name
     xs = list(xs)
     by_key = {(r.method, r.x): r for r in view.itertuples(index=False)}
     kind = metric_kind(metric)
-    cells, centrals = {}, {}
+    cells, centrals, fails = {}, {}, {}
     for m in slots:
-        cells[m], centrals[m] = {}, {}
+        cells[m], centrals[m], fails[m] = {}, {}, {}
         for x in xs:
             r = by_key.get((m, x))
             if r is None:
@@ -569,7 +550,17 @@ def write_view_table(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name
                 s += f" ({r.n - r.k}/{r.n})"
             cells[m][x] = s
             centrals[m][x] = r.center if np.isfinite(r.center) else None
-    bold = {x: _bold_best({m: centrals[m][x] for m in slots}, kind) for x in xs}
+            fails[m][x] = r.n - r.k
+    # Best per column: fewest failed seeds first, then the value over the
+    # solved ones (a method that solved 1 seed of 5 must not beat one that
+    # solved all 5 on a slightly better number).
+    bold = {}
+    for x in xs:
+        scored = {m: centrals[m][x] for m in slots if centrals[m].get(x) is not None}
+        if view_name == "all" and scored:
+            fewest = min(fails[m][x] for m in scored)
+            scored = {m: c for m, c in scored.items() if fails[m][x] == fewest}
+        bold[x] = _bold_best(scored, kind)
     header = ["Method"] + [_x_header(x, x_axis) for x in xs]
     rows = []
     for m in slots:
@@ -596,7 +587,8 @@ def write_view_table(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name
     dagger = dagger_note if fixed else f"top-{top_nbn} nbn per column"
     caption = (f"{caption_prefix}. {METRIC_LABEL.get(metric, metric)} "
                f"({_direction(metric)}) vs {x_axis}, view={view_name}. "
-               f"IQM$\\pm$IQR/2 across seeds; $\\dagger$ = {dagger}; {rule}.")
+               f"IQM$\\pm$IQR/2 across seeds; bold = fewest failed seeds, then best value; "
+               f"$\\dagger$ = {dagger}; {rule}.")
     _write_table(out_path, header, rows, caption, label=label, footer_rows=footer)
     return True
 

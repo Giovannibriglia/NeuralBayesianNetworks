@@ -55,8 +55,13 @@ class TestLabelsAndCategories:
 
     def test_colors_are_deterministic_and_distinct_per_engine(self):
         assert method_color("nbn-cat-ve") == method_color("nbn-cat-ve")
-        engines = {method_color(f"nbn-cat-{e}") for e in ("ve", "lw", "ais", "avi")}
-        assert len(engines) == 4
+        # one colour per mechanism, the engine is the hatch
+        from nbn.bench._paper_agg import method_style
+        styles = {method_style(f"nbn-cat-{e}") for e in ("ve", "lw", "ais", "avi")}
+        assert len(styles) == 4
+        assert len({c for c, _ in styles}) == 1
+        assert method_color("nbn-cat-ve") != method_color("nbn-mdn-lw")
+        assert method_style("pgmpy-mle") == method_style("pgmpy-mle-ve")
         assert method_color("pgmpy-mle-ve") != method_color("pgmpy-bayes-ve")
 
     def test_headline_metric(self):
