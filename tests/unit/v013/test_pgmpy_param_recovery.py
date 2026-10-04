@@ -255,8 +255,9 @@ def test_lg_recovery_not_applicable():
     by = {r.metric: r for r in ParamLearningMeasurement().measure(prob, a, [], seed=1)}
     for mname in ("param_recovery_tv", "param_recovery_kl"):
         assert by[mname].status == "not_applicable"
-    # pgmpy has no score_data yet -> log_likelihood is not_supported (PR 4+).
-    assert by["log_likelihood"].status == "not_supported"
+    # the linear-Gaussian path scores held-out data (v0.20.2)
+    assert by["log_likelihood"].status == "ok"
+    assert by["calibration_pit_ks"].status == "ok"
 
 
 # ---- determinism ------------------------------------------------------------

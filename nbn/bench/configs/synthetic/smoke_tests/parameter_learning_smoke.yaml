@@ -65,7 +65,7 @@ source:
 baselines:
   - {library: pgmpy,       mechanism: discrete, param_method: mle}
   - {library: pgmpy,       mechanism: discrete, param_method: bayes}
-  - {library: pgmpy,       mechanism: lg,       param_method: mle}
+  - {library: pgmpy,       mechanism: lg,       param_method: lg}
   - {library: pomegranate, mechanism: discrete, param_method: mle}
   - {library: pyro,        mechanism: empirical, param_method: mle}
   # Neural rows pin epochs: 20 explicitly — smoke is a quick sanity gate,

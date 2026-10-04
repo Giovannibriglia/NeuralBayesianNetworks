@@ -139,7 +139,7 @@ class NBNAdapter:
     # true-conditional samples from problem.true_model (sd_ratio). Discrete-only
     # adapters do not set this flag → their calibration rows are not_supported;
     # continuous-capable adapters that have not implemented predictive_samples yet
-    # (currently pgmpy-lg, pyro-empirical on continuous) also leave it unset. The
+    # (currently pyro-empirical on continuous) also leave it unset. The
     # caller (the measurement) is responsible for seeding the predictive draws for
     # reproducibility — the method itself is intentionally stochastic.
     supports_calibration: bool = True
@@ -557,14 +557,14 @@ class NBNAdapter:
             ).to(self.device)  # [B, D]
 
         # All-empty-mode batch (every evidence value None — e.g. the
-        # heaviest selector's V2 queries): the engines infer B from the
-        # evidence tensors, so with {} they'd answer a single marginal
-        # ([1, K]) for a B-query batch. No batched library path exists
-        # for evidence-free queries — fall back to sequential. (Rows
-        # still stamp batch_size=B; filter on evidence_mode when
-        # analyzing batched-speedup figures.)
+        # heaviest selector's V2 queries). The contract check above already
+        # established that every query has the same targets, and with no
+        # evidence value left the B queries are one and the same marginal
+        # p(targets): answer it once and return that posterior for every
+        # query. (Before v0.20.2 this fell back to B sequential calls, so
+        # the per-query time of evidence-free batches was flat in B.)
         if not stacked_evidence:
-            return default_query_batch(self, queries)
+            return [self.query(first)] * b
 
         want_diag = _ENGINE_SPEC[self.engine] in ("lw", "ais")
         result = self._engine_obj.query_batch(

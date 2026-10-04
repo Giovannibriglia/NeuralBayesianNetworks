@@ -324,3 +324,53 @@ class TestBehavioral:
         problem = _make_small_discrete_problem(n_samples=200, seed=1)
         adapter.fit(problem, epochs=5)   # should not raise
         assert adapter._model is not None
+
+
+class TestLinearGaussianScoring:
+    """Parameter-learning scoring of the linear-Gaussian model: held-out
+    log-likelihood and predictive samples (calibration)."""
+
+    def _fitted(self):
+        adapter = PgmpyAdapter(param_method="lg", inference_method=None)
+        problem = _make_small_continuous_lg_problem(n_samples=4000, seed=0)
+        adapter.fit(problem)
+        return adapter, problem
+
+    def test_name_and_capabilities(self):
+        lg = PgmpyAdapter(param_method="lg", inference_method=None)
+        assert lg.name == "pgmpy-lg"
+        assert lg.supports_scoring and lg.supports_calibration
+        mle = PgmpyAdapter(param_method="mle", inference_method=None)
+        assert not mle.supports_scoring and not mle.supports_calibration
+
+    def test_score_data_matches_true_density(self):
+        adapter, problem = self._fitted()
+        lp = adapter.score_data(problem.test_data)
+        d = problem.test_data
+        normal = torch.distributions.Normal
+        true_lp = (normal(0.0, 1.0).log_prob(d["X0"])
+                   + normal(0.5 * d["X0"], 0.5).log_prob(d["X1"])
+                   + normal(0.5 * d["X1"], 0.5).log_prob(d["X2"]))
+        assert lp.shape == (4000,)
+        # the MLE fit of the true family: mean LL within sampling error
+        assert abs(float(lp.mean()) - float(true_lp.mean())) < 0.02
+
+    def test_predictive_samples_are_calibrated(self):
+        adapter, problem = self._fitted()
+        torch.manual_seed(0)
+        pred = adapter.predictive_samples(problem.test_data)
+        assert set(pred) == {"X0", "X1", "X2"}
+        s = PgmpyAdapter.N_CALIBRATION_SAMPLES
+        for node, samples in pred.items():
+            assert samples.shape == (4000, s)
+        # root: one unconditional predictive shared by the rows
+        assert torch.equal(pred["X0"][0], pred["X0"][1])
+        # non-root: centred on the conditional mean, with the noise scale
+        resid = pred["X1"] - 0.5 * problem.test_data["X0"][:, None]
+        assert abs(float(resid.mean())) < 0.02
+        assert abs(float(resid.std()) - 0.5) < 0.02
+
+    def test_scoring_before_fit_raises(self):
+        adapter = PgmpyAdapter(param_method="lg", inference_method=None)
+        with pytest.raises(RuntimeError, match="not fitted"):
+            adapter.score_data({"X0": torch.zeros(3)})

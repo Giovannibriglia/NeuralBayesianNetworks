@@ -29,6 +29,14 @@ _RERUNS = {
         ("synthetic/complete/inference_scalability_complete.yaml", "cat_avi"),
     "synthetic/reruns/batch_speed_avi.yaml":
         ("synthetic/speed/inference_speed.yaml", "avi"),
+    # v0.20.2: evidence-free batches (nbn) and the pgmpy linear-Gaussian
+    # baseline of the learning benchmarks.
+    "synthetic/reruns/batch_speed_nbn.yaml":
+        ("synthetic/speed/inference_speed.yaml", "nbn"),
+    "synthetic/reruns/param_learning_pgmpy_lg.yaml":
+        ("synthetic/complete/parameter_learning_complete.yaml", "pgmpy_lg"),
+    "synthetic/reruns/learning_curves_pgmpy_lg.yaml":
+        ("synthetic/learning_curves/learning_curves.yaml", "pgmpy_lg"),
     "bnlearn/reruns/bnlearn_continuous.yaml":
         ("bnlearn/complete/inference_complete.yaml", "continuous"),
     "bnlearn/reruns/bnlearn_discrete_avi.yaml":
@@ -42,6 +50,10 @@ def _keep(kind: str, b: dict) -> bool:
         return (b["library"], b["mechanism"]) not in _DISCRETE_ONLY
     if kind == "cat_avi":
         return b["mechanism"] == "cat" and b.get("inference_method") == "avi"
+    if kind == "nbn":
+        return b["library"] == "nbn"
+    if kind == "pgmpy_lg":
+        return (b["library"], b["mechanism"]) == ("pgmpy", "lg")
     return b.get("inference_method") == "avi"
 
 
@@ -57,7 +69,12 @@ def test_rerun_config_matches_original(rerun: str, tmp_path: Path) -> None:
     new_b, orig_b = new.pop("baselines"), orig.pop("baselines")
     assert new == orig
     assert new_b == [b for b in orig_b if _keep(kind, b)] and new_b
-    load_runner_config(_C / rerun, jsonl_path=tmp_path / "o.jsonl")
+    measurement = None
+    if kind == "pgmpy_lg":   # parameter-learning configs load with their measurement
+        from nbn.bench.measurements import ParamLearningMeasurement
+        measurement = ParamLearningMeasurement()
+    load_runner_config(_C / rerun, jsonl_path=tmp_path / "o.jsonl",
+                       measurement_override=measurement)
 
 
 def test_rerun_families_cover_the_fixes() -> None:

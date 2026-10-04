@@ -69,7 +69,17 @@ Shipped configs (under `nbn/bench/configs/`):
 | `synthetic/complete/parameter_learning_complete.yaml` | `param-learning` | network size |
 | `synthetic/learning_curves/learning_curves.yaml` | `param-learning` | training-set size |
 | `bnlearn/complete/inference_complete.yaml` | `inference` | bnlearn networks |
-| `*/reruns/*.yaml` | either | partial reruns, combined with `nbn-bench merge` |
+| `*/reruns/*.yaml` | either | partial reruns, combined with `nbn-bench merge` (see below) |
+
+Partial reruns redo only the cells a release changed; each file's header says
+why and which run it is merged into.
+
+| Rerun config | Subcommand | Needed for runs made with | What it redoes |
+|---|---|---|---|
+| `synthetic/reruns/batch_speed_nbn.yaml` | `inference` | <= v0.20.1 | every nbn cell of the batch-speed run (evidence-free batches are answered once instead of one query at a time) |
+| `synthetic/reruns/param_learning_pgmpy_lg.yaml` | `param-learning` | <= v0.20.1 | adds the pgmpy linear-Gaussian baseline (log-likelihood, calibration) on the continuous families |
+| `synthetic/reruns/learning_curves_pgmpy_lg.yaml` | `param-learning` | <= v0.20.1 | same, for the training-set-size sweep |
+| `synthetic/reruns/{complete,scalability}_continuous.yaml`, `*_discrete_avi.yaml`, `batch_speed_avi.yaml`, `bnlearn/reruns/*.yaml` | `inference` | <= v0.18.3 | v0.19.0 oracle and AVI-gate fixes |
 
 `learning_curves.yaml` and `parameter_learning_complete.yaml` declare
 `metrics: log_likelihood`, so they **must** run under `param-learning`;

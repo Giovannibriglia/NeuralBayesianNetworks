@@ -115,12 +115,11 @@ def test_calibration_not_supported_without_flag():
     for metric in ("calibration_pit_ks", "calibration_sd_ratio"):
         assert by[metric].status == "not_supported"
 
-    # The real pgmpy-lg adapter indeed leaves the flag unset (future PR territory).
+    # Real adapters: the discrete pgmpy paths leave the flag unset; the
+    # linear-Gaussian one implements predictive_samples (v0.20.2).
     from nbn.bench.adapters import PgmpyAdapter
-    assert not getattr(
-        PgmpyAdapter(param_method="lg", inference_method="predict"),
-        "supports_calibration", False,
-    )
+    assert not PgmpyAdapter(param_method="mle", inference_method=None).supports_calibration
+    assert PgmpyAdapter(param_method="lg", inference_method=None).supports_calibration
 
 
 @pytest.mark.slow
