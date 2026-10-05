@@ -278,13 +278,13 @@ class TestEndToEnd:
         run = _run_dir(tmp_path, "param_learning", _pl_df())
         out = tmp_path / "figs"
         assert run_paper({"param_learning": [run]}, out) == 0
-        for f in ("param_learning_log_likelihood.pdf", "param_learning_param_recovery_tv.pdf",
+        for f in ("param_learning_nll_per_node.pdf", "param_learning_param_recovery_tv.pdf",
                   "param_learning_calibration_pit_ks.pdf", "param_learning_fit_time.pdf"):
             assert (out / f).exists(), f
         sel = (out / "selection.txt").read_text()
         assert "headline=param_recovery_tv" in sel
         assert "selected nbn: nbn-cat, nbn-smoothed" in sel
-        assert "headline=calibration_pit_ks" in sel
+        assert "headline=nll_per_node" in sel
         assert "selected nbn: nbn-mdn, nbn-kde" in sel
 
     def test_learning_curves_group_uses_n_train_axis(self, tmp_path):

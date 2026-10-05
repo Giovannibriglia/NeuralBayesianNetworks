@@ -46,6 +46,7 @@ ACCURACY_METRICS = (
 LOWER_IS_BETTER = frozenset({
     "tv_per_node", "jsd_per_node", "w1_per_node",
     "param_recovery_tv", "param_recovery_kl", "calibration_pit_ks",
+    "nll_per_node",
 })
 HIGHER_IS_BETTER = frozenset({"log_likelihood"})
 CLOSER_TO_VALUE = {"calibration_sd_ratio": 1.0}
@@ -54,6 +55,7 @@ METRIC_LABEL = {
     "jsd_per_node": "JSD",
     "w1_per_node": "W1",
     "log_likelihood": "LL",
+    "nll_per_node": "NLL per node",
     "param_recovery_tv": "TV (recovery)",
     "param_recovery_kl": "KL (recovery)",
     "calibration_pit_ks": "PIT-KS",
@@ -278,7 +280,14 @@ def _metric_rows(dfx: pd.DataFrame, metric: str) -> tuple[pd.DataFrame, str, str
     Accuracy metrics and per-query / total query time read ``metric`` rows;
     fit time reads ``metric == "fit_time_s"`` rows when the parquet has them
     (inference mode) and falls back to the ``fit_time_s`` column over the
-    cell's accuracy rows (parameter-learning mode, one row per metric)."""
+    cell's accuracy rows (parameter-learning mode, one row per metric).
+    ``nll_per_node`` is derived: the held-out ``log_likelihood`` rows, negated
+    and divided by the number of nodes (positive, lower is better)."""
+    if metric == "nll_per_node":
+        rows = dfx[dfx["metric"] == "log_likelihood"].copy()
+        n = pd.to_numeric(rows["n_nodes"], errors="coerce") if "n_nodes" in rows else np.nan
+        rows["value"] = -pd.to_numeric(rows["value"], errors="coerce") / n
+        return rows, "value", "mean"
     if metric == "query_time":
         return dfx[dfx["metric"] == "query_time_s"], "value", "mean"
     if metric == "total_query_time":

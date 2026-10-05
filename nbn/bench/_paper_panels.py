@@ -44,6 +44,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.patches import Patch
+from matplotlib.ticker import FuncFormatter, LogLocator, MaxNLocator, NullLocator
 
 from nbn.bench._merge import load_run, merge_frames
 from nbn.bench._paper_agg import (
@@ -97,7 +98,7 @@ NONPARAMETRIC_MECHS = frozenset({"kde", "knn", "flexcode", "smoothed"})
 # Headline metric candidates per family kind, first present wins.
 _HEADLINE_DISCRETE = ("tv_per_node", "param_recovery_tv", "log_likelihood",
                       "query_time")
-_HEADLINE_CONTINUOUS = ("w1_per_node", "calibration_pit_ks", "log_likelihood",
+_HEADLINE_CONTINUOUS = ("w1_per_node", "nll_per_node", "calibration_pit_ks",
                         "query_time")
 
 # Metrics rendered per group; "accuracy" = the family's headline accuracy
@@ -120,12 +121,12 @@ _PLAN: dict[str, list[tuple[str, str | tuple[str, ...], str | None]]] = {
                 ("total_query_time", "total_query_time", None),
                 ("accuracy_time", ("accuracy", "total_query_time"), None)],
     "param_learning": [("accuracy", "accuracy", None),
-                       ("log_likelihood", "log_likelihood", None),
+                       ("nll_per_node", "nll_per_node", None),
                        ("param_recovery_tv", "param_recovery_tv", None),
                        ("calibration_pit_ks", "calibration_pit_ks", None),
                        ("fit_time", "fit_time", None)],
     "learning_curves": [("accuracy", "accuracy", None),
-                        ("log_likelihood", "log_likelihood", None),
+                        ("nll_per_node", "nll_per_node", None),
                         ("param_recovery_tv", "param_recovery_tv", None),
                         ("calibration_pit_ks", "calibration_pit_ks", None),
                         ("fit_time", "fit_time", None)],
@@ -184,6 +185,7 @@ _BASELINE_LABEL = {
     "pgmpy-mle-ve": "pgmpy MLE+VE",
     "pgmpy-bayes-ve": "pgmpy Bayes+VE",
     "pgmpy-lg-predict": "pgmpy LG",
+    "pgmpy-lg": "pgmpy LG",
     "pomegranate-discrete-ve": "pomegranate",
     "pyro-empirical-importance": "pyro IS",
     "pgmpy-mle": "pgmpy MLE",
@@ -365,6 +367,8 @@ class FamilyData:
 def _available_metrics(dff: pd.DataFrame) -> set[str]:
     ok = dff[dff["status"] == "ok"]
     out = set(ok["metric"].unique())
+    if "log_likelihood" in out:
+        out.add("nll_per_node")
     if "query_time_s" in out:
         out |= {"query_time", "total_query_time"}
     if "fit_time_s" in out or ("fit_time_s" in dff.columns and not ok.empty):
@@ -475,7 +479,12 @@ def _draw_panel(ax, view: pd.DataFrame, xs, x_axis: str, metric: str,
     # Log y everywhere, except metrics with negative values (log-likelihood).
     if log_y and any(v > 0 for v in finite):
         ax.set_yscale("log")
+        _compact_log_ticks(ax)
     y0, y1 = ax.get_ylim()
+    if any(nk == "kn" for _, nk, *_ in notes):
+        # head room for the rotated f/n labels above the bars
+        y1 = y1 * (y1 / y0) ** 0.16 if ax.get_yscale() == "log" else y1 + 0.16 * (y1 - y0)
+        ax.set_ylim(y0, y1)
     for pos, nk, text, col, y in notes:
         if nk == "kn":
             ax.text(pos, y, text, ha="center", va="bottom", fontsize=4.2,
@@ -499,6 +508,23 @@ def _draw_panel(ax, view: pd.DataFrame, xs, x_axis: str, metric: str,
         ax.spines[side].set_visible(False)
     ax.tick_params(length=2, pad=1.5)
     return drew
+
+
+def _compact_log_ticks(ax) -> None:
+    """Short tick labels on a log y axis. Matplotlib labels the minor ticks of
+    an axis that spans less than a decade as ``3 x 10^-2``, wide enough to
+    run into the neighbouring panel: below two decades the ticks are plain
+    numbers (0.03) on a 1-2-5 grid, or on a linear grid under a factor of 3."""
+    y0, y1 = ax.get_ylim()
+    if y0 <= 0 or y1 / y0 >= 100:
+        return
+    if y1 / y0 < 3:
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=4, steps=[1, 2, 2.5, 5, 10]))
+    else:
+        ax.yaxis.set_major_locator(LogLocator(subs=(1.0, 2.0, 5.0)))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+    ax.yaxis.set_minor_locator(NullLocator())
+    ax.set_ylim(y0, y1)
 
 
 def _chunk(xs: list, size: int) -> list[list]:
@@ -588,7 +614,7 @@ def fig_family_rows(panel_rows: list[tuple[list[tuple], dict[str, str]]],
         for ri, row in enumerate(rows):
             ncols, strip = layout[ri]
             ratios = [max(len(p[2]), 2) for p in row]
-            gs = outer[ri].subgridspec(2, len(row), width_ratios=ratios, wspace=0.28,
+            gs = outer[ri].subgridspec(2, len(row), width_ratios=ratios, wspace=0.32,
                                        height_ratios=[strip, row_height], hspace=0.03)
             for pi, (fam, vdf, chunk, x_axis, methods, common, title,
                      metric_of) in enumerate(row):
