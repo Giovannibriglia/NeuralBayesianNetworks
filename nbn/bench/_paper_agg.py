@@ -10,8 +10,8 @@ with timeout / oom / error) was emitted for the cell.
 Two views share one contract (``docs/v0.18-bar-reporting-all-common.md``):
 
 * ``all``    — each method is aggregated over the seeds *it* solved. The
-               table / bar annotation reports ``k/n`` (solved / total seeds at
-               that x) whenever ``k < n``; a method with ``k == 0`` shows its
+               table / bar annotation reports ``f/n`` (failed / total seeds at
+               that x) whenever ``f > 0``; a method with ``k == 0`` shows its
                failure code instead of a value.
 * ``common`` — each method is aggregated over ``C(x)``, the seeds solved by
                **every shown method** at that x (methods with ``k == 0`` are
@@ -24,8 +24,9 @@ metric center). The ``common`` view reuses exactly that selection, so both
 views always show the same methods and ``C(x)`` is the intersection over
 that fixed set.
 
-Aggregation across seeds is ``iqm_iqr`` (interquartile mean ± IQR/2) or
-``mean_std``; the per-seed value is the per-cell reduction (mean over queries
+Aggregation across seeds is ``iqm_iqr`` (interquartile mean ± IQR/2 in the
+tables; the bars draw the min / max of the interquartile values, see
+:func:`plot_band`) or ``mean_std``; the per-seed value is the per-cell reduction (mean over queries
 for accuracy and per-query time, sum for total query time, first for fit time).
 """
 from __future__ import annotations
@@ -45,6 +46,7 @@ ACCURACY_METRICS = (
 LOWER_IS_BETTER = frozenset({
     "tv_per_node", "jsd_per_node", "w1_per_node",
     "param_recovery_tv", "param_recovery_kl", "calibration_pit_ks",
+    "nll_per_node",
 })
 HIGHER_IS_BETTER = frozenset({"log_likelihood"})
 CLOSER_TO_VALUE = {"calibration_sd_ratio": 1.0}
@@ -53,6 +55,7 @@ METRIC_LABEL = {
     "jsd_per_node": "JSD",
     "w1_per_node": "W1",
     "log_likelihood": "LL",
+    "nll_per_node": "NLL per node",
     "param_recovery_tv": "TV (recovery)",
     "param_recovery_kl": "KL (recovery)",
     "calibration_pit_ks": "PIT-KS",
@@ -74,6 +77,51 @@ def parse_baseline(baseline: str) -> tuple[str, str]:
 
 def is_nbn(baseline: str) -> bool:
     return parse_baseline(baseline)[0] == "nbn"
+
+
+# --- Method style (shared by every figure) ---------------------------------------
+# One colour per approach, the same in every figure, from colour-blind-safe
+# palettes (Okabe-Ito + Paul Tol "muted"): a colour per external baseline and
+# per nbn mechanism. The inference engine of an nbn method is a hatch, so
+# "cat + VE" and "cat + LW" share the colour of the cat mechanism.
+_APPROACH_COLOR = {
+    "pgmpy-mle": "#0072B2", "pgmpy-bayes": "#56B4E9", "pgmpy-lg": "#332288",
+    "pomegranate": "#AA4499", "pyro": "#999999",
+    "nbn-cat": "#D55E00", "nbn-cat-bayes": "#E69F00", "nbn-neuralcat": "#F0E442",
+    "nbn-lg": "#CC6677", "nbn-mdn": "#882255", "nbn-flow": "#117733",
+    "nbn-kde": "#44AA99", "nbn-knn": "#999933", "nbn-flexcode": "#DDCC77",
+    "nbn-smoothed": "#661100", "nbn-hybrid": "#000000",
+}
+_ENGINE_HATCH = {"ve": "", "lw": "/////", "ais": ".....", "avi": "xxxxx"}
+_STYLE_FALLBACK = "#BBBBBB"
+
+
+def approach(baseline: str) -> tuple[str, str]:
+    """(approach key, engine) of a baseline: 'nbn-cat-bayes' -> ('nbn-cat-bayes',
+    ''), 'nbn-mdn-lw' -> ('nbn-mdn', 'lw'), 'pgmpy-mle-ve' -> ('pgmpy-mle', ''),
+    'pyro-empirical-importance' -> ('pyro', '')."""
+    lib, rest = parse_baseline(baseline)
+    parts = rest.split("-") if rest else []
+    if lib != "nbn":
+        if lib == "pgmpy" and parts:
+            return f"pgmpy-{parts[0]}", ""
+        return lib, ""
+    engine = parts[-1] if parts and parts[-1] in _ENGINE_HATCH else ""
+    mech = parts[:-1] if engine else parts
+    if len(mech) > 1 and mech[1] == "router":
+        mech = mech[:1]
+    return "nbn-" + "-".join(mech), engine
+
+
+def method_style(baseline: str) -> tuple[str, str]:
+    """(hex colour, hatch) of a method, identical in every figure."""
+    key, engine = approach(baseline)
+    return _APPROACH_COLOR.get(key, _STYLE_FALLBACK), _ENGINE_HATCH.get(engine, "")
+
+
+def log_axis_ok(metric: str) -> bool:
+    """Figures use a log y axis except for metrics that take negative values."""
+    return metric not in HIGHER_IS_BETTER   # log-likelihood
 
 
 def metric_kind(metric: str) -> str:
@@ -108,6 +156,28 @@ def aggregate(values, method: str) -> tuple[float, float, float]:
         half = float((q3 - q1) / 2)
         return c, c - half, c + half
     raise ValueError(f"unknown aggregation: {method!r}")
+
+
+def plot_band(values, method: str) -> tuple[float, float]:
+    """(lower, upper) of the error bar drawn around :func:`aggregate`'s center.
+
+    iqm_iqr:  the smallest and the largest observed value among those that
+              enter the interquartile mean (the values in [Q1, Q3]), so the
+              bar spans real per-seed results and always contains the IQM.
+    mean_std: mean -/+ 1 std (the table band).
+    Empty or any +inf -> (nan, nan)."""
+    values = np.asarray(list(values), dtype=float)
+    values = values[~np.isnan(values)]
+    if values.size == 0 or np.isposinf(values).any():
+        return float("nan"), float("nan")
+    if method == "iqm_iqr":
+        q1, q3 = np.percentile(values, [25, 75])
+        mid = values[(values >= q1) & (values <= q3)]
+        if mid.size == 0:
+            mid = values
+        return float(mid.min()), float(mid.max())
+    _, lo, hi = aggregate(values, method)
+    return lo, hi
 
 
 def clip_band(kind: str, lower: float, upper: float) -> tuple[float, float]:
@@ -210,7 +280,14 @@ def _metric_rows(dfx: pd.DataFrame, metric: str) -> tuple[pd.DataFrame, str, str
     Accuracy metrics and per-query / total query time read ``metric`` rows;
     fit time reads ``metric == "fit_time_s"`` rows when the parquet has them
     (inference mode) and falls back to the ``fit_time_s`` column over the
-    cell's accuracy rows (parameter-learning mode, one row per metric)."""
+    cell's accuracy rows (parameter-learning mode, one row per metric).
+    ``nll_per_node`` is derived: the held-out ``log_likelihood`` rows, negated
+    and divided by the number of nodes (positive, lower is better)."""
+    if metric == "nll_per_node":
+        rows = dfx[dfx["metric"] == "log_likelihood"].copy()
+        n = pd.to_numeric(rows["n_nodes"], errors="coerce") if "n_nodes" in rows else np.nan
+        rows["value"] = -pd.to_numeric(rows["value"], errors="coerce") / n
+        return rows, "value", "mean"
     if metric == "query_time":
         return dfx[dfx["metric"] == "query_time_s"], "value", "mean"
     if metric == "total_query_time":
@@ -296,7 +373,7 @@ class Views:
     metric: str
     kind: str
     xs: list
-    all: pd.DataFrame            # method, x, center, lo, hi, k, n, code, shown
+    all: pd.DataFrame            # method, x, center, lo, hi, plo, phi, k, n, code, shown
     common: pd.DataFrame         # same columns
     common_sets: dict = field(default_factory=dict)   # x -> sorted list of inst
     selection: dict = field(default_factory=dict)     # view -> {x: [nbn methods]}
@@ -312,7 +389,7 @@ def _fail_code(g: pd.DataFrame):
 
 
 def _view_frame(recs) -> pd.DataFrame:
-    cols = ["method", "x", "center", "lo", "hi", "k", "n", "code"]
+    cols = ["method", "x", "center", "lo", "hi", "plo", "phi", "k", "n", "code"]
     df = pd.DataFrame.from_records(recs, columns=cols)
     # keep ``code`` a plain str-or-None column (pandas would coerce None to
     # NaN, which is truthy and would print as "nan" in a table cell).
@@ -326,7 +403,9 @@ def all_view(cells: pd.DataFrame, n_total: dict, aggregation: str) -> pd.DataFra
     for (m, x), g in cells.groupby(["method", "x"]):
         solved = g[g["solved"]]
         c, lo, hi = _agg_cell(solved["value"], aggregation)
-        recs.append(dict(method=m, x=x, center=c, lo=lo, hi=hi, k=int(len(solved)),
+        plo, phi = plot_band(solved["value"], aggregation)
+        recs.append(dict(method=m, x=x, center=c, lo=lo, hi=hi, plo=plo, phi=phi,
+                         k=int(len(solved)),
                          n=int(n_total.get(x, len(g))), code=_fail_code(g)))
     return _view_frame(recs)
 
@@ -365,7 +444,8 @@ def common_view(cells: pd.DataFrame, n_total: dict, aggregation: str,
                 continue
             solved = g[g["solved"] & g["inst"].isin(C)]
             c, lo, hi = _agg_cell(solved["value"], aggregation)
-            recs.append(dict(method=m, x=x, center=c, lo=lo, hi=hi,
+            plo, phi = plot_band(solved["value"], aggregation)
+            recs.append(dict(method=m, x=x, center=c, lo=lo, hi=hi, plo=plo, phi=phi,
                              k=int(len(solved)), n=int(len(C)), code=_fail_code(g)))
     return _view_frame(recs)
 

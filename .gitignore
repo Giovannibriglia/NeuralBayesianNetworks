@@ -34,3 +34,6 @@ make_bottleneck_figures.py
 
 # Benchmark run outputs (nbn-bench writes to ./results by default) — untracked.
 /results/
+
+# Paper repo (separate git remote: Giovannibriglia/2026-briglia-nbn)
+paper/

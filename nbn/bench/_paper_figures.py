@@ -9,7 +9,7 @@ Every figure is a **grouped bar plot** over the benchmark's discrete x grid
 figure and table comes in two views (``docs/v0.18-bar-reporting-all-common.md``,
 aggregation in :mod:`nbn.bench._paper_agg`):
 
-  all/      each method over the seeds it solved; ``k/n`` annotated when k<n
+  all/      each method over the seeds it solved; ``f/n`` (failed / run) annotated when f>0
   common/   each method over the seeds solved by every shown method at that x
 
 Shown methods per x = all non-nbn baselines applicable to the family + the
@@ -44,16 +44,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from nbn.bench._paper_agg import (  # noqa: F401  (re-exported for callers/tests)
+from nbn.bench._paper_agg import (
+    log_axis_ok,
+    method_style,  # noqa: F401  (re-exported for callers/tests)
     ACCURACY_METRICS,
     CLOSER_TO_VALUE,
     DISCRETE_FAMILIES,
-    FAILURE_STATUSES,
     HIGHER_IS_BETTER,
     LOWER_IS_BETTER,
     METRIC_LABEL,
     TIME_METRICS,
-    Views,
     aggregate,
     assign_x,
     build_views,
@@ -62,7 +62,6 @@ from nbn.bench._paper_agg import (  # noqa: F401  (re-exported for callers/tests
     is_n_train_sweep,
     is_nbn,
     metric_kind,
-    parse_baseline,
     sweep_axis,
     x_order,
 )
@@ -81,15 +80,6 @@ _DIVERGENCE_PAIRS = (("calibration_pit_ks", "w1_per_node"),)
 # PARAMETER-LEARNING baselines; stripped to align nbn-mdn-lw <-> nbn-mdn.
 _ENGINE_SUFFIXES = frozenset({"lw", "ve", "ais", "avi", "router", "predict",
                               "importance"})
-
-# Library -> base color (v0.12 convention).
-LIBRARY_COLORS = {
-    "pgmpy": "tab:blue",
-    "nbn": "tab:red",
-    "pomegranate": "tab:purple",
-    "pyro": "tab:brown",
-}
-_FALLBACK_COLOR = "tab:gray"
 
 # Status -> color for the 100%-stacked status breakdown.
 STATUS_COLORS = {
@@ -118,30 +108,6 @@ def _mechanism_key(baseline: str) -> str:
     if sep and last in _ENGINE_SUFFIXES:
         return head
     return baseline
-
-
-def baseline_colors(baselines) -> dict[str, tuple]:
-    """Library base color, lightened by a distinct factor per baseline within
-    the same library."""
-    by_lib: dict[str, list[str]] = {}
-    for b in sorted(baselines):
-        by_lib.setdefault(parse_baseline(b)[0], []).append(b)
-    colors: dict[str, tuple] = {}
-    for lib, members in by_lib.items():
-        base = np.array(matplotlib.colors.to_rgb(LIBRARY_COLORS.get(lib, _FALLBACK_COLOR)))
-        n = len(members)
-        for i, b in enumerate(members):
-            t = 0.0 if n == 1 else 0.55 * i / (n - 1)
-            rgb = base * (1 - t) + np.array([1.0, 1.0, 1.0]) * t
-            colors[b] = (*rgb, 1.0)
-    return colors
-
-
-def _log_or_linear(ax, vals, axis: str) -> None:
-    """Use log scale if the positive dynamic range exceeds ~1.5 decades."""
-    pos = [v for v in vals if v is not None and v > 0 and not np.isnan(v)]
-    if len(pos) >= 2 and max(pos) / min(pos) > 30:
-        (ax.set_xscale if axis == "x" else ax.set_yscale)("log")
 
 
 def _direction(metric) -> str:
@@ -340,8 +306,8 @@ def _tick(x, x_axis: str) -> str:
 def fig_bars(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name: str,
              out_path: Path, title: str, common_sets: dict | None = None) -> list[Path]:
     """Grouped bar plot: one group per x, one bar per shown method, error bar =
-    aggregation band. Annotations: ``k/n`` above a bar whose method solved
-    fewer than all seeds (``all`` view); the failure code in a slot whose
+    plot band (:func:`plot_band`). Annotations: ``f/n`` (failed / run seeds)
+    above a bar whose method solved fewer than all seeds (``all`` view); the failure code in a slot whose
     method solved none; ``+∞`` for an infinite center. ``common`` groups carry
     ``|C|=k`` under the x label. The x grid is split into ``_partK`` files
     beyond :data:`_MAX_GROUPS_PER_FIGURE` groups.
@@ -352,8 +318,10 @@ def fig_bars(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name: str,
         logger.info("skip empty (no solved seeds): %s", out_path.name)
         return []
     slots = _slot_order(view)
-    colors = baseline_colors(slots)
+    colors = {m: method_style(m)[0] for m in slots}
+    hatches = {m: method_style(m)[1] for m in slots}
     kind = metric_kind(metric)
+    log_y = log_axis_ok(metric)
     xs = list(xs)
     chunks = [xs[i:i + _MAX_GROUPS_PER_FIGURE]
               for i in range(0, len(xs), _MAX_GROUPS_PER_FIGURE)]
@@ -380,30 +348,34 @@ def fig_bars(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name: str,
                     continue
                 if np.isnan(r.center):
                     continue
-                lo, hi = clip_band(kind, r.lo, r.hi)
+                lo, hi = clip_band(kind, r.plo, r.phi)
                 if np.isnan(lo) or np.isnan(hi):
                     lo, hi = r.center, r.center
+                if log_y and r.center <= 0:
+                    continue           # not drawable on a log axis
+                if log_y and lo <= 0:
+                    lo = r.center
                 centers.append(r.center)
                 los.append(lo)
                 his.append(hi)
                 poss.append(pos)
                 if view_name == "all" and r.k < r.n:
-                    notes.append((pos, "kn", f"{r.k}/{r.n}", colors[m], hi))
+                    notes.append((pos, "kn", f"{r.n - r.k}/{r.n}", colors[m], hi))
             if not poss:
                 # no bar in this chunk (DNF / +inf everywhere): keep the legend
                 # entry so the failure-code / +∞ annotation is attributable.
-                ax.bar([0.0], [np.nan], color=colors[m], label=m)
+                ax.bar([0.0], [np.nan], facecolor=colors[m], hatch=hatches[m],
+                       edgecolor="black", linewidth=0.5, label=m)
                 continue
             yerr = [np.array(centers) - np.array(los), np.array(his) - np.array(centers)]
             ax.bar(poss, centers, width=width * 0.95, yerr=yerr, capsize=2,
-                   color=colors[m], edgecolor="white", linewidth=0.5, label=m,
+                   facecolor=colors[m], hatch=hatches[m], edgecolor="black",
+                   linewidth=0.5, label=m,
                    error_kw=dict(lw=0.8))
             finite_vals += centers + his
-        positives = [v for v in finite_vals if v > 0]
-        if kind == "time" and positives and len(positives) == len(finite_vals):
+        # Log y everywhere except metrics with negative values (LL).
+        if log_y and any(v > 0 for v in finite_vals):
             ax.set_yscale("log")
-        else:
-            _log_or_linear(ax, finite_vals, "y")
         y0, y1 = ax.get_ylim()
         for pos, nk, text, col, y in notes:
             if nk == "kn":
@@ -544,10 +516,11 @@ def _x_header(x, x_axis: str) -> str:
 
 def write_view_table(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name: str,
                      out_path: Path, caption_prefix: str, label: str,
-                     common_sets: dict | None = None, top_nbn: int = 2) -> bool:
+                     common_sets: dict | None = None, top_nbn: int = 2,
+                     dagger_note: str | None = None) -> bool:
     """Rows = shown methods (nbn rows marked $^\\dagger$), columns = x values.
 
-    ``all``:    ``c±h (k/n)`` with the ``(k/n)`` only when k < n; failure code
+    ``all``:    ``c±h (f/n)``, f = failed seeds, only when f > 0; failure code
                 when no seed was solved; ``--`` when the method did not run or
                 is not among the top-N nbn at that column.
     ``common``: ``c±h`` over C(x); a footer row gives |C(x)| per column.
@@ -560,9 +533,9 @@ def write_view_table(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name
     xs = list(xs)
     by_key = {(r.method, r.x): r for r in view.itertuples(index=False)}
     kind = metric_kind(metric)
-    cells, centrals = {}, {}
+    cells, centrals, fails = {}, {}, {}
     for m in slots:
-        cells[m], centrals[m] = {}, {}
+        cells[m], centrals[m], fails[m] = {}, {}, {}
         for x in xs:
             r = by_key.get((m, x))
             if r is None:
@@ -574,10 +547,20 @@ def write_view_table(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name
                 continue
             s = _fmt(r.center, r.lo, r.hi)
             if view_name == "all" and r.k < r.n:
-                s += f" ({r.k}/{r.n})"
+                s += f" ({r.n - r.k}/{r.n})"
             cells[m][x] = s
             centrals[m][x] = r.center if np.isfinite(r.center) else None
-    bold = {x: _bold_best({m: centrals[m][x] for m in slots}, kind) for x in xs}
+            fails[m][x] = r.n - r.k
+    # Best per column: fewest failed seeds first, then the value over the
+    # solved ones (a method that solved 1 seed of 5 must not beat one that
+    # solved all 5 on a slightly better number).
+    bold = {}
+    for x in xs:
+        scored = {m: centrals[m][x] for m in slots if centrals[m].get(x) is not None}
+        if view_name == "all" and scored:
+            fewest = min(fails[m][x] for m in scored)
+            scored = {m: c for m, c in scored.items() if fails[m][x] == fewest}
+        bold[x] = _bold_best(scored, kind)
     header = ["Method"] + [_x_header(x, x_axis) for x in xs]
     rows = []
     for m in slots:
@@ -591,19 +574,21 @@ def write_view_table(view: pd.DataFrame, xs, x_axis: str, metric: str, view_name
     if view_name == "common" and common_sets is not None:
         footer = (["$|C|$ (common seeds)"]
                   + [str(len(common_sets.get(x, []))) for x in xs],)
+    fixed = dagger_note is not None
+    tail = "" if fixed else ", or an nbn method outside the top-N at that column"
     if view_name == "all":
-        rule = ("(k/n) = seeds solved / seeds run, shown when k<n; a failure "
-                "code = no seed solved; -- = not run, or an nbn method outside "
-                "the top-N at that column")
+        rule = ("(f/n) = seeds failed (timeout, out of memory, NaN, error) / "
+                "seeds run, shown when f>0; a failure "
+                f"code = no seed solved; -- = not run{tail}")
     else:
         rule = ("each value over the seeds solved by every shown method at "
                 "that column (|C| row); methods with no solved seed are DNF "
-                "and do not constrain C; -- = not run, or an nbn method "
-                "outside the top-N at that column")
+                f"and do not constrain C; -- = not run{tail}")
+    dagger = dagger_note if fixed else f"top-{top_nbn} nbn per column"
     caption = (f"{caption_prefix}. {METRIC_LABEL.get(metric, metric)} "
                f"({_direction(metric)}) vs {x_axis}, view={view_name}. "
-               f"Center$\\pm$band across seeds; $\\dagger$ = top-{top_nbn} nbn "
-               f"per column; {rule}.")
+               f"IQM$\\pm$IQR/2 across seeds; bold = fewest failed seeds, then best value; "
+               f"$\\dagger$ = {dagger}; {rule}.")
     _write_table(out_path, header, rows, caption, label=label, footer_rows=footer)
     return True
 
