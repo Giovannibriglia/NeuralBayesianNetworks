@@ -223,7 +223,7 @@ def _pl_df(sweep: bool = False) -> pd.DataFrame:
                                         value=ks, n_train=nt))
                     rows.append(_pl_row(family="continuous_lg", baseline=b, seed=seed,
                                         problem_id=pid, metric="log_likelihood",
-                                        value=-5.0, n_train=nt))
+                                        value=-100 * ks, n_train=nt))
     return pd.DataFrame(rows)
 
 
