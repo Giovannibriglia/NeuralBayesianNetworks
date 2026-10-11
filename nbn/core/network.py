@@ -577,6 +577,12 @@ class NeuralBayesianNetwork(nn.Module):
                 t = v if isinstance(v, torch.Tensor) else torch.as_tensor(v)
                 if t.dim() == 0:
                     t = t.unsqueeze(0)
+                var = self.variables.get(k)
+                if t.dim() == 1 and var is not None and not var.is_discrete and var.dim > 1:
+                    # The documented [D] value of a D-dim continuous node is
+                    # ONE observation; engines read a 1-D tensor's axis as
+                    # rows, so make the single row explicit.
+                    t = t.unsqueeze(0)
                 out[k] = to_device(t, self._device)
             return out
 

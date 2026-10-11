@@ -462,3 +462,22 @@ def test_a16_per_row_evidence_and_log_weight():
     assert torch.equal(lw2, torch.zeros(4))
     s3 = model.sample(7, evidence={"X": 0.5, "A": torch.tensor([2])})
     assert s3["X"].shape == (7, 1) and s3["A"].shape == (7, 1)
+
+
+# ---------------------------------------------------------------------------
+# B7 — query() with documented [D] evidence on a multi-dim continuous node
+# ---------------------------------------------------------------------------
+
+
+def test_b7_query_vector_evidence_on_multidim_continuous_node():
+    from nbn import NeuralBayesianNetwork as NBN
+
+    model = NBN([("A", "X")], {"A": ("discrete", 2), "X": ("continuous", 3)}, device="cpu")
+    model.auto_mechanisms(default_continuous="lg")
+    g = torch.Generator().manual_seed(0)
+    a = torch.randint(0, 2, (500,), generator=g)
+    x = 3.0 * a.float().unsqueeze(1).expand(-1, 3) + 0.3 * torch.randn(500, 3, generator=g)
+    model.fit({"A": a, "X": x})
+    p = model.query(["A"], evidence={"X": torch.tensor([3.0, 3.0, 3.0])})
+    assert p.shape == (2,)
+    assert p[1] > 0.99
