@@ -265,3 +265,74 @@ def test_a20_flexcode_zero_weight_rows_do_not_move_the_support():
     torch.testing.assert_close(with_zero._y_max, dropped._y_max)
     q = torch.linspace(-3, 3, 13).unsqueeze(-1)
     torch.testing.assert_close(with_zero.log_prob(q, None), dropped.log_prob(q, None))
+
+
+# ==========================================================================
+# A21 -- BinningCategoricalTable: parent cards, n_categories, weights, n_bins
+# ==========================================================================
+
+
+def _binning_mech(**kw):
+    from nbn.mechanisms.parametric.binning_categorical import BinningCategoricalTable
+
+    return BinningCategoricalTable(**kw)
+
+
+def test_a21_binning_discrete_parent_keeps_its_cardinality():
+    g = torch.Generator().manual_seed(0)
+    n = 400
+    # The discrete parent declares 5 states; only 0..2 occur in training.
+    pa = torch.stack([torch.randint(0, 3, (n,), generator=g).float(),
+                      torch.randn(n, generator=g)], dim=-1)
+    x = (pa[:, 0] >= 1).long()
+    mech = _binning_mech(parent_kinds=[("discrete", 5), ("continuous", 1)],
+                         n_bins=3, n_categories=2)
+    mech.fit_local(x, pa)
+    # Pre-fix: [3, 3] -- the discrete parent was forced to n_bins states, so
+    # the declared values 3 and 4 had no rows and their strides aliased other
+    # parent configurations.
+    assert mech._parent_cards == [5, 3]
+    q = torch.tensor([[4.0, 0.0], [4.0, 5.0]])
+    probs = mech.forward(q).probs
+    # An unseen-but-declared configuration is an empty row: uniform.
+    torch.testing.assert_close(probs, torch.full((2, 2), 0.5))
+
+
+def test_a21_binning_honours_declared_target_cardinality():
+    pa = torch.randn(100, 1)
+    x = (pa[:, 0] > 0).long()                 # only classes {0, 1} seen
+    mech = _binning_mech(parent_kinds=[("continuous", 1)], n_bins=2, n_categories=4)
+    mech.fit_local(x, pa)
+    assert mech.n_classes == 4
+    # Pre-fix: log_prob of the declared, unseen class 3 indexed past K=2.
+    lp = mech.log_prob(torch.tensor([3, 3]), pa[:2])
+    assert torch.isfinite(lp).all()
+
+
+def test_a21_binning_weighted_thresholds_are_replication_exact():
+    g = torch.Generator().manual_seed(1)
+    pa = torch.randn(60, 1, generator=g)
+    x = (pa[:, 0] > 0).long()
+    w = torch.randint(0, 4, (60,), generator=g).float()
+    idx = _replicate(w)
+    weighted = _binning_mech(parent_kinds=[("continuous", 1)], n_bins=4, n_categories=2)
+    weighted.fit_local(x, pa, weights=w)
+    replicated = _binning_mech(parent_kinds=[("continuous", 1)], n_bins=4, n_categories=2)
+    replicated.fit_local(x[idx], pa[idx])
+    torch.testing.assert_close(weighted._thresholds, replicated._thresholds)
+    torch.testing.assert_close(weighted.cpt, replicated.cpt)
+
+
+def test_a21_binning_rejects_a_single_bin():
+    with pytest.raises(ValueError, match="n_bins"):
+        _binning_mech(parent_kinds=[("continuous", 1)], n_bins=1, n_categories=2)
+
+
+def test_a21_binning_accepts_parent_cards_from_fit():
+    # nbn.learning.fit threads parent_cards when every parent declares a
+    # cardinality; that used to collide with the binner's own keyword.
+    pa = torch.randint(0, 3, (50, 1)).float()
+    x = pa[:, 0].long() % 2
+    mech = _binning_mech(parent_kinds=[("discrete", 3)], n_bins=2, n_categories=2)
+    mech.fit_local(x, pa, parent_cards=[4], n_classes=2)
+    assert mech._parent_cards == [4]
