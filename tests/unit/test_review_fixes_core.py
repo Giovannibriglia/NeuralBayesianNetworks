@@ -381,3 +381,84 @@ def test_b2_float64_inputs_are_accepted_on_every_device(device):
     assert m2.sample(4)["A"].dtype != torch.float64 or device != "mps"
     s = model.sample(4, do={"A": torch.tensor([1.0], dtype=torch.float64)})
     torch.testing.assert_close(s["A"].cpu().double(), torch.ones(4, 1, dtype=torch.float64))
+
+
+# ---------------------------------------------------------------------------
+# A14 / B8 — discrete do-values: integral, in range; scalar / int do-values
+# ---------------------------------------------------------------------------
+
+
+def _mixed_model(device="cpu"):
+    from nbn import NeuralBayesianNetwork as NBN
+
+    model = NBN(
+        [("A", "X"), ("X", "Y")],
+        {"A": ("discrete", 3), "X": ("continuous", 1), "Y": ("continuous", 1)},
+        device=device,
+    )
+    model.auto_mechanisms(default_continuous="lg")
+    g = torch.Generator().manual_seed(0)
+    a = torch.randint(0, 3, (400,), generator=g)
+    x = a.float().unsqueeze(1) + 0.1 * torch.randn(400, 1, generator=g)
+    y = 2 * x + 0.1 * torch.randn(400, 1, generator=g)
+    model.fit({"A": a, "X": x, "Y": y})
+    return model
+
+
+@pytest.mark.parametrize("bad", [1.7, -1, 3, torch.tensor([2.5])])
+def test_a14_intervene_rejects_non_integral_or_out_of_range_discrete(bad):
+    model = _mixed_model()
+    with pytest.raises(ValueError, match="integer|outside"):
+        model.intervene({"A": bad})
+
+
+@pytest.mark.parametrize("bad", [1.7, 3, torch.tensor([-1.0])])
+def test_a14_sample_do_rejects_bad_discrete_values(bad):
+    model = _mixed_model()
+    with pytest.raises(ValueError, match="integer|outside"):
+        model.sample(5, do={"A": bad})
+
+
+@pytest.mark.parametrize("device", available_devices())
+@pytest.mark.parametrize("val", [1, 1.0, torch.tensor(1), torch.tensor(1.0), torch.tensor([1])])
+def test_b8_sample_do_accepts_scalars_and_ints(device, val):
+    model = _mixed_model(device)
+    s = model.sample(6, do={"A": val, "X": 2})
+    assert s["A"].dtype.is_floating_point
+    torch.testing.assert_close(s["A"].cpu().float(), torch.ones(6, 1))
+    torch.testing.assert_close(s["X"].cpu().float(), torch.full((6, 1), 2.0))
+    assert s["Y"].shape == (6, 1)
+
+
+# ---------------------------------------------------------------------------
+# A16 — sample(evidence=...) shapes and evidence-only log-weight
+# ---------------------------------------------------------------------------
+
+
+def test_a16_misaligned_batched_evidence_raises():
+    model = _mixed_model()
+    with pytest.raises(ValueError, match="Evidence for 'X'"):
+        model.sample(10, evidence={"X": torch.zeros(3, 1)})
+    with pytest.raises(ValueError, match="Evidence for 'X'"):
+        model.sample(10, evidence={"X": torch.zeros(10, 2)})
+
+
+def test_a16_per_row_evidence_and_log_weight():
+    model = _mixed_model()
+    xs = torch.linspace(-1, 1, 10).reshape(10, 1)
+    s, lp, lw = model.sample(10, evidence={"X": xs}, return_log_prob=True, return_log_weight=True)
+    torch.testing.assert_close(s["X"], xs)
+    assert lp.shape == lw.shape == (10,)
+    # The weight is exactly log p(X = x | A = a) for each sampled A.
+    mech = model.mechanisms["X"]
+    expected = mech.log_prob(xs, s["A"].float().reshape(10, 1)).reshape(10)
+    torch.testing.assert_close(lw, expected)
+    # The joint additionally carries A's and Y's terms.
+    a_lp = model.mechanisms["A"].log_prob(s["A"], None).reshape(10)
+    y_lp = model.mechanisms["Y"].log_prob(s["Y"], xs).reshape(10)
+    torch.testing.assert_close(lp, lw + a_lp + y_lp)
+    # Without evidence the weight is zero; shapes [n] / scalar evidence work.
+    s2, lw2 = model.sample(4, return_log_weight=True)
+    assert torch.equal(lw2, torch.zeros(4))
+    s3 = model.sample(7, evidence={"X": 0.5, "A": torch.tensor([2])})
+    assert s3["X"].shape == (7, 1) and s3["A"].shape == (7, 1)

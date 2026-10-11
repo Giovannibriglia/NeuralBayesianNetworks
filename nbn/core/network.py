@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from nbn.core.dag import DAG
-from nbn.core.variables import Variable
+from nbn.core.variables import Variable, validate_discrete_value
 from nbn.mechanisms.base import Mechanism
 from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
 from nbn.mechanisms.parametric.linear_gaussian import LinearGaussianMechanism
@@ -644,6 +644,7 @@ class NeuralBayesianNetwork(nn.Module):
         evidence: Dict[str, torch.Tensor] | None = None,
         do: Mapping[str, torch.Tensor] | None = None,
         return_log_prob: bool = False,
+        return_log_weight: bool = False,
         **kwargs: Any,
     ) -> Dict[str, torch.Tensor]:
         """Draw ``n`` joint samples on the model's device.
@@ -651,12 +652,23 @@ class NeuralBayesianNetwork(nn.Module):
         Parameters
         ----------
         n: number of samples.
-        evidence: clamped observed values (auto-moved to model device).
-        do: do-intervention values (auto-dispatched to deterministic /
-            dirac-gaussian per variable type).  One value per node — this
-            path has no batch axis to vary the intervention along; use
-            ``query_batch(do=...)`` for a per-row sweep.
-        return_log_prob: if True return ``(samples, log_prob)``.
+        evidence: **clamped** observed values (auto-moved to model device):
+            a scalar, ``[D]``, ``[1, D]`` or ``[n, D]`` per node; other shapes
+            raise.  Clamping is not conditioning — ancestors of an evidence
+            node are drawn from the prior, so the samples are *not* from the
+            posterior.  Weight them by ``exp(log_weight)`` (see
+            ``return_log_weight``) for likelihood weighting, or use
+            ``query``.
+        do: do-intervention values (Python scalar, 0-d or ``[D]`` tensor;
+            discrete values must be in-range integers).  One value per node
+            — this path has no batch axis to vary the intervention along;
+            use ``query_batch(do=...)`` for a per-row sweep.
+        return_log_prob: if True also return the ``[n]`` joint log-density
+            of each sample (sampled and evidence nodes, do-targets excluded).
+        return_log_weight: if True also return the ``[n]`` evidence-only
+            log-weight ``sum_e log p(e | pa(e))``.  The return value is
+            ``samples``, ``(samples, log_prob)``, ``(samples, log_weight)``
+            or ``(samples, log_prob, log_weight)``.
 
         Unlike ``intervene()``, this applies the intervention against the
         live parameters, so the returned samples stay differentiable w.r.t.
@@ -674,6 +686,7 @@ class NeuralBayesianNetwork(nn.Module):
             self, n=n, evidence=evidence, do=do,
             device=str(self._device),
             return_log_prob=return_log_prob,
+            return_log_weight=return_log_weight,
         )
 
     # ------------------------------------------------------------------
@@ -749,12 +762,9 @@ class NeuralBayesianNetwork(nn.Module):
             val_t = to_device(val_t, new_model._device)
             if var.is_discrete:
                 card = var.cardinality
-                idx = int(val_t.reshape(-1)[0].item())
-                if card is not None and not 0 <= idx < int(card):
-                    raise ValueError(
-                        f"Intervention value {idx} for discrete node '{node}' "
-                        f"is outside its {card} declared states."
-                    )
+                # Integral and in range: 1.7 used to be stored as-is in the
+                # delta CPD (VE truncated it to state 1, samplers emitted 1.7).
+                validate_discrete_value(node, val_t, card)
                 mech: Mechanism = DeterministicMechanism(
                     val_t.to(torch.float), cardinality=card,
                 )
