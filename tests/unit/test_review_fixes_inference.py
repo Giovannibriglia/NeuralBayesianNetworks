@@ -314,3 +314,119 @@ def test_a6_avi_observed_target_is_delta(avi_model_and_engine):
         eng.query(model, [t], {t: torch.tensor(1)}), torch.tensor([0.0, 1.0, 0.0]))
     out = eng.query_batch(model, [t], {t: torch.tensor([2, 0])})
     torch.testing.assert_close(out, torch.eye(3)[[2, 0]])
+
+
+# --------------------------------------------------------------------------- #
+# A7 / B4 / C — VE factor cache validity and lifetime
+# --------------------------------------------------------------------------- #
+
+
+def _two_same_shape_models():
+    a = _random_discrete(seed=5)
+    b = _random_discrete(seed=5)
+    # Same structure, different CPT values.
+    with torch.no_grad():
+        for p in b.parameters():
+            p.copy_(torch.randn_like(p) * 2)
+    return a, b
+
+
+def _q(model, eng=None):
+    from nbn import TensorVariableElimination
+
+    eng = eng or TensorVariableElimination()
+    nodes = list(model.dag.topological_order())
+    return eng.query(model, [nodes[-1]], {nodes[0]: torch.tensor(1)})
+
+
+def test_a7_cache_sees_load_state_dict():
+    from nbn import TensorVariableElimination
+
+    a, b = _two_same_shape_models()
+    eng = TensorVariableElimination()
+    before = _q(a, eng)
+    a.load_state_dict(b.state_dict())
+    torch.testing.assert_close(_q(a, eng), _q(b), atol=1e-6, rtol=1e-6)
+    assert (before - _q(b)).abs().max() > 1e-3  # non-vacuous
+
+
+def test_a7_cache_sees_in_place_parameter_edit():
+    from nbn import TensorVariableElimination
+
+    a, _ = _two_same_shape_models()
+    eng = TensorVariableElimination()
+    before = _q(a, eng)
+    with torch.no_grad():
+        for p in a.parameters():
+            p.mul_(-3.0)
+    after = _q(a, eng)
+    torch.testing.assert_close(after, _q(a), atol=1e-6, rtol=1e-6)
+    assert (before - after).abs().max() > 1e-3
+
+
+def test_a7_cache_sees_direct_mechanism_replacement():
+    from nbn import TensorVariableElimination
+
+    a, b = _two_same_shape_models()
+    eng = TensorVariableElimination()
+    _q(a, eng)
+    for name in list(a.mechanisms.keys()):
+        a.mechanisms[name] = b.mechanisms[name]  # bypasses set_mechanism
+    torch.testing.assert_close(_q(a, eng), _q(b), atol=1e-6, rtol=1e-6)
+
+
+def _accelerators():
+    from tests.conftest import available_devices
+
+    return [d for d in available_devices() if d != "cpu"]
+
+
+@pytest.mark.parametrize("device", _accelerators() or [
+    pytest.param("none", marks=pytest.mark.skip(reason="no accelerator"))])
+def test_b4_engine_survives_model_move_to_device(device):
+    from nbn import TensorVariableElimination
+
+    model = _random_discrete()
+    eng = TensorVariableElimination()
+    nodes = list(model.dag.topological_order())
+
+    def _qb():
+        ev = {nodes[0]: torch.tensor([0, 1, 2], device=model.device)}
+        return eng.query_batch(model, [nodes[-1]], ev)
+
+    cpu_answer = _qb()
+    model.to(device)
+    moved = _qb()  # used to index the cached CPU factors with device evidence
+    assert moved.device.type == torch.device(device).type
+    torch.testing.assert_close(moved.cpu(), cpu_answer, atol=1e-5, rtol=1e-5)
+
+
+def test_c_engine_caches_release_dead_models():
+    import gc
+
+    from nbn import TensorVariableElimination
+    from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
+
+    ve = TensorVariableElimination()
+    lw = LikelihoodWeightingEngine(64)
+    model = _random_discrete()
+    nodes = list(model.dag.topological_order())
+    ve.query(model, [nodes[-1]], {nodes[0]: torch.tensor(1)})
+    ve.query_batch(model, [nodes[-1]], {nodes[1]: torch.tensor([0, 1])})
+    lw.query(model, [nodes[-1]], {nodes[0]: torch.tensor(1)})
+    assert ve._factor_cache and ve._plan_cache and lw._cache
+    del model
+    gc.collect()
+    assert not ve._factor_cache and not ve._plan_cache and not lw._cache
+
+
+def test_c_lw_state_cache_does_not_grow_per_refit():
+    from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
+
+    lw = LikelihoodWeightingEngine(32)
+    model = _random_discrete()
+    nodes = list(model.dag.topological_order())
+    for _ in range(5):
+        lw.query(model, [nodes[-1]], {nodes[0]: torch.tensor(1)})
+        model._cache_version += 1  # what every refit does
+    assert len(lw._cache) == 1

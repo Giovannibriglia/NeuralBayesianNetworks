@@ -15,12 +15,17 @@ The v0.3.1 work introduces:
 from __future__ import annotations
 
 import logging
-import weakref
 from typing import Dict, List, Mapping
 
 import torch
 
 from nbn.core.factor import LogFactor
+from nbn.inference._cache import (
+    cache_get,
+    cache_put,
+    structure_version,
+    tensor_versions,
+)
 from nbn.inference._elimination_order import get_order
 from nbn.inference._pruning import relevant_subnetwork
 from nbn.inference.base import InferenceEngine
@@ -45,13 +50,11 @@ class TensorVariableElimination(InferenceEngine):
 
     def __init__(self, treewidth_threshold: int = 25) -> None:
         self.treewidth_threshold = treewidth_threshold
-        # Memoise factor build by id(model). Values are
-        # ``(weakref(model), cache_version, factors)`` — see ``_cache_get``
-        # for why the bare id() key was not enough.  Cleared on
-        # ``invalidate_cache``.
+        # Memoised log-CPT factors per model: ``{id(model): entry}``, see
+        # ``nbn.inference._cache`` and ``_extract_factors`` for validation.
         self._factor_cache: Dict[int, tuple] = {}
-        # Memoise the (elimination_order, relevant_set) per
-        # (id(model), targets, evidence_keys, do_keys, order), same triple.
+        # Memoised (elimination_order, relevant_set) per
+        # (id(model), target, evidence_keys, do_keys, order).
         self._plan_cache: Dict[tuple, tuple] = {}
 
     def invalidate_cache(self, model=None) -> None:
@@ -67,48 +70,41 @@ class TensorVariableElimination(InferenceEngine):
     # Cache validity
     # ------------------------------------------------------------------ #
     #
-    # Keying a memo on ``id(model)`` alone has two failure modes, both of
-    # which silently return *wrong numbers* rather than raising:
-    #
-    #   1. Refit.  ``model.fit(new_data)`` mutates the CPDs in place; the
-    #      id is unchanged, so an engine held across the refit keeps serving
-    #      the pre-fit posterior.  (``model.query`` happened to escape this
-    #      because ``fit`` -> ``to()`` drops the model's own cached engine,
-    #      but any externally-held or shared engine did not.)
-    #   2. Address reuse.  CPython recycles ``id()`` values: a model that is
-    #      garbage-collected can hand its address to an unrelated new model,
-    #      which then inherits the dead model's factors.
-    #
-    # Storing a weakref alongside the entry fixes (2) — a recycled address
-    # fails the identity check — and the model's ``_cache_version`` counter
-    # (bumped by fit / update / set_mechanism) fixes (1).
+    # Entries hold a weakref to the model (recycled ids miss; a dead
+    # model's entries are evicted by the weakref callback) and a version
+    # (see ``nbn.inference._cache``).  Plans depend only on the graph and the
+    # cardinalities, so they are versioned by ``structure_version``.  Factors
+    # also depend on every parameter value and on the device, and the
+    # model's ``_cache_version`` counter alone misses in-place edits
+    # (``load_state_dict``, optimiser steps, ``no_grad`` writes) and
+    # ``model.to(device)`` — which served stale CPTs, or crashed with a
+    # device mismatch after ``model.to("mps")`` (A7/B4).  So factor entries
+    # additionally record the device and the ``_version`` counter of every
+    # parameter and buffer; re-reading those counters costs ~30 us on a
+    # 200-node network, negligible next to a query.
 
     @staticmethod
-    def _model_version(model) -> int:
-        return int(getattr(model, "_cache_version", 0))
+    def _model_version(model) -> tuple:
+        """Version of the structural memos (plans)."""
+        return structure_version(model)
 
     def _cache_get(self, cache: Dict, key, model):
-        entry = cache.get(key)
-        if entry is None:
-            return None
-        ref, version, payload = entry
-        if ref() is not model or version != self._model_version(model):
-            cache.pop(key, None)
-            return None
-        return payload
+        return cache_get(cache, key, model, self._model_version(model))
 
     def _cache_put(self, cache: Dict, key, model, payload):
-        cache[key] = (weakref.ref(model), self._model_version(model), payload)
-        return payload
+        return cache_put(cache, key, model, self._model_version(model), payload)
 
     # ------------------------------------------------------------------ #
     # Factor and plan extraction (cached)
     # ------------------------------------------------------------------ #
 
     def _extract_factors(self, model) -> Dict[str, LogFactor]:
-        cached = self._cache_get(self._factor_cache, id(model), model)
-        if cached is not None:
-            return cached
+        version = (structure_version(model), str(model.device))
+        hit = cache_get(self._factor_cache, id(model), model, version)
+        if hit is not None:
+            tensors, versions, factors = hit
+            if versions is not None and tensor_versions(tensors) == versions:
+                return factors
         factors: Dict[str, LogFactor] = {}
         for node in model.dag.topological_order():
             mech = model.mechanisms[node]
@@ -138,7 +134,12 @@ class TensorVariableElimination(InferenceEngine):
             logits = mech.tabulate(parent_cards).detach()
             log_cpt = torch.log_softmax(logits, dim=-1)
             factors[node] = LogFactor(log_cpt, var_scope, cards)
-        return self._cache_put(self._factor_cache, id(model), model, factors)
+        # Snapshot the counters *after* tabulating, so a mechanism that
+        # lazily caches into a buffer does not invalidate its own entry.
+        tensors = [*model.parameters(), *model.buffers()]
+        cache_put(self._factor_cache, id(model), model, version,
+                  (tensors, tensor_versions(tensors), factors))
+        return factors
 
     def _plan(
         self,
