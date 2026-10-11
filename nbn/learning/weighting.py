@@ -141,6 +141,15 @@ def weighted_moments(
       common weight, which cancels) for constant weights.  The frequency form
       is meaningless there: ``sum(w) - 1`` is ~0 or negative when the weights
       sum to <= 1, and the std exploded by orders of magnitude.
+
+    The switch is deliberately discontinuous: ``w = [1, 3]`` (integers,
+    frequency rule, denominator 3) and ``w = [1, 3.0001]`` (reliability rule,
+    denominator ~1.5) give visibly different stds.  No single continuous rule
+    is both replication-exact for integer weights and scale-invariant for
+    fractional ones, and replication equivalence is the library's contract,
+    so integer weights win.  Weights that are integers "by accident" (e.g.
+    rounded responsibilities) are read as multiplicities — pass them as
+    fractions (or rescale) if they are reliabilities.
     """
     if weights is None:
         return t.mean(0), t.std(0, unbiased=unbiased)
@@ -194,9 +203,16 @@ def weighted_quantile(
     statistics.  The replicated, sorted column has ``M = sum(w)`` entries and
     entry ``j`` is the first sorted row whose cumulative weight exceeds ``j``;
     the quantile sits at position ``q * (M - 1)`` of that column and is
-    interpolated between its two neighbouring entries.  Non-integer weights
-    generalise naturally (``M`` is then real) and a zero weight drops the row
-    exactly.  Accumulated in float64.
+    interpolated between its two neighbouring entries.  A zero weight drops
+    the row exactly.  Accumulated in float64.
+
+    Non-integer weights are first rescaled to sum to the effective sample
+    size ``n_eff = (sum w)^2 / sum w^2``.  Using their raw sum as ``M`` made
+    the quantile depend on the weights' scale: normalised weights (sum 1)
+    put every quantile at position ``q * 0`` — the minimum — which flattened
+    binning thresholds and collapsed IQR-based bandwidths.  After rescaling,
+    constant weights reproduce the unweighted ``torch.quantile`` exactly and
+    any rescaling of the weights gives the same answer.
     """
     acc = accum_dtype(t.device)
     q = torch.as_tensor(q, device=t.device, dtype=acc).reshape(-1)
@@ -204,6 +220,9 @@ def weighted_quantile(
         return torch.quantile(t, q.to(t.dtype), dim=0)
     td = t.to(acc)
     w = weights.reshape(-1).to(device=t.device, dtype=acc)
+    if not bool((w == w.round()).all()):
+        # Reliability weights: only relative sizes matter (see docstring).
+        w = w * (effective_sample_size(w) / w.sum().clamp_min(_MIN_TOTAL_WEIGHT))
     order = td.argsort(dim=0)                                  # [N, D]
     xs = torch.gather(td, 0, order)                            # sorted per column
     cum = w[order].cumsum(0)                                   # [N, D]

@@ -650,3 +650,38 @@ def test_c_save_load_keeps_state_names_and_mixed_kind(tmp_path):
     loaded = NBN.load(str(path))
     assert loaded.variables["M"].kind == "mixed"
     assert loaded.state_names == {"A": ["no", "yes"]}
+
+
+# ---------------------------------------------------------------------------
+# Round 2 — R2: weighted_quantile with fractional / normalised weights
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("device", available_devices())
+def test_r2_weighted_quantile_normalised_weights_match_unweighted(device):
+    from nbn.learning.weighting import weighted_quantile
+
+    g = torch.Generator().manual_seed(0)
+    t = torch.randn(101, 2, generator=g).to(device)
+    q = torch.tensor([0.1, 0.25, 0.5, 0.75, 0.9])
+    ref = torch.quantile(t.cpu(), q, dim=0)
+    w = torch.full((101,), 1.0 / 101, device=device)
+    torch.testing.assert_close(weighted_quantile(t, q, w).cpu(), ref, atol=1e-5, rtol=0)
+    # Scale invariance for fractional weights.
+    w2 = (torch.rand(101, generator=g) + 0.1).to(device)
+    torch.testing.assert_close(
+        weighted_quantile(t, q, w2), weighted_quantile(t, q, w2 * 1e-3), atol=1e-5, rtol=0,
+    )
+    iqr = weighted_quantile(t, q, w2 * 1e-3)
+    assert (iqr[-1] - iqr[0] > 1.0).all()   # not collapsed onto the minimum
+
+
+def test_r2_weighted_quantile_integer_weights_stay_replication_exact():
+    from nbn.learning.weighting import weighted_quantile
+
+    t = torch.randn(30, 2)
+    w = torch.randint(0, 4, (30,)).float()
+    w[0] = 1.0
+    q = torch.tensor([0.1, 0.5, 0.9])
+    rep = t.repeat_interleave(w.long(), dim=0)
+    torch.testing.assert_close(weighted_quantile(t, q, w), torch.quantile(rep, q, dim=0))
