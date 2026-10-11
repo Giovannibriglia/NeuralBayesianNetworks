@@ -369,6 +369,9 @@ class NeuralBayesianNetwork(nn.Module):
         a :class:`BinningCategoricalTable` instead, which buckets those parents
         into ``n_bins`` quantile bins: a plain table would use the raw parent
         values as table indices and crash (``index -2 is out of bounds``).
+        ``BinningCategoricalTable`` has no incremental update: ``update()``
+        skips such nodes (``UpdateHistory.skipped``, one INFO log line), so
+        refit to fold new data into them.
         """
         # Validate the names up front: an unknown name used to fall through
         # to the non-default branch (e.g. "lgg" -> LinearGaussian) silently.
@@ -526,7 +529,10 @@ class NeuralBayesianNetwork(nn.Module):
         the new data using sufficient statistics it persisted during
         ``fit`` — the posterior left by ``fit`` becomes the prior for
         ``update`` (recursive Bayes).  Mechanisms that don't support it are
-        skipped (recorded in the returned ``UpdateHistory``).
+        skipped: their CPD stays as fitted, and they are recorded in the
+        returned ``UpdateHistory.skipped`` and logged once at INFO.  Note that
+        ``auto_mechanisms`` gives a discrete node with a continuous parent a
+        ``BinningCategoricalTable``, which has no incremental update.
 
         Parameters
         ----------

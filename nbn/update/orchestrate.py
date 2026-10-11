@@ -36,6 +36,11 @@ def update(
 ) -> UpdateHistory:
     """Fold ``data`` into an already-fitted ``model`` without rehearsal.
 
+    Mechanisms whose ``supports_update`` is False (e.g. the
+    ``BinningCategoricalTable`` that ``auto_mechanisms`` assigns to a discrete
+    node with a continuous parent) keep their fitted CPD unchanged; they are
+    listed in ``UpdateHistory.skipped`` and in one INFO log line per call.
+
     Parameters
     ----------
     model:
@@ -85,6 +90,13 @@ def update(
             _restore(saved)
         raise
 
+    if history.skipped:
+        logger.info(
+            "update(): %d node(s) not updated (mechanism has no incremental "
+            "update; refit to fold new data in): %s",
+            len(history.skipped),
+            ", ".join(f"{n} ({type(model.mechanisms[n]).__name__})" for n in history.skipped),
+        )
     history.wall_clock_s = time.perf_counter() - t0
     return history
 

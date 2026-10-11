@@ -1016,3 +1016,26 @@ def test_n7_weighted_consolidate_does_not_use_multinomial(monkeypatch):
     w = torch.rand(300)
     online_laplace.consolidate(mech, data["B"], data["A"], weights=w, sample_cap=64)
     assert torch.isfinite(mech._ewc_fisher).all()
+
+
+# ---------------------------------------------------------------------------
+# Round 3 — N8: skipped (non-updatable) nodes are logged once per update
+# ---------------------------------------------------------------------------
+
+
+def test_n8_update_logs_skipped_binning_nodes_once(caplog):
+    import logging
+
+    from nbn import NeuralBayesianNetwork as NBN
+
+    model = NBN([("X", "A")], {"X": ("continuous", 1), "A": ("discrete", 2)}, device="cpu")
+    model.auto_mechanisms(default_continuous="lg")
+    g = torch.Generator().manual_seed(0)
+    x = torch.randn(300, 1, generator=g)
+    data = {"X": x, "A": (x[:, 0] > 0).long()}
+    model.fit(data)
+    with caplog.at_level(logging.INFO, logger="nbn.update.orchestrate"):
+        hist = model.update(data)
+    assert hist.skipped == ["A"]
+    lines = [r for r in caplog.records if "not updated" in r.getMessage()]
+    assert len(lines) == 1 and "A (BinningCategoricalTable)" in lines[0].getMessage()
