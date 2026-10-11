@@ -481,3 +481,58 @@ def test_b7_query_vector_evidence_on_multidim_continuous_node():
     p = model.query(["A"], evidence={"X": torch.tensor([3.0, 3.0, 3.0])})
     assert p.shape == (2,)
     assert p[1] > 0.99
+
+
+# ---------------------------------------------------------------------------
+# B12 — update() is atomic
+# ---------------------------------------------------------------------------
+
+
+def _snapshot(model):
+    return {k: v.detach().clone() for k, v in model.state_dict().items() if v is not None}
+
+
+def test_b12_update_failure_midway_leaves_model_untouched():
+    from nbn import NeuralBayesianNetwork as NBN
+    from nbn.mechanisms.non_parametric.knn_conditional import KNNConditionalMechanism
+
+    model = NBN([("A", "B")], {"A": ("continuous", 1), "B": ("continuous", 1)}, device="cpu")
+    model.set_mechanism("A", __import__("nbn").mechanisms.LinearGaussianMechanism())
+    model.set_mechanism("B", KNNConditionalMechanism())
+    g = torch.Generator().manual_seed(0)
+    a = torch.randn(100, 1, generator=g)
+    data = {"A": a, "B": a + 0.1 * torch.randn(100, 1, generator=g)}
+    model.fit(data)
+    before = _snapshot(model)
+    mech_a = model.mechanisms["A"]
+    new = {"A": data["A"] + 5.0, "B": data["B"] + 5.0}
+    # A (LG) updates fine, then B (kNN) refuses forgetting < 1: must roll back A.
+    with pytest.raises(NotImplementedError):
+        model.update(new, forgetting=0.5)
+    after = _snapshot(model)
+    assert before.keys() == after.keys()
+    for k in before:
+        torch.testing.assert_close(after[k], before[k])
+    assert model.mechanisms["A"] is mech_a
+
+
+def test_b12_update_preflight_missing_column_and_ewc_state():
+    from nbn import NeuralBayesianNetwork as NBN
+
+    model, data = _lg_model("cpu")
+    model.fit(data)
+    before = _snapshot(model)
+    with pytest.raises(ValueError, match="missing"):
+        model.update({"A": data["A"]})
+    for k, v in _snapshot(model).items():
+        torch.testing.assert_close(v, before[k])
+
+    m2 = NBN([("A", "B")], {"A": ("continuous", 1), "B": ("continuous", 1)}, device="cpu")
+    m2.set_mechanism("A", __import__("nbn").mechanisms.LinearGaussianMechanism())
+    m2.set_mechanism("B", __import__("nbn").mechanisms.MDNMechanism(num_components=2))
+    m2.fit(data, consolidate=False, epochs=2)
+    snap = _snapshot(m2)
+    with pytest.raises(RuntimeError, match="EWC state missing.*'B'"):
+        m2.update(data)
+    for k, v in _snapshot(m2).items():
+        torch.testing.assert_close(v, snap[k])

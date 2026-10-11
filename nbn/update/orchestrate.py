@@ -8,6 +8,7 @@ not support incremental update are skipped (recorded in ``UpdateHistory``).
 """
 from __future__ import annotations
 
+import copy
 import logging
 import time
 from typing import TYPE_CHECKING, Any, Dict
@@ -30,6 +31,7 @@ def update(
     *,
     forgetting: float = 1.0,
     device: str | None = None,
+    atomic: bool = True,
     **kwargs: Any,
 ) -> UpdateHistory:
     """Fold ``data`` into an already-fitted ``model`` without rehearsal.
@@ -43,6 +45,13 @@ def update(
     forgetting:
         Exponential-forgetting factor in ``(0, 1]`` applied to each
         mechanism's persisted prior state (``1.0`` = pure recursive Bayes).
+    atomic:
+        If True (default) the update is all-or-nothing: every updatable
+        mechanism is snapshotted (``copy.deepcopy``) before it is touched and
+        restored in place if any later node fails, so a failure never leaves
+        the network half old, half new.  Costs one transient copy of each
+        updated mechanism — pass False for very large non-parametric stores
+        (KDE / kNN keep their whole sample) when memory is tight.
 
     Returns
     -------
@@ -50,6 +59,9 @@ def update(
     """
     if not (0.0 < float(forgetting) <= 1.0):
         raise ValueError(f"forgetting factor must be in (0, 1], got {forgetting!r}")
+
+    nodes = model.dag.topological_order()
+    _preflight(model, data, nodes)
 
     if device is None:
         device = str(model.device)
@@ -60,10 +72,52 @@ def update(
 
     history = UpdateHistory(device=device)
     t0 = time.perf_counter()
+    backups: Dict[str, Any] = {}
+    try:
+        _update_nodes(model, data_dev, nodes, forgetting, kwargs, history,
+                      backups if atomic else None)
+    except BaseException:
+        # Restore *in place* (same module objects), so references the caller
+        # holds to a mechanism see the pre-update state too.
+        for node, saved in backups.items():
+            mech = model.mechanisms[node]
+            mech.__dict__.clear()
+            mech.__dict__.update(saved.__dict__)
+        raise
 
-    for node in model.dag.topological_order():
-        if node not in model.mechanisms:
-            raise RuntimeError(f"No mechanism registered for node '{node}'.")
+    history.wall_clock_s = time.perf_counter() - t0
+    return history
+
+
+def _preflight(model, data, nodes) -> None:
+    """Check everything that can be checked before any mechanism is touched."""
+    missing = [n for n in nodes if n not in data]
+    if missing:
+        raise ValueError(
+            f"update() needs a column for every node; missing {sorted(missing)}."
+        )
+    unfitted = [n for n in nodes if n not in model.mechanisms]
+    if unfitted:
+        raise RuntimeError(f"No mechanism registered for node(s) {sorted(unfitted)}.")
+    # EWC-updated mechanisms register an ``_ewc_mu`` buffer that stays None
+    # until a fit with consolidate=True; ewc_update would raise mid-network.
+    no_ewc = [
+        n for n in nodes
+        if getattr(model.mechanisms[n], "supports_update", False)
+        and "_ewc_mu" in model.mechanisms[n]._buffers
+        and model.mechanisms[n]._buffers["_ewc_mu"] is None
+    ]
+    if no_ewc:
+        raise RuntimeError(
+            f"EWC state missing for node(s) {sorted(no_ewc)}: they were fitted "
+            f"with consolidate=False (or never fitted), so there is no "
+            f"theta*/Fisher snapshot to anchor the update.  Refit with "
+            f"consolidate=True before calling update()."
+        )
+
+
+def _update_nodes(model, data_dev, nodes, forgetting, kwargs, history, backups) -> None:
+    for node in nodes:
         mech = model.mechanisms[node]
         parents = model.dag.parents(node)
         pa_tensor = pack_parents(data_dev, parents)
@@ -87,6 +141,8 @@ def update(
                 "parent_cards", [int(pv.cardinality) for pv in parent_vars]
             )
 
+        if backups is not None:
+            backups[node] = copy.deepcopy(mech)
         metrics = mech.update_local(x, pa_tensor, forgetting=forgetting, **mech_kwargs)
         history.node_methods[node] = (metrics or {}).get("method", "unknown")
 
@@ -94,6 +150,3 @@ def update(
             history.node_log_likelihoods[node] = float(
                 mech.log_prob(x, pa_tensor).mean()
             )
-
-    history.wall_clock_s = time.perf_counter() - t0
-    return history
