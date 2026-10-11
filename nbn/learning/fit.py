@@ -318,7 +318,7 @@ def fit(
                 history.node_log_likelihoods.setdefault(node, []).append(
                     float(weighted_mean(lp, w_vec))
                 )
-        _sync_update_state_after_joint(model, data_dev, nodes, consolidate)
+        _sync_update_state_after_joint(model, data_dev, nodes, consolidate, w_vec)
     else:
         raise ValueError(f"Unknown method '{method}'. Use 'local' or 'joint'.")
 
@@ -326,7 +326,9 @@ def fit(
     return history
 
 
-def _sync_update_state_after_joint(model, data_dev, nodes, consolidate: bool) -> None:
+def _sync_update_state_after_joint(
+    model, data_dev, nodes, consolidate: bool, weights=None,
+) -> None:
     """Keep ``update()``'s persisted state consistent with a joint refinement.
 
     ``fit_local`` leaves two kinds of state for ``update()``: EWC anchors
@@ -359,7 +361,8 @@ def _sync_update_state_after_joint(model, data_dev, nodes, consolidate: bool) ->
         if "_ewc_mu" in mech._buffers:
             if consolidate:
                 pa = pack_parents(data_dev, model.dag.parents(node))
-                online_laplace.consolidate(mech, data_dev[node], pa)
+                # Weighted like the joint objective it summarises.
+                online_laplace.consolidate(mech, data_dev[node], pa, weights=weights)
             else:
                 mech._buffers["_ewc_mu"] = None
                 mech._buffers["_ewc_fisher"] = None

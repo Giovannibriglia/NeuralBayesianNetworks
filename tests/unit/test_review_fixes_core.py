@@ -759,3 +759,49 @@ def test_r7_log_prob_rejects_invalid_discrete_data(bad_val):
     data["A"] = torch.tensor([0.0, 1.0, float(bad_val)])
     with pytest.raises(ValueError, match="integer|outside"):
         model.log_prob(data)
+
+
+# ---------------------------------------------------------------------------
+# Round 2 — R12: weighted Fisher for (joint) consolidation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("force_loop", [False, True])
+def test_r12_weighted_fisher_equals_replicated_fisher(force_loop, monkeypatch):
+    import copy
+
+    from nbn.update import online_laplace
+
+    if force_loop:
+        def _no_vmap(*a, **k):
+            raise RuntimeError("force the per-sample loop")
+        monkeypatch.setattr(online_laplace, "_per_sample_fisher_vmap", _no_vmap)
+    model, data = _mdn_model()
+    model.fit(data, epochs=3)
+    mech = model.mechanisms["B"]
+    w = torch.randint(0, 3, (300,)).float()
+    rep = w.long()
+    a = copy.deepcopy(mech)
+    online_laplace.consolidate(a, data["B"], data["A"], weights=w)
+    b = copy.deepcopy(mech)
+    online_laplace.consolidate(
+        b, data["B"].repeat_interleave(rep, 0), data["A"].repeat_interleave(rep, 0),
+    )
+    torch.testing.assert_close(a._ewc_fisher, b._ewc_fisher, rtol=1e-4, atol=1e-7)
+
+
+def test_r12_joint_fit_reconsolidates_with_fit_weights():
+    import copy
+
+    from nbn.update import online_laplace
+
+    model, data = _mdn_model()
+    model.fit(data, epochs=3)
+    w = torch.zeros(300)
+    w[:100] = 1.0
+    with pytest.warns(UserWarning):
+        model.fit(data, method="joint", epochs=2, weights=w)
+    mech = model.mechanisms["B"]
+    ref = copy.deepcopy(mech)
+    online_laplace.consolidate(ref, data["B"][:100], data["A"][:100])
+    torch.testing.assert_close(mech._ewc_fisher, ref._ewc_fisher, rtol=1e-4, atol=1e-7)
