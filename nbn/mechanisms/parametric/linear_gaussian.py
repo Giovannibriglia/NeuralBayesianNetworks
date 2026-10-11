@@ -110,42 +110,9 @@ class LinearGaussianMechanism(Mechanism):
             parents = ensure_2d(parents).to(device=device, dtype=x.dtype)
             d_pa = parents.shape[1]
             self._input_dim = d_pa
-            ones = torch.ones(n, 1, device=device, dtype=x.dtype)
-            x_aug = torch.cat([parents, ones], dim=1)  # [N, D_pa+1]
-
-            # Weighted least squares == unweighted least squares on rows
-            # pre-scaled by sqrt(w).  Applied to the data rows only; the ridge
-            # block below is appended afterwards and stays unscaled.
-            if w_vec is None:
-                x_fit, y_fit = x_aug, x
-            else:
-                rw = w_vec.sqrt().to(x.dtype).reshape(-1, 1)
-                x_fit, y_fit = x_aug * rw, x * rw
-
-            if self.ridge > 0:
-                reg_pa = math.sqrt(self.ridge) * torch.eye(
-                    d_pa, device=device, dtype=x.dtype
-                )
-                reg_row = torch.zeros(d_pa, 1, device=device, dtype=x.dtype)
-                reg_x = torch.cat([reg_pa, reg_row], dim=1)
-                x_aug_r = torch.cat([x_fit, reg_x], dim=0)
-                y_r = torch.cat(
-                    [y_fit, torch.zeros(d_pa, d_x, device=device, dtype=x.dtype)],
-                    dim=0,
-                )
-            else:
-                x_aug_r, y_r = x_fit, y_fit
-
-            # ``lstsq`` has no MPS kernel: solve on ``linalg_device`` (the
-            # data device everywhere else) and bring the tiny result back.
-            ld = linalg_device(device)
-            theta = torch.linalg.lstsq(
-                x_aug_r.to(ld), y_r.to(ld),
-            ).solution.to(device)  # [D_pa+1, D_x]
-            w = theta[:-1]       # [D_pa, D_x]
-            b = theta[-1]        # [D_x]
+            w, b = self._solve_standardised(x, parents, w_vec)
             # Residual scale on the *unscaled* rows, weighted by w.
-            resid = x - x_aug @ theta
+            resid = x - (parents @ w + b)
             std = weighted_moments(resid, w_vec)[1].clamp_min(self.min_scale)
             log_s = torch.log(std)
 
@@ -167,6 +134,77 @@ class LinearGaussianMechanism(Mechanism):
             "n_params": (w.numel() + b.numel() + log_s.numel()),
             "warm_started": False,
         }
+
+    def _solve_standardised(
+        self,
+        x: torch.Tensor,
+        parents: torch.Tensor,
+        w_vec: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Weighted ridge solve for ``(W [D_pa, D_x], b [D_x])`` in raw units.
+
+        Why standardise: ``torch.linalg.lstsq``'s default (rank-revealing
+        ``gelsy``) driver drops directions whose singular value falls below
+        its relative cut-off.  A parent with a large offset and a small spread
+        (``P ~ N(100, 1)``) makes the ``[P, 1]`` design nearly collinear, so
+        the slope direction was dropped and the solve returned ``W=1.50,
+        b=0.015`` for data generated with ``W=0.5, b=100``.  Centring every
+        column (weighted) makes the intercept column orthogonal to the
+        parents, and scaling to unit spread puts every singular value at
+        ``O(sqrt(sum w))``, so nothing is near the cut-off.
+
+        The solve is the *same* optimisation problem, just reparameterised:
+        with ``P = mu + S z`` and ``X = m + sigma u`` the raw objective
+        ``sum_i w_i (x_i - p_i W - b)^2 + ridge ||W||^2`` equals
+        ``sigma^2 [sum_i w_i (u_i - z_i V - c)^2 + ridge ||S^-1 V||^2]`` with
+        ``W = S^-1 V sigma``.  So the ridge rows are ``sqrt(ridge) / s_j`` —
+        the penalty keeps the raw-unit strength the caller asked for and the
+        intercept stays unpenalised.  The moments are weighted population
+        moments, so integer weights still equal replication and a zero
+        weight still equals dropping the row.
+        """
+        n, d_x = x.shape
+        d_pa = parents.shape[1]
+        device, dtype = x.device, x.dtype
+        pa_m, pa_s = weighted_moments(parents, w_vec)
+        y_m, y_s = weighted_moments(x, w_vec)
+        # A constant column has zero spread: leave it unscaled (s = 1) rather
+        # than divide by zero; its centred values are then exactly 0 and the
+        # solve gives it no weight, as the raw problem's ridge would.
+        pa_s = torch.where(pa_s > 0, pa_s, torch.ones_like(pa_s))
+        y_s = torch.where(y_s > 0, y_s, torch.ones_like(y_s))
+        z_pa = (parents - pa_m) / pa_s
+        z_y = (x - y_m) / y_s
+        ones = torch.ones(n, 1, device=device, dtype=dtype)
+        z_aug = torch.cat([z_pa, ones], dim=1)  # [N, D_pa+1]
+
+        # Weighted least squares == unweighted least squares on rows
+        # pre-scaled by sqrt(w).  Applied to the data rows only; the ridge
+        # block below is appended afterwards and stays unscaled.
+        if w_vec is None:
+            z_fit, y_fit = z_aug, z_y
+        else:
+            rw = w_vec.sqrt().to(dtype).reshape(-1, 1)
+            z_fit, y_fit = z_aug * rw, z_y * rw
+
+        if self.ridge > 0:
+            reg_pa = torch.diag(math.sqrt(self.ridge) / pa_s)
+            reg_row = torch.zeros(d_pa, 1, device=device, dtype=dtype)
+            z_r = torch.cat([z_fit, torch.cat([reg_pa, reg_row], dim=1)], dim=0)
+            y_r = torch.cat(
+                [y_fit, torch.zeros(d_pa, d_x, device=device, dtype=dtype)], dim=0,
+            )
+        else:
+            z_r, y_r = z_fit, y_fit
+
+        # ``lstsq`` has no MPS kernel: solve on ``linalg_device`` (the
+        # data device everywhere else) and bring the tiny result back.
+        ld = linalg_device(device)
+        theta = torch.linalg.lstsq(z_r.to(ld), y_r.to(ld)).solution.to(device)
+        v, c = theta[:-1], theta[-1]                     # [D_pa, D_x], [D_x]
+        w = v * y_s.unsqueeze(0) / pa_s.unsqueeze(1)     # back to raw units
+        b = y_m + c * y_s - pa_m @ w
+        return w, b
 
     def _set_params(
         self, w: torch.Tensor, b: torch.Tensor, log_s: torch.Tensor
@@ -276,15 +314,16 @@ class LinearGaussianMechanism(Mechanism):
         assert self._bias is not None, "Call fit_local before forward()."
         scale = self._scale()  # [D_x]
         parents = self._cast_parents(parents)
+        # Batch dims are everything but the last parent axis, so a particle
+        # block [B, S, D_pa] gives batch_shape [B, S] as the Mechanism
+        # contract says.  ``scale`` is expanded to ``loc``'s full shape: it
+        # used to be expanded to [B, D_x], which crashed Normal() on 3-D input.
         if self._input_dim == 0 or parents is None:
-            b = 1 if parents is None else ensure_2d(parents).shape[0]
-            loc = self._bias.unsqueeze(0).expand(b, -1)  # [B, D_x]
-            scale_e = scale.unsqueeze(0).expand(b, -1)
+            batch = (1,) if parents is None else tuple(ensure_2d(parents).shape[:-1])
+            loc = self._bias.expand(*batch, -1)  # [*batch, D_x]
         else:
-            parents_2d = ensure_2d(parents)  # [B, D_pa]
-            loc = parents_2d @ self._weight + self._bias  # [B, D_x]
-            scale_e = scale.unsqueeze(0).expand(parents_2d.shape[0], -1)
-        return Independent(Normal(loc, scale_e), 1)
+            loc = ensure_2d(parents) @ self._weight + self._bias  # [*batch, D_x]
+        return Independent(Normal(loc, scale.expand_as(loc)), 1)
 
     def sample(self, parents: torch.Tensor | None, n: int = 1) -> torch.Tensor:
         """Return ``[B, n, D_x]``."""

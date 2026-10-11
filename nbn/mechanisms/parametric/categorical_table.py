@@ -103,6 +103,22 @@ class CategoricalTableMechanism(Mechanism):
         x = x.long().reshape(-1)
         n = x.shape[0]
         device = x.device
+        w = validate_weights(
+            weights, n, where="CategoricalTableMechanism.fit_local", device=device,
+        )
+        if w is not None and bool((w == 0).any()):
+            # A zero-weight row must be indistinguishable from an absent one.
+            # Its count contribution is already 0, but the *shape* of the
+            # table is read off the data (observed_k, observed_pc below): a
+            # zero-weight row carrying a larger label widened K or a parent
+            # cardinality, and the widened, never-counted class then drew a
+            # pseudo-count in _smooth.  Drop such rows before anything looks
+            # at the data.
+            keep = w > 0
+            x, w = x[keep], w[keep]
+            if parents is not None and parents.shape[-1] > 0:
+                parents = parents.reshape(n, -1)[keep]
+            n = x.shape[0]
 
         # Bug 1a (#127): span the *declared* cardinality, defending against
         # observed values that exceed it (shouldn't happen, but a truncated
@@ -169,9 +185,6 @@ class CategoricalTableMechanism(Mechanism):
         # range, so the default result is unchanged by the wider accumulator.
         # (``accum_dtype`` is float64 wherever it exists; MPS has none.)
         acc = accum_dtype(device)
-        w = validate_weights(
-            weights, n, where="CategoricalTableMechanism.fit_local", device=device,
-        )
         contrib = torch.ones(n, device=device, dtype=acc) if w is None else w
         counts = torch.zeros(n_parent_states * k, device=device, dtype=acc)
         counts.scatter_add_(0, flat_idx, contrib)
@@ -201,18 +214,36 @@ class CategoricalTableMechanism(Mechanism):
 
         Bug 1a (#127): a declared class that never appears anywhere in the
         accumulated data would otherwise be a structural zero (probability 0
-        for every parent configuration); give such classes a Laplace
-        pseudo-count of 1.0 so every declared class keeps nonzero probability.
+        for every parent configuration).  Each such class gets **one**
+        pseudo-observation in total -- Laplace's rule of succession over the
+        whole table -- shared across the parent rows in proportion to how
+        much data each row holds: row ``r`` receives ``n_r / N``.  The unseen
+        class therefore gets the same ``~1 / (N + 1)`` mass in every row that
+        has data.
+
+        It used to receive a full ``+1`` in *every* row, so at ``alpha=0`` a
+        sparse row (one observation) handed an unseen class 50% of its mass,
+        and an empty row (no observations) handed it 100% -- an empty row
+        with every class observed elsewhere is uniform, so the same table
+        flipped from "no information" to "certainly the class nobody has ever
+        seen".  Rows without data now get no pseudo-count and stay on the
+        uniform fallback.  A root table has one row holding all the data, so
+        its pseudo-count is still exactly ``+1``.
+
         Then add the Dirichlet ``alpha``.  This is a pure function of the
         *current* raw counts, applied identically by ``fit_local`` and
         ``update_local``, so incremental update stays exactly equal to a pooled
         fit (and stays a no-op — preserving pgmpy-MLE parity at ``alpha=0`` —
-        whenever every declared class is observed).
+        whenever every declared class is observed).  Weighted counts carry
+        through unchanged: ``N`` and ``n_r`` are weight totals, so integer
+        weights equal replication.
         """
         counts = counts.clone()
         unobserved = counts.sum(dim=0) == 0  # [k]
-        if bool(unobserved.any()):
-            counts[:, unobserved] = counts[:, unobserved] + 1.0
+        total = counts.sum()
+        if bool(unobserved.any()) and float(total) > 0:
+            share = counts.sum(dim=1, keepdim=True) / total  # [R, 1]: n_r / N
+            counts[:, unobserved] = counts[:, unobserved] + share
         return counts + self.alpha
 
     # ------------------------------------------------------------------

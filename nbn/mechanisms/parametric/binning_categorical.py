@@ -19,6 +19,7 @@ from typing import List, Sequence, Tuple
 
 import torch
 
+from nbn.learning.weighting import validate_weights, weighted_quantile
 from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
 
 
@@ -33,11 +34,14 @@ class BinningCategoricalTable(CategoricalTableMechanism):
         order.  Discrete parents pass through unchanged; continuous
         parents are bucketised at the learned thresholds.
     n_bins:
-        Number of bins for each continuous parent.  Must equal the
-        ``cardinality`` parameter the categorical CPT was sized for.
+        Number of bins for each continuous parent (``>= 2``; one bin would
+        make the parent irrelevant and has no thresholds to learn).
+        Discrete parents keep their own cardinality from ``parent_kinds``.
     n_categories:
         Cardinality of the *target* variable (``K`` in
-        :class:`CategoricalTableMechanism`).
+        :class:`CategoricalTableMechanism`).  Passed through as
+        ``n_classes`` so a declared class absent from the training data still
+        has a row in the CPT.
     """
 
     is_discrete: bool = True
@@ -54,6 +58,13 @@ class BinningCategoricalTable(CategoricalTableMechanism):
         n_categories: int,
     ) -> None:
         super().__init__(alpha=0.0)
+        if int(n_bins) < 2:
+            # n_bins=1 has no thresholds, so _bucketize left the continuous
+            # column raw and its values were used as CPT indices -- an
+            # out-of-bounds crash inside fit_local.  Fail at construction.
+            raise ValueError(
+                f"BinningCategoricalTable: n_bins must be >= 2, got {n_bins}."
+            )
         self._parent_kinds: List[Tuple[str, int]] = list(parent_kinds)
         self._n_bins = int(n_bins)
         self._n_categories = int(n_categories)
@@ -76,6 +87,11 @@ class BinningCategoricalTable(CategoricalTableMechanism):
         counts are recomputed from this call's data, which is exactly what an
         EM M-step needs.  Reported as ``warm_started: False``.
         """
+        # The target's declared cardinality.  It was stored but never used,
+        # so a declared class missing from the training data had no CPT
+        # column and log_prob of it indexed out of range.
+        kwargs.setdefault("n_classes", self._n_categories)
+        declared_pc = kwargs.pop("parent_cards", None)
         if parents is None or parents.shape[-1] == 0:
             # Root node — no binning needed; just call parent.
             empty = torch.zeros((0, self._n_bins - 1))
@@ -89,6 +105,14 @@ class BinningCategoricalTable(CategoricalTableMechanism):
         cont_mask = torch.tensor(
             [k == "continuous" for (k, _) in self._parent_kinds], dtype=torch.bool,
         )
+        # Weighted like the counts: unweighted quantiles broke replication
+        # equivalence (integer weights must give the thresholds of the
+        # replicated rows) and let zero-weight rows move the bin edges.
+        # ``weighted_quantile`` is torch.quantile when unweighted.
+        w = validate_weights(
+            kwargs.get("weights"), x.reshape(-1).shape[0],
+            where="BinningCategoricalTable.fit_local", device=parents.device,
+        )
         # PR-B §B.3 contamination-prevention contract: thresholds are
         # the empirical quantiles of *train_data*, never of the true
         # model.
@@ -99,17 +123,30 @@ class BinningCategoricalTable(CategoricalTableMechanism):
         for col in range(n_pa):
             if not cont_mask[col]:
                 continue
-            col_data = parents[..., col].float().reshape(-1)
-            thresholds[col] = torch.quantile(col_data, quantile_levels.to(col_data.device))
+            col_data = parents[..., col].float().reshape(-1, 1)
+            thresholds[col] = weighted_quantile(
+                col_data, quantile_levels.to(col_data.device), w,
+            ).reshape(-1).cpu()
 
         self.register_buffer("_thresholds", thresholds)
         self.register_buffer("_cont_mask", cont_mask)
 
         # Now bin the continuous parent columns and call the parent fitter.
         bucketed = self._bucketize(parents)
-        # Force pa cardinalities to n_bins for every column so the
-        # underlying CategoricalTable allocates a fixed-shape CPT.
-        parent_cards = [self._n_bins] * n_pa
+        # A continuous parent has exactly n_bins states after bucketising; a
+        # discrete one keeps its own cardinality.  Every column used to be
+        # forced to n_bins, which truncated (or padded) discrete parents
+        # whose cardinality differs.  CategoricalTable still widens to the
+        # observed maximum if the data exceed the declared value.
+        parent_cards = []
+        for col, (kind, card) in enumerate(self._parent_kinds):
+            if kind == "continuous":
+                parent_cards.append(self._n_bins)
+            else:
+                declared = int(card) if card else 1
+                if declared_pc is not None and declared_pc[col] is not None:
+                    declared = max(declared, int(declared_pc[col]))
+                parent_cards.append(declared)
         return super().fit_local(
             x.long().reshape(-1), bucketed, parent_cards=parent_cards,
             warm_start=warm_start, **kwargs,
