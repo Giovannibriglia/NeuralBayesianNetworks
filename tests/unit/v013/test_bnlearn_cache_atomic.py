@@ -93,3 +93,25 @@ def test_cached_file_gets_normal_permissions_not_mkstemp_0600(tmp_path, monkeypa
     finally:
         os.umask(old)
     assert (out.stat().st_mode & 0o777) == 0o644
+
+
+def test_umask_is_read_from_proc_without_changing_it(monkeypatch, tmp_path):
+    """The umask is read from /proc/self/status when available (thread-safe);
+    os.umask (which briefly CHANGES the process mask) is only a fallback."""
+    import builtins
+    import io as _io
+    import os
+
+    real_open = builtins.open
+
+    def fake_open(path, *a, **k):
+        if path == "/proc/self/status":
+            return _io.StringIO("Name:\tpython\nUmask:\t0027\n")
+        return real_open(path, *a, **k)
+
+    def no_umask(*_a):
+        raise AssertionError("os.umask must not be called when /proc is readable")
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    monkeypatch.setattr(os, "umask", no_umask)
+    assert bnlearn._current_umask() == 0o027

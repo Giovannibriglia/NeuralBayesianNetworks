@@ -593,6 +593,7 @@ ZERO_PROB_EVIDENCE = "evidence has zero probability under the fitted model"
 class UndefinedPosterior(ValueError):
     """The method's posterior is 0/0: P(evidence) = 0 under its fitted model.
 
+    Raised only when the adapter confirmed it (``Posterior.undefined_reason``).
     Not a malformed answer but an undefined one: the query is recorded as
     ``no_result`` for this method (reason in ``error_msg``), so the paper's
     same-query averaging drops it for every method of the cell instead of
@@ -609,11 +610,16 @@ def validated_probs(posterior: Any, target: str, k: int) -> torch.Tensor:
     Anything but a finite length-``k`` distribution is a method error (D5,
     #198): the old ``[:k]`` slice let a truncated grid (pgmpy without
     state_names, #217) pass and a short vector fall through to
-    not_supported. A NaN or all-zero vector is 0/0: the evidence has zero
-    (or underflowed) probability under the method's FITTED model, e.g. an
-    MLE that never saw an evidence state, so its posterior is undefined; the
-    reason starts with :data:`ZERO_PROB_EVIDENCE` so such queries can be
-    counted per baseline (D10).
+    not_supported. A NaN / inf / all-zero vector is an error too (a
+    numerical failure: LW with every particle at -inf weight, a NaN network,
+    overflow) -- UNLESS the adapter confirmed the evidence has zero
+    probability under its fitted model (``posterior.undefined_reason``, set
+    after an exact check on its CPTs). Only then is the posterior undefined
+    rather than wrong: :class:`UndefinedPosterior`, recorded as
+    ``no_result`` with a reason starting with :data:`ZERO_PROB_EVIDENCE` so
+    such queries can be counted per baseline (D10). Treating every NaN as
+    undefined hid real failures and let same-query averaging score the
+    other methods on an easier subset.
     """
     if posterior.probs is None:
         raise ValueError(f"no probability vector for discrete target {target!r}")
@@ -624,9 +630,15 @@ def validated_probs(posterior: Any, target: str, k: int) -> torch.Tensor:
             f"{target!r}, which has {k} states")
     total = float(pred_vec.sum()) if bool(torch.isfinite(pred_vec).all()) else None
     if total is None or total == 0.0:
-        raise UndefinedPosterior(
-            f"{ZERO_PROB_EVIDENCE}: posterior for {target!r} is "
-            f"{'NaN/inf' if total is None else 'all-zero'}")
+        what = "NaN/inf" if total is None else "all-zero"
+        reason = getattr(posterior, "undefined_reason", None)
+        if reason:
+            raise UndefinedPosterior(
+                f"{ZERO_PROB_EVIDENCE}: posterior for {target!r} is {what} "
+                f"({reason})")
+        raise ValueError(
+            f"non-finite or all-zero posterior for {target!r} ({what}) "
+            f"without a confirmed zero-probability evidence")
     if pred_vec.min() < -1e-6 or abs(total - 1.0) > 1e-3:
         raise ValueError(
             f"posterior for {target!r} is not a distribution (sum={total:.6g})")

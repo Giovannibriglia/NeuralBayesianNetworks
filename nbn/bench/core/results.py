@@ -178,7 +178,7 @@ class CellResult:
 # could produce no reference (zero-probability evidence under the TRUE model,
 # collapsed LW ESS; identical for every baseline of a cell), or the method's
 # own posterior is undefined because the evidence has zero probability under
-# its FITTED model (error_msg says which). Neither a method failure nor an
+# its FITTED model, as confirmed by the adapter (error_msg says which). Neither a method failure nor an
 # applicability gap: the paper's same-query averaging drops the query for
 # every method of the cell.
 VALID_STATUSES = frozenset({

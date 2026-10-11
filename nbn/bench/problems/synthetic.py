@@ -248,7 +248,8 @@ def _ensure_gt_samples(
     if sbn.n_nodes >= _REFERENCE_LARGE_NETWORK_THRESHOLD and n_ref > 10_000:
         n_ref //= 2
     try:
-        with torch.no_grad(), rng_scope(derive_seed("reference_pool", seed)):
+        with torch.no_grad(), rng_scope(derive_seed("reference_pool", seed),
+                                        getattr(sbn.true_model, "device", "cpu")):
             ref = sbn.true_model.sample(n=n_ref)
         pool = torch.cat(
             [ref[nm].reshape(n_ref, -1).float().cpu() for nm in sbn.column_order],

@@ -60,7 +60,7 @@ source:
 baselines:
   - {library: pgmpy, mechanism: discrete, param_method: mle,   inference_method: ve}
   - {library: pgmpy, mechanism: discrete, param_method: bayes, inference_method: ve}
-  - {library: pgmpy, mechanism: lg,       param_method: mle,   inference_method: predict, extra_kwargs: {n_samples: 2048}}
+  - {library: pgmpy, mechanism: lg,       param_method: lg,    inference_method: predict, extra_kwargs: {n_samples: 2048}}
   # Neural rows pin epochs: 20 explicitly — smoke is a quick sanity gate,
   # not a quality run. Without the pin, mechanisms train at their designed
   # budgets (flow 300 epochs) since the fit() setdefault fix, which blows

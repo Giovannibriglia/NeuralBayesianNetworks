@@ -39,6 +39,13 @@ class Posterior:
     # k̂<0.5 reliable, 0.5-0.7 usable, 0.7-1 unreliable, ≥1 broken (X2).
     khat: float | None = None
 
+    # Set by an adapter that has CONFIRMED the evidence has zero probability
+    # under its fitted model (e.g. an exact check on its CPTs), so its 0/0
+    # posterior is undefined rather than a numerical failure. The measurement
+    # records such a query as ``no_result``; any other NaN / inf / all-zero
+    # posterior is an ``error``.
+    undefined_reason: str | None = None
+
     def __post_init__(self) -> None:
         if (self.probs is None) == (self.samples is None):
             raise ValueError(

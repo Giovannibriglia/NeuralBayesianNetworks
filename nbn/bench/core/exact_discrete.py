@@ -42,6 +42,7 @@ __all__ = [
     "TabularSource",
     "tabular_source",
     "exact_posterior",
+    "evidence_is_impossible",
     "DEFAULT_MAX_ENTRIES",
 ]
 
@@ -320,3 +321,28 @@ def exact_posterior(
         raise ZeroProbabilityEvidence(
             "evidence has zero probability under the true model")
     return torch.softmax(vec, dim=0)
+
+
+def evidence_is_impossible(
+    src: TabularSource,
+    target: str,
+    evidence: dict[str, int],
+    *,
+    max_entries: int = DEFAULT_MAX_ENTRIES,
+) -> bool | None:
+    """Exactly decide whether ``P(evidence) = 0`` under the CPTs in ``src``.
+
+    ``True`` / ``False`` when decided, ``None`` when it cannot be (a
+    continuous node in the closure, or elimination above the size cap).
+    Adapters use it to tell a genuinely undefined posterior (0/0 because the
+    evidence is impossible under their fitted model) from a numerical
+    failure.
+    """
+    ev = {k: v for k, v in evidence.items() if k != target}
+    try:
+        exact_posterior(src, target, ev, max_entries=max_entries)
+    except ZeroProbabilityEvidence:
+        return True
+    except (Intractable, InvalidEvidence, KeyError):
+        return None
+    return False

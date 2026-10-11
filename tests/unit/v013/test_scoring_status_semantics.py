@@ -49,16 +49,31 @@ def test_short_probability_vector_is_an_error_not_not_supported():
     assert "length 2" in acc[0].error_msg
 
 
-def test_nan_posterior_is_no_result_with_reason_not_ok_nan_198():
-    """A NaN (0/0) posterior means P(evidence) = 0 under the method's fitted
-    model: undefined, recorded as no_result with the reason (never ok+NaN),
-    so same-query averaging drops the query for every method instead of
-    failing this method's whole seed."""
+def test_unconfirmed_nan_or_inf_posterior_is_an_error_198():
+    """N2: a NaN / inf / all-zero posterior is a numerical failure (error)
+    unless the adapter CONFIRMED zero-probability evidence; labelling every
+    NaN 'undefined' hid real failures and let same-query averaging score the
+    other methods on an easier subset."""
     p, q = _problem()
-    rows = at.AccuracyAndTiming().measure(p, _Fixed(torch.full((4,), float("nan"))), [q])
+    for bad in (torch.full((4,), float("nan")), torch.tensor([float("inf"), 0.0, 0.0, 0.0]),
+                torch.zeros(4)):
+        rows = at.AccuracyAndTiming().measure(p, _Fixed(bad), [q])
+        acc = _acc_rows(rows)
+        assert {r.status for r in acc} == {"error"}, bad
+        assert "without a confirmed zero-probability evidence" in acc[0].error_msg
+
+
+def test_confirmed_zero_probability_evidence_is_no_result():
+    p, q = _problem()
+
+    class _Confirmed(_Fixed):
+        def query(self, q):
+            return Posterior(probs=self.probs, undefined_reason="checked")
+
+    rows = at.AccuracyAndTiming().measure(p, _Confirmed(torch.full((4,), float("nan"))), [q])
     acc = _acc_rows(rows)
     assert {r.status for r in acc} == {"no_result"}
-    assert "evidence has zero probability under the fitted model" in acc[0].error_msg
+    assert at.ZERO_PROB_EVIDENCE in acc[0].error_msg
 
 
 def test_oracle_failure_is_no_result(monkeypatch):
@@ -133,3 +148,26 @@ def test_zero_probability_evidence_reason_and_pgmpy_vs_pomegranate():
     # defined: the pruned network's answer is the CPT row P(B | A=2) = uniform
     assert torch.allclose(at.validated_probs(pg.query(q), "B", 2).float(),
                           torch.tensor([0.5, 0.5]))
+
+
+def test_pomegranate_flags_only_genuinely_impossible_evidence():
+    """The pomegranate adapter confirms P(e)=0 by exact elimination on its
+    fitted CPTs before flagging; a NaN with P(e) > 0 stays unflagged."""
+    import pytest
+
+    pytest.importorskip("pomegranate")
+    from nbn.bench.adapters.pomegranate_adapter import PomegranateAdapter
+    from nbn.bench.domains.base import BenchmarkProblem
+
+    d = {"A": torch.tensor([0, 1, 0, 1, 1, 0]), "B": torch.tensor([0, 1, 1, 1, 0, 0])}
+    prob = BenchmarkProblem(name="t", dag=[("A", "B")],
+                            variables={"A": ("discrete", 3), "B": ("discrete", 2)},
+                            train_data=d, test_data=d, queries=[])
+    a = PomegranateAdapter(device="cpu")
+    a.fit(prob)
+    impossible = Query(targets=("B",), evidence={"A": torch.tensor(2.0)}, kind="marginal")
+    possible = Query(targets=("B",), evidence={"A": torch.tensor(1.0)}, kind="marginal")
+    assert a.query(impossible).undefined_reason
+    assert a.query(possible).undefined_reason is None
+    nan = torch.tensor([float("nan"), float("nan")])
+    assert a._undefined_reason(possible, nan) is None      # NaN but P(e) > 0
