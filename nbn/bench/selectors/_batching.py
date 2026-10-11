@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import torch
 
+from nbn.bench.core.seeding import derive_seed
 from nbn.bench.domains.base import BenchmarkProblem, Query
 
 
@@ -68,7 +69,7 @@ def make_query_groups(
         # Per-position derived seed: same cell seed -> same rows, but
         # positions don't all reuse identical row indices.
         gen = torch.Generator(device="cpu").manual_seed(
-            seed * 1000 + 13 + pos_idx
+            derive_seed("batch-variants", seed, pos_idx)
         )
         if n_train >= n_batch_queries:
             idx = torch.randperm(n_train, generator=gen)[:n_batch_queries]

@@ -285,6 +285,18 @@ def _run_cell(ctx: dict) -> list[dict]:
         spec, require_engine=not getattr(measurement, "fit_only", False),
     )
 
+    # D6: every stochastic step of the cell (weight init, minibatch order,
+    # LW / AIS particles, pgmpy / pyro sampling) runs from a seed derived from
+    # (problem, seed, baseline) — reproducible per cell, independent across
+    # baselines, and stable across processes (crc32 + SeedSequence, never the
+    # salted hash()). torch.manual_seed covers every CUDA device; see
+    # nbn/bench/core/seeding.py for the cuBLAS/cuDNN nondeterminism we leave.
+    from nbn.bench.core.seeding import derive_seed, set_global_seed
+
+    pid = getattr(problem, "problem_id", "") or getattr(problem, "name", "")
+    cell_seed = derive_seed("cell", pid, getattr(problem, "seed", 0), adapter.name)
+    set_global_seed(cell_seed)
+
     # --- Applicability gate ---
     # §5.2 step 2: one not_supported sentinel per batch_size (no fit
     # attempted). At length 1 this is exactly the pre-#174 single sentinel.
@@ -397,6 +409,9 @@ def _run_cell(ctx: dict) -> list[dict]:
     # bitwise identical to the pre-#174 output.
     all_rows: list = []
     for batch_size in batch_sizes:
+        # Re-seed per pass so a pass's query-time draws do not depend on how
+        # much randomness the fit (or an earlier pass) consumed.
+        set_global_seed(derive_seed("cell-measure", cell_seed, batch_size))
         query_groups = _select_groups(batch_size)
         queries = [q for g in query_groups for q in g]
         query_roles = [getattr(q, "query_role", default_role) for q in queries]

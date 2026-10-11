@@ -18,6 +18,7 @@ from typing import Mapping
 import networkx as nx
 import torch
 
+from nbn.bench.core.seeding import derive_seed
 from nbn.bench.domains.base import BenchmarkProblem, Query
 
 
@@ -378,7 +379,10 @@ class _ValueAllocator:
 
         Determinism: same ``problem_seed`` + ``query_idx`` + ``seen`` state →
         same return. Each retry draws a row index from a fresh
-        ``random.Random(problem_seed * 997 + query_idx + retry)`` (spec §3.5).
+        ``random.Random(derive_seed("topological-values", problem_seed,
+        query_idx, retry))``. (Spec §3.5 used ``problem_seed * 997 + query_idx
+        + retry``, under which query q's retry 1 replayed query q+1's first
+        draw and seeds collided across problems, e.g. (0, 997) vs (1, 0).)
         The dedup key uses ``row_idx`` rather than the value tensor to avoid
         tensor hashability issues (spec §5 Q4).
         """
@@ -391,7 +395,8 @@ class _ValueAllocator:
         retries = self.max_retry if max_retry is None else max_retry
         key_nodes = frozenset(evidence_nodes)
         for retry in range(retries):
-            local = random.Random(problem_seed * 997 + query_idx + retry)
+            local = random.Random(
+                derive_seed("topological-values", problem_seed, query_idx, retry))
             row_idx = local.randrange(n_rows)
             key = (target, key_nodes, row_idx)
             if key in seen:

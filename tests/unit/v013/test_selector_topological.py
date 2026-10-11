@@ -629,3 +629,29 @@ class TestTopologicalAllocator:
             assert q.targets[0] not in {"asia", "smoke"}
             # Evidence must be non-empty (we never construct queries with empty evidence)
             assert len(q.evidence) > 0
+
+
+def test_value_retry_seeds_do_not_collide(monkeypatch):
+    """The retry RNG was seeded with problem_seed*997 + query_idx + retry:
+    query q's retry 1 replayed query q+1's first draw, and (seed 0, q 997)
+    equalled (seed 1, q 0). Every (seed, query, retry) now gets its own seed."""
+    import random as _random
+
+    from nbn.bench.selectors import topological as topo
+
+    seeds = []
+
+    class _Spy(_random.Random):
+        def __init__(self, x=None):
+            seeds.append(x)
+            super().__init__(x)
+
+    monkeypatch.setattr(topo.random, "Random", _Spy)
+    assigner = topo._ValueAllocator(max_retry=4)
+    data = {"E": torch.zeros(1)}      # one row -> every retry after the first collides
+    for pseed in (0, 1):
+        seen: set = set()
+        for q in range(6):
+            assigner.assign_values("T", ["E"], data, seen, pseed, q)
+    assert len(seeds) == 2 * (1 + 5 * 4)   # first query succeeds, then 4 retries each
+    assert len(set(seeds)) == len(seeds)
