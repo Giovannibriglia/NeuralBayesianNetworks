@@ -9,6 +9,7 @@ import torch
 
 from nbn.learning.weighting import select, validate_weights, weighted_mean
 from nbn.utils.batching import pack_parents
+from nbn.utils.device import to_device
 
 if TYPE_CHECKING:
     from nbn.core.network import NeuralBayesianNetwork
@@ -141,9 +142,7 @@ def fit(
     model.to(dev)
 
     # Move data to device
-    data_dev: Dict[str, torch.Tensor] = {
-        k: v.to(dev) for k, v in data.items()
-    }
+    data_dev: Dict[str, torch.Tensor] = to_device(dict(data), dev)
 
     n_rows = next(iter(data_dev.values())).shape[0]
     w_vec = validate_weights(weights, n_rows, where="fit", device=dev)

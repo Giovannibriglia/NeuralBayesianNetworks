@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Dict, Mapping
 import torch
 
 from nbn.mechanisms.parametric.deterministic import DeterministicMechanism
+from nbn.utils.device import to_device
 
 if TYPE_CHECKING:
     from nbn.core.network import NeuralBayesianNetwork
@@ -52,7 +53,7 @@ def ancestral_sample(
     # Build a potentially mutilated mechanism dict
     mechanisms = dict(model.mechanisms)
     for node, val in do.items():
-        val_t = val.to(dev)
+        val_t = to_device(val, dev)
         # Every node here yields exactly ``n`` rows, so there is no axis for a
         # per-row intervention value to live on.  Without this check a batched
         # do-value died further down in ``expand`` with an opaque shape error
@@ -81,7 +82,7 @@ def ancestral_sample(
             pa_tensor = None
 
         if node in evidence:
-            val = evidence[node].to(dev)
+            val = to_device(evidence[node], dev)
             if val.dim() == 1:
                 val = val.unsqueeze(0).expand(n, -1)
             elif val.dim() == 0:

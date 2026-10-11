@@ -16,6 +16,7 @@ import torch
 
 from nbn.update.base import UpdateHistory
 from nbn.utils.batching import pack_parents
+from nbn.utils.device import to_device
 
 if TYPE_CHECKING:
     from nbn.core.network import NeuralBayesianNetwork
@@ -55,7 +56,7 @@ def update(
     dev = torch.device(device)
     model.to(dev)
 
-    data_dev: Dict[str, torch.Tensor] = {k: v.to(dev) for k, v in data.items()}
+    data_dev: Dict[str, torch.Tensor] = to_device(dict(data), dev)
 
     history = UpdateHistory(device=device)
     t0 = time.perf_counter()

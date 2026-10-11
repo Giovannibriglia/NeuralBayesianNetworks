@@ -344,3 +344,40 @@ def test_b4_cache_version_bumps_on_direct_writes_load_and_moves():
     assert model._cache_version == v + 1
     import copy
     assert copy.deepcopy(model)._cache_version == model._cache_version
+
+
+# ---------------------------------------------------------------------------
+# B2 — float64 inputs on a device without float64 (MPS)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("device", available_devices())
+def test_b2_float64_inputs_are_accepted_on_every_device(device):
+    import numpy as np
+
+    from nbn import NeuralBayesianNetwork as NBN
+
+    model = NBN(
+        [("D", "A"), ("A", "B")],
+        {"D": ("discrete", 2), "A": ("continuous", 1), "B": ("continuous", 1)},
+        device=device,
+    )
+    model.auto_mechanisms(default_continuous="lg")
+    g = torch.Generator().manual_seed(0)
+    d = torch.randint(0, 2, (300,), generator=g)
+    a = torch.randn(300, 1, generator=g, dtype=torch.float64) + d.unsqueeze(1)
+    data = {"D": d, "A": a, "B": 2 * a + 0.1 * torch.randn(300, 1, generator=g, dtype=torch.float64)}
+    w = torch.ones(300, dtype=torch.float64)
+    model.fit(data, weights=w)
+    model.fit(data, weights=np.ones(300))
+    model.update(data)
+    lp = model.log_prob(data)
+    assert torch.isfinite(lp).all()
+    model.query(["D"], evidence={"A": np.array([0.5])})
+    model.query_batch(
+        ["D"], evidence={"A": torch.tensor([[0.5], [1.0]], dtype=torch.float64)},
+    )
+    m2 = model.intervene({"A": torch.tensor(1.0, dtype=torch.float64)})
+    assert m2.sample(4)["A"].dtype != torch.float64 or device != "mps"
+    s = model.sample(4, do={"A": torch.tensor([1.0], dtype=torch.float64)})
+    torch.testing.assert_close(s["A"].cpu().double(), torch.ones(4, 1, dtype=torch.float64))

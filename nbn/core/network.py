@@ -368,8 +368,10 @@ class NeuralBayesianNetwork(nn.Module):
                 consolidate=consolidate,
                 warm_start=warm_start,
                 device=str(self._device),
-                weights=(None if weights is None
-                         else torch.as_tensor(weights).to(self._device)),
+                # Passed through unchanged: validate_weights places them on
+                # the device in its accumulation dtype (a float64 vector
+                # cannot be moved to MPS as-is).
+                weights=weights,
                 **kwargs,
             )
         finally:
@@ -572,10 +574,10 @@ class NeuralBayesianNetwork(nn.Module):
         def _norm(d):
             out: Dict[str, torch.Tensor] = {}
             for k, v in (d or {}).items():
-                t = v if isinstance(v, torch.Tensor) else torch.tensor(v)
+                t = v if isinstance(v, torch.Tensor) else torch.as_tensor(v)
                 if t.dim() == 0:
                     t = t.unsqueeze(0)
-                out[k] = t.to(self._device)
+                out[k] = to_device(t, self._device)
             return out
 
         ev = _norm(evidence)
@@ -613,9 +615,11 @@ class NeuralBayesianNetwork(nn.Module):
                 "use model.to(new_device) to move."
             )
         eng = engine if engine is not None else self._get_engine()
-        ev = {k: v.to(self._device) for k, v in evidence.items()}
+        ev = {k: to_device(torch.as_tensor(v), self._device) for k, v in evidence.items()}
         if do:
-            kwargs["do"] = {k: v.to(self._device) for k, v in do.items()}
+            kwargs["do"] = {
+                k: to_device(torch.as_tensor(v), self._device) for k, v in do.items()
+            }
         return eng.query_batch(self, list(targets), ev, **kwargs)
 
     def map_query(
@@ -742,7 +746,7 @@ class NeuralBayesianNetwork(nn.Module):
                     f"node.  Loop over the values, or pass do= to "
                     f"query()/query_batch(), which do accept a batch."
                 )
-            val_t = val_t.to(new_model._device)
+            val_t = to_device(val_t, new_model._device)
             if var.is_discrete:
                 card = var.cardinality
                 idx = int(val_t.reshape(-1)[0].item())
