@@ -222,3 +222,55 @@ def test_a19_log_einsum_exp_no_artificial_floor():
     assert torch.isneginf(out) or out < -150.0
     ok = log_einsum_exp("i,i->", torch.tensor([-1000.0, -1000.0]), torch.tensor([-5.0, -5.0]))
     torch.testing.assert_close(ok, torch.tensor(-1005.0 + float(torch.log(torch.tensor(2.0)))))
+
+
+# ---------------------------------------------------------------------------
+# B1 — node names colliding with nn.Module attributes, ints, "__DOT__"
+# ---------------------------------------------------------------------------
+
+_RESERVED_NAMES = [
+    "train", "eval", "to", "cuda", "forward", "parameters", "training",
+    "values", "keys", "update", "type", "float", "node__x", "a.b", "",
+]
+
+
+def _discrete_chain(names, device="cpu"):
+    from nbn import NeuralBayesianNetwork as NBN
+
+    edges = list(zip(names[:-1], names[1:]))
+    model = NBN(edges, dict.fromkeys(names, ("discrete", 2)), device=device)
+    g = torch.Generator().manual_seed(0)
+    data = {n: torch.randint(0, 2, (200,), generator=g) for n in names}
+    return model, data
+
+
+def test_b1_reserved_node_names_fit_query_and_round_trip(tmp_path):
+    from nbn import NeuralBayesianNetwork as NBN
+
+    model, data = _discrete_chain(_RESERVED_NAMES)
+    model.auto_mechanisms()
+    model.fit(data)
+    assert set(model.mechanisms.keys()) == set(_RESERVED_NAMES)
+    # nn.Module behaviour is intact (the attributes were not shadowed).
+    model.train()
+    model.eval()
+    p = model.query(["train"], evidence={"float": 1})
+    assert p.shape == (2,)
+    path = tmp_path / "m.pt"
+    model.save(str(path))
+    loaded = NBN.load(str(path))
+    torch.testing.assert_close(loaded.query(["train"], evidence={"float": 1}), p)
+    # state_dict round trip into a fresh model with the same names.
+    fresh, _ = _discrete_chain(_RESERVED_NAMES)
+    fresh.auto_mechanisms()
+    fresh.fit(data)
+    fresh.load_state_dict(model.state_dict())
+
+
+def test_b1_bad_node_names_rejected_early():
+    from nbn import NeuralBayesianNetwork as NBN
+
+    with pytest.raises(TypeError, match="str"):
+        NBN([(0, 1)], {0: ("discrete", 2), 1: ("discrete", 2)})
+    with pytest.raises(ValueError, match="__DOT__"):
+        NBN([], {"a__DOT__b": ("discrete", 2)})

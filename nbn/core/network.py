@@ -18,42 +18,85 @@ from nbn.utils.device import resolve_device, to_device
 logger = logging.getLogger(__name__)
 
 
-class _AliasModuleDict(nn.ModuleDict):
-    """An ``nn.ModuleDict`` that tolerates node names containing ``.``.
+# Every attribute an ``nn.ModuleDict`` already has (``train``, ``eval``,
+# ``to``, ``forward``, ``parameters``, ``training``, ``keys``, ``update``,
+# ``type``, ``float``, ...).  ``add_module`` refuses a key that shadows one of
+# them, so a node named like that must be stored under an escaped alias.
+_RESERVED = frozenset(dir(nn.ModuleDict()))
 
-    ``nn.ModuleDict`` keys map to submodule names, which forbid ``.`` (it would
-    be read as attribute nesting), so a bnlearn node like ``pm2.5`` or
-    ``YR.GLASS`` crashes registration. This subclass transparently stores keys
-    with ``.`` replaced by a reserved token and reverses the substitution on
-    read, so every call site keeps using the original node name unchanged.
-    The transform is a pure, deterministic, reversible string op (no side map
-    to keep in sync across deepcopy / load_state_dict).
+
+class _AliasModuleDict(nn.ModuleDict):
+    """An ``nn.ModuleDict`` that accepts any string node name.
+
+    ``nn.ModuleDict`` keys become submodule names, which forbid ``.`` (it
+    would be read as attribute nesting) and anything that collides with an
+    existing ``nn.Module`` attribute (a node called ``train`` or ``values``).
+    This subclass stores each key under a reversible alias:
+
+    * ``.`` is replaced by the reserved token ``__DOT__`` (bnlearn's
+      ``pm2.5``, ``YR.GLASS``);
+    * a key that is empty, collides with a ``ModuleDict`` attribute, or
+      already starts with the escape prefix ``node__`` gets that prefix, so
+      the reverse map is unambiguous.
+
+    Every call site keeps using the original node name.  The transform is a
+    pure, deterministic string op (no side map to keep in sync across
+    deepcopy / load_state_dict).  A literal ``__DOT__`` in a name would not
+    round-trip, so it is rejected; non-string keys are rejected too.
+
+    ``_version`` counts mutations so the owning model can invalidate
+    memoised inference factors when a mechanism is swapped in directly
+    (``model.mechanisms[node] = mech``) rather than via ``set_mechanism``.
     """
 
     _TOKEN = "__DOT__"
+    _PREFIX = "node__"
+    _version = 0  # class default; becomes an instance attribute on mutation
 
     @classmethod
     def _safe(cls, key: str) -> str:
-        return key.replace(".", cls._TOKEN)
+        if not isinstance(key, str):
+            raise TypeError(
+                f"Node names must be str, got {type(key).__name__} ({key!r})."
+            )
+        if cls._TOKEN in key:
+            raise ValueError(
+                f"Node name {key!r} contains the reserved token {cls._TOKEN!r}, "
+                f"which NBN uses to store '.' in module names; rename the node."
+            )
+        s = key.replace(".", cls._TOKEN)
+        if s == "" or s.startswith(cls._PREFIX) or s in _RESERVED:
+            s = cls._PREFIX + s
+        return s
 
     @classmethod
     def _orig(cls, key: str) -> str:
+        if key.startswith(cls._PREFIX):
+            key = key[len(cls._PREFIX):]
         return key.replace(cls._TOKEN, ".")
 
     def __setitem__(self, key, module):
         super().__setitem__(self._safe(key), module)
+        self._version += 1
 
     def __getitem__(self, key):
         return super().__getitem__(self._safe(key))
 
     def __delitem__(self, key):
         super().__delitem__(self._safe(key))
+        self._version += 1
 
     def __contains__(self, key):
+        if not isinstance(key, str) or self._TOKEN in key:
+            return False
         return super().__contains__(self._safe(key))
 
     def __iter__(self):
         return (self._orig(k) for k in super().__iter__())
+
+    def clear(self):
+        super().clear()
+        self._version += 1
 
     def keys(self):
         return list(self)  # __iter__ already yields original (de-aliased) names
@@ -133,11 +176,19 @@ class NeuralBayesianNetwork(nn.Module):
     ) -> None:
         super().__init__()
 
+        # Node names become module names and dict keys everywhere; validate
+        # them up front (str, no reserved token) instead of failing on the
+        # first set_mechanism with an opaque nn.Module error.
+        for name in variables:
+            _AliasModuleDict._safe(name)
+
         # Build DAG
         if isinstance(dag, DAG):
             self.dag = dag
         else:
             self.dag = DAG(dag, extra_nodes=list(variables.keys()))
+        for name in self.dag.nodes():
+            _AliasModuleDict._safe(name)
 
         # Build variable specs
         self.variables: Dict[str, Variable] = {}
