@@ -131,3 +131,40 @@ def test_b10_dirac_gaussian_batched_value():
     assert vec.sample(torch.zeros(5, 1), 2).shape == (5, 2, 2)
     assert vec.log_prob(torch.zeros(5, 3, 2), None).shape == (5, 3)
 
+
+# ==========================================================================
+# A13 -- Deterministic delta log_prob was 0 for every x
+# ==========================================================================
+
+
+def test_a13_deterministic_log_prob_is_zero_only_at_the_value():
+    from nbn.mechanisms.parametric.deterministic import _LOG_ZERO, DeterministicMechanism
+
+    cont = DeterministicMechanism(torch.tensor([1.5]))
+    lp = cont.log_prob(torch.tensor([[1.5], [2.0]]), None)
+    assert lp.tolist() == [0.0, _LOG_ZERO]
+    dist_lp = cont.forward(None).log_prob(torch.tensor([[1.5], [2.0]]))
+    assert dist_lp.tolist() == [0.0, _LOG_ZERO]
+    # Particle block [B, S, D].
+    lp3 = cont.log_prob(torch.tensor([[[1.5], [0.0]], [[2.0], [1.5]]]), None)
+    assert lp3.tolist() == [[0.0, _LOG_ZERO], [_LOG_ZERO, 0.0]]
+
+    disc = DeterministicMechanism(torch.tensor([2.0]), cardinality=3)
+    lp_d = disc.log_prob(torch.tensor([0, 1, 2]), None)
+    assert lp_d.dtype.is_floating_point
+    assert lp_d.tolist() == [_LOG_ZERO, _LOG_ZERO, 0.0]
+    # Consistent with the tabulated CPD exact inference uses.
+    torch.testing.assert_close(
+        lp_d, disc.tabulate()[torch.tensor([0, 1, 2])],
+    )
+
+
+def test_a13_deterministic_batched_value_aligns_with_particles():
+    from nbn.mechanisms.parametric.deterministic import _LOG_ZERO, DeterministicMechanism
+
+    mech = DeterministicMechanism(torch.tensor([[0.0], [1.0]]))
+    x = torch.tensor([[[0.0], [1.0], [0.0]], [[1.0], [1.0], [0.0]]])  # [2, 3, 1]
+    assert mech.log_prob(x, None).tolist() == [
+        [0.0, _LOG_ZERO, 0.0], [0.0, 0.0, _LOG_ZERO],
+    ]
+
