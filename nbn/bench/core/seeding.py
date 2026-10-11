@@ -68,39 +68,46 @@ def _mps_available() -> bool:
 
 
 @contextlib.contextmanager
-def rng_scope(seed: int) -> Iterator[None]:
-    """Run the body under a fixed torch + numpy seed and restore the caller's
-    RNG streams afterwards.
+def rng_scope(seed: int, device: object = None) -> Iterator[None]:
+    """Run the body under a fixed seed and restore the caller's RNG streams.
 
     The oracle uses this so its draws are (a) identical for every baseline of a
-    cell and (b) invisible to the adapter's own RNG stream. When CUDA is
-    available it is initialised on entry so every device's state can be saved
-    and restored, including the case where the body is the first CUDA user.
+    cell and (b) invisible to the adapter's own RNG stream.
+
+    Seeded and restored: torch's CPU generator, numpy's global RNG, and the
+    generator of ``device`` only -- the device the body samples on (the true
+    model's device). For a CUDA device exactly that GPU's generator is saved
+    (which initialises it if the body would be its first user, so its seed
+    cannot leak into the caller's stream afterwards), seeded and restored;
+    no other GPU is touched, and with a CPU / MPS / ``None`` device CUDA is
+    not touched at all (no CUDA context in CPU-only cells or in the runner
+    parent; safe under EXCLUSIVE_PROCESS compute mode).
     """
+    dev = torch.device(device) if device is not None else torch.device("cpu")
     cpu_state = torch.random.get_rng_state()
     np_state = np.random.get_state()
-    cuda_states = None
-    if torch.cuda.is_available():
-        # Initialise CUDA BEFORE saving: if the body is the first thing to
-        # touch CUDA, its lazily-created generators would otherwise keep the
-        # scope's seed afterwards and leak it into the caller's (adapter's)
-        # stream. In a cell worker CUDA is initialised by the fit anyway.
-        torch.cuda.init()
-        cuda_states = torch.cuda.get_rng_state_all()
-    mps_state = None
-    if _mps_available():
+    cuda_idx = cuda_state = mps_state = None
+    if dev.type == "cuda" and torch.cuda.is_available():
+        cuda_idx = dev.index if dev.index is not None else torch.cuda.current_device()
+        cuda_state = torch.cuda.get_rng_state(cuda_idx)
+    elif dev.type == "mps" and _mps_available():
         try:
             mps_state = torch.mps.get_rng_state()
         except Exception:  # pragma: no cover - older torch without the API
             mps_state = None
-    torch.manual_seed(int(seed))
+    torch.random.default_generator.manual_seed(int(seed))
     np.random.seed(int(seed))
+    if cuda_idx is not None:
+        with torch.cuda.device(cuda_idx):
+            torch.cuda.manual_seed(int(seed))
+    if mps_state is not None:
+        torch.mps.manual_seed(int(seed))
     try:
         yield
     finally:
         torch.random.set_rng_state(cpu_state)
         np.random.set_state(np_state)
-        if cuda_states is not None:
-            torch.cuda.set_rng_state_all(cuda_states)
+        if cuda_idx is not None:
+            torch.cuda.set_rng_state(cuda_state, cuda_idx)
         if mps_state is not None:
             torch.mps.set_rng_state(mps_state)

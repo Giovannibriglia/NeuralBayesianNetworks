@@ -242,7 +242,7 @@ def conditional_posterior_samples(
     if seed is not None:
         from nbn.bench.core.seeding import rng_scope
 
-        with rng_scope(seed):
+        with rng_scope(seed, _model_device(problem.true_model)):
             return conditional_posterior_samples(
                 problem, targets, evidence, n_samples=n_samples,
                 max_particles=max_particles, min_ess=min_ess, seed=None,
@@ -265,6 +265,12 @@ def conditional_posterior_samples(
     w = torch.softmax(logw, dim=0)
     idx = torch.multinomial(w, n_samples, replacement=True)
     return x[idx]
+
+
+def _model_device(tm) -> str:
+    """Device the true model samples on (its torch device; CPU for pgmpy /
+    numpy models). ``rng_scope`` seeds and restores only that device."""
+    return str(getattr(tm, "device", "cpu") or "cpu")
 
 
 def _clean_evidence(evidence: dict) -> dict:
@@ -394,7 +400,7 @@ def discrete_oracle(
             pool = getattr(gt, "samples", None) if gt is not None else None
             n_particles = (int(pool.shape[0]) if pool is not None and pool.numel()
                            else _DEFAULT_DISCRETE_LW_PARTICLES)
-        with rng_scope(seed):
+        with rng_scope(seed, _model_device(problem.true_model)):
             probs = discrete_posterior_lw(problem, target, ev, n_particles=n_particles)
         if probs is not None:
             return probs, ORACLE_LW

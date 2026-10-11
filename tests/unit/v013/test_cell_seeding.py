@@ -57,22 +57,60 @@ def test_derive_seed_has_no_linear_collisions():
     assert derive_seed("x", 3) == derive_seed("x", 3)
 
 
-def test_rng_scope_initialises_cuda_before_saving_its_state(monkeypatch):
-    """CUDA-by-reading #4: rng_scope saved/restored the CUDA RNG only when
-    CUDA was already initialised; if the oracle touched CUDA first inside the
-    scope, the scope's seed leaked into the adapter's stream. With CUDA
-    available it is now initialised, saved and restored every time."""
+def _mock_cuda(monkeypatch, calls):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "init", lambda: calls.append("init_all"))
+    monkeypatch.setattr(torch.cuda, "get_rng_state_all",
+                        lambda: calls.append("save_all") or [])
+    monkeypatch.setattr(torch.cuda, "get_rng_state",
+                        lambda i=None: calls.append(("save", i)) or "state")
+    monkeypatch.setattr(torch.cuda, "set_rng_state",
+                        lambda st, i=None: calls.append(("restore", st, i)))
+    monkeypatch.setattr(torch.cuda, "manual_seed",
+                        lambda s: calls.append(("seed", s)))
+    monkeypatch.setattr(torch.cuda, "manual_seed_all",
+                        lambda s: calls.append("seed_all"))
+
+    class _Dev:
+        def __init__(self, i):
+            self.i = i
+
+        def __enter__(self):
+            calls.append(("on", self.i))
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(torch.cuda, "device", _Dev)
+
+
+def test_rng_scope_touches_only_the_cell_cuda_device(monkeypatch):
+    """rng_scope initialised and saved EVERY visible GPU on a CUDA host (a
+    context per GPU even in CPU-only cells; fails under EXCLUSIVE_PROCESS).
+    Now only the given device's generator is saved, seeded and restored -- and
+    saving it first keeps the leak fix (the scope's seed cannot stay in a
+    generator the body created)."""
     from nbn.bench.core import seeding
 
     calls = []
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
-    monkeypatch.setattr(torch.cuda, "init", lambda: calls.append("init"))
-    monkeypatch.setattr(torch.cuda, "get_rng_state_all",
-                        lambda: calls.append("save") or ["state"])
-    monkeypatch.setattr(torch.cuda, "set_rng_state_all",
-                        lambda s: calls.append(("restore", tuple(s))))
-    monkeypatch.setattr(torch.cuda, "manual_seed_all", lambda s: None)
-    with seeding.rng_scope(7):
+    _mock_cuda(monkeypatch, calls)
+    with seeding.rng_scope(7, "cuda:1"):
         calls.append("body")
-    assert calls == ["init", "save", "body", ("restore", ("state",))]
+    assert calls == [("save", 1), ("on", 1), ("seed", 7), "body",
+                     ("restore", "state", 1)]
+
+
+def test_rng_scope_on_cpu_never_touches_cuda(monkeypatch):
+    from nbn.bench.core import seeding
+
+    calls = []
+    _mock_cuda(monkeypatch, calls)
+    before = torch.random.get_rng_state()
+    with seeding.rng_scope(7, "cpu"):
+        a = torch.rand(3)
+    with seeding.rng_scope(7):
+        b = torch.rand(3)
+    assert calls == []
+    assert torch.equal(a, b)
+    assert torch.equal(torch.random.get_rng_state(), before)
