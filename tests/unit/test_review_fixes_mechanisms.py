@@ -168,3 +168,21 @@ def test_a13_deterministic_batched_value_aligns_with_particles():
         [0.0, _LOG_ZERO, 0.0], [0.0, 0.0, _LOG_ZERO],
     ]
 
+
+# ==========================================================================
+# A15 -- NeuralCategorical embeddings indexed the sample axis of 3-D parents
+# ==========================================================================
+
+
+def test_a15_neural_categorical_embeddings_accept_particle_parents():
+    from nbn.mechanisms import NeuralCategoricalMechanism
+
+    g = torch.Generator().manual_seed(0)
+    pa = torch.randint(0, 3, (300, 2), generator=g)
+    x = (pa.sum(1) % 3)
+    mech = NeuralCategoricalMechanism(n_classes=3, embedding_dim=4)
+    mech.fit_local(x, pa, parent_cards=[3, 3], epochs=3, consolidate=False)
+    p3 = torch.randint(0, 3, (4, 5, 2), generator=g)
+    probs3 = mech.forward(p3).probs
+    probs2 = mech.forward(p3.reshape(20, 2)).probs.reshape(4, 5, 3)
+    torch.testing.assert_close(probs3, probs2)

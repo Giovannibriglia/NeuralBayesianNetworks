@@ -246,7 +246,13 @@ class NeuralCategoricalMechanism(Mechanism):
 
     def _logits_from_parents(self, parents: torch.Tensor) -> torch.Tensor:
         if self.embeddings is not None:
-            parts = [self.embeddings[i](parents[:, i].long()) for i in range(parents.shape[1])]
+            # Index the *last* (parent) axis: ``parents[:, i]`` picked the
+            # sample axis of a [B, S, D_pa] particle block, which crashed or
+            # embedded the wrong values.
+            parts = [
+                self.embeddings[i](parents[..., i].long())
+                for i in range(parents.shape[-1])
+            ]
             inp = torch.cat(parts, dim=-1)
         else:
             inp = parents.float()
