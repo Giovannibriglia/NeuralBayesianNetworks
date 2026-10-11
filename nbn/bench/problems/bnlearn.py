@@ -397,7 +397,7 @@ class _BnlearnContinuousModel:
         return out
 
     def weighted_sample(
-        self, n: int, evidence: dict, keep: list[str],
+        self, n: int, evidence: dict, keep: list[str], seed: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Likelihood-weighted particles for the oracle (#288).
 
@@ -405,6 +405,10 @@ class _BnlearnContinuousModel:
         with evidence clamped; each row's log-weight is
         ``Σ_{j∈E} log p(e_j | pa_j)``.  Returns ``(keep columns [n, len(keep)]
         float32, log-weights [n])``.
+
+        ``seed`` seeds the draw; ``None`` derives one from numpy's *global*
+        RNG (never from OS entropy), so the oracle's ``rng_scope`` makes
+        repeated calls reproducible (D6).
         """
         import numpy as np
 
@@ -414,7 +418,9 @@ class _BnlearnContinuousModel:
             if nd not in need:
                 need.add(nd)
                 stack.extend(self._parents(nd))
-        rng = np.random.default_rng()
+        if seed is None:
+            seed = int(np.random.randint(0, 2**31 - 1))
+        rng = np.random.default_rng(seed)
         values: dict[str, Any] = {}
         logw = np.zeros(n, dtype=np.float64)
         for node in self._topo:

@@ -51,7 +51,7 @@ from typing import Any
 
 import torch
 
-from nbn.bench.core.oracle import filter_ground_truth, conditional_posterior_samples
+from nbn.bench.core.oracle import conditional_posterior_samples, discrete_oracle
 from nbn.bench.core.results import CellResult
 from nbn.bench.domains.base import BenchmarkProblem, Query
 from nbn.bench.metrics import _compute_metrics_per_node
@@ -73,26 +73,38 @@ class AccuracyAndTiming:
         Number of samples drawn from ``problem.true_model`` per query for
         continuous oracle estimation.  Default 2000 matches the v0.12
         ``_compute_inference_metrics`` setting.
-    eps_factor:
-        Evidence tolerance for discrete ground-truth rejection filter.
-        Continuous evidence nodes within ``eps_factor * std`` of the
-        observed value are accepted.  Default 0.50 matches v0.12.
-    n_eff_min:
-        Minimum effective sample size for the discrete rejection filter.
-        Queries with fewer than ``n_eff_min`` surviving reference rows are
-        skipped with ``status="no_result"``.  Default 10 matches v0.12.
+    n_reference:
+        Effective-particle budget of the discrete likelihood-weighting oracle
+        tier (hybrid / intractable networks). ``None`` (default) uses the
+        problem's ``n_reference`` — the size of its reference pool — so the
+        config's ``source.n_reference`` keeps governing every sample-based
+        reference. Discrete targets on all-discrete networks are scored
+        against the *exact* posterior (variable elimination on the true
+        CPTs) and ignore it. See ``nbn.bench.core.oracle.discrete_oracle``.
+    eps_factor, n_eff_min:
+        Parameters of the legacy rejection-filter fallback, used only when
+        the true model is unusable (rows flagged ``oracle="rejection"``).
     """
 
     def __init__(
         self,
         *,
         n_oracle_samples: int = 2000,
+        n_reference: int | None = None,
         eps_factor: float = 0.50,
         n_eff_min: int = 10,
     ) -> None:
         self.n_oracle_samples = n_oracle_samples
+        self.n_reference = n_reference
         self.eps_factor = eps_factor
         self.n_eff_min = n_eff_min
+
+    def __getstate__(self) -> dict:
+        # The measurement is pickled into every cell worker's context; the
+        # per-problem CPT cache holds closures and must not travel with it.
+        state = self.__dict__.copy()
+        state.pop("_tabular_cache", None)
+        return state
 
     # -----------------------------------------------------------------------
     # Measurement protocol
@@ -218,12 +230,15 @@ class AccuracyAndTiming:
         t_metrics = time.perf_counter()
         per_query_metric_dicts: list[dict | None] = []
 
-        for q, (posterior, _err) in zip(queries, posteriors):
+        per_query_oracle: list[str | None] = []
+        for qi, (q, (posterior, _err)) in enumerate(zip(queries, posteriors)):
             if posterior is None:
                 per_query_metric_dicts.append(None)
+                per_query_oracle.append(None)
                 continue
-            mdict = self._score_query(problem, q, posterior)
+            mdict, tier = self._score_query(problem, q, posterior, query_index=qi)
             per_query_metric_dicts.append(mdict)
+            per_query_oracle.append(tier)
 
         metrics_time_s = time.perf_counter() - t_metrics
 
@@ -357,7 +372,11 @@ class AccuracyAndTiming:
             # every row of this query (float for lw/ais; None for ve/avi/others).
             q_ess = posterior.ess
             q_khat = posterior.khat
-            rows.extend(dataclasses.replace(r, ess=q_ess, khat=q_khat) for r in query_rows)
+            rows.extend(
+                dataclasses.replace(r, ess=q_ess, khat=q_khat,
+                                    oracle=per_query_oracle[i])
+                for r in query_rows
+            )
 
         # ---- Timeout rows for groups that never started ----
         # One row-set per unstarted GROUP (not per query), carrying the
@@ -426,63 +445,81 @@ class AccuracyAndTiming:
         problem: BenchmarkProblem,
         q: Query,
         posterior: Any,
-    ) -> dict[str, float | None]:
-        """Return ``{tv_per_node, jsd_per_node, w1_per_node}`` for one query.
+        *,
+        query_index: int = 0,
+    ) -> tuple[dict[str, float | None], str | None]:
+        """Return ``({tv_per_node, jsd_per_node, w1_per_node}, oracle tier)``.
 
         Dispatches on target kind (discrete → cpd_pair; continuous →
-        sample_pair).  Returns the ``_compute_metrics_per_node`` dict.
-        On oracle failure, returns all-None dict (caller emits no_result).
+        sample_pair).  The oracle's draws run under a seed derived from the
+        problem and ``query_index`` — identical for every baseline of the cell.
+        On oracle failure, returns an all-None dict (caller emits no_result).
         """
+        from nbn.bench.core.seeding import derive_seed
+
         target = q.targets[0]
         target_kind = problem.variables[target][0]
         ev_row = dict(q.evidence.items())
+        oracle_seed = derive_seed(
+            "oracle", problem.problem_id or problem.name, problem.seed, query_index,
+        )
 
         cpd_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
         sample_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
 
         if target_kind == "discrete":
-            oracle = filter_ground_truth(
-                problem, ev_row, target,
+            probs, tier = discrete_oracle(
+                problem, target, ev_row,
+                n_particles=self.n_reference,
+                seed=oracle_seed,
                 eps_factor=self.eps_factor,
                 n_eff_min=self.n_eff_min,
+                source=self._tabular(problem),
             )
-            if oracle is None:
-                return dict.fromkeys(_METRIC_KEYS)
+            if probs is None:
+                return dict.fromkeys(_METRIC_KEYS), tier
 
             k = problem.variables[target][1]
-            empirical = torch.zeros(k)
-            empirical.scatter_add_(
-                0,
-                oracle.long().clamp(0, k - 1),
-                torch.ones_like(oracle, dtype=torch.float),
-            )
-            empirical = empirical / empirical.sum().clamp_min(1e-12)
-            true_logits = torch.log(empirical.clamp_min(1e-12))
+            true_logits = torch.log(probs.float().clamp_min(1e-12))
 
             # Posterior.probs is the predicted probability vector.
             if posterior.probs is None:
-                return dict.fromkeys(_METRIC_KEYS)
+                return dict.fromkeys(_METRIC_KEYS), tier
             pred_vec = posterior.probs.cpu().reshape(-1)[:k]
             fit_logits = torch.log(pred_vec.clamp_min(1e-12))
             cpd_pairs.append((true_logits, fit_logits))
 
         else:
             # Continuous or hybrid-continuous target.
+            tier = "lw"
             oracle = conditional_posterior_samples(
                 problem, [target], ev_row, n_samples=self.n_oracle_samples,
+                seed=oracle_seed,
             )
             if oracle is None or oracle.shape[0] < 100:
-                return dict.fromkeys(_METRIC_KEYS)
+                return dict.fromkeys(_METRIC_KEYS), tier
 
             if posterior.samples is None:
-                return dict.fromkeys(_METRIC_KEYS)
+                return dict.fromkeys(_METRIC_KEYS), tier
             sample_pairs.append((oracle.reshape(-1).cpu(), posterior.samples.cpu().reshape(-1)))
 
         return _compute_metrics_per_node(
             cpd_pairs=cpd_pairs,
             sample_pairs=sample_pairs,
             metrics=_METRICS,
-        )
+        ), tier
+
+    def _tabular(self, problem: BenchmarkProblem):
+        """The true model's tabular CPT source, cached per problem (the same
+        tables serve every query of the cell)."""
+        from nbn.bench.core.exact_discrete import tabular_source
+
+        cached = getattr(self, "_tabular_cache", None)
+        if cached is not None and cached[0] is problem:
+            return cached[1]
+        src = tabular_source(problem)
+        self._tabular_cache = (problem, src)
+        return src
 
 
 # ---------------------------------------------------------------------------

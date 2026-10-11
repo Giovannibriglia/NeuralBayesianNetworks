@@ -199,7 +199,7 @@ source:                       # synthetic shown; bnlearn takes a network list
   seeds: [0]
   n_train: 2048
   n_test: 512
-  n_reference: 5000           # oracle samples for continuous ground truth
+  n_reference: 5000           # reference-pool rows = LW-oracle ESS for discrete targets on hybrid nets (docs/v0.13-oracle-methodology.md)
   edge_density: 0.20
   max_in_degree: 2
   cardinality: 4

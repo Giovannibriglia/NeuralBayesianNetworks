@@ -146,6 +146,16 @@ class CellResult:
     base_fit_time_s: float | None = None
     attach_time_s: float | None = None
 
+    # How the accuracy reference of this query was computed (D1): "exact_ve"
+    # (exact variable elimination on the true model's CPTs), "lw" (likelihood
+    # weighting on the true model — continuous targets, hybrid networks, or
+    # exact VE intractable) or "rejection" (legacy reference-pool rejection
+    # filter, used only when the true model is unusable; Monte-Carlo error
+    # ~0.05 TV, filter these rows out of headline numbers). None for timing
+    # rows of failed queries, non-accuracy measurements and legacy parquets.
+    # Stamped per query by AccuracyAndTiming. Additive.
+    oracle: str | None = None
+
 
 # Valid status values (for validation in implementations)
 VALID_STATUSES = frozenset({"ok", "timeout", "oom", "error", "not_supported"})
