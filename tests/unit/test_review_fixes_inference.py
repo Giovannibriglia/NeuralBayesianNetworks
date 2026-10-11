@@ -183,12 +183,12 @@ def test_c_ve_rejects_out_of_range_states(bad, kind):
     spec = {nodes[2]: torch.tensor(bad)}
     kw = {"do": spec} if kind == "do" else {}
     ev = {} if kind == "do" else spec
-    with pytest.raises(ValueError, match="out of range"):
+    with pytest.raises(ValueError, match="out of range|outside"):
         eng.query(model, [nodes[0]], ev, **kw)
     spec_b = {nodes[2]: torch.tensor([0, bad])}
     kw = {"do": spec_b} if kind == "do" else {}
     ev = {} if kind == "do" else spec_b
-    with pytest.raises(ValueError, match="out of range"):
+    with pytest.raises(ValueError, match="out of range|outside"):
         eng.query_batch(model, [nodes[0]], ev, **kw)
 
 

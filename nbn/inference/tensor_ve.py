@@ -28,6 +28,7 @@ from nbn.inference._cache import (
 )
 from nbn.inference._elimination_order import get_order
 from nbn.inference._memory import OutOfMemoryError, device_headroom_bytes
+from nbn.inference._validation import check_discrete_values
 from nbn.inference._pruning import relevant_subnetwork, requisite_nodes
 from nbn.inference.base import InferenceEngine
 
@@ -430,11 +431,11 @@ class TensorVariableElimination(InferenceEngine):
         def _as_int(v):
             return int(v.item()) if isinstance(v, torch.Tensor) else int(v)
 
+        # Validate before ``int()``: it would truncate 1.5 to state 1, and
+        # indexing would wrap -1 to the last state (R7 / C).
+        check_discrete_values(model, {**evidence, **do}, do_keys=do)
         ev_int: Dict[str, int] = {k: _as_int(v) for k, v in evidence.items()}
         do_int: Dict[str, int] = {k: _as_int(v) for k, v in do.items()}
-        for kind, vals in (("evidence", ev_int), ("do", do_int)):
-            for node, v in vals.items():
-                _check_state_range(model, node, kind, v, v)
 
         # Observing or intervening on the target itself makes the answer a
         # point mass by definition.  Handled up front because conditioning
@@ -565,7 +566,7 @@ class TensorVariableElimination(InferenceEngine):
         # may vary per row: the batched conditioner fancy-indexes each factor
         # with a [B] index tensor, so a per-row intervention costs nothing
         # extra over a per-row observation.
-        ev_norm: Dict[str, torch.Tensor] = {}
+        raw: Dict[str, torch.Tensor] = {}
         B = 1
         for k, v in {**evidence, **do}.items():
             t = v if isinstance(v, torch.Tensor) else torch.as_tensor(v)
@@ -573,12 +574,15 @@ class TensorVariableElimination(InferenceEngine):
                 t = t.reshape(1)
             elif t.dim() >= 2 and t.shape[-1] == 1:
                 t = t.reshape(-1)
-            t = t.to(device=device, dtype=torch.long)
-            ev_norm[k] = t
+            raw[k] = t
             B = max(B, t.shape[0])
+        # Validate before the cast to long, which would truncate 1.5 to 1.
+        check_discrete_values(model, raw, do_keys=do)
+        ev_norm: Dict[str, torch.Tensor] = {
+            k: t.to(device=device, dtype=torch.long) for k, t in raw.items()
+        }
         # Broadcast any [1] evidence to [B]
         ev_norm = {k: (v.expand(B) if v.shape[0] == 1 else v) for k, v in ev_norm.items()}
-        _check_batch_state_range(model, ev_norm, do)
 
         if target in ev_norm:
             # Point mass per row (target observed or intervened) — see ``query``.
@@ -733,46 +737,6 @@ class TensorVariableElimination(InferenceEngine):
                 model, targets, rows, do=do_rows, order=order, **kwargs,
             ))
         return torch.cat(outs, dim=0)
-
-
-def _check_state_range(model, node: str, kind: str, lo: int, hi: int) -> None:
-    """Reject a discrete state index outside ``[0, K)`` for ``node``.
-
-    Torch indexing wraps negative indices, so evidence ``-1`` used to be read
-    silently as the *last* state — a plausible, wrong posterior (C).  An index
-    ``>= K`` failed only deep inside a factor slice with an opaque error.
-    """
-    if node not in model.mechanisms:
-        raise KeyError(f"{kind} node {node!r} is not a node of the model.")
-    # The declared cardinality is always known; a mechanism's n_classes is 0
-    # until it is fitted, and reading it here would mask the clearer
-    # "has not been fitted" error raised when factors are extracted.
-    variable = model.variables.get(node)
-    k = getattr(variable, "cardinality", None) or model.mechanisms[node].n_classes
-    if not k:
-        return  # nothing declared and nothing fitted: let factor extraction report it
-    if lo < 0 or hi >= k:
-        bad = lo if lo < 0 else hi
-        raise ValueError(
-            f"{kind} value {bad} for discrete node {node!r} is out of range; "
-            f"valid states are 0..{k - 1}."
-        )
-
-
-def _check_batch_state_range(model, values: Dict[str, torch.Tensor], do) -> None:
-    """Batched :func:`_check_state_range` over ``{node: [B] long}``.
-
-    All min/max reductions are gathered into one tensor so the check costs a
-    single device→host sync per query, not one per evidence variable.
-    """
-    names = [n for n, v in values.items() if v.numel() > 0]
-    if not names:
-        return
-    bounds = torch.stack(
-        [torch.stack([values[n].min(), values[n].max()]) for n in names]
-    ).tolist()
-    for n, (lo, hi) in zip(names, bounds):
-        _check_state_range(model, n, "do" if n in do else "evidence", int(lo), int(hi))
 
 
 def _delta_probs(k: int, value: int, device) -> torch.Tensor:
