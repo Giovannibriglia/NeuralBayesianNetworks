@@ -608,3 +608,130 @@ def test_c_flexcode_samples_are_continuous_and_match_the_density():
     cdf = torch.cat([torch.zeros(1), cdf]) / cdf[-1]
     emp = torch.searchsorted(s.sort().values, grid, right=True).float() / s.numel()
     assert float((emp - cdf).abs().max()) < 0.02
+
+
+# ==========================================================================
+# A12 / B11 / C -- ConditionalKDE: weighted sampling, weighted auto bw,
+# effective sample size, one row, cross-device update
+# ==========================================================================
+
+
+def _kde(**kw):
+    from nbn.mechanisms.non_parametric.conditional_kde import ConditionalKDEMechanism
+
+    return ConditionalKDEMechanism(**kw)
+
+
+def test_a12_kde_root_sample_follows_the_weights():
+    # Pre-fix: the root sampler used randint, so the zero-weight cluster at 10
+    # received half of the samples.
+    y = torch.cat([torch.zeros(50, 1), torch.full((50, 1), 10.0)])
+    w = torch.cat([torch.ones(50), torch.full((50,), 1e-6)])
+    mech = _kde(bw_factor=1.0)
+    mech.fit_local(y, None, weights=w)
+    s = mech.sample(None, 4000)
+    assert float((s > 5).float().mean()) < 0.01
+
+
+def test_a12_kde_conditional_sample_follows_the_weights():
+    # Pre-fix: the exact conditional path dropped _train_logw from the
+    # component logits (the truncated path already had it).
+    pa = torch.zeros(100, 1) + 0.01 * torch.randn(100, 1)
+    y = torch.cat([torch.zeros(50, 1), torch.full((50, 1), 10.0)])
+    w = torch.cat([torch.full((50,), 3.0), torch.full((50,), 1.0)])
+    mech = _kde(bw_factor=1.0)
+    mech.fit_local(y, pa, weights=w)
+    s = mech.sample(torch.zeros(2, 1), 4000)
+    frac_far = float((s > 5).float().mean())
+    assert abs(frac_far - 0.25) < 0.03, frac_far
+    # Consistent with the density the mechanism reports.
+    with torch.no_grad():
+        p0 = mech.log_prob(torch.zeros(1, 1), torch.zeros(1, 1)).exp()
+        p10 = mech.log_prob(torch.full((1, 1), 10.0), torch.zeros(1, 1)).exp()
+    assert abs(float(p10 / (p0 + p10)) - 0.25) < 0.01
+
+
+def test_a12_kde_auto_bandwidth_uses_the_weights():
+    g = torch.Generator().manual_seed(0)
+    pa = torch.randn(200, 1, generator=g)
+    y = torch.sin(3 * pa) + 0.05 * torch.randn(200, 1, generator=g)
+    junk_pa = torch.randn(200, 1, generator=g)
+    junk_y = 5 * torch.randn(200, 1, generator=g)
+    # Zero-weight junk must leave the auto-selected factor (and the whole
+    # fit) exactly as if it had been dropped.  Pre-fix the selection ignored
+    # the weights and scored on the junk rows too: it picked 1.0 where the
+    # sharp curve alone picks 0.2.
+    x_all, pa_all = torch.cat([y, junk_y]), torch.cat([pa, junk_pa])
+    w = torch.cat([torch.ones(200), torch.zeros(200)])
+    weighted = _kde(bw_factor="auto")
+    weighted.fit_local(x_all, pa_all, weights=w)
+    dropped = _kde(bw_factor="auto")
+    dropped.fit_local(y, pa)
+    assert weighted.bw_factor == dropped.bw_factor == 0.2
+    q = torch.tensor([[0.0], [1.0]])
+    torch.testing.assert_close(weighted.log_prob(q, q), dropped.log_prob(q, q))
+
+
+def test_a12_kde_auto_bandwidth_scores_a_weighted_holdout():
+    from nbn.mechanisms.non_parametric import conditional_kde as ck
+
+    g = torch.Generator().manual_seed(1)
+    y = torch.randn(200, 1, generator=g)
+    w = torch.rand(200, generator=g) + 0.5
+    seen = {}
+    real = ck.weighted_mean
+
+    def spy(values, weights):
+        seen["weights"] = weights
+        return real(values, weights)
+
+    mech = _kde(bw_factor="auto")
+    try:
+        ck.weighted_mean = spy
+        mech.fit_local(y, None, weights=w)
+    finally:
+        ck.weighted_mean = real
+    assert seen["weights"] is not None and seen["weights"].numel() == 50
+
+
+def test_kde_bandwidth_sample_size_is_replication_exact_or_kish():
+    from nbn.mechanisms.non_parametric.conditional_kde import _bandwidth_n
+
+    assert _bandwidth_n(None, 7) == 7.0
+    # Integer multiplicities: the replicated row count.
+    assert _bandwidth_n(torch.tensor([2.0, 1.0, 0.0, 3.0]), 4) == 6.0
+    # Fractional weights: Kish n_eff -- scale-invariant, N for equal weights,
+    # never the (possibly <= 1) raw total.
+    assert _bandwidth_n(torch.full((10,), 0.05), 10) == pytest.approx(10.0)
+    w = torch.tensor([0.5, 0.25, 0.25])
+    assert _bandwidth_n(w, 3) == pytest.approx(1.0 / (0.25 + 0.0625 + 0.0625))
+    assert _bandwidth_n(7.3 * w, 3) == pytest.approx(_bandwidth_n(w, 3))
+
+
+@pytest.mark.parametrize("root", [True, False])
+def test_b11_kde_and_knn_fit_a_single_row(root):
+    from nbn.mechanisms.non_parametric.knn_conditional import KNNConditionalMechanism
+
+    y = torch.tensor([[0.3], [0.5]])
+    pa = None if root else torch.tensor([[1.0], [1.2]])
+    for mech in (_kde(), KNNConditionalMechanism()):
+        # Pre-fix: the unbiased std of one row is NaN, survived the clamps,
+        # and every log_prob was NaN.
+        mech.fit_local(y[:1], None if root else pa[:1])
+        lp = mech.log_prob(y, pa)
+        assert torch.isfinite(lp).all(), type(mech).__name__
+        assert torch.isfinite(mech.sample(pa, 3)).all()
+
+
+@pytest.mark.parametrize("device", [d for d in available_devices() if d != "cpu"])
+def test_c_kde_update_local_accepts_cpu_batch_into_accelerator_model(device):
+    # Pre-fix: the new weights were validated on x's (CPU) device as float64,
+    # then moved to the model's device -- impossible on MPS.
+    g = torch.Generator().manual_seed(0)
+    y = torch.randn(40, 1, generator=g)
+    pa = torch.randn(40, 1, generator=g)
+    mech = _kde(bw_factor=1.0)
+    mech.fit_local(y[:30].to(device), pa[:30].to(device), weights=torch.ones(30, device=device))
+    mech.update_local(y[30:], pa[30:], weights=torch.full((10,), 2.0))
+    assert mech._train_y.shape[0] == 40 and mech._train_logw.device.type == device
+    assert torch.isfinite(mech.log_prob(y.to(device), pa.to(device))).all()
