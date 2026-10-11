@@ -23,6 +23,7 @@ counterfactuals and for noise tying, not for interventional queries.
 """
 from __future__ import annotations
 
+import warnings
 from abc import abstractmethod
 from typing import List, Literal
 
@@ -177,6 +178,11 @@ class DiscreteAdditiveNoiseMechanism(StructuralMechanism):
         counts = scatter_counts(parent_row_index(pa, self._parent_cards), x, self.n_rows, k, w)
         self._counts = counts
         return counts
+
+    @property
+    def noise_max_offset(self) -> int:
+        """Largest ``|u|`` of the (possibly shared) noise law this mechanism uses."""
+        return int(self.noise.max_offset)
 
     def offset_range(self, n_classes: int) -> int:
         """Largest ``|u|`` this mechanism uses for a child with ``n_classes`` values."""
@@ -453,7 +459,11 @@ class AdditiveNoiseMechanism(StructuralMechanism):
             gram = design.T @ wd + self.ridge * torch.eye(d_pa + 1, device=solve_on, dtype=dtype)
             coef = torch.linalg.solve(gram, wd.T @ target).to(x.device, torch.float32)
             weight, bias = coef[:d_pa].T, coef[d_pa]
-        layer = nn.Linear(d_pa, d_x).to(x.device)
+        with warnings.catch_warnings():
+            # A root has no parents: nn.Linear(0, d) warns that initialising an
+            # empty weight is a no-op.  The weights are overwritten just below.
+            warnings.simplefilter("ignore", UserWarning)
+            layer = nn.Linear(d_pa, d_x).to(x.device)
         with torch.no_grad():
             layer.weight.copy_(weight)
             layer.bias.copy_(bias)

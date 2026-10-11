@@ -28,7 +28,7 @@ from typing import Dict, Literal, Mapping, Sequence
 import torch
 
 from nbn.scm._stats import chi2_sf, ks_two_sample, normal_two_sided_p
-from nbn.scm.fitting import child_law, fit_offset_law, log_likelihood, rows_table
+from nbn.scm.fitting import child_law, fit_offset_law, log_likelihood, offset_transfer, rows_table
 from nbn.scm.mechanisms import (
     AdditiveNoiseMechanism,
     DiscreteAdditiveNoiseMechanism,
@@ -123,7 +123,13 @@ def noise_tying_test(
     data = _on_model_device(model, data)
     mechs = [_structural(model, n) for n in nodes]
     if all(isinstance(m, DiscreteAdditiveNoiseMechanism) for m in mechs):
-        transfers = [m.transfer() for m in mechs]
+        # A shared law needs one offset range: the widest of the members (as tie_noise does).
+        widest = max(m.noise_max_offset for m in mechs if isinstance(m, DiscreteAdditiveNoiseMechanism))
+        offsets = torch.arange(-widest, widest + 1, device=model.device)
+        transfers = [
+            offset_transfer(m.n_classes, offsets) for m in mechs
+            if isinstance(m, DiscreteAdditiveNoiseMechanism)
+        ]
         counts = [count_table(model, data, n)[0] for n in nodes]
         observed, null_tables, fits = _tied_vs_separate_lr(transfers, counts)
         simulated = [_simulate_counts(t, c, n_boot) for t, c in zip(null_tables, counts)]

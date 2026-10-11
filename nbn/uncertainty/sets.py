@@ -215,7 +215,7 @@ class NoiseParameterSet:
         try:
             from scipy.optimize import linprog
         except ImportError as exc:  # pragma: no cover
-            raise ImportError("tightened() needs SciPy (pip install 'nbn[scm]').") from exc
+            raise ImportError("tightened() needs SciPy (pip install scipy; it is part of the 'bench' extra).") from exc
         import numpy as np
 
         e_mat = self.expressions.detach().cpu().double().numpy()

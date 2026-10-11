@@ -451,3 +451,23 @@ def test_saturated_rows_do_not_block_the_canonical_shift(device):
         assert loc.cpu().tolist() == [0, 4]
     for node in ("x", "y"):
         assert torch.equal(cpu.mechanisms[node].locations, other.mechanisms[node].locations.cpu())
+
+
+def test_tying_test_accepts_members_with_different_offset_ranges():
+    """Found by the examples: members declared with max_offset 2 and 1."""
+    gen = torch.Generator().manual_seed(0)
+    n = 3000
+    x = torch.randint(0, 4, (n,), generator=gen)
+    law = torch.tensor([0.15, 0.7, 0.15])
+    data = {"x": x.float(),
+            "y": (x + torch.multinomial(law, n, replacement=True, generator=gen) - 1).clamp(0, 3).float(),
+            "z": (x + torch.multinomial(law, n, replacement=True, generator=gen) - 1).clamp(0, 3).float()}
+    model = StructuralCausalModel([("x", "y"), ("x", "z")], dict.fromkeys(data, ("discrete", 4)),
+                                  device="cpu")
+    model.set_mechanism("y", DiscreteAdditiveNoiseMechanism(max_offset=2))
+    model.set_mechanism("z", DiscreteAdditiveNoiseMechanism(max_offset=1))
+    model.auto_mechanisms()
+    model.fit(data)
+    from nbn.scm import noise_tying_test
+
+    assert noise_tying_test(model, data, ["y", "z"], n_boot=50).p_value > 0.01

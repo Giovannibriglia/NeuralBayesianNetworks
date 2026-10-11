@@ -109,7 +109,7 @@ each table's box, a rectangular superset) and `CDFBandSet` have their own API.
 Binomial intervals come from the Chernoff (KL) inequality, inverted by
 bisection in torch — batched, no SciPy (the bound KL-UCB inverts; Garivier &
 Cappé, COLT 2011). Clopper–Pearson is available when SciPy
-is installed. The confidence budget `delta` is split over all intervals by a
+is installed (it is part of the `bench` extra). The confidence budget `delta` is split over all intervals by a
 union bound. For **trajectory data** the visit counts are random and depend on
 earlier draws, so each interval is made valid for every sample size at once
 (`delta_n = delta / (n (n + 1))`; the coupling argument of Agarwal et al.,

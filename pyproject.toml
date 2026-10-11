@@ -50,16 +50,13 @@ bench = [
     "certifi>=2023.7",  # CA bundle for bnlearn downloads (python.org macOS builds ship none)
 ]
 neural = ["zuko>=1.2,<2.0"]
-# Optional exact routines of nbn.uncertainty / nbn.scm (Clopper–Pearson
-# intervals, NoiseParameterSet.tightened); everything else is torch-only.
-scm = ["scipy>=1.10"]
 gp = ["gpytorch>=1.11"]
 mcmc = ["pyro-ppl>=1.9"]
 # Everything a paper-grade benchmark run needs, in one extra. The runner
 # records a baseline whose library is absent as ``not_supported`` rather than
 # failing, so partial installs produce quiet, wrong runs; ``nbn-bench
 # check-env`` (and the run commands themselves) verify this set.
-all = ["nbn[bench,neural,gp,mcmc,scm]"]
+all = ["nbn[bench,neural,gp,mcmc]"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
