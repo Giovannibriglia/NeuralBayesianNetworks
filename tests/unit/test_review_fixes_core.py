@@ -161,3 +161,64 @@ def test_a3_legacy_raw_state_is_converted():
     pooled = rg.batch_statistics(torch.cat([pa, pa]).float(), torch.cat([x, x]).float())
     for got, want in zip(rg.solve(st), rg.solve(pooled)):
         torch.testing.assert_close(got, want, atol=1e-4, rtol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# A18 — LogFactor.condition with several evidence keys
+# ---------------------------------------------------------------------------
+
+
+def test_a18_logfactor_condition_multiple_keys_selects_right_axes():
+    from nbn.core.factor import LogFactor
+
+    vals = torch.arange(2 * 3 * 4, dtype=torch.float).reshape(2, 3, 4)
+    f = LogFactor(vals, ["A", "B", "C"], {"A": 2, "B": 3, "C": 4})
+    out = f.condition({"A": 1, "C": 2})
+    assert out.variables == ["B"]
+    torch.testing.assert_close(out.log_values, vals[1, :, 2])
+    out2 = f.condition({"C": 3, "B": 0})
+    assert out2.variables == ["A"]
+    torch.testing.assert_close(out2.log_values, vals[:, 0, 3])
+
+
+def test_a18_logfactor_condition_rejects_out_of_range():
+    from nbn.core.factor import LogFactor
+
+    f = LogFactor(torch.zeros(2, 3), ["A", "B"], {"A": 2, "B": 3})
+    with pytest.raises(ValueError, match="outside"):
+        f.condition({"B": 3})
+    with pytest.raises(ValueError, match="outside"):
+        f.condition({"A": -1})
+
+
+# ---------------------------------------------------------------------------
+# A19 — log_einsum_exp with all -inf operands / underflow
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("device", available_devices())
+def test_a19_log_einsum_exp_all_neg_inf_operand(device):
+    from nbn.utils.einsum import log_einsum_exp
+
+    a = torch.full((3,), float("-inf"), device=device)
+    b = torch.zeros(3, device=device)
+    out = log_einsum_exp("i,i->", a, b)
+    assert not torch.isnan(out).any()
+    assert torch.isneginf(out).all()
+    # A partly -inf operand keeps its finite part exactly.
+    a2 = torch.tensor([0.0, float("-inf"), 0.0], device=device)
+    out2 = log_einsum_exp("i,i->", a2, b)
+    torch.testing.assert_close(out2.cpu(), torch.log(torch.tensor(2.0)))
+
+
+def test_a19_log_einsum_exp_no_artificial_floor():
+    from nbn.utils.einsum import log_einsum_exp
+
+    # Product underflows after the shift: the true answer is -inf in float32,
+    # never the old clamp value log(1e-40) + shift (a finite, wrong number).
+    a = torch.tensor([0.0, -200.0])
+    b = torch.tensor([-200.0, 0.0])
+    out = log_einsum_exp("i,i->", a, b)
+    assert torch.isneginf(out) or out < -150.0
+    ok = log_einsum_exp("i,i->", torch.tensor([-1000.0, -1000.0]), torch.tensor([-5.0, -5.0]))
+    torch.testing.assert_close(ok, torch.tensor(-1005.0 + float(torch.log(torch.tensor(2.0)))))
