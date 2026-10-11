@@ -263,6 +263,9 @@ class TensorVariableElimination(InferenceEngine):
         # computed on the induced subgraph rather than the full DAG —
         # same algorithm, far smaller input on dense networks.
         graph = model.dag.networkx_graph
+        # ``target`` is one node, or a tuple of nodes for a joint query (R6):
+        # Bayes-ball and min-fill take the target *set* unchanged.
+        target_list = [target] if isinstance(target, str) else list(target)
         # Mutilate before Bayes-ball: under do(X), X's incoming edges are cut,
         # so its ancestors are no longer d-connected to anything through X.
         # Running relevance on the observational graph would still be *sound*
@@ -276,7 +279,8 @@ class TensorVariableElimination(InferenceEngine):
         # do-nodes are clamped, exactly like evidence, for the purpose of
         # d-separation on the mutilated graph.
         relevant = relevant_subnetwork(
-            graph, target, tuple(evidence_keys) + tuple(do_keys),
+            graph, target if isinstance(target, str) else set(target_list),
+            tuple(evidence_keys) + tuple(do_keys),
         )
         # #132 (Option B): an observed node the ball never enters from a
         # parent (e.g. an observed parent/ancestor of the target) is
@@ -286,7 +290,7 @@ class TensorVariableElimination(InferenceEngine):
         # final normalisation.  Dropping it keeps those parents out of the
         # elimination (barley: ``sorttkv``'s CPT dragged in card-67 ``sort``).
         non_requisite = set(evidence_keys) - requisite_nodes(
-            graph, target, tuple(evidence_keys) + tuple(do_keys),
+            graph, set(target_list), tuple(evidence_keys) + tuple(do_keys),
         )
         relevant = relevant - non_requisite
         # Bug 2 Stage 2b (#127): the kept factors are the CPTs of the
@@ -308,7 +312,7 @@ class TensorVariableElimination(InferenceEngine):
         elimination_order = get_order(
             order,
             graph.subgraph(factor_scope),
-            targets=[target],
+            targets=target_list,
             # do-nodes are clamped like evidence, so they are conditioned out
             # rather than eliminated — prune them from the moral graph too.
             evidence=list(evidence_keys) + list(do_keys),
@@ -382,6 +386,13 @@ class TensorVariableElimination(InferenceEngine):
         prof = _peak_profile(
             plan, scopes, evidence_keys=tuple(evidence_keys) + tuple(do_keys),
         )
+        if not isinstance(target, str):
+            # A joint query ends by materialising the joint table over its
+            # free targets (per row), which can exceed every elimination step.
+            joint = 1
+            for t in target:
+                joint *= model.mechanisms[t].n_classes
+            prof = (prof[0], max(prof[1], joint))
         return self._cache_put(self._cost_cache, key, model, prof)
 
     def estimate_peak_bytes(
@@ -394,8 +405,14 @@ class TensorVariableElimination(InferenceEngine):
         B: int = 1,
         order: str = "min_fill",
     ) -> int:
-        """Estimated peak bytes of answering this query (``B`` rows) by VE."""
+        """Estimated peak bytes of answering this query (``B`` rows) by VE.
+
+        ``target`` is a node name, or a sequence of names for a joint query.
+        """
         ev = tuple(sorted(k for k in evidence_keys if k not in set(do_keys)))
+        target = _plan_target(target, set(ev) | set(do_keys))
+        if target is None:
+            return 0  # every target clamped: a point mass, nothing eliminated
         prof = self._peak_profile(model, target, ev, tuple(sorted(do_keys)), order)
         return _peak_bytes_from_profile(prof, B)
 
@@ -458,7 +475,12 @@ class TensorVariableElimination(InferenceEngine):
         **kwargs,
     ) -> torch.Tensor:
         if len(targets) != 1:
-            raise NotImplementedError("TensorVE supports exactly one target.")
+            # Joint query (R6): one row of the batched path, ``[K_1, …, K_n]``.
+            row = {k: (v if isinstance(v, torch.Tensor) else torch.as_tensor(v)).reshape(1)
+                   for k, v in (evidence or {}).items()}
+            do_row = {k: (v if isinstance(v, torch.Tensor) else torch.as_tensor(v)).reshape(1)
+                      for k, v in (do or {}).items()}
+            return self.query_batch(model, targets, row, do=do_row, order=order)[0]
         target = targets[0]
         evidence = evidence or {}
         do = dict(do or {})
@@ -591,9 +613,15 @@ class TensorVariableElimination(InferenceEngine):
         Output is bit-identical (≤1e-6) to looping ``query()`` over the
         batch on the same evidence — verified by
         ``tests/unit/test_vectorized_query_batch_correctness.py``.
+
+        Several targets (R6) return the exact *joint* posterior
+        ``[B, K_1, …, K_n]`` (axes in ``targets`` order, each row summing to
+        1): all targets are kept and every other variable eliminated.
         """
-        if len(targets) != 1:
-            raise NotImplementedError("TensorVE supports exactly one target.")
+        targets = list(targets)
+        if not targets or len(set(targets)) != len(targets):
+            raise ValueError(f"targets must be distinct node names, got {targets}.")
+        joint = len(targets) > 1
         target = targets[0]
         do = dict(do or {})
         self._validate_do(model, do, evidence)
@@ -621,12 +649,18 @@ class TensorVariableElimination(InferenceEngine):
         # Broadcast any [1] evidence to [B]
         ev_norm = {k: (v.expand(B) if v.shape[0] == 1 else v) for k, v in ev_norm.items()}
 
-        if target in ev_norm:
+        if not joint and target in ev_norm:
             # Point mass per row (target observed or intervened) — see ``query``.
             k = model.mechanisms[target].n_classes
             out = torch.zeros(B, k, device=device)
             out.scatter_(1, ev_norm[target].reshape(B, 1), 1.0)
             return out
+        cards = {t: model.mechanisms[t].n_classes for t in targets}
+        free = [t for t in targets if t not in ev_norm]
+        if joint and not free:
+            return _embed_clamped(torch.ones(B, device=device), targets, free,
+                                  ev_norm, cards)
+        plan_target = tuple(free) if joint else target
 
         # Pre-allocation memory-budget guard (v0.6b round-2; every device
         # since B5).  The peak intermediate-factor size is estimated by
@@ -652,7 +686,7 @@ class TensorVariableElimination(InferenceEngine):
         if budget is not None:
             ev_keys = tuple(sorted(k for k in ev_norm if k not in do))
             do_keys = tuple(sorted(do))
-            prof = self._peak_profile(model, target, ev_keys, do_keys, order)
+            prof = self._peak_profile(model, plan_target, ev_keys, do_keys, order)
             peak_b = _peak_bytes_from_profile(prof, B)
             if peak_b > budget:
                 peak_1 = _peak_bytes_from_profile(prof, 1)
@@ -678,7 +712,7 @@ class TensorVariableElimination(InferenceEngine):
         factors = {n: f for n, f in factors.items() if n not in do}
 
         to_eliminate, relevant = self._plan_with_relevant(
-            model, target, tuple(sorted(k for k in ev_norm if k not in do)),
+            model, plan_target, tuple(sorted(k for k in ev_norm if k not in do)),
             do_keys=tuple(sorted(do.keys())), order=order,
         )
 
@@ -712,6 +746,10 @@ class TensorVariableElimination(InferenceEngine):
             prod_lv = torch.logsumexp(prod_lv, dim=dim)
             prod_vars = [v for v in prod_vars if v != var]
             conditioned = rest + [(prod_lv, prod_vars, prod_has_b)]
+
+        if joint:
+            return _joint_from_factors(conditioned, targets, free, ev_norm,
+                                       cards, B, device)
 
         # Multiply remaining factors (only target should be in scope)
         if not conditioned:
@@ -774,6 +812,73 @@ class TensorVariableElimination(InferenceEngine):
                 model, targets, rows, do=do_rows, order=order, **kwargs,
             ))
         return torch.cat(outs, dim=0)
+
+
+def _plan_target(target, clamped: set):
+    """Plan key for ``target`` (name or names) with clamped targets removed.
+
+    ``None`` when every target is clamped.  A single name stays a ``str`` so
+    single-target plans keep their historical cache keys.
+    """
+    if isinstance(target, str):
+        return None if target in clamped else target
+    free = tuple(t for t in target if t not in clamped)
+    if not free:
+        return None
+    return free[0] if len(free) == 1 and len(tuple(target)) == 1 else free
+
+
+def _joint_from_factors(conditioned, targets, free, ev_norm, cards, B, device):
+    """Normalised joint ``[B, K_1, …, K_n]`` from the post-elimination factors.
+
+    After eliminating every non-target variable, the remaining factors mention
+    only the free (unclamped) targets; their product is the unnormalised
+    joint over them.  Clamped targets are point masses and are inserted as
+    one-hot axes, so the output always has one axis per requested target.
+    """
+    if conditioned:
+        prod_lv, prod_vars, prod_has_b = conditioned[0]
+        for lv2, vars2, has_b2 in conditioned[1:]:
+            prod_lv, prod_vars, prod_has_b = _log_factor_product_batched(
+                prod_lv, prod_vars, prod_has_b, lv2, vars2, has_b2,
+            )
+        offset = 1 if prod_has_b else 0
+        # Defensive: sum out anything that is not a free target.
+        for i in range(len(prod_vars) - 1, -1, -1):
+            if prod_vars[i] not in free:
+                prod_lv = torch.logsumexp(prod_lv, dim=i + offset)
+                prod_vars = prod_vars[:i] + prod_vars[i + 1:]
+        if not prod_has_b:
+            prod_lv = prod_lv.unsqueeze(0).expand(B, *prod_lv.shape)
+        # A free target absent from every factor is uniform: broadcast it.
+        for t in free:
+            if t not in prod_vars:
+                prod_lv = prod_lv.unsqueeze(-1).expand(*prod_lv.shape, cards[t])
+                prod_vars = prod_vars + [t]
+        perm = [0] + [1 + prod_vars.index(t) for t in free]
+        prod_lv = prod_lv.permute(*perm)
+    else:
+        prod_lv = torch.zeros(B, *[cards[t] for t in free], device=device)
+    flat = prod_lv.reshape(B, -1)
+    probs = torch.softmax(flat, dim=-1).reshape(prod_lv.shape).to(device)
+    return _embed_clamped(probs, targets, free, ev_norm, cards)
+
+
+def _embed_clamped(probs, targets, free, ev_norm, cards):
+    """Insert a one-hot axis per clamped target into ``probs`` ``[B, *free]``.
+
+    Axes are inserted in ``targets`` order, so at each insertion every
+    earlier target already has its axis and the result ends as
+    ``[B, K_1, …, K_n]``.
+    """
+    B = probs.shape[0]
+    for i, t in enumerate(targets):
+        if t in free:
+            continue
+        onehot = torch.nn.functional.one_hot(ev_norm[t], cards[t]).to(probs.dtype)
+        tail = probs.dim() - 1 - i
+        probs = probs.unsqueeze(i + 1) * onehot.reshape(B, *([1] * i), cards[t], *([1] * tail))
+    return probs
 
 
 def _delta_probs(k: int, value: int, device) -> torch.Tensor:

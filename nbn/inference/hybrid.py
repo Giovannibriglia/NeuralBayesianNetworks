@@ -19,9 +19,11 @@ class HybridRouter(InferenceEngine):
 
     Routing logic:
 
-    1. More than one target → ``LikelihoodWeightingEngine`` (VE answers
-       exactly one target; a multi-target query used to crash, B6).
-    2. Any continuous mechanism → LW.
+    1. Any continuous mechanism → LW.
+    2. Several discrete targets → exact joint VE (``[K_1, …, K_n]`` per
+       row) when the joint table has at most ``max_joint_elements``
+       entries, else LW's ``(weights, samples)`` particles (R6; a
+       multi-target query used to crash VE, B6).
     3. Induced treewidth > τ → LW (a cheap structural pre-filter).
     4. Otherwise price the *actual* VE plan of this query: its estimated
        peak bytes for one row against the device memory budget (VE splits
@@ -49,6 +51,9 @@ class HybridRouter(InferenceEngine):
     memory_budget: float, optional
         Hard cap in bytes on VE's estimated peak; combined with the device
         default (see ``TensorVariableElimination.memory_budget_bytes``).
+    max_joint_elements: int
+        Largest joint table (product of the target cardinalities) a
+        multi-target discrete query is answered with exactly.
     ve_host_fraction: float
         On CPU / MPS, route to VE only when one row's estimated peak fits
         this fraction of the stable memory capacity (leaving room for the
@@ -65,8 +70,10 @@ class HybridRouter(InferenceEngine):
         n_samples: int = 2048,
         memory_budget: float | None = None,
         ve_host_fraction: float = 0.75,
+        max_joint_elements: int = 1 << 20,
     ) -> None:
         self.treewidth_threshold = treewidth_threshold
+        self.max_joint_elements = int(max_joint_elements)
         self.ve_host_fraction = float(ve_host_fraction)
         self._ve = TensorVariableElimination(
             treewidth_threshold, memory_budget=memory_budget,
@@ -111,14 +118,25 @@ class HybridRouter(InferenceEngine):
         do: Dict[str, torch.Tensor] | None = None,
         order: str = "min_fill",
     ) -> InferenceEngine:
-        if targets is not None and len(targets) != 1:
-            return self._use_lw("%d targets; VE answers one, using LW.", len(targets))
+        multi = targets is not None and len(targets) != 1
         all_discrete = all(
             m.is_discrete for m in model.mechanisms.values()
         )
         if not all_discrete:
             self._last_engine = "likelihood_weighting"
             return self._lw
+        if multi:
+            size = 1
+            for t in targets:
+                size *= int(model.mechanisms[t].n_classes)
+            if not targets or size > self.max_joint_elements:
+                return self._use_lw(
+                    "HybridRouter: the joint table over %s has %d entries "
+                    "(> max_joint_elements=%d); answering with likelihood-"
+                    "weighting particles instead of an exact joint.",
+                    list(targets), size, self.max_joint_elements,
+                    warn_key=("joint",) + _shape_key(model, targets, evidence, do),
+                )
         try:
             tw = model.dag.induced_width()
         except (nx.NetworkXError, ValueError):
@@ -137,12 +155,12 @@ class HybridRouter(InferenceEngine):
                 tw, self.treewidth_threshold,
             )
         if targets is not None and not self._ve_fits(
-            model, targets[0], evidence, do, order,
+            model, tuple(targets) if multi else targets[0], evidence, do, order,
         ):
             return self._use_lw(
                 "HybridRouter: the exact VE plan for P(%s | %s) would exceed "
                 "the %s memory budget; answering with likelihood weighting "
-                "(approximate).", targets[0],
+                "(approximate).", ", ".join(targets),
                 sorted({**(evidence or {}), **(do or {})}), model.device,
                 warn_key=_shape_key(model, targets, evidence, do),
             )
@@ -150,9 +168,13 @@ class HybridRouter(InferenceEngine):
         return self._ve
 
     def _ve_fits(self, model, target, evidence, do, order) -> bool:
-        """Whether one row of VE's plan for this query fits the memory budget."""
+        """Whether one row of VE's plan for this query fits the memory budget.
+
+        ``target`` is a name, or a tuple of names for a joint query.
+        """
         evidence, do = evidence or {}, do or {}
-        if target in evidence or target in do:
+        names = (target,) if isinstance(target, str) else tuple(target)
+        if all(t in evidence or t in do for t in names):
             return True  # answered as a point mass, no elimination
         return self._ve.fits_memory(
             model, target, tuple(evidence), tuple(do), order=order,

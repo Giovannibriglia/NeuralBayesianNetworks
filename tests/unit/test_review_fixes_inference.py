@@ -606,12 +606,18 @@ def test_b5_is_oom_error(exc, expected):
 # --------------------------------------------------------------------------- #
 
 
-def test_b6_router_routes_multi_target_to_lw():
+def test_b6_router_multi_target_no_longer_crashes():
+    """Multi-target discrete queries used to crash VE inside the router.
+
+    Since R6 a small joint is answered exactly by VE (see
+    ``test_review_fixes_inference_r2``); a joint above
+    ``max_joint_elements`` goes to LW particles.
+    """
     from nbn.inference.hybrid import HybridRouter
 
     model = _random_discrete()
     nodes = list(model.dag.topological_order())
-    router = HybridRouter(n_samples=128)
+    router = HybridRouter(n_samples=128, max_joint_elements=4)
     weights, samples = router.query(model, [nodes[0], nodes[1]], {nodes[-1]: torch.tensor(1)})
     assert router._last_engine == "likelihood_weighting"
     assert weights.shape == (1, 128) and samples.shape == (1, 128, 2)
