@@ -536,3 +536,50 @@ def test_b12_update_preflight_missing_column_and_ewc_state():
         m2.update(data)
     for k, v in _snapshot(m2).items():
         torch.testing.assert_close(v, snap[k])
+
+
+# ---------------------------------------------------------------------------
+# A17 — method="joint" honours consolidate; C: weighted TrainHistory
+# ---------------------------------------------------------------------------
+
+
+def _mdn_model():
+    from nbn import NeuralBayesianNetwork as NBN
+    from nbn.mechanisms import LinearGaussianMechanism, MDNMechanism
+
+    model = NBN([("A", "B")], {"A": ("continuous", 1), "B": ("continuous", 1)}, device="cpu")
+    model.set_mechanism("A", LinearGaussianMechanism())
+    model.set_mechanism("B", MDNMechanism(num_components=2))
+    g = torch.Generator().manual_seed(0)
+    a = torch.randn(300, 1, generator=g)
+    data = {"A": a, "B": torch.sin(a) + 0.1 * torch.randn(300, 1, generator=g)}
+    return model, data
+
+
+def test_a17_joint_fit_reconsolidates_ewc_anchor():
+    model, data = _mdn_model()
+    model.fit(data, epochs=3)
+    mech = model.mechanisms["B"]
+    with pytest.warns(UserWarning, match="A \\(LinearGaussianMechanism\\)"):
+        model.fit(data, method="joint", epochs=3, lr=1e-2)
+    flat = torch.cat([p.detach().reshape(-1) for p in mech.parameters() if p.requires_grad])
+    torch.testing.assert_close(mech._ewc_mu, flat)
+
+
+def test_a17_joint_fit_without_consolidate_clears_stale_anchor():
+    model, data = _mdn_model()
+    model.fit(data, epochs=3)
+    with pytest.warns(UserWarning):
+        model.fit(data, method="joint", epochs=2, consolidate=False)
+    assert model.mechanisms["B"]._ewc_mu is None
+    with pytest.raises(RuntimeError, match="EWC state missing"):
+        model.update(data)
+
+
+def test_c_train_history_is_weighted():
+    model, data = _lg_model("cpu")
+    w = torch.zeros(200)
+    w[:50] = 1.0
+    hist = model.fit(data, weights=w)
+    lp = model.mechanisms["A"].log_prob(data["A"], None).detach().reshape(-1)
+    assert hist.mean_ll("A") == pytest.approx(float(lp[:50].mean()), rel=1e-5)
