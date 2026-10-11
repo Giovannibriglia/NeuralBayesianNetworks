@@ -56,7 +56,15 @@ def to_device(obj: Any, device: torch.device) -> Any:
     if obj is None:
         return None
     if isinstance(obj, torch.Tensor):
-        return obj.to(device, non_blocking=True) if obj.device != device else obj
+        device = torch.device(device)
+        if obj.device == device:
+            return obj
+        # non_blocking is only safe for a pinned host -> accelerator copy.  A
+        # device -> CPU copy with non_blocking=True returns before the data
+        # has landed, so the caller reads zeros / garbage (seen on MPS; the
+        # same hazard exists on CUDA without an explicit synchronize).
+        nb = obj.device.type == "cpu" and device.type != "cpu" and obj.is_pinned()
+        return obj.to(device, non_blocking=nb)
     if isinstance(obj, nn.Module):
         return obj.to(device)
     if isinstance(obj, Mapping):
