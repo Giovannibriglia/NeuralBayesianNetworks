@@ -685,3 +685,55 @@ def test_r2_weighted_quantile_integer_weights_stay_replication_exact():
     q = torch.tensor([0.1, 0.5, 0.9])
     rep = t.repeat_interleave(w.long(), dim=0)
     torch.testing.assert_close(weighted_quantile(t, q, w), torch.quantile(rep, q, dim=0))
+
+
+# ---------------------------------------------------------------------------
+# Round 2 — R4: rollback keeps parameter identities; R8: NaN rows rejected
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("first", ["lg", "mdn"])
+def test_r4_update_rollback_keeps_parameter_objects(first):
+    import nbn
+    from nbn import NeuralBayesianNetwork as NBN
+    from nbn.mechanisms.non_parametric.knn_conditional import KNNConditionalMechanism
+
+    model = NBN([("A", "B")], {"A": ("continuous", 1), "B": ("continuous", 1)}, device="cpu")
+    mech_a = (nbn.mechanisms.LinearGaussianMechanism() if first == "lg"
+              else nbn.mechanisms.MDNMechanism(num_components=2))
+    model.set_mechanism("A", mech_a)
+    model.set_mechanism("B", KNNConditionalMechanism())
+    g = torch.Generator().manual_seed(0)
+    a = torch.randn(100, 1, generator=g)
+    data = {"A": a, "B": a + 0.1 * torch.randn(100, 1, generator=g)}
+    model.fit(data, epochs=3)
+    ewc_before = getattr(mech_a, "_ewc_mu", None)
+    params_before = list(model.parameters())
+    values_before = [p.detach().clone() for p in params_before]
+    opt = torch.optim.SGD(model.parameters(), lr=0.1)
+    with pytest.raises(NotImplementedError):
+        model.update({"A": a + 5.0, "B": data["B"] + 5.0}, forgetting=0.5, epochs=3)
+    if ewc_before is not None:
+        assert mech_a._ewc_mu is ewc_before
+    params_after = list(model.parameters())
+    assert len(params_after) == len(params_before)
+    for p0, p1, v0 in zip(params_before, params_after, values_before):
+        assert p0 is p1
+        torch.testing.assert_close(p1.detach(), v0)
+    assert opt.param_groups[0]["params"][0] is params_after[0]
+
+
+@pytest.mark.parametrize("device", available_devices())
+def test_r8_update_and_fit_reject_non_finite_rows(device):
+    model, data = _lg_model(device)
+    model.fit(data)
+    snap = _snapshot(model)
+    bad = {k: v.clone() for k, v in data.items()}
+    bad["B"][3, 0] = float("nan")
+    with pytest.raises(ValueError, match="NaN or infinite.*'B'"):
+        model.update(bad)
+    for k, v in _snapshot(model).items():
+        torch.testing.assert_close(v, snap[k])
+    bad["B"][3, 0] = float("inf")
+    with pytest.raises(ValueError, match="NaN or infinite"):
+        model.fit(bad)

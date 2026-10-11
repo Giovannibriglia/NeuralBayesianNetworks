@@ -149,6 +149,19 @@ def fit(
 
     # Move data to device
     data_dev: Dict[str, torch.Tensor] = to_device(dict(data), dev)
+    # Fail loudly on NaN/inf: most mechanisms would otherwise fit silently to
+    # NaN parameters, and the closed-form ones persist the NaN in the
+    # sufficient statistics that every later update() builds on.
+    bad = sorted(
+        k for k, v in data_dev.items()
+        if isinstance(v, torch.Tensor) and v.is_floating_point()
+        and not bool(torch.isfinite(v).all())
+    )
+    if bad:
+        raise ValueError(
+            f"fit() data contains NaN or infinite values in column(s) {bad}; "
+            f"drop or impute those rows first."
+        )
 
     n_rows = next(iter(data_dev.values())).shape[0]
     w_vec = validate_weights(weights, n_rows, where="fit", device=dev)

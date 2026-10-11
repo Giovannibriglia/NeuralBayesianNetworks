@@ -47,9 +47,11 @@ def update(
         mechanism's persisted prior state (``1.0`` = pure recursive Bayes).
     atomic:
         If True (default) the update is all-or-nothing: every updatable
-        mechanism is snapshotted (``copy.deepcopy``) before it is touched and
-        restored in place if any later node fails, so a failure never leaves
-        the network half old, half new.  Costs one transient copy of each
+        mechanism is snapshotted before it is touched and restored in place
+        if any later node fails, so a failure never leaves the network half
+        old, half new.  The restore re-installs the *original* parameter and
+        buffer objects with their saved values, so optimisers and references
+        to ``model.parameters()`` stay valid.  Costs one transient copy of each
         updated mechanism — pass False for very large non-parametric stores
         (KDE / kNN keep their whole sample) when memory is tight.
 
@@ -79,14 +81,62 @@ def update(
     except BaseException:
         # Restore *in place* (same module objects), so references the caller
         # holds to a mechanism see the pre-update state too.
-        for node, saved in backups.items():
-            mech = model.mechanisms[node]
-            mech.__dict__.clear()
-            mech.__dict__.update(saved.__dict__)
+        for saved in backups.values():
+            _restore(saved)
         raise
 
     history.wall_clock_s = time.perf_counter() - t0
     return history
+
+
+_CONTAINERS = ("_parameters", "_buffers", "_modules")
+
+
+def _snapshot(module: torch.nn.Module):
+    """Record ``module`` so ``_restore`` can undo an ``update_local`` in place.
+
+    ``update_local`` may rebind attributes (LG's ``_set_params`` installs new
+    ``nn.Parameter`` objects, EWC reassigns ``_ewc_mu``) and mutate tensors in
+    place (Adam steps).  So keep: the original attribute *bindings* (shallow
+    copies of ``__dict__`` and its parameter/buffer/module dicts), a clone of
+    every tensor's data, and a deepcopy of plain mutable attributes (lists of
+    parent cards, ...).  Restoring re-binds the original objects and writes
+    their saved data back — the identities callers hold stay valid.
+    """
+    attrs = {}
+    tensors = []
+    for k, v in module.__dict__.items():
+        if k in _CONTAINERS:
+            attrs[k] = dict(v)
+            if k != "_modules":
+                tensors += [(t, t.detach().clone()) for t in v.values() if t is not None]
+        elif isinstance(v, torch.Tensor):
+            attrs[k] = v
+            tensors.append((v, v.detach().clone()))
+        elif isinstance(v, (list, dict, set)) and not k.startswith("_forward") \
+                and not k.startswith("_backward") and not k.endswith("hooks"):
+            attrs[k] = copy.deepcopy(v)
+        else:
+            attrs[k] = v
+    children = [_snapshot(m) for m in module._modules.values() if m is not None]
+    return module, attrs, tensors, children
+
+
+def _restore(saved) -> None:
+    module, attrs, tensors, children = saved
+    for k in [k for k in module.__dict__ if k not in attrs]:
+        del module.__dict__[k]
+    for k, v in attrs.items():
+        if k in _CONTAINERS:
+            getattr(module, k).clear()
+            getattr(module, k).update(v)
+        else:
+            module.__dict__[k] = v
+    with torch.no_grad():
+        for t, data in tensors:
+            t.data = data       # .data (not copy_): tolerates a shape change
+    for child in children:
+        _restore(child)
 
 
 def _preflight(model, data, nodes) -> None:
@@ -95,6 +145,15 @@ def _preflight(model, data, nodes) -> None:
     if missing:
         raise ValueError(
             f"update() needs a column for every node; missing {sorted(missing)}."
+        )
+    # A single NaN row would be folded into the persisted sufficient
+    # statistics (LG normal equations, CPT counts) and poison every later
+    # update for good — there is no way to subtract it back out.
+    bad = [n for n in nodes if not _all_finite(data[n])]
+    if bad:
+        raise ValueError(
+            f"update() data contains NaN or infinite values in column(s) "
+            f"{sorted(bad)}; drop or impute those rows first."
         )
     unfitted = [n for n in nodes if n not in model.mechanisms]
     if unfitted:
@@ -142,7 +201,7 @@ def _update_nodes(model, data_dev, nodes, forgetting, kwargs, history, backups) 
             )
 
         if backups is not None:
-            backups[node] = copy.deepcopy(mech)
+            backups[node] = _snapshot(mech)
         metrics = mech.update_local(x, pa_tensor, forgetting=forgetting, **mech_kwargs)
         history.node_methods[node] = (metrics or {}).get("method", "unknown")
 
@@ -150,3 +209,8 @@ def _update_nodes(model, data_dev, nodes, forgetting, kwargs, history, backups) 
             history.node_log_likelihoods[node] = float(
                 mech.log_prob(x, pa_tensor).mean()
             )
+
+
+def _all_finite(t) -> bool:
+    t = torch.as_tensor(t)
+    return (not t.is_floating_point()) or bool(torch.isfinite(t).all())
