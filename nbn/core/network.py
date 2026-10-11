@@ -282,6 +282,17 @@ class NeuralBayesianNetwork(nn.Module):
             int(value) - int(getattr(mechs, "_version", 0))
         )
 
+    def __getstate__(self):
+        """Pickle without the cached inference engine.
+
+        Engines memoise factors keyed on ``weakref(model)``; weakrefs cannot
+        be pickled, so ``torch.save(model)`` failed after the first query.
+        The engine is a cache — it is rebuilt lazily by ``_get_engine``.
+        """
+        state = super().__getstate__()
+        state["_engine"] = None
+        return state
+
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
         """Accept state_dicts written before node names got escaped (B1).
 
@@ -325,12 +336,18 @@ class NeuralBayesianNetwork(nn.Module):
         default_discrete: str = "categorical_table",
         default_continuous: str = "mdn",
         mdn_components: int = 5,
+        n_bins: int = 5,
     ) -> None:
         """Assign default mechanisms based on variable types (each on model device).
 
         ``default_discrete``: ``"categorical_table"`` or ``"neural_categorical"``.
         ``default_continuous``: ``"mdn"`` or ``"lg"`` / ``"linear_gaussian"``.
         Any other name raises.
+
+        A ``"categorical_table"`` node with a continuous (or mixed) parent gets
+        a :class:`BinningCategoricalTable` instead, which buckets those parents
+        into ``n_bins`` quantile bins: a plain table would use the raw parent
+        values as table indices and crash (``index -2 is out of bounds``).
         """
         # Validate the names up front: an unknown name used to fall through
         # to the non-default branch (e.g. "lgg" -> LinearGaussian) silently.
@@ -348,8 +365,26 @@ class NeuralBayesianNetwork(nn.Module):
             if node in self.mechanisms:
                 continue
             if var.is_discrete:
-                if default_discrete == "categorical_table":
-                    mech: Mechanism = CategoricalTableMechanism()
+                pa_vars = [self.variables[p] for p in self.dag.parents(node)]
+                if default_discrete == "categorical_table" and any(
+                    not pv.is_discrete for pv in pa_vars
+                ):
+                    from nbn.mechanisms.parametric.binning_categorical import (
+                        BinningCategoricalTable,
+                    )
+                    # One entry per parent *column*, in pack_parents order.
+                    kinds = []
+                    for pv in pa_vars:
+                        if pv.is_discrete:
+                            kinds.append(("discrete", int(pv.cardinality or 2)))
+                        else:
+                            kinds += [("continuous", 1)] * int(pv.dim)
+                    mech: Mechanism = BinningCategoricalTable(
+                        parent_kinds=kinds, n_bins=n_bins,
+                        n_categories=int(var.cardinality or 2),
+                    )
+                elif default_discrete == "categorical_table":
+                    mech = CategoricalTableMechanism()
                 else:
                     from nbn.mechanisms.parametric.neural_categorical import NeuralCategoricalMechanism
                     mech = NeuralCategoricalMechanism(n_classes=var.cardinality or 2)

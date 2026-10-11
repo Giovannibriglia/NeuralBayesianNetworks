@@ -833,3 +833,45 @@ def test_r11_strict_load_of_legacy_node_prefix_state_dict():
     fresh.load_state_dict(legacy, strict=True)
     for k, v in fresh.state_dict().items():
         torch.testing.assert_close(v, sd[k])
+
+
+# ---------------------------------------------------------------------------
+# Round 2 — R14: auto_mechanisms with continuous parents; pickling after query
+# ---------------------------------------------------------------------------
+
+
+def test_r14_auto_mechanisms_discrete_child_of_continuous_parent_fits():
+    from nbn import NeuralBayesianNetwork as NBN
+    from nbn.mechanisms.parametric.binning_categorical import BinningCategoricalTable
+
+    model = NBN(
+        [("X", "A"), ("D", "A")],
+        {"X": ("continuous", 1), "D": ("discrete", 3), "A": ("discrete", 2)},
+        device="cpu",
+    )
+    model.auto_mechanisms(default_continuous="lg")
+    assert isinstance(model.mechanisms["A"], BinningCategoricalTable)
+    g = torch.Generator().manual_seed(0)
+    x = torch.randn(400, 1, generator=g)
+    d = torch.randint(0, 3, (400,), generator=g)
+    a = (x[:, 0] > 0).long()
+    model.fit({"X": x, "D": d, "A": a})
+    lp = model.log_prob({"X": x, "D": d, "A": a})
+    assert torch.isfinite(lp).all()
+
+
+def test_r14_torch_save_after_query(tmp_path):
+    from nbn import NeuralBayesianNetwork as NBN
+
+    model = _mixed_model()
+    model.query(["A"], evidence={"X": torch.tensor([0.5])})
+    assert model._engine is not None
+    path = tmp_path / "whole.pt"
+    torch.save(model, path)
+    loaded = torch.load(path, weights_only=False)
+    assert isinstance(loaded, NBN) and loaded._engine is None
+    torch.testing.assert_close(
+        loaded.query(["A"], evidence={"X": torch.tensor([0.5])}),
+        model.query(["A"], evidence={"X": torch.tensor([0.5])}),
+        atol=0.05, rtol=0,
+    )
