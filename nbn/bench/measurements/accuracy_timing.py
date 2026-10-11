@@ -224,7 +224,9 @@ class AccuracyAndTiming:
         # Failure statuses are classified the same way as fit-time failures
         # (#127 Stage 4): a torch allocator failure raised during query must
         # classify as "oom", not "error". Batches are atomic (§4.2/§4.4).
-        from nbn.bench.measurements._batch_dispatch import run_query_groups
+        from nbn.bench.measurements._batch_dispatch import (
+            pass_batch_size, run_query_groups, stamped_batch_size,
+        )
 
         outcomes, unstarted_groups = run_query_groups(
             adapter, query_groups, query_budget_s=query_budget_s,
@@ -431,7 +433,7 @@ class AccuracyAndTiming:
                     query_time_s=float("nan"),
                     metrics_time_s=float("nan"),
                     error_msg="query budget exceeded",
-                    batch_size=len(group),
+                    batch_size=stamped_batch_size(group, pass_batch_size(query_groups)),
                     query_idx=flat_start,
                 ))
             for tk, tv in [
@@ -456,7 +458,7 @@ class AccuracyAndTiming:
                     query_time_s=float("nan"),
                     metrics_time_s=float("nan"),
                     error_msg="query budget exceeded",
-                    batch_size=len(group),
+                    batch_size=stamped_batch_size(group, pass_batch_size(query_groups)),
                     query_idx=flat_start,
                 ))
 

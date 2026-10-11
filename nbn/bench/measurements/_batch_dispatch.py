@@ -53,6 +53,27 @@ def _device_sync(device: Any) -> None:
         pass
 
 
+def pass_batch_size(groups: list[list[Query]]) -> int:
+    """The batch size of a measure() pass: its largest group (1 if empty)."""
+    return max((len(g) for g in groups), default=1)
+
+
+def stamped_batch_size(group: list[Query], pass_b: int) -> int:
+    """``batch_size`` recorded on the rows of ``group``.
+
+    ``len(group)`` (queries per library call), except for an evidence-free
+    singleton: since D7 such a position is ONE query in every pass instead of
+    ``pass_b`` identical copies, and its rows are stamped with the pass's
+    batch size so they stay in that pass's ``batch_size`` slice. Stamping 1
+    pooled the copies from every pass of a sweep into the B=1 slice (twice
+    the evidence-free rows at B=1, with clashing ``query_idx``).
+    """
+    evidence = getattr(group[0], "evidence", None) if len(group) == 1 else None
+    if isinstance(evidence, dict) and all(v is None for v in evidence.values()):
+        return pass_b
+    return len(group)
+
+
 @dataclass
 class QueryOutcome:
     """Per-query outcome from group dispatch (flat order)."""
@@ -61,7 +82,7 @@ class QueryOutcome:
     error_msg: str | None
     status: str              # "ok" or classified failure
     query_time_s: float      # amortized batch_time/B; NaN for failed B>1
-    batch_size: int          # len of the group this query was part of
+    batch_size: int          # stamped batch size (see stamped_batch_size)
     flat_index: int          # index into the flattened query list
 
 
@@ -83,9 +104,11 @@ def run_query_groups(
     unstarted: list[tuple[list[Query], int]] = []
     cumulative = 0.0
     qi = 0
+    pass_b = pass_batch_size(groups)
 
     for group in groups:
         b = len(group)
+        b_stamp = stamped_batch_size(group, pass_b)
         if cumulative >= query_budget_s:
             unstarted.append((group, qi))
             qi += b
@@ -130,12 +153,12 @@ def run_query_groups(
                 q_time = elapsed if b == 1 else float("nan")
                 outcomes.append(QueryOutcome(
                     posterior=None, error_msg=err_msg, status=status,
-                    query_time_s=q_time, batch_size=b, flat_index=qi + j,
+                    query_time_s=q_time, batch_size=b_stamp, flat_index=qi + j,
                 ))
             else:
                 outcomes.append(QueryOutcome(
                     posterior=posteriors[j], error_msg=None, status="ok",
-                    query_time_s=elapsed / b, batch_size=b, flat_index=qi + j,
+                    query_time_s=elapsed / b, batch_size=b_stamp, flat_index=qi + j,
                 ))
         qi += b
 

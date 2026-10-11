@@ -130,8 +130,9 @@ class TestAtomicBatchFailure:
         assert per_status == {"error"}
         assert all("mock batch failure" in (r.error_msg or "") for r in rows)
         assert all(r.batch_size == 4 for r in rows)
-        # All 4 queries represented: 6 rows each (3 metric + 3 timing).
-        assert len(rows) == 4 * 6
+        # All 4 queries represented: 7 rows each (4 accuracy metrics -- tv,
+        # jsd, w1 and, since D2, ks -- + 3 timing).
+        assert len(rows) == 4 * 7
 
 
 # ---- 4. Per-group (K) sentinels on soft timeout -----------------------------------

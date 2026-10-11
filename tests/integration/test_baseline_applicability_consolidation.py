@@ -226,6 +226,13 @@ _EXPECTED_APPLICABILITY: dict[tuple[str, str], bool] = {
     ("pomegranate-discrete", "continuous_lg"): False,
     ("pomegranate-discrete", "continuous_nongauss"): False,
     ("pomegranate-discrete", "hybrid"): False,
+    # pomegranate's predict_proba is loopy BP: "-lbp" is the label since D10,
+    # "-ve" its pre-D10 alias (kept so old result files keep their
+    # applicability) — the two must stay identical.
+    ("pomegranate-discrete-lbp", "discrete"): True,
+    ("pomegranate-discrete-lbp", "continuous_lg"): False,
+    ("pomegranate-discrete-lbp", "continuous_nongauss"): False,
+    ("pomegranate-discrete-lbp", "hybrid"): False,
     ("pomegranate-discrete-ve", "discrete"): True,
     ("pomegranate-discrete-ve", "continuous_lg"): False,
     ("pomegranate-discrete-ve", "continuous_nongauss"): False,
@@ -258,7 +265,8 @@ _FROZEN_GATE_B_PAIRS: list[tuple[str, str]] = [
 
 _ADAPTER_TO_LABELS: dict[str, list[str]] = {
     "gpytorch":    ["gpytorch-gp", "gpytorch-gp-predict"],
-    "pomegranate": ["pomegranate-discrete", "pomegranate-discrete-ve"],
+    "pomegranate": ["pomegranate-discrete", "pomegranate-discrete-lbp",
+                    "pomegranate-discrete-ve"],
     "nbn_ve":      ["nbn-cat-ve", "nbn-neuralcat-ve"],
     "pgmpy":       ["pgmpy-mle", "pgmpy-bayes", "pgmpy-lg",
                     "pgmpy-mle-ve", "pgmpy-bayes-ve", "pgmpy-lg-predict"],

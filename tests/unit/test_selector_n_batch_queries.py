@@ -234,3 +234,36 @@ def test_query_timer_synchronizes_accelerator(monkeypatch):
 
     bd.run_query_groups(_A(), [[object()], [object()]])
     assert calls == ["cuda:1", "cuda:1"]
+
+
+def test_evidence_free_rows_stay_in_their_pass_batch_size_slice():
+    """D7 follow-up: an evidence-free singleton in a B=4 pass was stamped
+    batch_size=1, so a sweep pooled every pass's copy into the B=1 slice
+    (and TimingOnly stamped the pass rows with the FIRST group's size, 1 when
+    the first position was evidence-free). Both now carry the pass's B."""
+    from nbn.bench.domains.base import Query
+    from nbn.bench.domains.posterior import Posterior
+    from nbn.bench.measurements.timing_only import TimingOnly
+
+    problem = _make_problem()
+    nodes = list(problem.variables)
+    empty = Query(targets=(nodes[0],), evidence={nodes[1]: None}, kind="marginal")
+    full = [Query(targets=(nodes[0],), evidence={nodes[1]: torch.tensor(float(v % 2))},
+                  kind="marginal") for v in range(4)]
+
+    class _A:
+        name = "stub"
+
+        def query(self, q):
+            return Posterior(probs=torch.tensor([0.5, 0.5]))
+
+        def query_batch(self, qs):
+            return [self.query(q) for q in qs]
+
+    rows = TimingOnly().measure(problem, _A(), [empty, *full],
+                                query_groups=[[empty], full],
+                                evidence_modes=["empty"] + ["full"] * 4)
+    by_mode = {(r.metric, r.evidence_mode): r.batch_size for r in rows}
+    assert by_mode[("query_time_s", "empty")] == 4
+    assert by_mode[("query_time_s", "full")] == 4
+    assert {r.batch_size for r in rows if r.metric in ("fit_time_s", "metrics_time_s")} == {4}

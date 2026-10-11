@@ -54,13 +54,24 @@ class TestSweepDispatch:
         assert sorted(pgmpy["batch_size"].unique()) == [1]
 
     def test_batch_size_column_stamped(self, sweep_df):
+        """Every (baseline, batch_size) slice holds the same queries.
+
+        The heaviest selector emits K positions on the 8-node fixture, half of
+        them evidence-free (empty mode). Since D7 an evidence-free position is
+        ONE query in every pass (it used to be n_batch_queries=16 identical
+        copies that nbn answered once while dividing the time by 16). Its rows
+        are stamped with the pass's batch size, so each slice holds
+        K_full x 16 full-mode rows + K_empty empty-mode rows -- fewer rows
+        than before (K x 16), and still the same count for every combo.
+        """
         qt = sweep_df[sweep_df.metric == "query_time_s"]
         by = qt.groupby(["baseline", "batch_size"]).size()
-        # 160 = K positions × n_batch_queries=16 variants; K=10 for the
-        # 8-node fixture DAG (heaviest emits 10 positions on it).
         n_per_combo = by.iloc[0]
         assert (by == n_per_combo).all()  # same count for every combo
-        assert n_per_combo % 16 == 0      # K × 16 (n_batch_queries plumbed)
+        full = qt[qt.evidence_mode == "full"].groupby(["baseline", "batch_size"]).size()
+        assert (full % 16 == 0).all()     # K_full x 16 (n_batch_queries plumbed)
+        empty = qt[qt.evidence_mode == "empty"].groupby(["baseline", "batch_size"]).size()
+        assert (empty < 16).all()         # one row per evidence-free position
         assert set(by.index) == {
             ("nbn-cat-ve", 1), ("nbn-cat-ve", 4), ("pgmpy-mle-ve", 1),
         }
@@ -86,15 +97,22 @@ class TestSweepDispatch:
         assert set(ok["n_nodes"].unique()) == {8}
 
     def test_n_batch_queries_row_count(self, sweep_df):
-        """K×16 query rows per (problem, seed, baseline, batch_size)."""
+        """Per (problem, seed, baseline, batch_size): K_full x 16 full-mode
+        query rows (n_batch_queries variants per position) and one row per
+        evidence-free position (D7: a single query, not 16 copies; stamped
+        with the pass's batch size, so a B=4 pass's evidence-free rows are not
+        pooled into the B=1 slice)."""
         qt = sweep_df[sweep_df.metric == "query_time_s"]
-        for (_, _, _, bs), grp in qt.groupby(
-            ["problem_id", "seed", "baseline", "batch_size"]
-        ):
-            k = len(grp) / 16
+        keys = ["problem_id", "seed", "baseline", "batch_size"]
+        k_empty = None
+        for key, grp in qt.groupby(keys):
+            n_full = int((grp.evidence_mode == "full").sum())
+            n_empty = int((grp.evidence_mode == "empty").sum())
+            k = n_full / 16
             assert k == int(k) and k >= 1, (
-                f"expected K×16 rows, got {len(grp)} (batch_size={bs})"
-            )
+                f"expected K_full x 16 full-mode rows, got {n_full} ({key})")
+            k_empty = n_empty if k_empty is None else k_empty
+            assert n_empty == k_empty, f"evidence-free rows differ across slices ({key})"
 
 
 @pytest.mark.slow
