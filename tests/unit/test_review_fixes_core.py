@@ -274,3 +274,73 @@ def test_b1_bad_node_names_rejected_early():
         NBN([(0, 1)], {0: ("discrete", 2), 1: ("discrete", 2)})
     with pytest.raises(ValueError, match="__DOT__"):
         NBN([], {"a__DOT__b": ("discrete", 2)})
+
+
+# ---------------------------------------------------------------------------
+# B3 / B4 — .cpu()/.cuda() refresh _device; cache version bumps
+# ---------------------------------------------------------------------------
+
+
+def _lg_model(device):
+    from nbn import NeuralBayesianNetwork as NBN
+
+    model = NBN([("A", "B")], {"A": ("continuous", 1), "B": ("continuous", 1)}, device=device)
+    model.auto_mechanisms(default_continuous="lg")
+    g = torch.Generator().manual_seed(0)
+    a = torch.randn(200, 1, generator=g)
+    data = {"A": a, "B": 2 * a + 0.1 * torch.randn(200, 1, generator=g)}
+    return model, data
+
+
+@pytest.mark.parametrize("device", ACCELERATORS or ["cpu"])
+def test_b3_cpu_refreshes_device(device):
+    model, data = _lg_model(device)
+    model.fit(data)
+    model.cpu()
+    assert model.device.type == "cpu"
+    assert all(p.device.type == "cpu" for p in model.parameters())
+    model.fit(data)                     # data must now land on cpu, not on `device`
+    assert model.mechanisms["B"]._weight.device.type == "cpu"
+    s = model.sample(5)
+    assert s["B"].device.type == "cpu"
+
+
+@pytest.mark.parametrize("device", ACCELERATORS or ["cpu"])
+def test_b3_device_refresh_for_parameterless_model(device):
+    model, _ = _lg_model("cpu")          # mechanisms registered, not fitted
+    if device == "cuda":
+        model.cuda()
+    else:
+        # .to(tensor) has no explicit device spec: _apply must infer it.
+        model.to(torch.empty(0, device=device))
+    assert model.device.type == device
+    model.cpu()
+    assert model.device.type == "cpu"
+
+
+def test_b4_cache_version_bumps_on_direct_writes_load_and_moves():
+    from nbn.mechanisms.parametric.linear_gaussian import LinearGaussianMechanism
+
+    model, data = _lg_model("cpu")
+    model.fit(data)
+    v = model._cache_version
+    model.mechanisms["B"] = LinearGaussianMechanism()
+    assert model._cache_version > v
+    v = model._cache_version
+    del model.mechanisms["B"]
+    assert model._cache_version > v
+    model.set_mechanism("B", LinearGaussianMechanism())
+    model.fit(data)
+    sd = model.state_dict()
+    v = model._cache_version
+    model.load_state_dict(sd)
+    assert model._cache_version > v
+    v = model._cache_version
+    model.cpu()
+    assert model._cache_version > v
+    # Setter keeps working (callers do ``_cache_version += 1``).
+    v = model._cache_version
+    model._cache_version += 1
+    assert model._cache_version == v + 1
+    import copy
+    assert copy.deepcopy(model)._cache_version == model._cache_version

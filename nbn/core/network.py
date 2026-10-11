@@ -217,12 +217,49 @@ class NeuralBayesianNetwork(nn.Module):
         # Empty for an observational model; see ``intervene``.
         self._do_targets: set = set()
         # Monotonic counter bumped whenever the CPDs change (fit / update /
-        # set_mechanism).  Inference engines memoise per-model factors and
+        # set_mechanism / direct ``mechanisms[...]`` writes / load_state_dict
+        # / device moves).  Inference engines memoise per-model factors and
         # plans; they key that memo on this counter so a refit can never be
-        # served a stale posterior.  See ``TensorVariableElimination``.
+        # served a stale posterior.  See ``TensorVariableElimination`` and
+        # the ``_cache_version`` property below.
         self._cache_version = 0
         self._device = resolve_device(device)
         self._mixed_precision = False
+
+    # ------------------------------------------------------------------
+    # Cache invalidation
+    # ------------------------------------------------------------------
+
+    @property
+    def _cache_version(self) -> int:
+        """Version of the CPDs: an explicit counter plus the registry's own.
+
+        ``_AliasModuleDict`` counts its own mutations, so a mechanism written
+        straight into ``model.mechanisms[node]`` (bypassing
+        ``set_mechanism``) also invalidates memoised inference.  Summing two
+        plain ints keeps this deepcopy/pickle-safe (no back-reference from
+        the registry to the model).  Reads ``__dict__`` directly so models
+        pickled before the split (plain ``_cache_version`` attribute) load.
+        """
+        d = self.__dict__
+        base = d.get("_cache_version_base", d.get("_cache_version", 0))
+        mechs = d.get("_modules", {}).get("mechanisms")
+        return int(base) + int(getattr(mechs, "_version", 0))
+
+    @_cache_version.setter
+    def _cache_version(self, value: int) -> None:
+        mechs = self.__dict__.get("_modules", {}).get("mechanisms")
+        self.__dict__["_cache_version_base"] = (
+            int(value) - int(getattr(mechs, "_version", 0))
+        )
+
+    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
+        """``nn.Module.load_state_dict`` that also invalidates inference caches."""
+        try:
+            return super().load_state_dict(state_dict, strict=strict, assign=assign)
+        finally:
+            # Bump even on a strict-mode failure: tensors may be half copied.
+            self._cache_version += 1
 
     # ------------------------------------------------------------------
     # Mechanism registration
@@ -735,24 +772,41 @@ class NeuralBayesianNetwork(nn.Module):
     def device(self) -> torch.device:
         return self._device
 
+    def _apply(self, fn, *args, **kwargs):
+        """Every device/dtype move (``to``, ``cpu``, ``cuda``, ``half``, ...)
+        funnels through here, so this is where ``_device`` is refreshed.
+
+        Overriding only ``to()`` left ``_device`` stale after ``.cpu()`` /
+        ``.cuda(1)``, and every later ``fit`` / ``query`` moved data back to
+        the old device.  The new device is read off the first parameter or
+        buffer; a model with neither (mechanisms not fitted yet) probes ``fn``
+        on an empty tensor instead.
+        """
+        super()._apply(fn, *args, **kwargs)
+        ref = next(iter(self.parameters()), None)
+        if ref is None:
+            ref = next(iter(self.buffers()), None)
+        if ref is None:
+            try:
+                ref = fn(torch.empty(0, device=self._device))
+            except Exception:  # an fn that cannot take a probe: keep _device
+                ref = None
+        if isinstance(ref, torch.Tensor):
+            self._device = ref.device
+        # Engines and memoised factors hold tensors on the old device.
+        self._engine = None
+        self._cache_version += 1
+        return self
+
     def to(self, *args, **kwargs) -> NeuralBayesianNetwork:
         """Move model + every registered mechanism + cached engine to a device."""
-        super().to(*args, **kwargs)
-        # Update cached device
-        new_device: torch.device | None = None
+        super().to(*args, **kwargs)  # refreshes _device via _apply
+        # An explicit device spec wins over what _apply read off the tensors,
+        # so ``model.to("cuda")`` reports the spec the caller used.
         if args and isinstance(args[0], (str, torch.device)):
-            new_device = resolve_device(args[0])
+            self._device = resolve_device(args[0])
         elif "device" in kwargs:
-            new_device = resolve_device(kwargs["device"])
-        else:
-            try:
-                new_device = next(self.parameters()).device
-            except StopIteration:
-                pass
-        if new_device is not None:
-            self._device = new_device
-        # Propagate to a cached engine (clear so next call rebuilds on new device)
-        self._engine = None
+            self._device = resolve_device(kwargs["device"])
         return self
 
     # ------------------------------------------------------------------
