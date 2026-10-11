@@ -105,6 +105,32 @@ class _AliasModuleDict(nn.ModuleDict):
         return [(self._orig(k), v) for k, v in super().items()]
 
 
+_KINDS = ("discrete", "continuous", "mixed")
+
+
+def _build_variable(name: str, spec: Union[Tuple, Variable]) -> Variable:
+    """``(kind, dim)`` spec -> ``Variable``; the kind must be spelled exactly.
+
+    Anything that was not ``"discrete"`` used to become continuous, so a typo
+    (``"categorical"``, ``"Discrete"``) silently fitted a Gaussian to state
+    indices.
+    """
+    from nbn.core.variables import ContinuousVariable, DiscreteVariable
+
+    if isinstance(spec, Variable):
+        return spec
+    kind, dim = spec
+    if kind not in _KINDS:
+        raise ValueError(
+            f"Variable '{name}': unknown kind {kind!r}; expected one of {_KINDS}."
+        )
+    if kind == "discrete":
+        return DiscreteVariable(name, cardinality=dim)
+    if kind == "mixed":
+        return Variable(name=name, kind="mixed", dim=dim)
+    return ContinuousVariable(name, dim=dim)
+
+
 class NeuralBayesianNetwork(nn.Module):
     """A Bayesian Network with a *given* DAG and learnable, GPU-resident,
     autograd-compatible per-node neural mechanisms.
@@ -191,21 +217,22 @@ class NeuralBayesianNetwork(nn.Module):
             _AliasModuleDict._safe(name)
 
         # Build variable specs
-        self.variables: Dict[str, Variable] = {}
-        for name, spec in variables.items():
-            if isinstance(spec, Variable):
-                self.variables[name] = spec
-            else:
-                kind, dim = spec
-                from nbn.core.variables import ContinuousVariable, DiscreteVariable
-                if kind == "discrete":
-                    self.variables[name] = DiscreteVariable(name, cardinality=dim)
-                else:
-                    self.variables[name] = ContinuousVariable(name, dim=dim)
+        self.variables: Dict[str, Variable] = {
+            name: _build_variable(name, spec) for name, spec in variables.items()
+        }
 
         missing = set(self.dag.nodes()) - set(self.variables)
         if missing:
             raise ValueError(f"Variables spec missing nodes: {sorted(missing)}")
+        # The reverse gap matters as much: a variable absent from a
+        # caller-built DAG is never visited by fit / sample / inference, so
+        # it would silently stay unfitted.
+        orphans = set(self.variables) - set(self.dag.nodes())
+        if orphans:
+            raise ValueError(
+                f"Variables {sorted(orphans)} are not nodes of the DAG; add "
+                f"them to the graph (isolated nodes are fine) or drop them."
+            )
 
         # Mechanism registry (populated by set_mechanism / auto_mechanisms / fit).
         # _AliasModuleDict tolerates dotted node names (e.g. bnlearn's pm2.5).
@@ -279,7 +306,24 @@ class NeuralBayesianNetwork(nn.Module):
         default_continuous: str = "mdn",
         mdn_components: int = 5,
     ) -> None:
-        """Assign default mechanisms based on variable types (each on model device)."""
+        """Assign default mechanisms based on variable types (each on model device).
+
+        ``default_discrete``: ``"categorical_table"`` or ``"neural_categorical"``.
+        ``default_continuous``: ``"mdn"`` or ``"lg"`` / ``"linear_gaussian"``.
+        Any other name raises.
+        """
+        # Validate the names up front: an unknown name used to fall through
+        # to the non-default branch (e.g. "lgg" -> LinearGaussian) silently.
+        known_d = ("categorical_table", "neural_categorical")
+        known_c = ("mdn", "lg", "linear_gaussian")
+        if default_discrete not in known_d:
+            raise ValueError(
+                f"Unknown default_discrete {default_discrete!r}; expected one of {known_d}."
+            )
+        if default_continuous not in known_c:
+            raise ValueError(
+                f"Unknown default_continuous {default_continuous!r}; expected one of {known_c}."
+            )
         for node, var in self.variables.items():
             if node in self.mechanisms:
                 continue
@@ -297,7 +341,20 @@ class NeuralBayesianNetwork(nn.Module):
             self.set_mechanism(node, mech)
 
     def set_mixed_precision(self, enabled: bool) -> None:
-        """Toggle ``torch.amp.autocast`` for forward passes (default: off)."""
+        """Deprecated no-op: the flag was never read by any code path.
+
+        Mixed precision is not implemented for NBN (closed-form fits and
+        log-density sums are precision-sensitive).  Wrap calls in
+        ``torch.autocast`` yourself if you need it for a neural mechanism.
+        """
+        import warnings
+
+        warnings.warn(
+            "set_mixed_precision() has no effect and is deprecated; NBN does "
+            "not autocast.  Use torch.autocast around your own calls instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._mixed_precision = bool(enabled)
 
     # ------------------------------------------------------------------
@@ -752,7 +809,8 @@ class NeuralBayesianNetwork(nn.Module):
             (u, v) for (u, v) in self.dag.ordered_edges() if v not in targets
         ]
         new_model.dag = DAG(kept_edges, extra_nodes=list(self.dag.nodes()))
-        new_model._do_targets = set(targets)
+        # Union: chaining intervene() keeps the earlier cuts recorded too.
+        new_model._do_targets = set(self._do_targets) | targets
 
         for node, val in do.items():
             var = new_model.variables[node]
@@ -875,6 +933,8 @@ class NeuralBayesianNetwork(nn.Module):
             },
             "mechanisms": dict(self.mechanisms.items()),
             "do_targets": sorted(self._do_targets),
+            # Label <-> index maps (from_bif); absent on most models.
+            "state_names": getattr(self, "state_names", None),
             "engine_spec": self._engine_spec if isinstance(self._engine_spec, str) else None,
         }
         torch.save(payload, path)
@@ -899,6 +959,8 @@ class NeuralBayesianNetwork(nn.Module):
         for n, (kind, dim, card) in payload["variables"].items():
             if kind == "discrete":
                 variables[n] = DiscreteVariable(n, cardinality=card)
+            elif kind == "mixed":  # used to be downgraded to continuous
+                variables[n] = Variable(name=n, kind="mixed", dim=dim, cardinality=card)
             else:
                 variables[n] = ContinuousVariable(n, dim=dim)
 
@@ -906,6 +968,8 @@ class NeuralBayesianNetwork(nn.Module):
         dag = DAG(edges, extra_nodes=nodes)
         engine_spec = payload.get("engine_spec") or "auto"
         model = cls(dag, variables, default_engine=engine_spec, device=str(map_location))
+        if payload.get("state_names") is not None:
+            model.state_names = payload["state_names"]
 
         mechanisms = payload.get("mechanisms")
         if mechanisms is None:

@@ -583,3 +583,70 @@ def test_c_train_history_is_weighted():
     hist = model.fit(data, weights=w)
     lp = model.mechanisms["A"].log_prob(data["A"], None).detach().reshape(-1)
     assert hist.mean_ll("A") == pytest.approx(float(lp[:50].mean()), rel=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# C — constructor / DAG / auto_mechanisms / mixed precision / intervene /
+#     save-load metadata
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kind", ["categorical", "Discrete", "cont"])
+def test_c_unknown_variable_kind_raises(kind):
+    from nbn import NeuralBayesianNetwork as NBN
+
+    with pytest.raises(ValueError, match="unknown kind"):
+        NBN([], {"A": (kind, 2)})
+
+
+def test_c_variables_missing_from_dag_raise():
+    from nbn import NeuralBayesianNetwork as NBN
+    from nbn.core.dag import DAG
+
+    with pytest.raises(ValueError, match="not nodes of the DAG"):
+        NBN(DAG([("A", "B")]), {"A": ("discrete", 2), "B": ("discrete", 2), "C": ("discrete", 2)})
+
+
+def test_c_dag_does_not_mutate_callers_graph():
+    import networkx as nx
+
+    from nbn.core.dag import DAG
+
+    g = nx.DiGraph([("A", "B")])
+    DAG(g, extra_nodes=["C"])
+    assert set(g.nodes) == {"A", "B"}
+
+
+def test_c_auto_mechanisms_rejects_unknown_names():
+    from nbn import NeuralBayesianNetwork as NBN
+
+    model = NBN([("A", "B")], {"A": ("discrete", 2), "B": ("continuous", 1)}, device="cpu")
+    with pytest.raises(ValueError, match="default_continuous"):
+        model.auto_mechanisms(default_continuous="lgg")
+    with pytest.raises(ValueError, match="default_discrete"):
+        model.auto_mechanisms(default_discrete="table")
+
+
+def test_c_set_mixed_precision_warns():
+    model, _ = _lg_model("cpu")
+    with pytest.warns(DeprecationWarning, match="no effect"):
+        model.set_mixed_precision(True)
+
+
+def test_c_chained_intervene_keeps_all_do_targets():
+    model = _mixed_model()
+    m = model.intervene({"A": 1}).intervene({"X": 0.5})
+    assert m._do_targets == {"A", "X"}
+
+
+def test_c_save_load_keeps_state_names_and_mixed_kind(tmp_path):
+    from nbn import NeuralBayesianNetwork as NBN
+
+    model = NBN([("A", "M")], {"A": ("discrete", 2), "M": ("mixed", 1)}, device="cpu")
+    assert model.variables["M"].kind == "mixed"
+    model.state_names = {"A": ["no", "yes"]}
+    path = tmp_path / "m.pt"
+    model.save(str(path))
+    loaded = NBN.load(str(path))
+    assert loaded.variables["M"].kind == "mixed"
+    assert loaded.state_names == {"A": ["no", "yes"]}
