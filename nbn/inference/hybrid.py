@@ -6,7 +6,7 @@ from typing import Dict, List
 import networkx as nx
 import torch
 
-from nbn.inference._memory import is_oom_error
+from nbn.inference._memory import is_oom_error, release_cached_memory
 from nbn.inference.base import InferenceEngine
 from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
 from nbn.inference.tensor_ve import TensorVariableElimination
@@ -29,8 +29,16 @@ class HybridRouter(InferenceEngine):
        ``TensorVariableElimination``; does not → LW.  The unweighted
        treewidth alone ignored cardinalities: a 40-node, in-degree-5,
        card-4 network had width 21 (→ VE) and an estimated 3.3 TB peak (B5).
+       On CPU / MPS the budget is ``ve_host_fraction`` of the *stable*
+       memory capacity, so the route does not flip with momentary memory
+       pressure; on CUDA it is the live headroom (see
+       ``TensorVariableElimination.memory_budget_bytes``).
     5. If VE still runs out of memory on any device (CUDA OOM, MPS
        "out of memory", CPU allocator failure), the query is retried with LW.
+
+    Every downgrade from exact VE to approximate LW for a discrete query is
+    logged at WARNING, once per query shape, and ``last_engine`` names the
+    engine that answered the latest query.
 
     Parameters
     ----------
@@ -40,24 +48,58 @@ class HybridRouter(InferenceEngine):
         Number of samples for the likelihood-weighting fallback.
     memory_budget: float, optional
         Hard cap in bytes on VE's estimated peak; combined with the device
-        headroom (see ``TensorVariableElimination.memory_budget_bytes``).
+        default (see ``TensorVariableElimination.memory_budget_bytes``).
+    ve_host_fraction: float
+        On CPU / MPS, route to VE only when one row's estimated peak fits
+        this fraction of the stable memory capacity (leaving room for the
+        rest of the process).  Called directly, VE itself rejects only plans
+        beyond the whole capacity.
     """
+
+    # Bound on remembered "already warned" query shapes.
+    _MAX_WARNED = 1024
 
     def __init__(
         self,
         treewidth_threshold: int = 25,
         n_samples: int = 2048,
         memory_budget: float | None = None,
+        ve_host_fraction: float = 0.75,
     ) -> None:
         self.treewidth_threshold = treewidth_threshold
+        self.ve_host_fraction = float(ve_host_fraction)
         self._ve = TensorVariableElimination(
             treewidth_threshold, memory_budget=memory_budget,
         )
         self._lw = LikelihoodWeightingEngine(n_samples)
         self._last_engine: str | None = None
+        self._warned: set = set()
 
-    def _use_lw(self, reason: str, *args) -> InferenceEngine:
-        logger.debug(reason, *args)
+    @property
+    def last_engine(self) -> str | None:
+        """``"tensor_ve"`` or ``"likelihood_weighting"``: who answered last."""
+        return self._last_engine
+
+    def _warn_once(self, key, msg: str, *args) -> None:
+        """WARNING the first time a query shape is downgraded, DEBUG after.
+
+        A silent downgrade from exact to approximate answers is a behaviour
+        change the caller must be able to see; repeating it per row of a
+        sweep would drown the log.
+        """
+        if key in self._warned:
+            logger.debug(msg, *args)
+            return
+        if len(self._warned) >= self._MAX_WARNED:
+            self._warned.clear()
+        self._warned.add(key)
+        logger.warning(msg, *args)
+
+    def _use_lw(self, reason: str, *args, warn_key=None) -> InferenceEngine:
+        if warn_key is None:
+            logger.debug(reason, *args)
+        else:
+            self._warn_once(warn_key, reason, *args)
         self._last_engine = "likelihood_weighting"
         return self._lw
 
@@ -98,8 +140,11 @@ class HybridRouter(InferenceEngine):
             model, targets[0], evidence, do, order,
         ):
             return self._use_lw(
-                "VE plan for %r exceeds the memory budget; using likelihood "
-                "weighting.", targets[0],
+                "HybridRouter: the exact VE plan for P(%s | %s) would exceed "
+                "the %s memory budget; answering with likelihood weighting "
+                "(approximate).", targets[0],
+                sorted({**(evidence or {}), **(do or {})}), model.device,
+                warn_key=_shape_key(model, targets, evidence, do),
             )
         self._last_engine = "tensor_ve"
         return self._ve
@@ -111,6 +156,7 @@ class HybridRouter(InferenceEngine):
             return True  # answered as a point mass, no elimination
         return self._ve.fits_memory(
             model, target, tuple(evidence), tuple(do), order=order,
+            host_fraction=self.ve_host_fraction,
         )
 
     def _dispatch(self, method: str, model, targets, evidence, kwargs):
@@ -135,12 +181,21 @@ class HybridRouter(InferenceEngine):
         except Exception as exc:
             if engine is self._lw or not is_oom_error(exc):
                 raise  # LW itself OOMed, or not an OOM at all.
-            logger.warning(
-                "TensorVE exceeded the memory budget (%s); retrying with "
-                "likelihood weighting.", type(exc).__name__,
-            )
-            self._last_engine = "likelihood_weighting"
-            return getattr(self._lw, method)(model, targets, evidence, **kwargs)
+            oom = type(exc).__name__
+        # Retry OUTSIDE the except block: inside it the exception's traceback
+        # keeps VE's frames — and every intermediate tensor they hold — alive,
+        # so LW would run on a device still full of the failed attempt.  With
+        # the exception gone, hand the cached blocks back before retrying.
+        device = getattr(model, "device", None)
+        if device is not None:
+            release_cached_memory(device)
+        self._warn_once(
+            ("oom",) + _shape_key(model, targets, evidence, kwargs.get("do")),
+            "HybridRouter: exact VE ran out of memory on %s (%s); answering "
+            "with likelihood weighting (approximate).", device, oom,
+        )
+        self._last_engine = "likelihood_weighting"
+        return getattr(self._lw, method)(model, targets, evidence, **kwargs)
 
     def query(
         self,
@@ -159,3 +214,11 @@ class HybridRouter(InferenceEngine):
         **kwargs,
     ) -> torch.Tensor:
         return self._dispatch("query_batch", model, targets, evidence, kwargs)
+
+
+def _shape_key(model, targets, evidence, do) -> tuple:
+    """Query shape for log de-duplication (values do not matter)."""
+    return (
+        id(model), tuple(targets or ()),
+        tuple(sorted(evidence or {})), tuple(sorted(do or {})),
+    )

@@ -27,7 +27,11 @@ from nbn.inference._cache import (
     tensor_versions,
 )
 from nbn.inference._elimination_order import get_order
-from nbn.inference._memory import OutOfMemoryError, device_headroom_bytes
+from nbn.inference._memory import (
+    OutOfMemoryError,
+    device_capacity_bytes,
+    device_headroom_bytes,
+)
 from nbn.inference._validation import check_discrete_values
 from nbn.inference._pruning import relevant_subnetwork, requisite_nodes
 from nbn.inference.base import InferenceEngine
@@ -44,6 +48,13 @@ logger = logging.getLogger(__name__)
 # actual/predicted = 2.85× rock-stable across batch sizes; 3.0 rounds
 # conservative. See #177 for the measurement and #178 for the deeper
 # live-set model that would replace this scalar.
+#
+# The same factor holds on CPU and MPS (R5 re-measurement, 2026-10-11,
+# Apple M-series, 30-node in-degree-4 card-4 nets, bare peaks 0.07-4.3 GB):
+# CPU peak-RSS growth / bare = 2.8-3.4 and MPS driver-allocated growth /
+# bare = 3.0 once the plan is large enough to dominate allocator
+# granularity.  So one multiplier serves every device; what differs per
+# device is the budget it is compared with (``memory_budget_bytes``).
 _LIVESET_MULTIPLIER = 3.0
 
 
@@ -57,21 +68,30 @@ class TensorVariableElimination(InferenceEngine):
         treewidth_threshold: int = 25,
         memory_budget: float | None = None,
         memory_safety: float = 0.9,
+        host_memory_fraction: float = 1.0,
     ) -> None:
         """
         Parameters
         ----------
         memory_budget:
-            Optional hard cap, in bytes, on the estimated elimination peak.
-            The effective budget is ``min(memory_budget, memory_safety ×
-            device headroom)``; with neither known no check is made.
+            Optional hard cap, in bytes, on the estimated elimination peak,
+            combined (``min``) with the device default below; with neither
+            known no check is made.
         memory_safety:
-            Fraction of the device headroom (``nbn.inference._memory``) a
-            query may plan to use.
+            CUDA default: this fraction of the live device headroom
+            (``nbn.inference._memory.device_headroom_bytes``).
+        host_memory_fraction:
+            CPU / MPS default: this fraction of the *stable* memory capacity
+            (RAM capped by the cgroup limit; Metal's recommended working
+            set).  The default 1.0 rejects only plans whose estimated peak
+            exceeds the whole pool — plans that could not have completed
+            without swapping or being OOM-killed.  ``HybridRouter`` prices
+            routes with a smaller fraction of its own.
         """
         self.treewidth_threshold = treewidth_threshold
         self.memory_budget = memory_budget
         self.memory_safety = float(memory_safety)
+        self.host_memory_fraction = float(host_memory_fraction)
         # Memoised per-plan peak profile ``(batch_free, per_row)`` element
         # counts, keyed like ``_plan_cache`` (see ``_peak_profile``).
         self._cost_cache: Dict[tuple, tuple] = {}
@@ -300,16 +320,30 @@ class TensorVariableElimination(InferenceEngine):
     # Memory budget (every device)
     # ------------------------------------------------------------------ #
 
-    def memory_budget_bytes(self, device) -> float | None:
+    def memory_budget_bytes(
+        self, device, *, host_fraction: float | None = None,
+    ) -> float | None:
         """Bytes an elimination on ``device`` may plan to use (``None``: unchecked).
 
         The guard used to run on CUDA only, reading driver-free memory; CPU
         and MPS allocated blindly, so a terabyte plan was attempted and died
         in the allocator (or the OS OOM killer) instead of being refused or
         routed to LW (B5).
+
+        CUDA compares with live headroom (as the original guard did, now
+        counting PyTorch's reusable cache, #264).  CPU and MPS compare with a
+        stable capacity × ``host_fraction`` (default
+        ``self.host_memory_fraction``): momentary free host memory made the
+        same query exact on an idle machine and LW under pressure (R5).
         """
-        head = device_headroom_bytes(device)
-        budget = None if head is None else self.memory_safety * head
+        device = torch.device(device)
+        if device.type == "cuda":
+            head = device_headroom_bytes(device)
+            budget = None if head is None else self.memory_safety * head
+        else:
+            cap = device_capacity_bytes(device)
+            frac = self.host_memory_fraction if host_fraction is None else host_fraction
+            budget = None if cap is None else frac * cap
         if self.memory_budget is not None:
             cap = float(self.memory_budget)
             budget = cap if budget is None else min(budget, cap)
@@ -366,9 +400,10 @@ class TensorVariableElimination(InferenceEngine):
         return _peak_bytes_from_profile(prof, B)
 
     def fits_memory(self, model, target, evidence_keys=(), do_keys=(), *,
-                    order: str = "min_fill") -> bool:
+                    order: str = "min_fill",
+                    host_fraction: float | None = None) -> bool:
         """Whether one row of this query fits the budget (larger B is chunked)."""
-        budget = self.memory_budget_bytes(model.device)
+        budget = self.memory_budget_bytes(model.device, host_fraction=host_fraction)
         if budget is None:
             return True
         return self.estimate_peak_bytes(
