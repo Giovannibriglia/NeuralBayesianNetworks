@@ -875,3 +875,55 @@ def test_r14_torch_save_after_query(tmp_path):
         model.query(["A"], evidence={"X": torch.tensor([0.5])}),
         atol=0.05, rtol=0,
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 2 — B7 (query_batch) and CUDA device index pinning
+# ---------------------------------------------------------------------------
+
+
+def test_b7_query_batch_bare_vector_evidence_on_multidim_node():
+    from nbn import NeuralBayesianNetwork as NBN
+
+    model = NBN(
+        [("A", "X"), ("A", "C")],
+        {"A": ("discrete", 2), "X": ("continuous", 3), "C": ("discrete", 2)},
+        device="cpu",
+    )
+    model.auto_mechanisms(default_continuous="lg")
+    g = torch.Generator().manual_seed(0)
+    a = torch.randint(0, 2, (500,), generator=g)
+    x = 3.0 * a.float().unsqueeze(1).expand(-1, 3) + 0.3 * torch.randn(500, 3, generator=g)
+    model.fit({"A": a, "X": x, "C": a})
+    p = model.query_batch(["A"], evidence={"X": torch.tensor([3.0, 3.0, 3.0])})
+    assert p.shape == (1, 2) and p[0, 1] > 0.99
+    p2 = model.query_batch(
+        ["A"], evidence={"X": torch.tensor([3.0, 3.0, 3.0]), "C": torch.tensor([0, 1])},
+    )
+    assert p2.shape == (2, 2)
+    with pytest.raises(ValueError, match="3-dim continuous"):
+        model.query_batch(["A"], evidence={"X": torch.tensor([3.0, 3.0])})
+
+
+def test_cuda_realise_device_pins_index_or_leaves_others():
+    from nbn.utils.device import realise_device
+
+    assert realise_device("cpu") == torch.device("cpu")
+    if "mps" in available_devices():
+        assert realise_device("mps").type == "mps"
+    if torch.cuda.is_available():
+        assert realise_device("cuda").index == torch.cuda.current_device()
+        assert realise_device("cuda:0").index == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_cuda_model_to_cuda_stores_indexed_device():
+    model, data = _lg_model("cpu")
+    model.to("cuda")
+    assert model.device.index == torch.cuda.current_device()
+    model.fit(data)
+    assert model.mechanisms["B"]._weight.device == model.device
+    from nbn import NeuralBayesianNetwork as NBN
+
+    m2 = NBN([], {"A": ("continuous", 1)}, device="cuda")
+    assert m2.device.index is not None

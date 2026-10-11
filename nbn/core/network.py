@@ -13,7 +13,7 @@ from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanis
 from nbn.mechanisms.parametric.linear_gaussian import LinearGaussianMechanism
 from nbn.mechanisms.parametric.mdn import MDNMechanism
 from nbn.utils.batching import pack_parents
-from nbn.utils.device import resolve_device, to_device
+from nbn.utils.device import realise_device, to_device
 
 logger = logging.getLogger(__name__)
 
@@ -252,7 +252,7 @@ class NeuralBayesianNetwork(nn.Module):
         # served a stale posterior.  See ``TensorVariableElimination`` and
         # the ``_cache_version`` property below.
         self._cache_version = 0
-        self._device = resolve_device(device)
+        self._device = realise_device(device)
         self._mixed_precision = False
 
     # ------------------------------------------------------------------
@@ -744,6 +744,26 @@ class NeuralBayesianNetwork(nn.Module):
             )
         eng = engine if engine is not None else self._get_engine()
         ev = {k: to_device(torch.as_tensor(v), self._device) for k, v in evidence.items()}
+        # A bare [D] vector on a D-dim continuous node is one row; broadcast
+        # it over the batch the other evidence defines (B = 1 if none).
+        vec = [
+            k for k, t in ev.items()
+            if t.dim() == 1 and k in self.variables
+            and not self.variables[k].is_discrete and self.variables[k].dim > 1
+        ]
+        for k in vec:
+            d = self.variables[k].dim
+            if ev[k].shape[0] != d:
+                raise ValueError(
+                    f"query_batch evidence for '{k}' has shape "
+                    f"{tuple(ev[k].shape)}; a {d}-dim continuous node takes "
+                    f"[B, {d}] (or a single [{d}] row)."
+                )
+            ev[k] = ev[k].unsqueeze(0)
+        if vec:
+            b = max(int(t.shape[0]) for t in ev.values())
+            for k in vec:
+                ev[k] = ev[k].expand(b, -1)
         if do:
             kwargs["do"] = {
                 k: to_device(torch.as_tensor(v), self._device) for k, v in do.items()
@@ -947,9 +967,9 @@ class NeuralBayesianNetwork(nn.Module):
         # An explicit device spec wins over what _apply read off the tensors,
         # so ``model.to("cuda")`` reports the spec the caller used.
         if args and isinstance(args[0], (str, torch.device)):
-            self._device = resolve_device(args[0])
+            self._device = realise_device(args[0])
         elif "device" in kwargs:
-            self._device = resolve_device(kwargs["device"])
+            self._device = realise_device(kwargs["device"])
         return self
 
     # ------------------------------------------------------------------
