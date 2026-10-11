@@ -202,6 +202,15 @@ def _bif_url(name: str) -> str:
     return f"https://www.bnlearn.com/bnrepository/{directory}/{name}.bif.gz"
 
 
+def _current_umask() -> int:
+    """The process umask (read by the set-and-restore round trip)."""
+    import os
+
+    mask = os.umask(0o022)
+    os.umask(mask)
+    return mask
+
+
 def _ensure_cached(name: str) -> Path:
     """Download a discrete ``.bif.gz`` to the cache and decompress if absent.
 
@@ -241,6 +250,9 @@ def _ensure_cached(name: str) -> Path:
 
         with gzip.open(tmp_gz, "rb") as f_in, open(tmp_bif, "wb") as f_out:
             f_out.write(f_in.read())
+        # mkstemp creates 0600; a shared cache (other users / SLURM jobs)
+        # needs the usual 0666 & ~umask a plain open() would have given.
+        os.chmod(tmp_bif, 0o666 & ~_current_umask())
         os.replace(tmp_bif, local_bif)
     finally:
         for tmp in (tmp_gz, tmp_bif):

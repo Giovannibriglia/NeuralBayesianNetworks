@@ -81,3 +81,49 @@ def test_scoring_uses_equal_sample_counts(monkeypatch):
     r2 = [r.value for r in m.measure(problem, _SamplesAdapter(50), [q])
           if r.metric == "ks_per_node"]
     assert r1 == r2 and r1[0] == r1[0]
+
+
+def test_short_posteriors_are_flagged_with_their_sample_count(caplog):
+    """D3 (rest): a method returning fewer than S draws keeps its own noise
+    after resampling; rows record n_posterior_samples and a warning names
+    the baseline."""
+    cfg = SyntheticConfig(families=["continuous_lg"], n_nodes_list=[4], seeds=[0],
+                          n_train=100, n_test=10, n_reference=100)
+    problem = next(iter(SyntheticProblemSource().iter_problems(cfg)))
+    nodes = list(problem.variables)
+    q = Query(targets=(nodes[-1],), evidence={nodes[0]: torch.tensor(0.3)},
+              kind="marginal")
+    m = at.AccuracyAndTiming(n_oracle_samples=300)
+    with caplog.at_level("WARNING"):
+        rows = m.measure(problem, _SamplesAdapter(50), [q])
+    assert {r.n_posterior_samples for r in rows if r.metric == "w1_per_node"} == {50}
+    assert "fixed-samples returned fewer posterior samples" in caplog.text
+    rows = m.measure(problem, _SamplesAdapter(400), [q])
+    assert {r.n_posterior_samples for r in rows if r.metric == "w1_per_node"} == {400}
+
+
+def test_inference_configs_align_posterior_sample_counts():
+    """Every sampling baseline of the inference (accuracy) configs draws
+    >= the scoring count S = 2000 (pyro used 50, pgmpy 1024, smokes 512-1024)."""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2] / "nbn" / "bench" / "configs"
+    import yaml
+
+    checked = 0
+    for path in root.rglob("*.yaml"):
+        doc = yaml.safe_load(path.read_text())
+        if not isinstance(doc, dict) or doc.get("metrics", "all") != "all":
+            continue  # timing-only / parameter-learning: no posterior scoring
+        checked += 1
+        for line in path.read_text().splitlines():
+            if line.lstrip().startswith("#") or "inference_method:" not in line:
+                continue
+            sampling = (re.search(r"inference_method: (lw|ais|avi|router|importance|predict)",
+                                  line) is not None)
+            if not sampling:
+                continue
+            m = re.search(r"n_samples: (\d+)", line)
+            assert m and int(m.group(1)) >= 2000, f"{path.name}: {line.strip()}"
+    assert checked > 5

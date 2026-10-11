@@ -184,3 +184,30 @@ def test_synthetic_discrete_pool_uses_n_reference_and_is_reproducible():
     p2 = _problem(n_reference=1234)
     assert p1.ground_truth.samples.shape[0] == 1234  # was hard-coded 5_000
     assert torch.equal(p1.ground_truth.samples, p2.ground_truth.samples)
+
+
+def test_impossible_evidence_in_a_factor_detached_from_the_target():
+    """R13: a -inf scalar factor (evidence impossible in a part of the network
+    that does not touch the target) was skipped, returning a confident
+    posterior for P(e) = 0. It is now 'zero-probability evidence'."""
+    from nbn.bench.core.exact_discrete import TabularSource, ZeroProbabilityEvidence
+
+    tables = {"A": torch.tensor([0.5, 0.5]),
+              "B": torch.tensor([[1.0, 0.0], [1.0, 0.0]]),   # B is always 0
+              "T": torch.tensor([0.3, 0.7])}
+    parents = {"A": (), "B": ("A",), "T": ()}
+    src = TabularSource(lambda n: parents[n], lambda n: 2, lambda n: tables[n])
+    with pytest.raises(ZeroProbabilityEvidence):
+        exact_posterior(src, "T", {"B": 1})
+    assert torch.allclose(exact_posterior(src, "T", {"B": 0}),
+                          torch.tensor([0.3, 0.7], dtype=torch.float64))
+
+
+def test_out_of_range_evidence_state_is_a_clear_error():
+    from nbn.bench.core.exact_discrete import InvalidEvidence
+
+    problem = _problem()
+    src = tabular_source(problem)
+    nodes = list(problem.variables)
+    with pytest.raises(InvalidEvidence, match="outside the node's states"):
+        exact_posterior(src, nodes[0], {nodes[1]: 7})

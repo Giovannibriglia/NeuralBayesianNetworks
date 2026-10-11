@@ -163,11 +163,24 @@ class CellResult:
     # parquets and sentinels. Additive.
     query_idx: int | None = None
 
+    # Number of posterior samples the method returned for a CONTINUOUS target
+    # (stamped on every row of the query). Scoring compares the method's
+    # draws to the oracle's S = n_oracle_samples draws after a seeded
+    # resample to S; a method returning fewer than S draws still carries its
+    # own sampling noise, so rows with n_posterior_samples < S are flagged by
+    # this column (configs align n_samples to 2048 >= S). None for discrete
+    # targets, failures and legacy parquets. Additive.
+    n_posterior_samples: int | None = None
+
 
 # Valid status values (for validation in implementations)
-# "no_result": the query ran but the oracle could produce no reference for it
-# (zero-probability evidence, collapsed LW ESS); identical for every baseline
-# of a cell, so it is neither a method failure nor an applicability gap.
+# "no_result": the query ran but no score is defined for it -- the oracle
+# could produce no reference (zero-probability evidence under the TRUE model,
+# collapsed LW ESS; identical for every baseline of a cell), or the method's
+# own posterior is undefined because the evidence has zero probability under
+# its FITTED model (error_msg says which). Neither a method failure nor an
+# applicability gap: the paper's same-query averaging drops the query for
+# every method of the cell.
 VALID_STATUSES = frozenset({
     "ok", "timeout", "oom", "error", "not_supported", "no_result",
 })

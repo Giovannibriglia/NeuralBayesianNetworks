@@ -213,6 +213,11 @@ def run_cell_in_subprocess(
     memory_limit_bytes = _compute_cell_memory_limit_bytes()
     env = os.environ.copy()
     env[MEMORY_LIMIT_ENV_VAR] = str(memory_limit_bytes)
+    # Safety net for reproducibility: str hashing is randomised per process,
+    # so any set/dict-order or hash() dependence anywhere in a cell (the
+    # benchmark code itself is audited for it) would make baselines of one
+    # cell see different queries. Pin it for every worker.
+    env["PYTHONHASHSEED"] = "0"
 
     cmd = list(worker_cmd) if worker_cmd is not None else [
         python_executable, "-m", "nbn.bench.core.cell_worker"]

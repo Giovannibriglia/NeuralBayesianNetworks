@@ -49,6 +49,7 @@ Reference: docs/v0.13-benchmark-redesign.md §3, §4.1
 from __future__ import annotations
 
 import dataclasses
+import logging
 import math
 import time
 from typing import Any
@@ -61,6 +62,8 @@ from nbn.bench.core.seeding import derive_seed
 from nbn.bench.domains.base import BenchmarkProblem, Query
 from nbn.bench.metrics import _compute_metrics_per_node
 
+
+logger = logging.getLogger(__name__)
 
 _METRICS: tuple[str, ...] = ("tv", "jsd", "w1", "ks")
 _METRIC_KEYS: tuple[str, ...] = (
@@ -249,6 +252,8 @@ class AccuracyAndTiming:
                 continue
             try:
                 mdict, tier = self._score_query(problem, q, posterior, query_index=qi)
+            except UndefinedPosterior as exc:
+                mdict, tier = {**_no_result(), "_reason": str(exc)}, None
             except Exception as exc:  # noqa: BLE001 - recorded as an error row
                 # A malformed posterior (wrong shape, NaN, missing field) is a
                 # method failure of THIS query: status "error" with the reason,
@@ -259,6 +264,18 @@ class AccuracyAndTiming:
             per_query_oracle.append(tier)
 
         metrics_time_s = time.perf_counter() - t_metrics
+        short = [m["_n_samples"] for m in per_query_metric_dicts
+                 if m and m.get("_n_samples") is not None
+                 and m["_n_samples"] < self.n_oracle_samples]
+        if short:
+            # D3: methods must return >= S draws for a noise-comparable score.
+            logger.warning(
+                "%s returned fewer posterior samples than the scoring count "
+                "S=%d on %d continuous queries (min %d): those scores include "
+                "the method's own sampling noise; rows are flagged by "
+                "n_posterior_samples", baseline, self.n_oracle_samples,
+                len(short), min(short),
+            )
 
         # ---- Phase 3: emit CellResult rows ----
         rows: list[CellResult] = []
@@ -338,7 +355,11 @@ class AccuracyAndTiming:
                     # The oracle produced no reference for this query.
                     status = "no_result"
                     value = float("nan")
-                    row_err = "oracle produced no reference for this query"
+                    row_err = mdict.get(
+                        "_reason",
+                        "oracle produced no reference for this query (evidence "
+                        "with zero probability under the true model, or LW "
+                        "effective sample size below the floor)")
                 elif val is None:
                     status = "not_supported"
                     value = float("nan")
@@ -400,7 +421,8 @@ class AccuracyAndTiming:
             q_khat = posterior.khat
             rows.extend(
                 dataclasses.replace(r, ess=q_ess, khat=q_khat,
-                                    oracle=per_query_oracle[i], query_idx=i)
+                                    oracle=per_query_oracle[i], query_idx=i,
+                                    n_posterior_samples=mdict.get("_n_samples"))
                 for r in query_rows
             )
 
@@ -496,6 +518,10 @@ class AccuracyAndTiming:
         sample_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
 
         if target_kind == "discrete":
+            k = int(problem.variables[target][1])
+            # The method's vector is validated first: a malformed posterior is
+            # a method error whether or not a reference exists.
+            pred_vec = validated_probs(posterior, target, k)
             probs, tier = discrete_oracle(
                 problem, target, ev_row,
                 n_particles=self.n_reference,
@@ -506,30 +532,8 @@ class AccuracyAndTiming:
             )
             if probs is None:
                 return _no_result(), tier
-
-            k = int(problem.variables[target][1])
             true_logits = torch.log(probs.float().clamp_min(1e-12))
-
-            # Posterior.probs is the predicted probability vector. Anything
-            # but a finite length-K distribution is a method error (D5, #198):
-            # the old ``[:k]`` slice let a truncated grid (pgmpy without
-            # state_names, #217) pass and a short vector fall through to
-            # not_supported.
-            if posterior.probs is None:
-                raise ValueError(
-                    f"no probability vector for discrete target {target!r}")
-            pred_vec = posterior.probs.detach().cpu().double().reshape(-1)
-            if pred_vec.numel() != k:
-                raise ValueError(
-                    f"probability vector of length {pred_vec.numel()} for "
-                    f"{target!r}, which has {k} states")
-            if not bool(torch.isfinite(pred_vec).all()):
-                raise ValueError(f"non-finite posterior probabilities for {target!r}")
-            total = float(pred_vec.sum())
-            if pred_vec.min() < -1e-6 or abs(total - 1.0) > 1e-3:
-                raise ValueError(
-                    f"posterior for {target!r} is not a distribution (sum={total:.6g})")
-            fit_logits = torch.log((pred_vec / total).float().clamp_min(1e-12))
+            fit_logits = torch.log(pred_vec.float().clamp_min(1e-12))
             cpd_pairs.append((true_logits, fit_logits))
 
         else:
@@ -559,11 +563,14 @@ class AccuracyAndTiming:
             )
             sample_pairs.append((oracle.reshape(-1).cpu(), fit))
 
-        return _compute_metrics_per_node(
+        out = _compute_metrics_per_node(
             cpd_pairs=cpd_pairs,
             sample_pairs=sample_pairs,
             metrics=_METRICS,
-        ), tier
+        )
+        if sample_pairs:
+            out["_n_samples"] = int(posterior.samples.numel())
+        return out, tier
 
     def _tabular(self, problem: BenchmarkProblem):
         """The true model's tabular CPT source, cached per problem (the same
@@ -576,6 +583,54 @@ class AccuracyAndTiming:
         src = tabular_source(problem)
         self._tabular_cache = (problem, src)
         return src
+
+
+#: ``error_msg`` prefix of queries whose posterior is undefined because the
+#: evidence has zero probability under the method's fitted model.
+ZERO_PROB_EVIDENCE = "evidence has zero probability under the fitted model"
+
+
+class UndefinedPosterior(ValueError):
+    """The method's posterior is 0/0: P(evidence) = 0 under its fitted model.
+
+    Not a malformed answer but an undefined one: the query is recorded as
+    ``no_result`` for this method (reason in ``error_msg``), so the paper's
+    same-query averaging drops it for every method of the cell instead of
+    failing the method's whole seed. Libraries differ here: pomegranate's
+    loopy BP returns NaN, while pgmpy prunes the network before VE and often
+    returns a finite conditional for the same fitted parameters.
+    """
+
+
+def validated_probs(posterior: Any, target: str, k: int) -> torch.Tensor:
+    """The method's probability vector for a discrete target, normalised, or
+    ``ValueError`` with the reason (recorded as an ``error`` row).
+
+    Anything but a finite length-``k`` distribution is a method error (D5,
+    #198): the old ``[:k]`` slice let a truncated grid (pgmpy without
+    state_names, #217) pass and a short vector fall through to
+    not_supported. A NaN or all-zero vector is 0/0: the evidence has zero
+    (or underflowed) probability under the method's FITTED model, e.g. an
+    MLE that never saw an evidence state, so its posterior is undefined; the
+    reason starts with :data:`ZERO_PROB_EVIDENCE` so such queries can be
+    counted per baseline (D10).
+    """
+    if posterior.probs is None:
+        raise ValueError(f"no probability vector for discrete target {target!r}")
+    pred_vec = posterior.probs.detach().cpu().double().reshape(-1)
+    if pred_vec.numel() != k:
+        raise ValueError(
+            f"probability vector of length {pred_vec.numel()} for "
+            f"{target!r}, which has {k} states")
+    total = float(pred_vec.sum()) if bool(torch.isfinite(pred_vec).all()) else None
+    if total is None or total == 0.0:
+        raise UndefinedPosterior(
+            f"{ZERO_PROB_EVIDENCE}: posterior for {target!r} is "
+            f"{'NaN/inf' if total is None else 'all-zero'}")
+    if pred_vec.min() < -1e-6 or abs(total - 1.0) > 1e-3:
+        raise ValueError(
+            f"posterior for {target!r} is not a distribution (sum={total:.6g})")
+    return pred_vec / total
 
 
 def _no_result() -> dict:

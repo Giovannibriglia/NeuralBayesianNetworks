@@ -174,6 +174,20 @@ class TestSubprocessLaunch:
         assert result.rows == [{"status": "ok"}]
         assert "LAST-LINE-MARKER" in result.stderr
 
+    def test_worker_runs_with_pinned_hash_seed(self, tmp_path):
+        """R3 safety net: every cell worker runs with PYTHONHASHSEED=0, so any
+        residual set/dict-order dependence cannot differ between baselines."""
+        import sys
+
+        worker = tmp_path / "env_worker.py"
+        worker.write_text(
+            "import json, os, sys\n"
+            "open(sys.argv[2], 'w').write(json.dumps("
+            "{'status': 'ok', 'h': os.environ.get('PYTHONHASHSEED')}) + '\\n')\n")
+        result = run_cell_in_subprocess(
+            {}, timeout_s=60, worker_cmd=[sys.executable, str(worker)])
+        assert result.rows == [{"status": "ok", "h": "0"}]
+
     def test_synthesized_row_carries_exit_code_and_output_tail(self, tmp_path):
         import sys
 

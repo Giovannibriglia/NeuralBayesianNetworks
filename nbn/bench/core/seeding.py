@@ -73,14 +73,19 @@ def rng_scope(seed: int) -> Iterator[None]:
     RNG streams afterwards.
 
     The oracle uses this so its draws are (a) identical for every baseline of a
-    cell and (b) invisible to the adapter's own RNG stream. CUDA states are
-    saved and restored only when CUDA is already initialised in this process
-    (querying them would otherwise initialise a context just for this).
+    cell and (b) invisible to the adapter's own RNG stream. When CUDA is
+    available it is initialised on entry so every device's state can be saved
+    and restored, including the case where the body is the first CUDA user.
     """
     cpu_state = torch.random.get_rng_state()
     np_state = np.random.get_state()
     cuda_states = None
-    if torch.cuda.is_available() and torch.cuda.is_initialized():
+    if torch.cuda.is_available():
+        # Initialise CUDA BEFORE saving: if the body is the first thing to
+        # touch CUDA, its lazily-created generators would otherwise keep the
+        # scope's seed afterwards and leak it into the caller's (adapter's)
+        # stream. In a cell worker CUDA is initialised by the fit anyway.
+        torch.cuda.init()
         cuda_states = torch.cuda.get_rng_state_all()
     mps_state = None
     if _mps_available():

@@ -37,6 +37,8 @@ import torch
 
 __all__ = [
     "Intractable",
+    "InvalidEvidence",
+    "ZeroProbabilityEvidence",
     "TabularSource",
     "tabular_source",
     "exact_posterior",
@@ -50,6 +52,14 @@ DEFAULT_MAX_ENTRIES = 1 << 23
 
 class Intractable(RuntimeError):
     """The elimination plan needs a factor larger than the configured cap."""
+
+
+class ZeroProbabilityEvidence(ValueError):
+    """``P(evidence) = 0`` under the true model: no conditional exists."""
+
+
+class InvalidEvidence(ValueError):
+    """An evidence state outside ``0..K-1`` of its node (a caller bug)."""
 
 
 class TabularSource:
@@ -178,7 +188,9 @@ def _plan(scopes: list[tuple[str, ...]], cards: dict[str, int],
     log_cap = math.log(max_entries)
 
     def weight(v: str) -> float:
-        return math.log(cards[v]) + sum(math.log(cards[u]) for u in adj[v])
+        # sorted(): float summation order must not follow set (hash) order,
+        # or near-ties could break differently in different processes.
+        return math.log(cards[v]) + sum(math.log(cards[u]) for u in sorted(adj[v]))
 
     heap = [(weight(v), v) for v in adj if v != keep]
     heapq.heapify(heap)
@@ -243,10 +255,19 @@ def exact_posterior(
     ``ValueError`` when the evidence has probability zero under the model.
     """
     k = src.card(target)
+    if target in evidence and not 0 <= int(evidence[target]) < k:
+        raise InvalidEvidence(
+            f"evidence {target}={evidence[target]} is outside 0..{k - 1}")
     if target in evidence:
         out = torch.zeros(k, dtype=torch.float64)
         out[int(evidence[target])] = 1.0
         return out
+
+    for nd, val in evidence.items():
+        kn = src.card(nd) if src.is_discrete(nd) else None
+        if kn is not None and not 0 <= int(val) < kn:
+            raise InvalidEvidence(
+                f"evidence {nd}={val} is outside the node's states 0..{kn - 1}")
 
     nodes = _ancestral_closure(src, [target, *evidence])
     for nd in nodes:
@@ -283,12 +304,19 @@ def exact_posterior(
         factors.append((sc[:ax] + sc[ax + 1:], torch.logsumexp(t, dim=ax)))
 
     vec = torch.zeros(k, dtype=torch.float64)
+    log_const = torch.zeros((), dtype=torch.float64)
     for sc, t in factors:
         if not sc:
-            continue  # scalar: normalising constant only
+            # Scalar: a normalising constant for the target, but -inf means a
+            # factor disconnected from the target made the evidence impossible
+            # (e.g. two observed nodes inconsistent with their CPTs). Skipping
+            # it returned a confident posterior for P(e) = 0.
+            log_const = log_const + t
+            continue
         if sc != (target,):  # pragma: no cover - plan guarantees this
             raise RuntimeError(f"unexpected residual scope {sc}")
         vec = vec + t
-    if not torch.isfinite(torch.logsumexp(vec, 0)):
-        raise ValueError("evidence has zero probability under the true model")
+    if not torch.isfinite(torch.logsumexp(vec, 0) + log_const):
+        raise ZeroProbabilityEvidence(
+            "evidence has zero probability under the true model")
     return torch.softmax(vec, dim=0)
