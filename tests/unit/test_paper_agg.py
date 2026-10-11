@@ -163,6 +163,26 @@ def test_cell_table_fit_time_from_column_in_pl_mode():
     assert sorted(fit[fit["method"] == "nbn-cat"]["value"]) == [3.0, 4.0]
 
 
+def test_fit_time_of_reloaders_includes_the_shared_base_fit():
+    """D4: a fit-once reloader's fit_time_s is attach only; the paper's
+    "Fit time" is base_fit_time_s + attach_time_s whenever both are stamped.
+    Rows without the split (non-nbn baselines) keep fit_time_s."""
+    rows = []
+    for s_ in range(2):
+        rows.append(_row("nbn-cat-ve", s_, metric="fit_time_s", value=10.2,
+                         base_fit_time_s=10.0, attach_time_s=0.2))
+        rows.append(_row("nbn-cat-ais", s_, metric="fit_time_s", value=3.0,
+                         base_fit_time_s=10.0, attach_time_s=2.9))
+        rows.append(_row("pgmpy-mle-ve", s_, metric="fit_time_s", value=1.5,
+                         base_fit_time_s=None, attach_time_s=None))
+    dfx = assign_x(pd.DataFrame(rows), "n_nodes", {"50": 50})
+    fit, _ = cell_table(dfx, "fit_time")
+    by = fit.groupby("method")["value"].first()
+    assert by["nbn-cat-ais"] == pytest.approx(12.9)   # was 3.0 (attach only)
+    assert by["nbn-cat-ve"] == pytest.approx(10.2)
+    assert by["pgmpy-mle-ve"] == pytest.approx(1.5)
+
+
 def test_cell_table_nan_ok_value_is_not_solved():
     """status ok with a NaN metric (pomegranate posteriors, #218) is not a
     result: unsolved with code 'nan'."""

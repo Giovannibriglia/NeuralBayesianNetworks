@@ -304,12 +304,37 @@ def _metric_rows(dfx: pd.DataFrame, metric: str) -> tuple[pd.DataFrame, str, str
     if metric == "fit_time":
         rows = dfx[dfx["metric"] == "fit_time_s"]
         if not rows.empty:
-            return rows, "value", "first"
+            return _with_shared_base_fit(rows, "value"), "value", "first"
         if "fit_time_s" in dfx.columns:
             rows = dfx[dfx["metric"].isin(ACCURACY_METRICS)]
-            return rows, "fit_time_s", "first"
+            return _with_shared_base_fit(rows, "fit_time_s"), "fit_time_s", "first"
         return dfx.iloc[0:0], "value", "first"
     return dfx[dfx["metric"] == metric], "value", "mean"
+
+
+def _with_shared_base_fit(rows: pd.DataFrame, vcol: str) -> pd.DataFrame:
+    """Fit time of a fit-once group member = shared base fit + its own attach.
+
+    In a fit-once group (#191) only the fitter runs ``model.fit()``; the
+    reloaders' ``fit_time_s`` is just reload + engine attach, so reporting it
+    as "Fit time" understated their cost by the whole base fit. The runner
+    stamps the fitter's ``base_fit_time_s`` on every member and each member's
+    own ``attach_time_s``: when both are present the reported fit time is
+    their sum (for the fitter this equals its ``fit_time_s`` up to timer
+    overhead). Rows without the split (non-nbn baselines, legacy parquets)
+    keep ``fit_time_s``.
+    """
+    if "base_fit_time_s" not in rows.columns or "attach_time_s" not in rows.columns:
+        return rows
+    base = pd.to_numeric(rows["base_fit_time_s"], errors="coerce")
+    attach = pd.to_numeric(rows["attach_time_s"], errors="coerce")
+    both = base.notna() & attach.notna()
+    if not both.any():
+        return rows
+    rows = rows.copy()
+    rows[vcol] = pd.to_numeric(rows[vcol], errors="coerce").astype(float)
+    rows.loc[both, vcol] = (base + attach)[both]
+    return rows
 
 
 def cell_table(dfx: pd.DataFrame, metric: str) -> tuple[pd.DataFrame, dict]:
