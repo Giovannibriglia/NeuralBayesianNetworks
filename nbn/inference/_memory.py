@@ -58,6 +58,7 @@ _OOM_MESSAGES = (
 # tree).  v2 exposes memory.max / memory.current at the root of the process's
 # cgroup namespace; v1 under ``memory/``.
 _CGROUP_ROOT = "/sys/fs/cgroup"
+_PROC_SELF_CGROUP = "/proc/self/cgroup"
 # cgroup v1 reports "no limit" as a huge page-aligned number (2^63 - 4096).
 _CGROUP_UNLIMITED = 1 << 60
 
@@ -99,6 +100,69 @@ def _stat_value(path: str, key: str) -> int:
     return 0
 
 
+def _own_cgroup_paths() -> tuple[str | None, str | None]:
+    """This process's cgroup paths ``(v2, v1 memory)`` from ``/proc/self/cgroup``.
+
+    Lines look like ``0::/system.slice/…/job_42/step_0`` (v2) or
+    ``4:memory:/slurm/uid_1000/job_42/step_0`` (v1; the controller field may
+    list several, e.g. ``memory,cpuacct``).  ``None`` where absent.
+    """
+    v2 = v1 = None
+    try:
+        with open(_PROC_SELF_CGROUP) as fh:
+            for line in fh:
+                parts = line.rstrip("\n").split(":", 2)
+                if len(parts) != 3:
+                    continue
+                _hier, controllers, path = parts
+                if controllers == "":
+                    v2 = path
+                elif "memory" in controllers.split(","):
+                    v1 = path
+    except OSError:
+        pass
+    return v2, v1
+
+
+def _levels(mount: str, rel: str | None) -> list[str]:
+    """Directories from the process's leaf cgroup up to the mount root."""
+    if not rel or rel == "/":
+        return [mount]
+    out, cur = [], rel.strip("/")
+    while cur:
+        out.append(os.path.join(mount, cur))
+        cur = os.path.dirname(cur)
+    out.append(mount)
+    return out
+
+
+def _walk(levels, limit_file, usage_file, stat_key, unlimited=None):
+    """Tightest ``(limit, usage)`` over ``levels`` (leaf first)."""
+    best_limit = best_room = None
+    leaf_usage = None
+    for d in levels:
+        limit = _read_int(os.path.join(d, limit_file))
+        usage = _read_int(os.path.join(d, usage_file))
+        if limit is not None and unlimited is not None and limit >= unlimited:
+            limit = None
+        if usage is not None:
+            usage -= _stat_value(os.path.join(d, "memory.stat"), stat_key)
+            if leaf_usage is None:
+                leaf_usage = usage
+        if limit is None:
+            continue
+        best_limit = limit if best_limit is None else min(best_limit, limit)
+        if usage is not None:
+            room = limit - usage
+            best_room = room if best_room is None else min(best_room, room)
+    if best_limit is None:
+        return None, leaf_usage
+    if best_room is None:
+        return best_limit, leaf_usage
+    # Report the usage that makes ``limit - usage`` the tightest headroom.
+    return best_limit, best_limit - best_room
+
+
 def cgroup_memory() -> tuple[int | None, int | None]:
     """``(limit, usage)`` of this process's memory cgroup, ``None`` if absent.
 
@@ -106,22 +170,27 @@ def cgroup_memory() -> tuple[int | None, int | None]:
     exceeding the cap gets the job OOM-killed, so host-wide figures overstate
     what this process may use.  Usage excludes inactive page cache, which the
     kernel reclaims before killing anything (the ``docker stats`` rule).
+
+    The job's cgroup is not necessarily the mount root: under SLURM without a
+    cgroup namespace it is e.g. ``system.slice/slurmstepd.scope/job_42/…``
+    (v2) or ``memory/slurm/uid_1000/job_42/…`` (v1), with the limit set on an
+    intermediate level.  So the path comes from ``/proc/self/cgroup`` and
+    every level from the leaf up to the root is read: the limit is the
+    smallest one, and ``limit - usage`` the tightest remaining headroom over
+    all levels.  Missing files are skipped level by level.
     """
-    v2_limit = _read_int(os.path.join(_CGROUP_ROOT, "memory.max"))
-    v2_usage = _read_int(os.path.join(_CGROUP_ROOT, "memory.current"))
-    if v2_limit is not None or v2_usage is not None:
-        if v2_usage is not None:
-            v2_usage -= _stat_value(
-                os.path.join(_CGROUP_ROOT, "memory.stat"), "inactive_file")
-        return v2_limit, v2_usage
-    v1 = os.path.join(_CGROUP_ROOT, "memory")
-    limit = _read_int(os.path.join(v1, "memory.limit_in_bytes"))
-    usage = _read_int(os.path.join(v1, "memory.usage_in_bytes"))
-    if limit is not None and limit >= _CGROUP_UNLIMITED:
-        limit = None
-    if usage is not None:
-        usage -= _stat_value(os.path.join(v1, "memory.stat"), "total_inactive_file")
-    return limit, usage
+    v2_rel, v1_rel = _own_cgroup_paths()
+    limit, usage = _walk(
+        _levels(_CGROUP_ROOT, v2_rel), "memory.max", "memory.current",
+        "inactive_file",
+    )
+    if limit is not None or usage is not None:
+        return limit, usage
+    return _walk(
+        _levels(os.path.join(_CGROUP_ROOT, "memory"), v1_rel),
+        "memory.limit_in_bytes", "memory.usage_in_bytes", "total_inactive_file",
+        unlimited=_CGROUP_UNLIMITED,
+    )
 
 
 def host_total_bytes() -> int | None:

@@ -171,6 +171,7 @@ def test_cuda_reading_1_cgroup_limits_bound_host_memory(tmp_path, monkeypatch, f
 
     _cgroup_tree(tmp_path, files)
     monkeypatch.setattr(_memory, "_CGROUP_ROOT", str(tmp_path))
+    monkeypatch.setattr(_memory, "_PROC_SELF_CGROUP", str(tmp_path / "no-proc"), raising=False)
     assert _memory.cgroup_memory() == expected
     limit, usage = expected
     total = _memory.host_total_bytes()
