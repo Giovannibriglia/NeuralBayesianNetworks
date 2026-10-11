@@ -70,6 +70,10 @@ def _normalise_evidence(model, node: str, val: Any, n: int, dev: torch.device) -
             f"[{d}], [1, {d}] or [{n}, {d}] (leading dim 1 or n={n}, last "
             f"dim = the variable's dimension {d})."
         )
+    if var is not None and var.is_discrete:
+        # A negative index would silently wrap to the last state in a CPT
+        # lookup, an out-of-range one crash deep inside a mechanism.
+        validate_discrete_value(node, t, var.cardinality, what="Evidence")
     return t.expand(n, d)
 
 

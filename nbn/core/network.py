@@ -13,7 +13,7 @@ from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanis
 from nbn.mechanisms.parametric.linear_gaussian import LinearGaussianMechanism
 from nbn.mechanisms.parametric.mdn import MDNMechanism
 from nbn.utils.batching import pack_parents
-from nbn.utils.device import resolve_device, to_device
+from nbn.utils.device import realise_device, to_device
 
 logger = logging.getLogger(__name__)
 
@@ -252,7 +252,7 @@ class NeuralBayesianNetwork(nn.Module):
         # served a stale posterior.  See ``TensorVariableElimination`` and
         # the ``_cache_version`` property below.
         self._cache_version = 0
-        self._device = resolve_device(device)
+        self._device = realise_device(device)
         self._mixed_precision = False
 
     # ------------------------------------------------------------------
@@ -282,6 +282,35 @@ class NeuralBayesianNetwork(nn.Module):
             int(value) - int(getattr(mechs, "_version", 0))
         )
 
+    def __getstate__(self):
+        """Pickle without the cached inference engine.
+
+        Engines memoise factors keyed on ``weakref(model)``; weakrefs cannot
+        be pickled, so ``torch.save(model)`` failed after the first query.
+        The engine is a cache — it is rebuilt lazily by ``_get_engine``.
+        """
+        state = super().__getstate__()
+        state["_engine"] = None
+        return state
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        """Accept state_dicts written before node names got escaped (B1).
+
+        Up to v0.14 a node literally named ``node__x`` was stored under the
+        submodule key ``node__x``; it is now ``node__node__x`` (the prefix is
+        the escape marker).  Rename such legacy keys in place — torch hands
+        the children slices of this same dict afterwards — so a strict load of
+        an older state_dict still works.
+        """
+        mp = prefix + "mechanisms."
+        current = self.mechanisms._modules
+        esc = _AliasModuleDict._PREFIX
+        for key in [k for k in state_dict if k.startswith(mp)]:
+            head, sep, rest = key[len(mp):].partition(".")
+            if head not in current and esc + head in current:
+                state_dict[mp + esc + head + sep + rest] = state_dict.pop(key)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
     def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
         """``nn.Module.load_state_dict`` that also invalidates inference caches."""
         try:
@@ -307,12 +336,18 @@ class NeuralBayesianNetwork(nn.Module):
         default_discrete: str = "categorical_table",
         default_continuous: str = "mdn",
         mdn_components: int = 5,
+        n_bins: int = 5,
     ) -> None:
         """Assign default mechanisms based on variable types (each on model device).
 
         ``default_discrete``: ``"categorical_table"`` or ``"neural_categorical"``.
         ``default_continuous``: ``"mdn"`` or ``"lg"`` / ``"linear_gaussian"``.
         Any other name raises.
+
+        A ``"categorical_table"`` node with a continuous (or mixed) parent gets
+        a :class:`BinningCategoricalTable` instead, which buckets those parents
+        into ``n_bins`` quantile bins: a plain table would use the raw parent
+        values as table indices and crash (``index -2 is out of bounds``).
         """
         # Validate the names up front: an unknown name used to fall through
         # to the non-default branch (e.g. "lgg" -> LinearGaussian) silently.
@@ -330,8 +365,26 @@ class NeuralBayesianNetwork(nn.Module):
             if node in self.mechanisms:
                 continue
             if var.is_discrete:
-                if default_discrete == "categorical_table":
-                    mech: Mechanism = CategoricalTableMechanism()
+                pa_vars = [self.variables[p] for p in self.dag.parents(node)]
+                if default_discrete == "categorical_table" and any(
+                    not pv.is_discrete for pv in pa_vars
+                ):
+                    from nbn.mechanisms.parametric.binning_categorical import (
+                        BinningCategoricalTable,
+                    )
+                    # One entry per parent *column*, in pack_parents order.
+                    kinds = []
+                    for pv in pa_vars:
+                        if pv.is_discrete:
+                            kinds.append(("discrete", int(pv.cardinality or 2)))
+                        else:
+                            kinds += [("continuous", 1)] * int(pv.dim)
+                    mech: Mechanism = BinningCategoricalTable(
+                        parent_kinds=kinds, n_bins=n_bins,
+                        n_categories=int(var.cardinality or 2),
+                    )
+                elif default_discrete == "categorical_table":
+                    mech = CategoricalTableMechanism()
                 else:
                     from nbn.mechanisms.parametric.neural_categorical import NeuralCategoricalMechanism
                     mech = NeuralCategoricalMechanism(n_classes=var.cardinality or 2)
@@ -545,6 +598,15 @@ class NeuralBayesianNetwork(nn.Module):
             )
 
         data_dev = to_device(dict(data), self._device)
+        # Discrete columns must hold valid state indices: a negative index
+        # silently wraps to the last state in a table lookup and a fractional
+        # one is truncated, both returning a plausible but wrong likelihood.
+        for node in nodes:
+            var = self.variables[node]
+            if var.is_discrete:
+                validate_discrete_value(
+                    node, data_dev[node], var.cardinality, what="log_prob data",
+                )
         per: Dict[str, torch.Tensor] = {}
         for node in nodes:
             pa_tensor = pack_parents(data_dev, self.dag.parents(node))
@@ -682,6 +744,26 @@ class NeuralBayesianNetwork(nn.Module):
             )
         eng = engine if engine is not None else self._get_engine()
         ev = {k: to_device(torch.as_tensor(v), self._device) for k, v in evidence.items()}
+        # A bare [D] vector on a D-dim continuous node is one row; broadcast
+        # it over the batch the other evidence defines (B = 1 if none).
+        vec = [
+            k for k, t in ev.items()
+            if t.dim() == 1 and k in self.variables
+            and not self.variables[k].is_discrete and self.variables[k].dim > 1
+        ]
+        for k in vec:
+            d = self.variables[k].dim
+            if ev[k].shape[0] != d:
+                raise ValueError(
+                    f"query_batch evidence for '{k}' has shape "
+                    f"{tuple(ev[k].shape)}; a {d}-dim continuous node takes "
+                    f"[B, {d}] (or a single [{d}] row)."
+                )
+            ev[k] = ev[k].unsqueeze(0)
+        if vec:
+            b = max(int(t.shape[0]) for t in ev.values())
+            for k in vec:
+                ev[k] = ev[k].expand(b, -1)
         if do:
             kwargs["do"] = {
                 k: to_device(torch.as_tensor(v), self._device) for k, v in do.items()
@@ -885,9 +967,9 @@ class NeuralBayesianNetwork(nn.Module):
         # An explicit device spec wins over what _apply read off the tensors,
         # so ``model.to("cuda")`` reports the spec the caller used.
         if args and isinstance(args[0], (str, torch.device)):
-            self._device = resolve_device(args[0])
+            self._device = realise_device(args[0])
         elif "device" in kwargs:
-            self._device = resolve_device(kwargs["device"])
+            self._device = realise_device(kwargs["device"])
         return self
 
     # ------------------------------------------------------------------

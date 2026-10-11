@@ -47,6 +47,22 @@ def resolve_device(spec: str | torch.device | None) -> torch.device:
     return torch.device(spec)
 
 
+def realise_device(device: str | torch.device) -> torch.device:
+    """``resolve_device`` plus an explicit CUDA index.
+
+    ``torch.device("cuda")`` means "whatever the current CUDA device is *at
+    use time*".  A model that stores it keeps pointing at the current device
+    even after ``torch.cuda.set_device`` moved that elsewhere, so memory
+    budgets, synchronisation and cache keys could address a different GPU
+    than the one holding the parameters.  Pin the index the tensors were
+    actually placed on.  Other backends are returned unchanged.
+    """
+    d = resolve_device(device)
+    if d.type == "cuda" and d.index is None and torch.cuda.is_available():
+        return torch.device("cuda", torch.cuda.current_device())
+    return d
+
+
 def to_device(obj: Any, device: torch.device) -> Any:
     """Recursively move tensors / dicts / lists / modules to ``device``.
 

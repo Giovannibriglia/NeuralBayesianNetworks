@@ -157,7 +157,14 @@ def test_a3_legacy_raw_state_is_converted():
         torch.tensor(300.0), 1,
     )
     assert not rg.is_centred(legacy)
-    st = rg.accumulate(legacy, rg.batch_statistics(pa.float(), x.float()))
+    rg._LEGACY_WARNED = False
+    with pytest.warns(UserWarning, match="refit"):
+        st = rg.accumulate(legacy, rg.batch_statistics(pa.float(), x.float()))
+    # Once per process, not on every call (R10).
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        rg.accumulate(legacy, rg.batch_statistics(pa.float(), x.float()))
     pooled = rg.batch_statistics(torch.cat([pa, pa]).float(), torch.cat([x, x]).float())
     for got, want in zip(rg.solve(st), rg.solve(pooled)):
         torch.testing.assert_close(got, want, atol=1e-4, rtol=1e-4)
@@ -650,3 +657,273 @@ def test_c_save_load_keeps_state_names_and_mixed_kind(tmp_path):
     loaded = NBN.load(str(path))
     assert loaded.variables["M"].kind == "mixed"
     assert loaded.state_names == {"A": ["no", "yes"]}
+
+
+# ---------------------------------------------------------------------------
+# Round 2 — R2: weighted_quantile with fractional / normalised weights
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("device", available_devices())
+def test_r2_weighted_quantile_normalised_weights_match_unweighted(device):
+    from nbn.learning.weighting import weighted_quantile
+
+    g = torch.Generator().manual_seed(0)
+    t = torch.randn(101, 2, generator=g).to(device)
+    q = torch.tensor([0.1, 0.25, 0.5, 0.75, 0.9])
+    ref = torch.quantile(t.cpu(), q, dim=0)
+    w = torch.full((101,), 1.0 / 101, device=device)
+    torch.testing.assert_close(weighted_quantile(t, q, w).cpu(), ref, atol=1e-5, rtol=0)
+    # Scale invariance for fractional weights.
+    w2 = (torch.rand(101, generator=g) + 0.1).to(device)
+    torch.testing.assert_close(
+        weighted_quantile(t, q, w2), weighted_quantile(t, q, w2 * 1e-3), atol=1e-5, rtol=0,
+    )
+    iqr = weighted_quantile(t, q, w2 * 1e-3)
+    assert (iqr[-1] - iqr[0] > 1.0).all()   # not collapsed onto the minimum
+
+
+def test_r2_weighted_quantile_integer_weights_stay_replication_exact():
+    from nbn.learning.weighting import weighted_quantile
+
+    t = torch.randn(30, 2)
+    w = torch.randint(0, 4, (30,)).float()
+    w[0] = 1.0
+    q = torch.tensor([0.1, 0.5, 0.9])
+    rep = t.repeat_interleave(w.long(), dim=0)
+    torch.testing.assert_close(weighted_quantile(t, q, w), torch.quantile(rep, q, dim=0))
+
+
+# ---------------------------------------------------------------------------
+# Round 2 — R4: rollback keeps parameter identities; R8: NaN rows rejected
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("first", ["lg", "mdn"])
+def test_r4_update_rollback_keeps_parameter_objects(first):
+    import nbn
+    from nbn import NeuralBayesianNetwork as NBN
+    from nbn.mechanisms.non_parametric.knn_conditional import KNNConditionalMechanism
+
+    model = NBN([("A", "B")], {"A": ("continuous", 1), "B": ("continuous", 1)}, device="cpu")
+    mech_a = (nbn.mechanisms.LinearGaussianMechanism() if first == "lg"
+              else nbn.mechanisms.MDNMechanism(num_components=2))
+    model.set_mechanism("A", mech_a)
+    model.set_mechanism("B", KNNConditionalMechanism())
+    g = torch.Generator().manual_seed(0)
+    a = torch.randn(100, 1, generator=g)
+    data = {"A": a, "B": a + 0.1 * torch.randn(100, 1, generator=g)}
+    model.fit(data, epochs=3)
+    ewc_before = getattr(mech_a, "_ewc_mu", None)
+    params_before = list(model.parameters())
+    values_before = [p.detach().clone() for p in params_before]
+    opt = torch.optim.SGD(model.parameters(), lr=0.1)
+    with pytest.raises(NotImplementedError):
+        model.update({"A": a + 5.0, "B": data["B"] + 5.0}, forgetting=0.5, epochs=3)
+    if ewc_before is not None:
+        assert mech_a._ewc_mu is ewc_before
+    params_after = list(model.parameters())
+    assert len(params_after) == len(params_before)
+    for p0, p1, v0 in zip(params_before, params_after, values_before):
+        assert p0 is p1
+        torch.testing.assert_close(p1.detach(), v0)
+    assert opt.param_groups[0]["params"][0] is params_after[0]
+
+
+@pytest.mark.parametrize("device", available_devices())
+def test_r8_update_and_fit_reject_non_finite_rows(device):
+    model, data = _lg_model(device)
+    model.fit(data)
+    snap = _snapshot(model)
+    bad = {k: v.clone() for k, v in data.items()}
+    bad["B"][3, 0] = float("nan")
+    with pytest.raises(ValueError, match="NaN or infinite.*'B'"):
+        model.update(bad)
+    for k, v in _snapshot(model).items():
+        torch.testing.assert_close(v, snap[k])
+    bad["B"][3, 0] = float("inf")
+    with pytest.raises(ValueError, match="NaN or infinite"):
+        model.fit(bad)
+
+
+# ---------------------------------------------------------------------------
+# Round 2 — R7: discrete evidence / log_prob data must be valid state indices
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [torch.tensor([3]), torch.tensor([-1]), torch.tensor([1.5])])
+def test_r7_sample_rejects_invalid_discrete_evidence(bad):
+    model = _mixed_model()
+    with pytest.raises(ValueError, match="integer|outside"):
+        model.sample(5, evidence={"A": bad})
+
+
+@pytest.mark.parametrize("bad_val", [-1, 3, 0.5])
+def test_r7_log_prob_rejects_invalid_discrete_data(bad_val):
+    model = _mixed_model()
+    data = {"A": torch.tensor([0, 1, 2]), "X": torch.zeros(3, 1), "Y": torch.zeros(3, 1)}
+    assert torch.isfinite(model.log_prob(data)).all()
+    data["A"] = torch.tensor([0.0, 1.0, float(bad_val)])
+    with pytest.raises(ValueError, match="integer|outside"):
+        model.log_prob(data)
+
+
+# ---------------------------------------------------------------------------
+# Round 2 — R12: weighted Fisher for (joint) consolidation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("force_loop", [False, True])
+def test_r12_weighted_fisher_equals_replicated_fisher(force_loop, monkeypatch):
+    import copy
+
+    from nbn.update import online_laplace
+
+    if force_loop:
+        def _no_vmap(*a, **k):
+            raise RuntimeError("force the per-sample loop")
+        monkeypatch.setattr(online_laplace, "_per_sample_fisher_vmap", _no_vmap)
+    model, data = _mdn_model()
+    model.fit(data, epochs=3)
+    mech = model.mechanisms["B"]
+    w = torch.randint(0, 3, (300,)).float()
+    rep = w.long()
+    a = copy.deepcopy(mech)
+    online_laplace.consolidate(a, data["B"], data["A"], weights=w)
+    b = copy.deepcopy(mech)
+    online_laplace.consolidate(
+        b, data["B"].repeat_interleave(rep, 0), data["A"].repeat_interleave(rep, 0),
+    )
+    torch.testing.assert_close(a._ewc_fisher, b._ewc_fisher, rtol=1e-4, atol=1e-7)
+
+
+def test_r12_joint_fit_reconsolidates_with_fit_weights():
+    import copy
+
+    from nbn.update import online_laplace
+
+    model, data = _mdn_model()
+    model.fit(data, epochs=3)
+    w = torch.zeros(300)
+    w[:100] = 1.0
+    with pytest.warns(UserWarning):
+        model.fit(data, method="joint", epochs=2, weights=w)
+    mech = model.mechanisms["B"]
+    ref = copy.deepcopy(mech)
+    online_laplace.consolidate(ref, data["B"][:100], data["A"][:100])
+    torch.testing.assert_close(mech._ewc_fisher, ref._ewc_fisher, rtol=1e-4, atol=1e-7)
+
+
+# ---------------------------------------------------------------------------
+# Round 2 — R11: legacy state_dict keys for node names starting with node__
+# ---------------------------------------------------------------------------
+
+
+def test_r11_strict_load_of_legacy_node_prefix_state_dict():
+    names = ["node__a", "b"]
+    model, data = _discrete_chain(names)
+    model.auto_mechanisms()
+    model.fit(data)
+    sd = model.state_dict()
+    assert any(k.startswith("mechanisms.node__node__a.") for k in sd)
+    legacy = {k.replace("mechanisms.node__node__a.", "mechanisms.node__a."): v for k, v in sd.items()}
+    fresh, _ = _discrete_chain(names)
+    fresh.auto_mechanisms()
+    fresh.fit({k: v.flip(0) for k, v in data.items()})
+    fresh.load_state_dict(legacy, strict=True)
+    for k, v in fresh.state_dict().items():
+        torch.testing.assert_close(v, sd[k])
+
+
+# ---------------------------------------------------------------------------
+# Round 2 — R14: auto_mechanisms with continuous parents; pickling after query
+# ---------------------------------------------------------------------------
+
+
+def test_r14_auto_mechanisms_discrete_child_of_continuous_parent_fits():
+    from nbn import NeuralBayesianNetwork as NBN
+    from nbn.mechanisms.parametric.binning_categorical import BinningCategoricalTable
+
+    model = NBN(
+        [("X", "A"), ("D", "A")],
+        {"X": ("continuous", 1), "D": ("discrete", 3), "A": ("discrete", 2)},
+        device="cpu",
+    )
+    model.auto_mechanisms(default_continuous="lg")
+    assert isinstance(model.mechanisms["A"], BinningCategoricalTable)
+    g = torch.Generator().manual_seed(0)
+    x = torch.randn(400, 1, generator=g)
+    d = torch.randint(0, 3, (400,), generator=g)
+    a = (x[:, 0] > 0).long()
+    model.fit({"X": x, "D": d, "A": a})
+    lp = model.log_prob({"X": x, "D": d, "A": a})
+    assert torch.isfinite(lp).all()
+
+
+def test_r14_torch_save_after_query(tmp_path):
+    from nbn import NeuralBayesianNetwork as NBN
+
+    model = _mixed_model()
+    model.query(["A"], evidence={"X": torch.tensor([0.5])})
+    assert model._engine is not None
+    path = tmp_path / "whole.pt"
+    torch.save(model, path)
+    loaded = torch.load(path, weights_only=False)
+    assert isinstance(loaded, NBN) and loaded._engine is None
+    torch.testing.assert_close(
+        loaded.query(["A"], evidence={"X": torch.tensor([0.5])}),
+        model.query(["A"], evidence={"X": torch.tensor([0.5])}),
+        atol=0.05, rtol=0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Round 2 — B7 (query_batch) and CUDA device index pinning
+# ---------------------------------------------------------------------------
+
+
+def test_b7_query_batch_bare_vector_evidence_on_multidim_node():
+    from nbn import NeuralBayesianNetwork as NBN
+
+    model = NBN(
+        [("A", "X"), ("A", "C")],
+        {"A": ("discrete", 2), "X": ("continuous", 3), "C": ("discrete", 2)},
+        device="cpu",
+    )
+    model.auto_mechanisms(default_continuous="lg")
+    g = torch.Generator().manual_seed(0)
+    a = torch.randint(0, 2, (500,), generator=g)
+    x = 3.0 * a.float().unsqueeze(1).expand(-1, 3) + 0.3 * torch.randn(500, 3, generator=g)
+    model.fit({"A": a, "X": x, "C": a})
+    p = model.query_batch(["A"], evidence={"X": torch.tensor([3.0, 3.0, 3.0])})
+    assert p.shape == (1, 2) and p[0, 1] > 0.99
+    p2 = model.query_batch(
+        ["A"], evidence={"X": torch.tensor([3.0, 3.0, 3.0]), "C": torch.tensor([0, 1])},
+    )
+    assert p2.shape == (2, 2)
+    with pytest.raises(ValueError, match="3-dim continuous"):
+        model.query_batch(["A"], evidence={"X": torch.tensor([3.0, 3.0])})
+
+
+def test_cuda_realise_device_pins_index_or_leaves_others():
+    from nbn.utils.device import realise_device
+
+    assert realise_device("cpu") == torch.device("cpu")
+    if "mps" in available_devices():
+        assert realise_device("mps").type == "mps"
+    if torch.cuda.is_available():
+        assert realise_device("cuda").index == torch.cuda.current_device()
+        assert realise_device("cuda:0").index == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_cuda_model_to_cuda_stores_indexed_device():
+    model, data = _lg_model("cpu")
+    model.to("cuda")
+    assert model.device.index == torch.cuda.current_device()
+    model.fit(data)
+    assert model.mechanisms["B"]._weight.device == model.device
+    from nbn import NeuralBayesianNetwork as NBN
+
+    m2 = NBN([], {"A": ("continuous", 1)}, device="cuda")
+    assert m2.device.index is not None

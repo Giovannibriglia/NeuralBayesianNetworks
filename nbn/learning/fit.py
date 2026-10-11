@@ -149,6 +149,19 @@ def fit(
 
     # Move data to device
     data_dev: Dict[str, torch.Tensor] = to_device(dict(data), dev)
+    # Fail loudly on NaN/inf: most mechanisms would otherwise fit silently to
+    # NaN parameters, and the closed-form ones persist the NaN in the
+    # sufficient statistics that every later update() builds on.
+    bad = sorted(
+        k for k, v in data_dev.items()
+        if isinstance(v, torch.Tensor) and v.is_floating_point()
+        and not bool(torch.isfinite(v).all())
+    )
+    if bad:
+        raise ValueError(
+            f"fit() data contains NaN or infinite values in column(s) {bad}; "
+            f"drop or impute those rows first."
+        )
 
     n_rows = next(iter(data_dev.values())).shape[0]
     w_vec = validate_weights(weights, n_rows, where="fit", device=dev)
@@ -305,7 +318,7 @@ def fit(
                 history.node_log_likelihoods.setdefault(node, []).append(
                     float(weighted_mean(lp, w_vec))
                 )
-        _sync_update_state_after_joint(model, data_dev, nodes, consolidate)
+        _sync_update_state_after_joint(model, data_dev, nodes, consolidate, w_vec)
     else:
         raise ValueError(f"Unknown method '{method}'. Use 'local' or 'joint'.")
 
@@ -313,7 +326,9 @@ def fit(
     return history
 
 
-def _sync_update_state_after_joint(model, data_dev, nodes, consolidate: bool) -> None:
+def _sync_update_state_after_joint(
+    model, data_dev, nodes, consolidate: bool, weights=None,
+) -> None:
     """Keep ``update()``'s persisted state consistent with a joint refinement.
 
     ``fit_local`` leaves two kinds of state for ``update()``: EWC anchors
@@ -346,7 +361,8 @@ def _sync_update_state_after_joint(model, data_dev, nodes, consolidate: bool) ->
         if "_ewc_mu" in mech._buffers:
             if consolidate:
                 pa = pack_parents(data_dev, model.dag.parents(node))
-                online_laplace.consolidate(mech, data_dev[node], pa)
+                # Weighted like the joint objective it summarises.
+                online_laplace.consolidate(mech, data_dev[node], pa, weights=weights)
             else:
                 mech._buffers["_ewc_mu"] = None
                 mech._buffers["_ewc_fisher"] = None
