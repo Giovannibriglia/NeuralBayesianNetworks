@@ -272,7 +272,12 @@ def test_query_batch_oom_guard_raises_on_constrained_cuda_device() -> None:
                       new_callable=PropertyMock,
                       return_value=fake_device), \
          patch("torch.cuda.mem_get_info",
-               return_value=(1 * 1024 ** 2, 8 * 1024 ** 3)):
+               return_value=(1 * 1024 ** 2, 8 * 1024 ** 3)), \
+         patch("torch.cuda.memory_reserved", return_value=0), \
+         patch("torch.cuda.memory_allocated", return_value=0):
+        # #264: the guard also counts PyTorch's reusable cached blocks
+        # (reserved - allocated) as headroom; pin them to 0 so earlier CUDA
+        # work in this worker cannot lift the budget above the mock.
         # 1 MiB free; even one row's peak exceeds the 0.9 MiB budget →
         # guard rejects the query pre-allocation (chunking cannot help).
         with pytest.raises(

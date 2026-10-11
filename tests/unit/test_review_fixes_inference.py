@@ -18,6 +18,7 @@ from nbn.bench.synthetic import make_synthetic_bn
 from nbn.inference.amortized_is import AmortizedISEngine
 from nbn.inference.recognition_net import ParentConditionedProposal
 from nbn.mechanisms.parametric.neural_categorical import NeuralCategoricalMechanism
+from tests.conftest import available_devices
 
 # --------------------------------------------------------------------------- #
 # Brute-force oracle
@@ -376,8 +377,6 @@ def test_a7_cache_sees_direct_mechanism_replacement():
 
 
 def _accelerators():
-    from tests.conftest import available_devices
-
     return [d for d in available_devices() if d != "cpu"]
 
 
@@ -430,3 +429,189 @@ def test_c_lw_state_cache_does_not_grow_per_refit():
         lw.query(model, [nodes[-1]], {nodes[0]: torch.tensor(1)})
         model._cache_version += 1  # what every refit does
     assert len(lw._cache) == 1
+
+
+# --------------------------------------------------------------------------- #
+# B5 / B6 / #264 — memory-priced routing, guard on every device, OOM fallback
+# --------------------------------------------------------------------------- #
+
+
+def _wide_card4_net(seed: int = 1):
+    """40 nodes, in-degree 5, cardinality 4: treewidth 20 but a ~50 TB VE plan."""
+    g = torch.Generator().manual_seed(seed)
+    names = [f"V{i}" for i in range(40)]
+    edges = []
+    for j in range(1, 40):
+        for p in torch.randperm(j, generator=g)[: min(5, j)].tolist():
+            edges.append((names[p], names[j]))
+    m = NBN(edges, variables=dict.fromkeys(names, ("discrete", 4)), device="cpu")
+    m.auto_mechanisms()
+    m.fit({n: torch.randint(0, 4, (200,), generator=g).float() for n in names})
+    return m
+
+
+def test_b5_router_prices_the_plan_not_the_treewidth():
+    from nbn.inference.hybrid import HybridRouter
+
+    model = _wide_card4_net()
+    assert model.dag.induced_width() <= 25  # the old gate would pick VE
+    ev = {f"V{i}": torch.tensor(1) for i in range(35, 40)}
+    router = HybridRouter(n_samples=256)
+    assert router._ve.estimate_peak_bytes(model, "V30", tuple(ev)) > 1e12
+    out = router.query(model, ["V30"], ev)
+    assert router._last_engine == "likelihood_weighting"
+    assert out.shape == (4,) and torch.isfinite(out).all()
+    # A cheap query on the same network still gets exact VE.
+    router.query(model, ["V1"], {"V0": torch.tensor(2)})
+    assert router._last_engine == "tensor_ve"
+
+
+@pytest.mark.parametrize("device", available_devices())
+def test_b5_ve_guard_runs_on_every_device(device):
+    from nbn import TensorVariableElimination
+
+    model = _random_discrete()
+    model.to(device)
+    nodes = list(model.dag.topological_order())
+    tiny = TensorVariableElimination(memory_budget=1.0)  # 1 byte
+    with pytest.raises(torch.cuda.OutOfMemoryError, match="pre-allocation guard"):
+        tiny.query(model, [nodes[-1]], {nodes[0]: torch.tensor(1)})
+    with pytest.raises(torch.cuda.OutOfMemoryError, match="pre-allocation guard"):
+        tiny.query_batch(model, [nodes[-1]], {nodes[0]: torch.tensor([1, 0], device=device)})
+    # The default budget (device headroom) is known and admits a small query.
+    eng = TensorVariableElimination()
+    budget = eng.memory_budget_bytes(model.device)
+    assert budget is None or budget > 0
+    out = eng.query(model, [nodes[-1]], {nodes[0]: torch.tensor(1)})
+    torch.testing.assert_close(out.cpu(), brute_posterior(model, nodes[-1], {nodes[0]: 1}),
+                               atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("msg", [
+    "MPS backend out of memory (MPS allocated: 17.00 GB, other allocations: 1 GB)",
+    "[enforce fail at alloc_cpu.cpp:117] DefaultCPUAllocator: can't allocate memory",
+    "Invalid buffer size: 48.00 GB",
+])
+def test_b5_router_falls_back_to_lw_on_any_backend_oom(monkeypatch, msg):
+    from nbn.inference.hybrid import HybridRouter
+
+    model = _random_discrete()
+    nodes = list(model.dag.topological_order())
+    router = HybridRouter(n_samples=512)
+
+    def _oom(*a, **k):
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(router._ve, "query_batch", _oom)
+    out = router.query_batch(model, [nodes[-1]], {nodes[0]: torch.tensor([1, 2])})
+    assert out.shape == (2, 3)
+    assert router._last_engine == "likelihood_weighting"
+
+
+def test_b5_router_does_not_swallow_non_oom_runtime_errors(monkeypatch):
+    from nbn.inference.hybrid import HybridRouter
+
+    model = _random_discrete()
+    nodes = list(model.dag.topological_order())
+    router = HybridRouter()
+    monkeypatch.setattr(router._ve, "query",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("shape bug")))
+    with pytest.raises(RuntimeError, match="shape bug"):
+        router.query(model, [nodes[-1]], {})
+
+
+def test_a8_guard_chunking_end_to_end_keeps_do_on_cpu():
+    """The chunking path now runs on CPU too: a budget between the 1-row and
+    the B-row peak forces it, and do= must survive it."""
+    from unittest import mock
+
+    from nbn import TensorVariableElimination
+
+    model = _random_discrete(seed=3)
+    nodes = list(model.dag.topological_order())
+    x = next(n for n in nodes if model.dag.parents(n))
+    y = model.dag.parents(x)[0]
+    e = next(n for n in reversed(nodes) if n not in (x, y))
+    B = 6
+    g = torch.Generator().manual_seed(1)
+    do_v, ev_v = torch.randint(0, 3, (B,), generator=g), torch.randint(0, 3, (B,), generator=g)
+    probe = TensorVariableElimination()
+    p1 = probe.estimate_peak_bytes(model, y, (e,), (x,), B=1)
+    pb = probe.estimate_peak_bytes(model, y, (e,), (x,), B=B)
+    assert pb > p1 > 0
+    eng = TensorVariableElimination(memory_budget=(p1 + pb) / 2)
+    with mock.patch.object(eng, "_query_batch_chunked",
+                           wraps=eng._query_batch_chunked) as spy:
+        out = eng.query_batch(model, [y], {e: ev_v}, do={x: do_v})
+    assert spy.called
+    ref = torch.stack([brute_posterior(model, y, {e: int(ev_v[i])}, {x: int(do_v[i])})
+                       for i in range(B)])
+    torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-5)
+
+
+def test_264_cuda_headroom_counts_cached_blocks_on_the_right_device():
+    from unittest import mock
+
+    from nbn.inference._memory import device_headroom_bytes
+
+    dev = torch.device("cuda:1")
+    with mock.patch("torch.cuda.mem_get_info", return_value=(100, 1000)) as info, \
+         mock.patch("torch.cuda.memory_reserved", return_value=500) as res, \
+         mock.patch("torch.cuda.memory_allocated", return_value=200) as alloc:
+        assert device_headroom_bytes(dev) == 100 + (500 - 200)
+    for m in (info, res, alloc):
+        assert m.call_args.args[0] == dev
+
+
+def test_264_guard_does_not_chunk_when_cache_is_reusable():
+    """#264 scenario: driver 'free' is tiny but PyTorch holds a large reusable
+    cache — the batch must run in one pass, not hundreds of chunks."""
+    from unittest import mock
+
+    from nbn import TensorVariableElimination
+    from nbn.inference.tensor_ve import _max_chunk_rows
+
+    model = _random_discrete()
+    nodes = list(model.dag.topological_order())
+    eng = TensorVariableElimination()
+    B = 4096
+    pb = eng.estimate_peak_bytes(model, nodes[-1], (nodes[0],), B=B)
+    p1 = eng.estimate_peak_bytes(model, nodes[-1], (nodes[0],), B=1)
+    gib = 1024 ** 3
+    with mock.patch("torch.cuda.mem_get_info", return_value=(pb // 4, 8 * gib)), \
+         mock.patch("torch.cuda.memory_reserved", return_value=7 * gib), \
+         mock.patch("torch.cuda.memory_allocated", return_value=1 * gib):
+        budget = eng.memory_budget_bytes(torch.device("cuda:0"))
+    assert _max_chunk_rows(pb, p1, B, budget) == B  # single pass
+    # Driver-free memory alone (the old reading) would have chunked.
+    assert _max_chunk_rows(pb, p1, B, 0.9 * (pb // 4)) < B
+
+
+@pytest.mark.parametrize("exc,expected", [
+    (torch.cuda.OutOfMemoryError("CUDA out of memory"), True),
+    (RuntimeError("MPS backend out of memory"), True),
+    (RuntimeError("DefaultCPUAllocator: can't allocate memory: you tried"), True),
+    (MemoryError(), True),
+    (RuntimeError("size mismatch"), False),
+    (ValueError("out of memory"), False),
+])
+def test_b5_is_oom_error(exc, expected):
+    from nbn.inference._memory import is_oom_error
+
+    assert is_oom_error(exc) is expected
+
+
+# --------------------------------------------------------------------------- #
+# B6 — multi-target discrete queries through the router
+# --------------------------------------------------------------------------- #
+
+
+def test_b6_router_routes_multi_target_to_lw():
+    from nbn.inference.hybrid import HybridRouter
+
+    model = _random_discrete()
+    nodes = list(model.dag.topological_order())
+    router = HybridRouter(n_samples=128)
+    weights, samples = router.query(model, [nodes[0], nodes[1]], {nodes[-1]: torch.tensor(1)})
+    assert router._last_engine == "likelihood_weighting"
+    assert weights.shape == (1, 128) and samples.shape == (1, 128, 2)

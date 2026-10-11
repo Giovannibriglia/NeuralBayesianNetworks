@@ -66,6 +66,9 @@ def test_ve_oom_falls_back_to_lw(monkeypatch):
     def _oom(*args, **kwargs):
         raise torch.cuda.OutOfMemoryError("estimated peak exceeds budget")
 
+    # The stub has no real plan to price; let the memory check pass so the
+    # query reaches VE and its OOM (B5 routes over-budget plans to LW first).
+    monkeypatch.setattr(router, "_ve_fits", lambda *a, **k: True)
     monkeypatch.setattr(router._ve, "query", _oom)
     monkeypatch.setattr(
         router._lw, "query", lambda *a, **k: "lw-result", raising=False
@@ -82,6 +85,7 @@ def test_ve_non_oom_error_propagates(monkeypatch):
     def _boom(*args, **kwargs):
         raise RuntimeError("real bug")
 
+    monkeypatch.setattr(router, "_ve_fits", lambda *a, **k: True)
     monkeypatch.setattr(router._ve, "query", _boom)
     with pytest.raises(RuntimeError, match="real bug"):
         router.query(model, ["a"], None)
