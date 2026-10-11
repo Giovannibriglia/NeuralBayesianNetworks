@@ -282,6 +282,24 @@ class NeuralBayesianNetwork(nn.Module):
             int(value) - int(getattr(mechs, "_version", 0))
         )
 
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        """Accept state_dicts written before node names got escaped (B1).
+
+        Up to v0.14 a node literally named ``node__x`` was stored under the
+        submodule key ``node__x``; it is now ``node__node__x`` (the prefix is
+        the escape marker).  Rename such legacy keys in place — torch hands
+        the children slices of this same dict afterwards — so a strict load of
+        an older state_dict still works.
+        """
+        mp = prefix + "mechanisms."
+        current = self.mechanisms._modules
+        esc = _AliasModuleDict._PREFIX
+        for key in [k for k in state_dict if k.startswith(mp)]:
+            head, sep, rest = key[len(mp):].partition(".")
+            if head not in current and esc + head in current:
+                state_dict[mp + esc + head + sep + rest] = state_dict.pop(key)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
     def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
         """``nn.Module.load_state_dict`` that also invalidates inference caches."""
         try:

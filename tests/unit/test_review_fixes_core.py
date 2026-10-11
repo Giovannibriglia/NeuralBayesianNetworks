@@ -812,3 +812,24 @@ def test_r12_joint_fit_reconsolidates_with_fit_weights():
     ref = copy.deepcopy(mech)
     online_laplace.consolidate(ref, data["B"][:100], data["A"][:100])
     torch.testing.assert_close(mech._ewc_fisher, ref._ewc_fisher, rtol=1e-4, atol=1e-7)
+
+
+# ---------------------------------------------------------------------------
+# Round 2 — R11: legacy state_dict keys for node names starting with node__
+# ---------------------------------------------------------------------------
+
+
+def test_r11_strict_load_of_legacy_node_prefix_state_dict():
+    names = ["node__a", "b"]
+    model, data = _discrete_chain(names)
+    model.auto_mechanisms()
+    model.fit(data)
+    sd = model.state_dict()
+    assert any(k.startswith("mechanisms.node__node__a.") for k in sd)
+    legacy = {k.replace("mechanisms.node__node__a.", "mechanisms.node__a."): v for k, v in sd.items()}
+    fresh, _ = _discrete_chain(names)
+    fresh.auto_mechanisms()
+    fresh.fit({k: v.flip(0) for k, v in data.items()})
+    fresh.load_state_dict(legacy, strict=True)
+    for k, v in fresh.state_dict().items():
+        torch.testing.assert_close(v, sd[k])
