@@ -117,3 +117,112 @@ def test_279_ais_trains_and_queries_on_hybrid():
                        time_budget_s=10)
     out = eng.query(model, ["D"], {"C": torch.tensor([0.5])})
     assert out.shape == (4,) and torch.isfinite(out).all()
+
+
+# --------------------------------------------------------------------------- #
+# A5 — target that is also evidence
+# --------------------------------------------------------------------------- #
+
+
+def test_oracle_agrees_with_ve_on_ordinary_queries():
+    """Sanity: the enumeration oracle and VE agree where VE was never broken."""
+    from nbn import TensorVariableElimination
+
+    model = _random_discrete()
+    nodes = list(model.dag.topological_order())
+    eng = TensorVariableElimination()
+    for t, ev in [(nodes[0], {nodes[-1]: 2}), (nodes[3], {nodes[1]: 0, nodes[5]: 1})]:
+        out = eng.query(model, [t], {k: torch.tensor(v) for k, v in ev.items()})
+        torch.testing.assert_close(out, brute_posterior(model, t, ev), atol=1e-5, rtol=1e-5)
+
+
+def test_a5_ve_query_target_in_evidence_is_delta():
+    from nbn import TensorVariableElimination
+
+    model = _random_discrete()
+    t = list(model.dag.topological_order())[-1]
+    out = TensorVariableElimination().query(model, [t], {t: torch.tensor(1)})
+    torch.testing.assert_close(out, brute_posterior(model, t, {t: 1}))
+    torch.testing.assert_close(out, torch.tensor([0.0, 1.0, 0.0]))
+
+
+def test_a5_ve_query_batch_target_in_evidence_is_delta_per_row():
+    from nbn import TensorVariableElimination
+
+    model = _random_discrete()
+    nodes = list(model.dag.topological_order())
+    t, other = nodes[-1], nodes[0]
+    ev = {t: torch.tensor([0, 2, 1]), other: torch.tensor([1, 1, 0])}
+    out = TensorVariableElimination().query_batch(model, [t], ev)
+    expected = torch.eye(3)[[0, 2, 1]]
+    torch.testing.assert_close(out, expected)
+
+
+def test_a5_map_query_returns_observed_state():
+    model = _random_discrete()
+    model._engine = None
+    model._engine_spec = "tensor_ve"
+    t = list(model.dag.topological_order())[-1]
+    assert int(model.map_query([t], {t: torch.tensor(2)})[t]) == 2
+
+
+# --------------------------------------------------------------------------- #
+# C — out-of-range discrete evidence / do values
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("bad", [-1, 3])
+@pytest.mark.parametrize("kind", ["evidence", "do"])
+def test_c_ve_rejects_out_of_range_states(bad, kind):
+    from nbn import TensorVariableElimination
+
+    model = _random_discrete()
+    nodes = list(model.dag.topological_order())
+    eng = TensorVariableElimination()
+    spec = {nodes[2]: torch.tensor(bad)}
+    kw = {"do": spec} if kind == "do" else {}
+    ev = {} if kind == "do" else spec
+    with pytest.raises(ValueError, match="out of range"):
+        eng.query(model, [nodes[0]], ev, **kw)
+    spec_b = {nodes[2]: torch.tensor([0, bad])}
+    kw = {"do": spec_b} if kind == "do" else {}
+    ev = {} if kind == "do" else spec_b
+    with pytest.raises(ValueError, match="out of range"):
+        eng.query_batch(model, [nodes[0]], ev, **kw)
+
+
+# --------------------------------------------------------------------------- #
+# A8 — chunked query_batch must keep do= as an intervention
+# --------------------------------------------------------------------------- #
+
+
+def test_a8_chunked_query_batch_keeps_do_semantics():
+    from nbn import TensorVariableElimination
+
+    model = _random_discrete(seed=3)
+    nodes = list(model.dag.topological_order())
+    # Target = a parent of the do-node: intervening on X leaves its parent's
+    # distribution alone while observing X does not, so do != conditioning.
+    x = next(n for n in nodes if model.dag.parents(n))
+    y = model.dag.parents(x)[0]
+    e = next(n for n in reversed(nodes) if n not in (x, y))
+    B = 7
+    g = torch.Generator().manual_seed(0)
+    do_v = torch.randint(0, 3, (B,), generator=g)
+    ev_v = torch.randint(0, 3, (B,), generator=g)
+    eng = TensorVariableElimination()
+    ev_norm = {e: ev_v, x: do_v}  # what query_batch hands the chunker
+    out = eng._query_batch_chunked(
+        model, [y], ev_norm, B=B, chunk=3, order="min_fill", do_keys=(x,),
+    )
+    ref = torch.stack([
+        brute_posterior(model, y, {e: int(ev_v[i])}, {x: int(do_v[i])})
+        for i in range(B)
+    ])
+    torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-5)
+    # Non-vacuous: the observational answer (the old bug) differs here.
+    obs = torch.stack([
+        brute_posterior(model, y, {e: int(ev_v[i]), x: int(do_v[i])})
+        for i in range(B)
+    ])
+    assert (obs - ref).abs().max() > 1e-3

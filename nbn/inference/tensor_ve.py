@@ -315,15 +315,19 @@ class TensorVariableElimination(InferenceEngine):
 
         ev_int: Dict[str, int] = {k: _as_int(v) for k, v in evidence.items()}
         do_int: Dict[str, int] = {k: _as_int(v) for k, v in do.items()}
+        for kind, vals in (("evidence", ev_int), ("do", do_int)):
+            for node, v in vals.items():
+                _check_state_range(model, node, kind, v, v)
 
-        # Intervening on the target itself makes the answer a point mass by
-        # definition.  Handled up front because elimination would otherwise
-        # find no factor mentioning the target (its CPT having been dropped)
-        # and fall through to the uniform default — LW, which clamps and then
+        # Observing or intervening on the target itself makes the answer a
+        # point mass by definition.  Handled up front because conditioning
+        # removes the target from every factor's scope, so elimination would
+        # fall through to the uniform default (A5) — LW, which clamps and then
         # histograms, has always returned the delta here.
-        if target in do_int:
+        clamped_target = {**ev_int, **do_int}
+        if target in clamped_target:
             return _delta_probs(
-                model.mechanisms[target].n_classes, do_int[target], device,
+                model.mechanisms[target].n_classes, clamped_target[target], device,
             )
 
         factors = self._extract_factors(model)
@@ -445,9 +449,10 @@ class TensorVariableElimination(InferenceEngine):
             B = max(B, t.shape[0])
         # Broadcast any [1] evidence to [B]
         ev_norm = {k: (v.expand(B) if v.shape[0] == 1 else v) for k, v in ev_norm.items()}
+        _check_batch_state_range(model, ev_norm, do)
 
-        if target in do:
-            # Point mass per row — see ``query``.
+        if target in ev_norm:
+            # Point mass per row (target observed or intervened) — see ``query``.
             k = model.mechanisms[target].n_classes
             out = torch.zeros(B, k, device=device)
             out.scatter_(1, ev_norm[target].reshape(B, 1), 1.0)
@@ -533,7 +538,7 @@ class TensorVariableElimination(InferenceEngine):
                     )
                     return self._query_batch_chunked(
                         model, targets, ev_norm, B=B, chunk=chunk,
-                        order=order, **kwargs,
+                        order=order, do_keys=tuple(do), **kwargs,
                     )
                 # chunk == B: free memory recovered between the two
                 # ``mem_get_info`` reads — fall through to the single pass.
@@ -599,26 +604,65 @@ class TensorVariableElimination(InferenceEngine):
         B: int,
         chunk: int,
         order: str,
+        do_keys: tuple[str, ...] = (),
         **kwargs,
     ) -> torch.Tensor:
         """Run ``query_batch`` over row-chunks of ``ev_norm`` and concatenate.
 
-        ``ev_norm`` is the already-normalised evidence (``[B]`` long tensors,
-        broadcast applied), so slicing rows is exact.  Each chunk re-enters
-        ``query_batch`` — plan/factor caches hit, and the guard re-checks each
-        chunk against live free memory (shrinking further or raising if the
-        budget collapsed mid-batch).  Output is ``[B, K]``, row-identical to
-        the single-pass result.
+        ``ev_norm`` is the already-normalised evidence *and do-values*
+        (``[B]`` long tensors, broadcast applied), so slicing rows is exact.
+        ``do_keys`` names the entries that are interventions: they must go
+        back in as ``do=``, not as evidence — re-entering with them merged
+        into ``evidence`` silently turned ``P(Y | do(X))`` into the
+        observational ``P(Y | X)`` on exactly the large-B CUDA batches that
+        get chunked (A8).  Each chunk re-enters ``query_batch`` — plan/factor
+        caches hit, and the guard re-checks each chunk against live free
+        memory (shrinking further or raising if the budget collapsed
+        mid-batch).  Output is ``[B, K]``, row-identical to the single-pass
+        result.
         """
-        outs = [
-            self.query_batch(
-                model, targets,
-                {k: v[i:i + chunk] for k, v in ev_norm.items()},
-                order=order, **kwargs,
-            )
-            for i in range(0, B, chunk)
-        ]
+        outs = []
+        for i in range(0, B, chunk):
+            rows = {k: v[i:i + chunk] for k, v in ev_norm.items()}
+            do_rows = {k: rows.pop(k) for k in do_keys}
+            outs.append(self.query_batch(
+                model, targets, rows, do=do_rows, order=order, **kwargs,
+            ))
         return torch.cat(outs, dim=0)
+
+
+def _check_state_range(model, node: str, kind: str, lo: int, hi: int) -> None:
+    """Reject a discrete state index outside ``[0, K)`` for ``node``.
+
+    Torch indexing wraps negative indices, so evidence ``-1`` used to be read
+    silently as the *last* state — a plausible, wrong posterior (C).  An index
+    ``>= K`` failed only deep inside a factor slice with an opaque error.
+    """
+    if node not in model.mechanisms:
+        raise KeyError(f"{kind} node {node!r} is not a node of the model.")
+    k = model.mechanisms[node].n_classes
+    if lo < 0 or hi >= k:
+        bad = lo if lo < 0 else hi
+        raise ValueError(
+            f"{kind} value {bad} for discrete node {node!r} is out of range; "
+            f"valid states are 0..{k - 1}."
+        )
+
+
+def _check_batch_state_range(model, values: Dict[str, torch.Tensor], do) -> None:
+    """Batched :func:`_check_state_range` over ``{node: [B] long}``.
+
+    All min/max reductions are gathered into one tensor so the check costs a
+    single device→host sync per query, not one per evidence variable.
+    """
+    names = [n for n, v in values.items() if v.numel() > 0]
+    if not names:
+        return
+    bounds = torch.stack(
+        [torch.stack([values[n].min(), values[n].max()]) for n in names]
+    ).tolist()
+    for n, (lo, hi) in zip(names, bounds):
+        _check_state_range(model, n, "do" if n in do else "evidence", int(lo), int(hi))
 
 
 def _delta_probs(k: int, value: int, device) -> torch.Tensor:
