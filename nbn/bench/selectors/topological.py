@@ -276,6 +276,10 @@ class _KindEvidenceAllocator:
     ) -> list[str]:
         """Build the candidate pool for evidence nodes.
 
+        Every pool is a list in a process-independent order: frozensets of
+        node names iterate in string-hash order (randomised per process by
+        PYTHONHASHSEED), so pools are sorted by (hardness, name) or by name.
+
         Spec §3.4 evidence pools table:
         - prediction + longest_path: ancestors of target, sorted by depth
           distance desc
@@ -294,15 +298,16 @@ class _KindEvidenceAllocator:
                 # Deepest ancestors are farthest in topological depth from target.
                 return sorted(
                     ancestors,
-                    key=lambda v: -(roles.depth.get(target, 0) - roles.depth.get(v, 0)),
+                    key=lambda v: (
+                        -(roles.depth.get(target, 0) - roles.depth.get(v, 0)), v),
                 )
             elif strategy == "mb_neighbors":
                 parents = roles.parents.get(target, frozenset())
                 co_parents = roles.co_parents.get(target, frozenset())
                 pool = list(parents | co_parents)
-                return sorted(pool, key=lambda v: -roles.mb_size.get(v, 0))
+                return sorted(pool, key=lambda v: (-roles.mb_size.get(v, 0), v))
             elif strategy == "random":
-                return list(roles.ancestors.get(target, frozenset()))
+                return sorted(roles.ancestors.get(target, frozenset()))
             else:
                 return []
         elif query_kind == "diagnosis":
@@ -310,18 +315,19 @@ class _KindEvidenceAllocator:
                 descendants = roles.descendants.get(target, frozenset())
                 return sorted(
                     descendants,
-                    key=lambda v: -(roles.depth.get(v, 0) - roles.depth.get(target, 0)),
+                    key=lambda v: (
+                        -(roles.depth.get(v, 0) - roles.depth.get(target, 0)), v),
                 )
             elif strategy == "mb_neighbors":
                 children = roles.children.get(target, frozenset())
                 # Per spec §5 Q3: co_children = co_parents (same structural set)
                 co_children = roles.co_parents.get(target, frozenset())
                 pool = list(children | co_children)
-                return sorted(pool, key=lambda v: -roles.mb_size.get(v, 0))
+                return sorted(pool, key=lambda v: (-roles.mb_size.get(v, 0), v))
             elif strategy == "random":
                 descendants = roles.descendants.get(target, frozenset())
                 all_nodes = set(roles.mb_size.keys())
-                return list(all_nodes - {target} - descendants)
+                return sorted(all_nodes - {target} - descendants)
             else:
                 return []
         else:
@@ -343,7 +349,10 @@ class _KindEvidenceAllocator:
         For random strategy: uniform shuffle, then take first n.
         """
         if strategy == "random":
-            pool_copy = list(pool)
+            # sorted() first: a pool built from a frozenset iterates in
+            # string-hash order, which differs per process (PYTHONHASHSEED),
+            # so the same seed shuffled a different list in every cell worker.
+            pool_copy = sorted(pool)
             rng.shuffle(pool_copy)
             return pool_copy[:n]
         else:

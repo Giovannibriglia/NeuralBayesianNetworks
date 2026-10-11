@@ -178,7 +178,9 @@ def _plan(scopes: list[tuple[str, ...]], cards: dict[str, int],
     log_cap = math.log(max_entries)
 
     def weight(v: str) -> float:
-        return math.log(cards[v]) + sum(math.log(cards[u]) for u in adj[v])
+        # sorted(): float summation order must not follow set (hash) order,
+        # or near-ties could break differently in different processes.
+        return math.log(cards[v]) + sum(math.log(cards[u]) for u in sorted(adj[v]))
 
     heap = [(weight(v), v) for v in adj if v != keep]
     heapq.heapify(heap)
