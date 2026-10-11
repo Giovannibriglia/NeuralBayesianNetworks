@@ -203,9 +203,24 @@ def _bif_url(name: str) -> str:
 
 
 def _current_umask() -> int:
-    """The process umask (read by the set-and-restore round trip)."""
+    """The process umask, read without changing it where possible.
+
+    Linux exposes it in ``/proc/self/status`` (``Umask:`` line, kernel >=
+    4.7), which is thread-safe. Elsewhere (macOS, old kernels) the only API
+    is the ``os.umask`` set-and-restore round trip, which briefly changes the
+    process-wide mask: a file another thread creates in that window gets
+    mode & ~0o022. That fallback is acceptable here (cache population, best
+    effort) and documented rather than hidden.
+    """
     import os
 
+    try:
+        with open("/proc/self/status", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("Umask:"):
+                    return int(line.split()[1], 8)
+    except (OSError, ValueError, IndexError):
+        pass
     mask = os.umask(0o022)
     os.umask(mask)
     return mask
