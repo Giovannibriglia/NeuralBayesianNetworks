@@ -744,7 +744,13 @@ def _check_state_range(model, node: str, kind: str, lo: int, hi: int) -> None:
     """
     if node not in model.mechanisms:
         raise KeyError(f"{kind} node {node!r} is not a node of the model.")
-    k = model.mechanisms[node].n_classes
+    # The declared cardinality is always known; a mechanism's n_classes is 0
+    # until it is fitted, and reading it here would mask the clearer
+    # "has not been fitted" error raised when factors are extracted.
+    variable = model.variables.get(node)
+    k = getattr(variable, "cardinality", None) or model.mechanisms[node].n_classes
+    if not k:
+        return  # nothing declared and nothing fitted: let factor extraction report it
     if lo < 0 or hi >= k:
         bad = lo if lo < 0 else hi
         raise ValueError(
