@@ -60,3 +60,31 @@ class ContinuousVariable(Variable):
 
     def __init__(self, name: str, dim: int = 1) -> None:
         super().__init__(name=name, kind="continuous", dim=dim, cardinality=None)
+
+
+def validate_discrete_value(
+    node: str, value, cardinality: int | None, *, what: str = "Intervention value",
+) -> None:
+    """Raise unless every entry of ``value`` is an integral state in range.
+
+    A discrete node's states are the indices ``0 .. cardinality-1``.  A value
+    like ``1.7`` used to be stored verbatim in a delta CPD (and silently
+    truncated to state 1 by exact inference but not by samplers), so the same
+    intervention meant different things on different paths.
+    """
+    import torch
+
+    t = value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
+    t = t.detach()
+    if t.is_floating_point() and not bool((t == t.round()).all()):
+        raise ValueError(
+            f"{what} for discrete node '{node}' must be an integer state "
+            f"index, got {t.reshape(-1).tolist()}."
+        )
+    if cardinality is not None:
+        lo, hi = float(t.min()), float(t.max())
+        if lo < 0 or hi >= int(cardinality):
+            raise ValueError(
+                f"{what} {t.reshape(-1).tolist()} for discrete node '{node}' "
+                f"is outside its {cardinality} declared states."
+            )

@@ -9,6 +9,7 @@ import torch
 
 from nbn.learning.weighting import select, validate_weights, weighted_mean
 from nbn.utils.batching import pack_parents
+from nbn.utils.device import to_device
 
 if TYPE_CHECKING:
     from nbn.core.network import NeuralBayesianNetwork
@@ -104,6 +105,12 @@ def fit(
         Fisher pass on *every* iteration.  It is almost always wanted only on
         the final fit, if at all; ``warm_start`` deliberately does not change
         this default, so pass ``consolidate=False`` explicitly.
+
+        ``method="joint"`` honours it too: EWC mechanisms are re-consolidated
+        at the joint optimum (``consolidate=False`` clears their stale
+        anchors instead), and nodes whose ``update`` re-solves closed-form
+        statistics — which would undo the joint refinement — are named in a
+        ``UserWarning``.
     warm_start:
         If True, each mechanism continues from the parameters it already
         holds rather than rebuilding from a fresh initialisation.  Default
@@ -141,9 +148,7 @@ def fit(
     model.to(dev)
 
     # Move data to device
-    data_dev: Dict[str, torch.Tensor] = {
-        k: v.to(dev) for k, v in data.items()
-    }
+    data_dev: Dict[str, torch.Tensor] = to_device(dict(data), dev)
 
     n_rows = next(iter(data_dev.values())).shape[0]
     w_vec = validate_weights(weights, n_rows, where="fit", device=dev)
@@ -224,9 +229,11 @@ def fit(
             # split and no early stopping — callers who need a held-out
             # estimate must hold data out themselves and score it with
             # ``NeuralBayesianNetwork.log_prob``.
+            # Weighted like the fit itself: an unweighted mean would report
+            # the LL of a data distribution the caller did not fit to.
             with torch.no_grad():
                 lp = mech.log_prob(x, pa_tensor)
-                mean_ll = float(lp.mean())
+                mean_ll = float(weighted_mean(lp, w_vec))
             history.node_log_likelihoods.setdefault(node, []).append(mean_ll)
 
             if (i + 1) % log_every == 0 or (i + 1) == len(model.dag.topological_order()):
@@ -295,9 +302,62 @@ def fit(
                 mech = model.mechanisms[node]
                 pa_tensor = pack_parents(data_dev, model.dag.parents(node))
                 lp = mech.log_prob(data_dev[node], pa_tensor)
-                history.node_log_likelihoods.setdefault(node, []).append(float(lp.mean()))
+                history.node_log_likelihoods.setdefault(node, []).append(
+                    float(weighted_mean(lp, w_vec))
+                )
+        _sync_update_state_after_joint(model, data_dev, nodes, consolidate)
     else:
         raise ValueError(f"Unknown method '{method}'. Use 'local' or 'joint'.")
 
     history.wall_clock_s = time.perf_counter() - t0
     return history
+
+
+def _sync_update_state_after_joint(model, data_dev, nodes, consolidate: bool) -> None:
+    """Keep ``update()``'s persisted state consistent with a joint refinement.
+
+    ``fit_local`` leaves two kinds of state for ``update()``: EWC anchors
+    (``theta*`` + Fisher, neural mechanisms) and closed-form sufficient
+    statistics (linear-Gaussian normal equations, CPT counts, ...).  Joint
+    training moves the parameters but not that state, so a later ``update()``
+    would anchor to — or re-solve back to — the *local* fit and silently
+    undo the joint training.
+
+    * EWC mechanisms are re-consolidated at the joint optimum when
+      ``consolidate`` is True; otherwise their now-stale anchors are cleared,
+      so ``update()`` raises (as after any ``consolidate=False`` fit) instead
+      of pulling the weights back to the local fit.
+    * Closed-form mechanisms cannot be refreshed — their statistics are a
+      function of the data only, and re-solving them *is* the local fit — so
+      the affected nodes are named in a warning.
+    """
+    import warnings
+
+    from nbn.update import online_laplace
+
+    closed_form = []
+    for node in nodes:
+        mech = model.mechanisms[node]
+        if not getattr(mech, "supports_update", False):
+            continue
+        trainable = [p for p in mech.parameters() if p.requires_grad]
+        if not trainable:
+            continue
+        if "_ewc_mu" in mech._buffers:
+            if consolidate:
+                pa = pack_parents(data_dev, model.dag.parents(node))
+                online_laplace.consolidate(mech, data_dev[node], pa)
+            else:
+                mech._buffers["_ewc_mu"] = None
+                mech._buffers["_ewc_fisher"] = None
+        else:
+            closed_form.append(f"{node} ({type(mech).__name__})")
+    if closed_form:
+        warnings.warn(
+            "method='joint' refined nodes whose update() re-solves from the "
+            "closed-form statistics of the last local fit: "
+            f"{', '.join(closed_form)}.  A later model.update() will discard "
+            "the joint refinement for these nodes.",
+            UserWarning,
+            stacklevel=3,
+        )

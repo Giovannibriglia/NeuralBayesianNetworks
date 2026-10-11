@@ -52,11 +52,27 @@ def to_device(obj: Any, device: torch.device) -> Any:
 
     Distributions are reconstructed lazily via the engine that produced them;
     here we move only the underlying parameters (e.g. ``loc``, ``scale``).
+
+    A float64 tensor headed for a device without float64 (MPS) is cast to
+    float32 in the same call: user data built from numpy is float64 by
+    default, and ``.to("mps")`` on it raises.  On CPU / CUDA the dtype is
+    left alone.
     """
     if obj is None:
         return None
     if isinstance(obj, torch.Tensor):
-        return obj.to(device, non_blocking=True) if obj.device != device else obj
+        device = torch.device(device)
+        if obj.dtype == torch.float64 and not supports_float64(device):
+            # Cast on the source device first; MPS cannot hold the float64.
+            return obj.to(device=device, dtype=torch.float32)
+        if obj.device == device:
+            return obj
+        # non_blocking is only safe for a pinned host -> accelerator copy.  A
+        # device -> CPU copy with non_blocking=True returns before the data
+        # has landed, so the caller reads zeros / garbage (seen on MPS; the
+        # same hazard exists on CUDA without an explicit synchronize).
+        nb = obj.device.type == "cpu" and device.type != "cpu" and obj.is_pinned()
+        return obj.to(device, non_blocking=nb)
     if isinstance(obj, nn.Module):
         return obj.to(device)
     if isinstance(obj, Mapping):

@@ -29,7 +29,9 @@ class DAG:
         extra_nodes: Sequence[str] | None = None,
     ) -> None:
         if isinstance(edges, nx.DiGraph):
-            g = edges
+            # Copy: extra_nodes below (and any later caller edit) must not
+            # leak between this immutable DAG and the caller's graph.
+            g = nx.DiGraph(edges)
         else:
             g = nx.DiGraph()
             g.add_edges_from(edges)

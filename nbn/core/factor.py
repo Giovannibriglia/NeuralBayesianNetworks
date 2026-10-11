@@ -38,14 +38,20 @@ class LogFactor:
         """Slice out evidence variables, returning a reduced factor."""
         result = self.log_values
         remaining_vars = list(self.variables)
-        offset = 0
         for var, val in evidence.items():
             if var not in remaining_vars:
                 continue
-            dim = remaining_vars.index(var) - offset
-            result = result.select(dim, val)
+            idx = int(val)
+            card = int(result.shape[remaining_vars.index(var)])
+            if not 0 <= idx < card:
+                raise ValueError(
+                    f"Evidence {var}={idx} is outside its {card} states."
+                )
+            # remaining_vars tracks the axes of ``result`` exactly (the
+            # selected axis is removed below), so its index *is* the axis;
+            # an extra running offset double-counts and slices the wrong axis.
+            result = result.select(remaining_vars.index(var), idx)
             remaining_vars.remove(var)
-            offset += 1
         return LogFactor(result, remaining_vars, self.cardinalities)
 
     def marginalise(self, var: str) -> LogFactor:

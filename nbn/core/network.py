@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from nbn.core.dag import DAG
-from nbn.core.variables import Variable
+from nbn.core.variables import Variable, validate_discrete_value
 from nbn.mechanisms.base import Mechanism
 from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
 from nbn.mechanisms.parametric.linear_gaussian import LinearGaussianMechanism
@@ -18,48 +18,117 @@ from nbn.utils.device import resolve_device, to_device
 logger = logging.getLogger(__name__)
 
 
-class _AliasModuleDict(nn.ModuleDict):
-    """An ``nn.ModuleDict`` that tolerates node names containing ``.``.
+# Every attribute an ``nn.ModuleDict`` already has (``train``, ``eval``,
+# ``to``, ``forward``, ``parameters``, ``training``, ``keys``, ``update``,
+# ``type``, ``float``, ...).  ``add_module`` refuses a key that shadows one of
+# them, so a node named like that must be stored under an escaped alias.
+_RESERVED = frozenset(dir(nn.ModuleDict()))
 
-    ``nn.ModuleDict`` keys map to submodule names, which forbid ``.`` (it would
-    be read as attribute nesting), so a bnlearn node like ``pm2.5`` or
-    ``YR.GLASS`` crashes registration. This subclass transparently stores keys
-    with ``.`` replaced by a reserved token and reverses the substitution on
-    read, so every call site keeps using the original node name unchanged.
-    The transform is a pure, deterministic, reversible string op (no side map
-    to keep in sync across deepcopy / load_state_dict).
+
+class _AliasModuleDict(nn.ModuleDict):
+    """An ``nn.ModuleDict`` that accepts any string node name.
+
+    ``nn.ModuleDict`` keys become submodule names, which forbid ``.`` (it
+    would be read as attribute nesting) and anything that collides with an
+    existing ``nn.Module`` attribute (a node called ``train`` or ``values``).
+    This subclass stores each key under a reversible alias:
+
+    * ``.`` is replaced by the reserved token ``__DOT__`` (bnlearn's
+      ``pm2.5``, ``YR.GLASS``);
+    * a key that is empty, collides with a ``ModuleDict`` attribute, or
+      already starts with the escape prefix ``node__`` gets that prefix, so
+      the reverse map is unambiguous.
+
+    Every call site keeps using the original node name.  The transform is a
+    pure, deterministic string op (no side map to keep in sync across
+    deepcopy / load_state_dict).  A literal ``__DOT__`` in a name would not
+    round-trip, so it is rejected; non-string keys are rejected too.
+
+    ``_version`` counts mutations so the owning model can invalidate
+    memoised inference factors when a mechanism is swapped in directly
+    (``model.mechanisms[node] = mech``) rather than via ``set_mechanism``.
     """
 
     _TOKEN = "__DOT__"
+    _PREFIX = "node__"
+    _version = 0  # class default; becomes an instance attribute on mutation
 
     @classmethod
     def _safe(cls, key: str) -> str:
-        return key.replace(".", cls._TOKEN)
+        if not isinstance(key, str):
+            raise TypeError(
+                f"Node names must be str, got {type(key).__name__} ({key!r})."
+            )
+        if cls._TOKEN in key:
+            raise ValueError(
+                f"Node name {key!r} contains the reserved token {cls._TOKEN!r}, "
+                f"which NBN uses to store '.' in module names; rename the node."
+            )
+        s = key.replace(".", cls._TOKEN)
+        if s == "" or s.startswith(cls._PREFIX) or s in _RESERVED:
+            s = cls._PREFIX + s
+        return s
 
     @classmethod
     def _orig(cls, key: str) -> str:
+        if key.startswith(cls._PREFIX):
+            key = key[len(cls._PREFIX):]
         return key.replace(cls._TOKEN, ".")
 
     def __setitem__(self, key, module):
         super().__setitem__(self._safe(key), module)
+        self._version += 1
 
     def __getitem__(self, key):
         return super().__getitem__(self._safe(key))
 
     def __delitem__(self, key):
         super().__delitem__(self._safe(key))
+        self._version += 1
 
     def __contains__(self, key):
+        if not isinstance(key, str) or self._TOKEN in key:
+            return False
         return super().__contains__(self._safe(key))
 
     def __iter__(self):
         return (self._orig(k) for k in super().__iter__())
+
+    def clear(self):
+        super().clear()
+        self._version += 1
 
     def keys(self):
         return list(self)  # __iter__ already yields original (de-aliased) names
 
     def items(self):
         return [(self._orig(k), v) for k, v in super().items()]
+
+
+_KINDS = ("discrete", "continuous", "mixed")
+
+
+def _build_variable(name: str, spec: Union[Tuple, Variable]) -> Variable:
+    """``(kind, dim)`` spec -> ``Variable``; the kind must be spelled exactly.
+
+    Anything that was not ``"discrete"`` used to become continuous, so a typo
+    (``"categorical"``, ``"Discrete"``) silently fitted a Gaussian to state
+    indices.
+    """
+    from nbn.core.variables import ContinuousVariable, DiscreteVariable
+
+    if isinstance(spec, Variable):
+        return spec
+    kind, dim = spec
+    if kind not in _KINDS:
+        raise ValueError(
+            f"Variable '{name}': unknown kind {kind!r}; expected one of {_KINDS}."
+        )
+    if kind == "discrete":
+        return DiscreteVariable(name, cardinality=dim)
+    if kind == "mixed":
+        return Variable(name=name, kind="mixed", dim=dim)
+    return ContinuousVariable(name, dim=dim)
 
 
 class NeuralBayesianNetwork(nn.Module):
@@ -133,28 +202,37 @@ class NeuralBayesianNetwork(nn.Module):
     ) -> None:
         super().__init__()
 
+        # Node names become module names and dict keys everywhere; validate
+        # them up front (str, no reserved token) instead of failing on the
+        # first set_mechanism with an opaque nn.Module error.
+        for name in variables:
+            _AliasModuleDict._safe(name)
+
         # Build DAG
         if isinstance(dag, DAG):
             self.dag = dag
         else:
             self.dag = DAG(dag, extra_nodes=list(variables.keys()))
+        for name in self.dag.nodes():
+            _AliasModuleDict._safe(name)
 
         # Build variable specs
-        self.variables: Dict[str, Variable] = {}
-        for name, spec in variables.items():
-            if isinstance(spec, Variable):
-                self.variables[name] = spec
-            else:
-                kind, dim = spec
-                from nbn.core.variables import ContinuousVariable, DiscreteVariable
-                if kind == "discrete":
-                    self.variables[name] = DiscreteVariable(name, cardinality=dim)
-                else:
-                    self.variables[name] = ContinuousVariable(name, dim=dim)
+        self.variables: Dict[str, Variable] = {
+            name: _build_variable(name, spec) for name, spec in variables.items()
+        }
 
         missing = set(self.dag.nodes()) - set(self.variables)
         if missing:
             raise ValueError(f"Variables spec missing nodes: {sorted(missing)}")
+        # The reverse gap matters as much: a variable absent from a
+        # caller-built DAG is never visited by fit / sample / inference, so
+        # it would silently stay unfitted.
+        orphans = set(self.variables) - set(self.dag.nodes())
+        if orphans:
+            raise ValueError(
+                f"Variables {sorted(orphans)} are not nodes of the DAG; add "
+                f"them to the graph (isolated nodes are fine) or drop them."
+            )
 
         # Mechanism registry (populated by set_mechanism / auto_mechanisms / fit).
         # _AliasModuleDict tolerates dotted node names (e.g. bnlearn's pm2.5).
@@ -166,12 +244,49 @@ class NeuralBayesianNetwork(nn.Module):
         # Empty for an observational model; see ``intervene``.
         self._do_targets: set = set()
         # Monotonic counter bumped whenever the CPDs change (fit / update /
-        # set_mechanism).  Inference engines memoise per-model factors and
+        # set_mechanism / direct ``mechanisms[...]`` writes / load_state_dict
+        # / device moves).  Inference engines memoise per-model factors and
         # plans; they key that memo on this counter so a refit can never be
-        # served a stale posterior.  See ``TensorVariableElimination``.
+        # served a stale posterior.  See ``TensorVariableElimination`` and
+        # the ``_cache_version`` property below.
         self._cache_version = 0
         self._device = resolve_device(device)
         self._mixed_precision = False
+
+    # ------------------------------------------------------------------
+    # Cache invalidation
+    # ------------------------------------------------------------------
+
+    @property
+    def _cache_version(self) -> int:
+        """Version of the CPDs: an explicit counter plus the registry's own.
+
+        ``_AliasModuleDict`` counts its own mutations, so a mechanism written
+        straight into ``model.mechanisms[node]`` (bypassing
+        ``set_mechanism``) also invalidates memoised inference.  Summing two
+        plain ints keeps this deepcopy/pickle-safe (no back-reference from
+        the registry to the model).  Reads ``__dict__`` directly so models
+        pickled before the split (plain ``_cache_version`` attribute) load.
+        """
+        d = self.__dict__
+        base = d.get("_cache_version_base", d.get("_cache_version", 0))
+        mechs = d.get("_modules", {}).get("mechanisms")
+        return int(base) + int(getattr(mechs, "_version", 0))
+
+    @_cache_version.setter
+    def _cache_version(self, value: int) -> None:
+        mechs = self.__dict__.get("_modules", {}).get("mechanisms")
+        self.__dict__["_cache_version_base"] = (
+            int(value) - int(getattr(mechs, "_version", 0))
+        )
+
+    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
+        """``nn.Module.load_state_dict`` that also invalidates inference caches."""
+        try:
+            return super().load_state_dict(state_dict, strict=strict, assign=assign)
+        finally:
+            # Bump even on a strict-mode failure: tensors may be half copied.
+            self._cache_version += 1
 
     # ------------------------------------------------------------------
     # Mechanism registration
@@ -191,7 +306,24 @@ class NeuralBayesianNetwork(nn.Module):
         default_continuous: str = "mdn",
         mdn_components: int = 5,
     ) -> None:
-        """Assign default mechanisms based on variable types (each on model device)."""
+        """Assign default mechanisms based on variable types (each on model device).
+
+        ``default_discrete``: ``"categorical_table"`` or ``"neural_categorical"``.
+        ``default_continuous``: ``"mdn"`` or ``"lg"`` / ``"linear_gaussian"``.
+        Any other name raises.
+        """
+        # Validate the names up front: an unknown name used to fall through
+        # to the non-default branch (e.g. "lgg" -> LinearGaussian) silently.
+        known_d = ("categorical_table", "neural_categorical")
+        known_c = ("mdn", "lg", "linear_gaussian")
+        if default_discrete not in known_d:
+            raise ValueError(
+                f"Unknown default_discrete {default_discrete!r}; expected one of {known_d}."
+            )
+        if default_continuous not in known_c:
+            raise ValueError(
+                f"Unknown default_continuous {default_continuous!r}; expected one of {known_c}."
+            )
         for node, var in self.variables.items():
             if node in self.mechanisms:
                 continue
@@ -209,7 +341,20 @@ class NeuralBayesianNetwork(nn.Module):
             self.set_mechanism(node, mech)
 
     def set_mixed_precision(self, enabled: bool) -> None:
-        """Toggle ``torch.amp.autocast`` for forward passes (default: off)."""
+        """Deprecated no-op: the flag was never read by any code path.
+
+        Mixed precision is not implemented for NBN (closed-form fits and
+        log-density sums are precision-sensitive).  Wrap calls in
+        ``torch.autocast`` yourself if you need it for a neural mechanism.
+        """
+        import warnings
+
+        warnings.warn(
+            "set_mixed_precision() has no effect and is deprecated; NBN does "
+            "not autocast.  Use torch.autocast around your own calls instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._mixed_precision = bool(enabled)
 
     # ------------------------------------------------------------------
@@ -280,8 +425,10 @@ class NeuralBayesianNetwork(nn.Module):
                 consolidate=consolidate,
                 warm_start=warm_start,
                 device=str(self._device),
-                weights=(None if weights is None
-                         else torch.as_tensor(weights).to(self._device)),
+                # Passed through unchanged: validate_weights places them on
+                # the device in its accumulation dtype (a float64 vector
+                # cannot be moved to MPS as-is).
+                weights=weights,
                 **kwargs,
             )
         finally:
@@ -484,10 +631,16 @@ class NeuralBayesianNetwork(nn.Module):
         def _norm(d):
             out: Dict[str, torch.Tensor] = {}
             for k, v in (d or {}).items():
-                t = v if isinstance(v, torch.Tensor) else torch.tensor(v)
+                t = v if isinstance(v, torch.Tensor) else torch.as_tensor(v)
                 if t.dim() == 0:
                     t = t.unsqueeze(0)
-                out[k] = t.to(self._device)
+                var = self.variables.get(k)
+                if t.dim() == 1 and var is not None and not var.is_discrete and var.dim > 1:
+                    # The documented [D] value of a D-dim continuous node is
+                    # ONE observation; engines read a 1-D tensor's axis as
+                    # rows, so make the single row explicit.
+                    t = t.unsqueeze(0)
+                out[k] = to_device(t, self._device)
             return out
 
         ev = _norm(evidence)
@@ -525,9 +678,11 @@ class NeuralBayesianNetwork(nn.Module):
                 "use model.to(new_device) to move."
             )
         eng = engine if engine is not None else self._get_engine()
-        ev = {k: v.to(self._device) for k, v in evidence.items()}
+        ev = {k: to_device(torch.as_tensor(v), self._device) for k, v in evidence.items()}
         if do:
-            kwargs["do"] = {k: v.to(self._device) for k, v in do.items()}
+            kwargs["do"] = {
+                k: to_device(torch.as_tensor(v), self._device) for k, v in do.items()
+            }
         return eng.query_batch(self, list(targets), ev, **kwargs)
 
     def map_query(
@@ -552,6 +707,7 @@ class NeuralBayesianNetwork(nn.Module):
         evidence: Dict[str, torch.Tensor] | None = None,
         do: Mapping[str, torch.Tensor] | None = None,
         return_log_prob: bool = False,
+        return_log_weight: bool = False,
         **kwargs: Any,
     ) -> Dict[str, torch.Tensor]:
         """Draw ``n`` joint samples on the model's device.
@@ -559,12 +715,23 @@ class NeuralBayesianNetwork(nn.Module):
         Parameters
         ----------
         n: number of samples.
-        evidence: clamped observed values (auto-moved to model device).
-        do: do-intervention values (auto-dispatched to deterministic /
-            dirac-gaussian per variable type).  One value per node — this
-            path has no batch axis to vary the intervention along; use
-            ``query_batch(do=...)`` for a per-row sweep.
-        return_log_prob: if True return ``(samples, log_prob)``.
+        evidence: **clamped** observed values (auto-moved to model device):
+            a scalar, ``[D]``, ``[1, D]`` or ``[n, D]`` per node; other shapes
+            raise.  Clamping is not conditioning — ancestors of an evidence
+            node are drawn from the prior, so the samples are *not* from the
+            posterior.  Weight them by ``exp(log_weight)`` (see
+            ``return_log_weight``) for likelihood weighting, or use
+            ``query``.
+        do: do-intervention values (Python scalar, 0-d or ``[D]`` tensor;
+            discrete values must be in-range integers).  One value per node
+            — this path has no batch axis to vary the intervention along;
+            use ``query_batch(do=...)`` for a per-row sweep.
+        return_log_prob: if True also return the ``[n]`` joint log-density
+            of each sample (sampled and evidence nodes, do-targets excluded).
+        return_log_weight: if True also return the ``[n]`` evidence-only
+            log-weight ``sum_e log p(e | pa(e))``.  The return value is
+            ``samples``, ``(samples, log_prob)``, ``(samples, log_weight)``
+            or ``(samples, log_prob, log_weight)``.
 
         Unlike ``intervene()``, this applies the intervention against the
         live parameters, so the returned samples stay differentiable w.r.t.
@@ -582,6 +749,7 @@ class NeuralBayesianNetwork(nn.Module):
             self, n=n, evidence=evidence, do=do,
             device=str(self._device),
             return_log_prob=return_log_prob,
+            return_log_weight=return_log_weight,
         )
 
     # ------------------------------------------------------------------
@@ -641,7 +809,8 @@ class NeuralBayesianNetwork(nn.Module):
             (u, v) for (u, v) in self.dag.ordered_edges() if v not in targets
         ]
         new_model.dag = DAG(kept_edges, extra_nodes=list(self.dag.nodes()))
-        new_model._do_targets = set(targets)
+        # Union: chaining intervene() keeps the earlier cuts recorded too.
+        new_model._do_targets = set(self._do_targets) | targets
 
         for node, val in do.items():
             var = new_model.variables[node]
@@ -654,15 +823,12 @@ class NeuralBayesianNetwork(nn.Module):
                     f"node.  Loop over the values, or pass do= to "
                     f"query()/query_batch(), which do accept a batch."
                 )
-            val_t = val_t.to(new_model._device)
+            val_t = to_device(val_t, new_model._device)
             if var.is_discrete:
                 card = var.cardinality
-                idx = int(val_t.reshape(-1)[0].item())
-                if card is not None and not 0 <= idx < int(card):
-                    raise ValueError(
-                        f"Intervention value {idx} for discrete node '{node}' "
-                        f"is outside its {card} declared states."
-                    )
+                # Integral and in range: 1.7 used to be stored as-is in the
+                # delta CPD (VE truncated it to state 1, samplers emitted 1.7).
+                validate_discrete_value(node, val_t, card)
                 mech: Mechanism = DeterministicMechanism(
                     val_t.to(torch.float), cardinality=card,
                 )
@@ -684,24 +850,41 @@ class NeuralBayesianNetwork(nn.Module):
     def device(self) -> torch.device:
         return self._device
 
+    def _apply(self, fn, *args, **kwargs):
+        """Every device/dtype move (``to``, ``cpu``, ``cuda``, ``half``, ...)
+        funnels through here, so this is where ``_device`` is refreshed.
+
+        Overriding only ``to()`` left ``_device`` stale after ``.cpu()`` /
+        ``.cuda(1)``, and every later ``fit`` / ``query`` moved data back to
+        the old device.  The new device is read off the first parameter or
+        buffer; a model with neither (mechanisms not fitted yet) probes ``fn``
+        on an empty tensor instead.
+        """
+        super()._apply(fn, *args, **kwargs)
+        ref = next(iter(self.parameters()), None)
+        if ref is None:
+            ref = next(iter(self.buffers()), None)
+        if ref is None:
+            try:
+                ref = fn(torch.empty(0, device=self._device))
+            except Exception:  # an fn that cannot take a probe: keep _device
+                ref = None
+        if isinstance(ref, torch.Tensor):
+            self._device = ref.device
+        # Engines and memoised factors hold tensors on the old device.
+        self._engine = None
+        self._cache_version += 1
+        return self
+
     def to(self, *args, **kwargs) -> NeuralBayesianNetwork:
         """Move model + every registered mechanism + cached engine to a device."""
-        super().to(*args, **kwargs)
-        # Update cached device
-        new_device: torch.device | None = None
+        super().to(*args, **kwargs)  # refreshes _device via _apply
+        # An explicit device spec wins over what _apply read off the tensors,
+        # so ``model.to("cuda")`` reports the spec the caller used.
         if args and isinstance(args[0], (str, torch.device)):
-            new_device = resolve_device(args[0])
+            self._device = resolve_device(args[0])
         elif "device" in kwargs:
-            new_device = resolve_device(kwargs["device"])
-        else:
-            try:
-                new_device = next(self.parameters()).device
-            except StopIteration:
-                pass
-        if new_device is not None:
-            self._device = new_device
-        # Propagate to a cached engine (clear so next call rebuilds on new device)
-        self._engine = None
+            self._device = resolve_device(kwargs["device"])
         return self
 
     # ------------------------------------------------------------------
@@ -750,6 +933,8 @@ class NeuralBayesianNetwork(nn.Module):
             },
             "mechanisms": dict(self.mechanisms.items()),
             "do_targets": sorted(self._do_targets),
+            # Label <-> index maps (from_bif); absent on most models.
+            "state_names": getattr(self, "state_names", None),
             "engine_spec": self._engine_spec if isinstance(self._engine_spec, str) else None,
         }
         torch.save(payload, path)
@@ -774,6 +959,8 @@ class NeuralBayesianNetwork(nn.Module):
         for n, (kind, dim, card) in payload["variables"].items():
             if kind == "discrete":
                 variables[n] = DiscreteVariable(n, cardinality=card)
+            elif kind == "mixed":  # used to be downgraded to continuous
+                variables[n] = Variable(name=n, kind="mixed", dim=dim, cardinality=card)
             else:
                 variables[n] = ContinuousVariable(n, dim=dim)
 
@@ -781,6 +968,8 @@ class NeuralBayesianNetwork(nn.Module):
         dag = DAG(edges, extra_nodes=nodes)
         engine_spec = payload.get("engine_spec") or "auto"
         model = cls(dag, variables, default_engine=engine_spec, device=str(map_location))
+        if payload.get("state_names") is not None:
+            model.state_names = payload["state_names"]
 
         mechanisms = payload.get("mechanisms")
         if mechanisms is None:
