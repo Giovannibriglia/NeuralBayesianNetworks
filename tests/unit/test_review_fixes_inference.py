@@ -262,3 +262,55 @@ def test_c_lw_outputs_usable_in_autograd_and_in_place(engine_cls):
     assert w.grad is not None
     out.mul_(2.0)                       # in-place post-processing
 
+
+# --------------------------------------------------------------------------- #
+# A6 — AmortizedVIEngine: do=, observed target, batch shape
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(scope="module")
+def avi_model_and_engine():
+    from nbn.inference.amortized_vi import AmortizedVIEngine
+
+    torch.manual_seed(0)
+    model = _random_discrete(seed=3)
+    eng = AmortizedVIEngine(n_samples=20_000)
+    eng.train_proposal(model, n_training_samples=512, n_epochs=1,
+                       time_budget_s=10, early_stop=False, quality_gate=False)
+    assert eng.recognition_net is not None  # the learned path is under test
+    return model, eng
+
+
+def _child_of_some_node(model):
+    nodes = list(model.dag.topological_order())
+    x = next(n for n in nodes if model.dag.children(n))
+    return x, model.dag.children(x)[0]
+
+
+def test_a6_avi_query_honours_do(avi_model_and_engine):
+    model, eng = avi_model_and_engine
+    x, y = _child_of_some_node(model)
+    out = eng.query(model, [y], {}, do={x: torch.tensor(2)})
+    ref = brute_posterior(model, y, do={x: 2})
+    torch.testing.assert_close(out, ref, atol=0.03, rtol=0)
+    # Non-vacuous: the do-free (observational prior) answer differs.
+    assert (brute_posterior(model, y) - ref).abs().max() > 0.05
+
+
+def test_a6_avi_query_batch_per_row_do_keeps_batch(avi_model_and_engine):
+    model, eng = avi_model_and_engine
+    x, y = _child_of_some_node(model)
+    do_v = torch.tensor([0, 1, 2, 2])
+    out = eng.query_batch(model, [y], {}, do={x: do_v})
+    assert out.shape == (4, 3)
+    ref = torch.stack([brute_posterior(model, y, do={x: int(v)}) for v in do_v])
+    torch.testing.assert_close(out, ref, atol=0.03, rtol=0)
+
+
+def test_a6_avi_observed_target_is_delta(avi_model_and_engine):
+    model, eng = avi_model_and_engine
+    t = list(model.dag.topological_order())[-1]
+    torch.testing.assert_close(
+        eng.query(model, [t], {t: torch.tensor(1)}), torch.tensor([0.0, 1.0, 0.0]))
+    out = eng.query_batch(model, [t], {t: torch.tensor([2, 0])})
+    torch.testing.assert_close(out, torch.eye(3)[[2, 0]])
