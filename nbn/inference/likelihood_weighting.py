@@ -195,7 +195,12 @@ class LikelihoodWeightingEngine(InferenceEngine):
     # so this covers every public LW/AIS query entry; proposal TRAINING
     # (``AmortizedISEngine.train_proposal``) is not routed through ``query``
     # and keeps its gradients.
-    @torch.inference_mode()
+    #
+    # ``no_grad`` rather than ``inference_mode``: an inference-mode tensor
+    # can never enter autograd later nor be modified in place outside
+    # inference mode, so a caller who fed a posterior into a loss (as a
+    # constant target) or normalised it in place got a RuntimeError.  The
+    # saving that matters here — no per-particle graph — is the same.
     def query(
         self,
         model,
@@ -207,6 +212,23 @@ class LikelihoodWeightingEngine(InferenceEngine):
         return_psis_k: bool = False,
         **kwargs,
     ) -> torch.Tensor:
+        """Single query: a discrete single-target answer is ``[K]`` when B == 1."""
+        return self._query(model, targets, evidence, do, n_samples,
+                           return_ess, return_psis_k, squeeze=True)
+
+    @torch.no_grad()
+    def _query(
+        self,
+        model,
+        targets: List[str],
+        evidence: Dict[str, torch.Tensor] | None,
+        do: Dict[str, torch.Tensor] | None,
+        n_samples: int | None,
+        return_ess: bool,
+        return_psis_k: bool,
+        *,
+        squeeze: bool,
+    ):
         s = n_samples or self.n_samples
         log_w, buf = self._run(model, targets, evidence, do, s)
 
@@ -255,7 +277,9 @@ class LikelihoodWeightingEngine(InferenceEngine):
                     mask = (samp_vals == int(cv[ci])).float()
                     probs[:, ci] = (weights * mask).sum(dim=-1)
                 probs = probs / probs.sum(-1, keepdim=True).clamp_min(1e-12)
-                out = probs.squeeze(0) if b == 1 else probs
+                # Only ``query`` squeezes a lone row to ``[K]``; ``query_batch``
+                # always returns ``[B, K]`` so a B=1 batch keeps its batch axis.
+                out = probs.squeeze(0) if (squeeze and b == 1) else probs
                 return _wrap(out)
 
         state = get_inference_state(model, targets, tuple(sorted((evidence or {}).keys())),
@@ -274,6 +298,10 @@ class LikelihoodWeightingEngine(InferenceEngine):
         return_psis_k: bool = False,
         **kwargs,
     ) -> torch.Tensor:
-        """Batched query — all B evidence rows processed in a single GPU launch."""
-        return self.query(model, targets, evidence, return_ess=return_ess,
-                          return_psis_k=return_psis_k, **kwargs)
+        """Batched query — all B evidence rows processed in a single GPU launch.
+
+        Always ``[B, K]`` for a discrete target, including B == 1.
+        """
+        return self._query(model, targets, evidence, kwargs.get("do"),
+                           kwargs.get("n_samples"), return_ess, return_psis_k,
+                           squeeze=False)

@@ -1,12 +1,14 @@
-"""LW/AIS query paths run under ``torch.inference_mode`` (PR C).
+"""LW/AIS query paths run without autograd (PR C; ``no_grad`` since the review fixes).
 
 Mechanism parameters still require grad after ``eval()``, so before this
 change every particle's ``sample()``/``log_prob()`` in the LW ancestral
 sweep built and retained an autograd graph across the whole topological
 order — pure waste of query-time compute and memory (VE already detaches
-at factor build).  ``LikelihoodWeightingEngine.query`` is now decorated
-with ``@torch.inference_mode()``; ``query_batch`` delegates to it and
-``AmortizedISEngine`` inherits both, so the whole hot path is covered.
+at factor build).  ``LikelihoodWeightingEngine`` runs its query body under
+``@torch.no_grad()`` (originally ``inference_mode``, which made the outputs
+unusable in later autograd / in-place ops); ``query`` and ``query_batch``
+share it and ``AmortizedISEngine`` inherits both, so the whole hot path is
+covered.
 
 Contract pinned here:
 - query outputs carry no autograd state (``requires_grad`` False, no

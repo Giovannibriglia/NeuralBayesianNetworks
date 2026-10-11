@@ -226,3 +226,39 @@ def test_a8_chunked_query_batch_keeps_do_semantics():
         for i in range(B)
     ])
     assert (obs - ref).abs().max() > 1e-3
+
+
+# --------------------------------------------------------------------------- #
+# C — LW/AIS output contract: [1, K] batches, ordinary (non-inference) tensors
+# --------------------------------------------------------------------------- #
+
+
+def test_c_lw_query_batch_b1_keeps_batch_axis():
+    from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
+
+    model = _random_discrete()
+    nodes = list(model.dag.topological_order())
+    lw = LikelihoodWeightingEngine(n_samples=256)
+    out = lw.query_batch(model, [nodes[-1]], {nodes[0]: torch.tensor([1])})
+    assert out.shape == (1, 3)
+    out_do = lw.query_batch(model, [nodes[-1]], {}, do={nodes[0]: torch.tensor([1])})
+    assert out_do.shape == (1, 3)
+    # Single-query contract unchanged.
+    assert lw.query(model, [nodes[-1]], {nodes[0]: torch.tensor([1])}).shape == (3,)
+
+
+@pytest.mark.parametrize("engine_cls", ["lw", "ais"])
+def test_c_lw_outputs_usable_in_autograd_and_in_place(engine_cls):
+    from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
+
+    model = _random_discrete()
+    nodes = list(model.dag.topological_order())
+    eng = (LikelihoodWeightingEngine(256) if engine_cls == "lw"
+           else AmortizedISEngine(n_samples=256))
+    out = eng.query(model, [nodes[-1]], {nodes[0]: torch.tensor(1)})
+    assert not out.is_inference() and not out.requires_grad
+    w = torch.ones(3, requires_grad=True)
+    (out * w).sum().backward()          # posterior as a constant in a loss
+    assert w.grad is not None
+    out.mul_(2.0)                       # in-place post-processing
+
