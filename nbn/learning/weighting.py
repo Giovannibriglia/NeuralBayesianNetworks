@@ -128,12 +128,19 @@ def weighted_moments(
     miss: the fit converges, but to a model standardised against a data
     distribution the caller did not ask for.  Accumulated in float64.
 
-    ``unbiased`` follows the *frequency-weight* convention — the denominator
-    is ``sum(w) - 1`` rather than ``n - 1`` — because that is what replicating
-    a row ``w_i`` times produces.  Passing the population form (``sum(w)``)
-    where the unweighted call site used ``n - 1`` is a 2%-scale error on small
-    samples: big enough to move a standardised model, small enough to read as
-    numerical noise.
+    ``unbiased`` picks the denominator by what the weights mean:
+
+    * **integer weights** are multiplicities, so the *frequency-weight*
+      convention ``sum(w) - 1`` applies — exactly what replicating a row
+      ``w_i`` times produces (replication equivalence stays exact).  Passing
+      the population form (``sum(w)``) where the unweighted call site used
+      ``n - 1`` is a 2%-scale error on small samples.
+    * **fractional weights** (normalised weights, EM responsibilities) use the
+      *reliability-weight* convention ``sum(w) - sum(w^2) / sum(w)``.  It is
+      invariant to rescaling the weights and equals ``n - 1`` (times the
+      common weight, which cancels) for constant weights.  The frequency form
+      is meaningless there: ``sum(w) - 1`` is ~0 or negative when the weights
+      sum to <= 1, and the std exploded by orders of magnitude.
     """
     if weights is None:
         return t.mean(0), t.std(0, unbiased=unbiased)
@@ -142,9 +149,38 @@ def weighted_moments(
     wd = weights.reshape(-1, 1).to(device=t.device, dtype=acc)
     tot = wd.sum().clamp_min(_MIN_TOTAL_WEIGHT)
     mean = (wd * td).sum(0) / tot
-    denom = (tot - 1.0).clamp_min(_MIN_TOTAL_WEIGHT) if unbiased else tot
+    if not unbiased:
+        denom = tot
+    elif bool((wd == wd.round()).all()):
+        denom = tot - 1.0                        # frequency weights
+    else:
+        denom = tot - wd.pow(2).sum() / tot      # reliability weights
+    # Clamp relative to the total so a single effective row (denom == 0, all
+    # deviations 0) gives std 0 instead of 0/0, whatever the weights' scale.
+    denom = denom.clamp_min(_MIN_TOTAL_WEIGHT * tot)
     var = (wd * (td - mean).pow(2)).sum(0) / denom
     return mean.to(t.dtype), var.sqrt().to(t.dtype)
+
+
+def effective_sample_size(
+    weights: torch.Tensor | None, n: int | None = None,
+) -> torch.Tensor | int:
+    """Kish's effective sample size ``(sum w)^2 / sum w^2``.
+
+    The right ``n`` for sample-size-driven rules (bandwidth selectors such as
+    Scott / Silverman, ``n - 1`` corrections) under fractional weights, where
+    ``sum(w)`` is arbitrary (normalised weights sum to 1) and the row count
+    over-counts rows whose weight is ~0.  Scale-invariant; equals the row
+    count for constant weights and 1 when a single row carries all weight.
+    ``weights=None`` returns ``n`` (the unweighted row count) unchanged.
+    """
+    if weights is None:
+        if n is None:
+            raise ValueError("effective_sample_size: pass n when weights is None.")
+        return n
+    w = weights.reshape(-1)
+    w = w.to(accum_dtype(w.device))
+    return (w.sum().pow(2) / w.pow(2).sum().clamp_min(_MIN_TOTAL_WEIGHT ** 2))
 
 
 def weighted_quantile(
