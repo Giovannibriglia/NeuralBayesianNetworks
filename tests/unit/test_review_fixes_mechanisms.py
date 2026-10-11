@@ -437,3 +437,106 @@ def test_b11_mdn_fits_a_single_row(root):
     mdn.fit_local(x[:1], None if root else pa[:1], epochs=2, consolidate=False)
     lp = mdn.log_prob(x, None if root else pa)
     assert torch.isfinite(lp).all()
+
+
+# ==========================================================================
+# A9 / B9 -- NormalizingFlow: standardisation, Jacobian, float64 inputs
+# ==========================================================================
+
+
+
+def _flow(**kw):
+    pytest.importorskip("zuko")
+    from nbn.mechanisms.parametric.normalizing_flow import NormalizingFlowMechanism
+
+    return NormalizingFlowMechanism(num_transforms=2, hidden=(16, 16), **kw)
+
+
+def test_a9_flow_root_far_from_the_spline_window():
+    # Pre-fix: the splines act on [-5, 5]; data at ~100 was fitted with NLL
+    # ~5003 (true ~1.42) and sampled near 0.
+    g = torch.Generator().manual_seed(0)
+    x = 100.0 + torch.randn(1000, 1, generator=g)
+    mech = _flow()
+    mech.fit_local(x, None, epochs=100, batch_size=128)
+    with torch.no_grad():
+        nll = float(-mech.log_prob(x, None).mean())
+    assert nll < 1.7, nll
+    s = mech.sample(None, 2000)
+    assert abs(float(s.mean()) - 100.0) < 0.3
+    assert 0.7 < float(s.std()) < 1.3
+    # forward() presents the same raw-unit distribution.
+    dist = mech.forward(None)
+    torch.testing.assert_close(dist.log_prob(x[:5]), mech.log_prob(x[:5], None))
+    assert abs(float(dist.sample((500,)).mean()) - 100.0) < 0.5
+
+
+def test_a9_flow_conditional_on_large_parents_matches_linear_gaussian():
+    g = torch.Generator().manual_seed(1)
+    pa = 100.0 + 10.0 * torch.randn(2000, 1, generator=g)
+    x = 0.5 * pa + torch.randn(2000, 1, generator=g)
+    lg = LinearGaussianMechanism()
+    lg.fit_local(x, pa)
+    mech = _flow()
+    mech.fit_local(x, pa, epochs=30, lr=3e-3, batch_size=256)
+    with torch.no_grad():
+        nll_lg = float(-lg.log_prob(x, pa).mean())
+        nll_flow = float(-mech.log_prob(x, pa).mean())
+    assert nll_flow < nll_lg + 0.3, (nll_flow, nll_lg)
+    s = mech.sample(torch.tensor([[90.0], [110.0]]), 500)
+    torch.testing.assert_close(
+        s.mean(1).reshape(-1), torch.tensor([45.0, 55.0]), atol=0.5, rtol=0,
+    )
+
+
+def test_a9_flow_density_integrates_to_one_in_raw_units():
+    x = 1000.0 + 50.0 * torch.randn(500, 1)
+    mech = _flow()
+    mech.fit_local(x, None, epochs=3)
+    grid = torch.linspace(0.0, 2000.0, 20001).unsqueeze(-1)
+    with torch.no_grad():
+        dens = mech.log_prob(grid, None).exp()
+    assert abs(float(torch.trapz(dens, grid[:, 0])) - 1.0) < 1e-2
+
+
+def test_a9_flow_standardisation_frozen_under_warm_start_and_clamped():
+    g = torch.Generator().manual_seed(2)
+    pa = torch.randn(300, 1, generator=g)
+    x = pa + 0.1 * torch.randn(300, 1, generator=g)
+    mech = _flow()
+    mech.fit_local(x, pa, epochs=1)
+    bufs = {k: getattr(mech, k).clone() for k in ("_x_mean", "_x_std", "_pa_mean", "_pa_std")}
+    mech.fit_local(x + 50.0, pa * 3.0, epochs=1, warm_start=True)
+    for k, v in bufs.items():
+        torch.testing.assert_close(getattr(mech, k), v)
+    assert set(bufs) <= set(mech.state_dict())
+    # A context 1e6 sigma out is clamped, not fed to the conditioner raw.
+    far = torch.tensor([[1e6], [1e9]])
+    torch.testing.assert_close(mech._std_ctx(far), torch.full((2, 1), mech._pa_clamp))
+    assert torch.isfinite(mech.log_prob(torch.zeros(2, 1), far)).all()
+
+
+def test_a9_flow_weighted_standardisation_is_replication_exact():
+    g = torch.Generator().manual_seed(3)
+    pa = 5 + 2 * torch.randn(40, 1, generator=g)
+    x = pa + torch.randn(40, 1, generator=g)
+    w = torch.randint(0, 4, (40,), generator=g).float()
+    idx = _replicate(w)
+    a, b = _flow(), _flow()
+    a.fit_local(x, pa, weights=w, epochs=0)
+    b.fit_local(x[idx], pa[idx], epochs=0)
+    for k in ("_x_mean", "_x_std", "_pa_mean", "_pa_std"):
+        torch.testing.assert_close(getattr(a, k), getattr(b, k))
+
+
+@pytest.mark.parametrize("root", [True, False])
+def test_b9_flow_accepts_float64_inputs(root):
+    g = torch.Generator().manual_seed(4)
+    pa = torch.randn(64, 1, generator=g).double()
+    x = (pa + torch.randn(64, 1, generator=g).double())
+    mech = _flow()
+    # Pre-fix: float64 data against the float32 zuko net crashed.
+    mech.fit_local(x, None if root else pa, epochs=1)
+    lp = mech.log_prob(x, None if root else pa)
+    assert lp.shape == (64,) and torch.isfinite(lp).all()
+    assert mech.sample(None if root else pa, 2).shape == (1 if root else 64, 2, 1)

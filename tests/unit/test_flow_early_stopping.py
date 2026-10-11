@@ -80,7 +80,12 @@ def test_restores_best_epoch_parameters(monkeypatch):
 
     monkeypatch.setattr(NormalizingFlowMechanism, "_val_nll", spy)
     metrics = mech.fit_local(x, None, epochs=30, batch_size=100, lr=2e-2, patience=2)
-    assert seen and min(seen) == pytest.approx(metrics["best_val_nll"])
+    # best_val_nll is one of the epochs seen.  It need not be min(seen): an
+    # epoch improving on the best by less than min_delta (1e-3) does not
+    # replace it, so the minimum can sit up to min_delta below it.
+    best = metrics["best_val_nll"]
+    assert seen and any(v == pytest.approx(best) for v in seen)
+    assert best - 1e-3 <= min(seen) <= best
     # The restored parameters must reproduce the best validation NLL, not
     # the (worse) NLL of the epoch training stopped on.
     assert seen[-1] >= metrics["best_val_nll"]
