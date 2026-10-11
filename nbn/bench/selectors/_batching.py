@@ -73,9 +73,11 @@ def make_query_groups(
             # would be the same marginal query. Emitting N identical copies let
             # an adapter that dedupes (nbn) answer once while the timer divided
             # by N, against adapters that answered N times (D7). It is ONE
-            # query, emitted as a B=1 group; its rows carry
-            # evidence_mode="empty" and batch_size=1, so batched-speed figures
-            # report it separately from the full-evidence sweep.
+            # query, emitted as a single-query group; its rows carry
+            # evidence_mode="empty" (batched-speed figures report that mode
+            # separately) and the PASS's batch size, so a sweep keeps each
+            # pass's copy in its own batch_size slice
+            # (measurements._batch_dispatch.stamped_batch_size).
             groups.append([base])
             continue
         # Per-position derived seed: same cell seed -> same rows, but

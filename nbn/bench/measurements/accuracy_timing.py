@@ -356,7 +356,10 @@ class AccuracyAndTiming:
                     status = "no_result"
                     value = float("nan")
                     row_err = mdict.get(
-                        "_reason", "oracle produced no reference for this query")
+                        "_reason",
+                        "oracle produced no reference for this query (evidence "
+                        "with zero probability under the true model, or LW "
+                        "effective sample size below the floor)")
                 elif val is None:
                     status = "not_supported"
                     value = float("nan")

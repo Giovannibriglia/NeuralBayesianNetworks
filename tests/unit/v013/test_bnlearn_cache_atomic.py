@@ -80,3 +80,16 @@ def test_concurrent_populators_all_get_the_complete_file(tmp_path, monkeypatch):
     assert not errors
     assert results == [_BIF] * 4
     assert sorted(p.name for p in tmp_path.iterdir()) == ["toy.bif"]
+
+
+def test_cached_file_gets_normal_permissions_not_mkstemp_0600(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.setattr(bnlearn, "_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(bnlearn.urllib.request, "urlopen", _fake_urlopen)
+    old = os.umask(0o022)
+    try:
+        out = bnlearn._ensure_cached("toy")
+    finally:
+        os.umask(old)
+    assert (out.stat().st_mode & 0o777) == 0o644

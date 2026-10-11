@@ -381,10 +381,12 @@ def discrete_oracle(
             ), ORACLE_EXACT
         except (xd.Intractable, KeyError):
             pass
-        except ValueError:
-            # Zero-probability evidence: no conditional exists. LW would
-            # return None for the same reason, so stop here.
+        except xd.ZeroProbabilityEvidence:
+            # No conditional exists. LW would return None for the same
+            # reason, so stop here (the measurement emits no_result).
             return None, ORACLE_EXACT
+        # xd.InvalidEvidence (a state outside 0..K-1) propagates: it is a
+        # selector / data bug, recorded as an error row with its message.
 
     if problem.true_model is not None:
         if n_particles is None:
