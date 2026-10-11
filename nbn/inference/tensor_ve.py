@@ -28,7 +28,7 @@ from nbn.inference._cache import (
 )
 from nbn.inference._elimination_order import get_order
 from nbn.inference._memory import OutOfMemoryError, device_headroom_bytes
-from nbn.inference._pruning import relevant_subnetwork
+from nbn.inference._pruning import relevant_subnetwork, requisite_nodes
 from nbn.inference.base import InferenceEngine
 
 logger = logging.getLogger(__name__)
@@ -198,7 +198,9 @@ class TensorVariableElimination(InferenceEngine):
 
         Returns a ``(elimination_order, relevant_set)`` tuple where
         ``relevant_set`` is the Bayes-ball relevant subnetwork for
-        ``(target, evidence_keys)`` (Bug 2 of #127).  The elimination
+        ``(target, evidence_keys)`` (Bug 2 of #127) minus the evidence nodes
+        whose own CPT is not requisite (#132) — i.e. exactly the nodes
+        whose CPTs enter the elimination.  The elimination
         order is computed on the *induced subgraph* of that relevant set,
         not the full DAG, so barren and m-separated nodes never enter the
         ordering.  Callers also use ``relevant_set`` to drop factors for
@@ -253,6 +255,17 @@ class TensorVariableElimination(InferenceEngine):
         relevant = relevant_subnetwork(
             graph, target, tuple(evidence_keys) + tuple(do_keys),
         )
+        # #132 (Option B): an observed node the ball never enters from a
+        # parent (e.g. an observed parent/ancestor of the target) is
+        # relevant as *evidence* — its value is clamped wherever it appears
+        # in a kept CPT — but its own CPT is not requisite: evaluated at the
+        # observed value it depends only on its parents and cancels in the
+        # final normalisation.  Dropping it keeps those parents out of the
+        # elimination (barley: ``sorttkv``'s CPT dragged in card-67 ``sort``).
+        non_requisite = set(evidence_keys) - requisite_nodes(
+            graph, target, tuple(evidence_keys) + tuple(do_keys),
+        )
+        relevant = relevant - non_requisite
         # Bug 2 Stage 2b (#127): the kept factors are the CPTs of the
         # relevant nodes, whose scopes are {node} ∪ parents(node).  Some
         # of those parents lie *outside* the relevant set — e.g. an

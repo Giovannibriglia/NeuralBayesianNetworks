@@ -615,3 +615,54 @@ def test_b6_router_routes_multi_target_to_lw():
     weights, samples = router.query(model, [nodes[0], nodes[1]], {nodes[-1]: torch.tensor(1)})
     assert router._last_engine == "likelihood_weighting"
     assert weights.shape == (1, 128) and samples.shape == (1, 128, 2)
+
+
+# --------------------------------------------------------------------------- #
+# #132 — non-requisite evidence CPTs are dropped, answers unchanged
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_132_pruned_ve_matches_enumeration_on_random_queries(seed):
+    from nbn import TensorVariableElimination
+
+    model = _random_discrete(seed=seed, n_nodes=7)
+    nodes = list(model.dag.topological_order())
+    g = torch.Generator().manual_seed(seed)
+    eng = TensorVariableElimination()
+    for _ in range(8):
+        perm = torch.randperm(len(nodes), generator=g).tolist()
+        n_ev = int(torch.randint(1, 5, (1,), generator=g))
+        target, ev_nodes = nodes[perm[0]], [nodes[i] for i in perm[1:1 + n_ev]]
+        do_nodes = [ev_nodes.pop()] if (n_ev > 1 and seed % 2) else []
+        ev = {n: int(torch.randint(0, 3, (1,), generator=g)) for n in ev_nodes}
+        do = {n: int(torch.randint(0, 3, (1,), generator=g)) for n in do_nodes}
+        out = eng.query(model, [target], {k: torch.tensor(v) for k, v in ev.items()},
+                        do={k: torch.tensor(v) for k, v in do.items()})
+        torch.testing.assert_close(out, brute_posterior(model, target, ev, do),
+                                   atol=1e-5, rtol=1e-5)
+        batched = eng.query_batch(model, [target], {k: torch.tensor([v, v]) for k, v in ev.items()},
+                                  do={k: torch.tensor([v, v]) for k, v in do.items()})
+        torch.testing.assert_close(batched[1], out, atol=1e-5, rtol=1e-5)
+
+
+def test_132_observed_parent_cpt_and_its_parents_leave_the_plan():
+    """G (card 50) -> P -> T with P observed: P's CPT is not requisite, so G
+    never enters the elimination; the answer is still exact."""
+    from nbn import TensorVariableElimination
+
+    torch.manual_seed(0)
+    m = NBN([("G", "P"), ("P", "T")],
+            variables={"G": ("discrete", 50), "P": ("discrete", 3), "T": ("discrete", 3)},
+            device="cpu")
+    m.auto_mechanisms()
+    n = 3000
+    gv = torch.randint(0, 50, (n,))
+    pv = (gv % 3 + torch.randint(0, 2, (n,))) % 3
+    tv = (pv + torch.randint(0, 2, (n,))) % 3
+    m.fit({"G": gv.float(), "P": pv.float(), "T": tv.float()})
+    eng = TensorVariableElimination()
+    order, factor_nodes = eng._plan_with_relevant(m, "T", ("P",))
+    assert factor_nodes == {"T"} and "G" not in order
+    out = eng.query(m, ["T"], {"P": torch.tensor(2)})
+    torch.testing.assert_close(out, brute_posterior(m, "T", {"P": 2}), atol=1e-5, rtol=1e-5)
