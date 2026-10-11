@@ -36,6 +36,23 @@ from nbn.bench.core.runner import _classify_exception
 from nbn.bench.domains.base import Query
 
 
+def _device_sync(device: Any) -> None:
+    """``torch.cuda.synchronize`` / ``torch.mps.synchronize`` for an adapter
+    on an accelerator, so per-query wall-clock includes the queued kernels."""
+    dev = str(device or "cpu")
+    try:
+        import torch
+
+        if dev.startswith("cuda") and torch.cuda.is_available():
+            torch.cuda.synchronize(dev)
+        elif dev.startswith("mps"):
+            backend = getattr(torch.backends, "mps", None)
+            if backend is not None and backend.is_available():
+                torch.mps.synchronize()
+    except Exception:  # pragma: no cover - a sync failure must not fail a query
+        pass
+
+
 @dataclass
 class QueryOutcome:
     """Per-query outcome from group dispatch (flat order)."""
@@ -93,6 +110,9 @@ def run_query_groups(
                         f"{0 if posteriors is None else len(posteriors)} "
                         f"posteriors for a batch of {b}"
                     )
+            # Asynchronous accelerators: wait for the kernels the call queued
+            # before stopping the clock (no-op on CPU / CPU-only adapters).
+            _device_sync(getattr(adapter, "device", "cpu"))
             status = "ok"
             err_msg = None
         except Exception as exc:
