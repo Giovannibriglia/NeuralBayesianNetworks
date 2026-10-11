@@ -737,3 +737,25 @@ def test_r8_update_and_fit_reject_non_finite_rows(device):
     bad["B"][3, 0] = float("inf")
     with pytest.raises(ValueError, match="NaN or infinite"):
         model.fit(bad)
+
+
+# ---------------------------------------------------------------------------
+# Round 2 — R7: discrete evidence / log_prob data must be valid state indices
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [torch.tensor([3]), torch.tensor([-1]), torch.tensor([1.5])])
+def test_r7_sample_rejects_invalid_discrete_evidence(bad):
+    model = _mixed_model()
+    with pytest.raises(ValueError, match="integer|outside"):
+        model.sample(5, evidence={"A": bad})
+
+
+@pytest.mark.parametrize("bad_val", [-1, 3, 0.5])
+def test_r7_log_prob_rejects_invalid_discrete_data(bad_val):
+    model = _mixed_model()
+    data = {"A": torch.tensor([0, 1, 2]), "X": torch.zeros(3, 1), "Y": torch.zeros(3, 1)}
+    assert torch.isfinite(model.log_prob(data)).all()
+    data["A"] = torch.tensor([0.0, 1.0, float(bad_val)])
+    with pytest.raises(ValueError, match="integer|outside"):
+        model.log_prob(data)

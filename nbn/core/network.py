@@ -545,6 +545,15 @@ class NeuralBayesianNetwork(nn.Module):
             )
 
         data_dev = to_device(dict(data), self._device)
+        # Discrete columns must hold valid state indices: a negative index
+        # silently wraps to the last state in a table lookup and a fractional
+        # one is truncated, both returning a plausible but wrong likelihood.
+        for node in nodes:
+            var = self.variables[node]
+            if var.is_discrete:
+                validate_discrete_value(
+                    node, data_dev[node], var.cardinality, what="log_prob data",
+                )
         per: Dict[str, torch.Tensor] = {}
         for node in nodes:
             pa_tensor = pack_parents(data_dev, self.dag.parents(node))

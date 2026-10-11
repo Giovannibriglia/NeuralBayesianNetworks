@@ -76,15 +76,23 @@ def validate_discrete_value(
 
     t = value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
     t = t.detach()
+    if t.numel() == 0:
+        return
+    # One device sync on the happy path (this runs on every log_prob call).
+    bad = (t < 0)
+    if t.is_floating_point():
+        bad = bad | (t != t.round())
+    if cardinality is not None:
+        bad = bad | (t >= int(cardinality))
+    if not bool(bad.any()):
+        return
     if t.is_floating_point() and not bool((t == t.round()).all()):
         raise ValueError(
             f"{what} for discrete node '{node}' must be an integer state "
-            f"index, got {t.reshape(-1).tolist()}."
+            f"index, got {t.reshape(-1)[:10].tolist()}."
         )
-    if cardinality is not None:
-        lo, hi = float(t.min()), float(t.max())
-        if lo < 0 or hi >= int(cardinality):
-            raise ValueError(
-                f"{what} {t.reshape(-1).tolist()} for discrete node '{node}' "
-                f"is outside its {cardinality} declared states."
-            )
+    raise ValueError(
+        f"{what} for discrete node '{node}' is outside its "
+        f"{cardinality if cardinality is not None else 'non-negative'} "
+        f"declared states (min {float(t.min())}, max {float(t.max())})."
+    )
