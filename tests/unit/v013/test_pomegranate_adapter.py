@@ -81,7 +81,7 @@ class TestProtocolConformance:
         assert isinstance(adapter, BaselineAdapter)
 
     def test_name_is_correct(self):
-        assert PomegranateAdapter().name == "pomegranate-discrete-ve"
+        assert PomegranateAdapter().name == "pomegranate-discrete-lbp"
 
     def test_pre_fit_state_is_none(self):
         adapter = PomegranateAdapter()
@@ -94,7 +94,7 @@ class TestProtocolConformance:
     def test_kwargs_silently_accepted(self):
         """Constructor accepts **kwargs for runner API compatibility."""
         adapter = PomegranateAdapter(some_future_kwarg=42)
-        assert adapter.name == "pomegranate-discrete-ve"
+        assert adapter.name == "pomegranate-discrete-lbp"
 
 
 class TestApplicability:
@@ -214,3 +214,53 @@ class TestBehavioral:
         problem = _make_small_discrete_problem(n_samples=200, seed=1)
         adapter.fit(problem, epochs=5)   # should not raise
         assert adapter.model is not None
+
+
+def test_unseen_parent_config_gets_uniform_row_not_nan_218():
+    """#218 / #198: a parent configuration absent from training was stored as
+    0/0 = NaN and predict_proba returned NaN for every query touching it."""
+    import torch
+
+    from nbn.bench.adapters.pomegranate_adapter import PomegranateAdapter
+    from nbn.bench.domains.base import BenchmarkProblem, Query
+
+    # Both root states are seen, but the parent combination (1, 1) never is.
+    data = {"X0": torch.tensor([0, 1, 0, 1, 0, 0]),
+            "X1": torch.tensor([0, 0, 1, 0, 1, 0]),
+            "X2": torch.tensor([0, 1, 1, 1, 0, 0])}
+    problem = BenchmarkProblem(
+        name="t", dag=[("X0", "X2"), ("X1", "X2")],
+        variables={"X0": ("discrete", 2), "X1": ("discrete", 2), "X2": ("discrete", 2)},
+        train_data=data, test_data=data, queries=[])
+    adapter = PomegranateAdapter(device="cpu")
+    adapter.fit(problem)
+    post = adapter.query(Query(targets=("X2",),
+                               evidence={"X0": torch.tensor(1.0), "X1": torch.tensor(1.0)},
+                               kind="marginal")).probs
+    assert torch.isfinite(post).all()
+    assert torch.allclose(post, torch.tensor([0.5, 0.5]), atol=1e-6)
+
+
+def test_label_is_loopy_bp_and_legacy_engine_spelling_is_accepted():
+    from nbn.bench.adapters.pomegranate_adapter import PomegranateAdapter
+    from nbn.bench.core.applicability import is_applicable
+    from nbn.bench.core.config import BaselineSpec, build_adapter
+
+    for eng in ("lbp", "ve"):
+        a = build_adapter(BaselineSpec("pomegranate", "discrete", "mle", eng))
+        assert a.name == "pomegranate-discrete-lbp"
+    assert is_applicable("pomegranate-discrete-lbp", "discrete")
+    assert is_applicable("pomegranate-discrete-ve", "discrete")   # old files
+    import pytest
+    with pytest.raises(ValueError):
+        PomegranateAdapter(inference_method="lw")
+
+
+def test_old_result_files_are_read_under_the_new_label():
+    import pandas as pd
+
+    from nbn.bench._paper_agg import normalize_baselines
+
+    df = pd.DataFrame({"baseline": ["pomegranate-discrete-ve", "nbn-cat-ve"]})
+    assert normalize_baselines(df)["baseline"].tolist() == [
+        "pomegranate-discrete-lbp", "nbn-cat-ve"]

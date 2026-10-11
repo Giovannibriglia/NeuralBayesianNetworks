@@ -48,7 +48,7 @@ selector:
 baselines:
   - {library: nbn,         mechanism: cat,      param_method: mle, inference_method: ve}
   - {library: pgmpy,       mechanism: discrete, param_method: mle, inference_method: ve}
-  - {library: pomegranate, mechanism: discrete, param_method: mle, inference_method: ve}
+  - {library: pomegranate, mechanism: discrete, param_method: mle, inference_method: lbp}
 
 n_queries_per_cell: 32
 per_cell_timeout_s: 60.0

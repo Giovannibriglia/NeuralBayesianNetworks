@@ -71,7 +71,7 @@ source:
 
 baselines:
   - {library: pgmpy,       mechanism: discrete,  param_method: mle, inference_method: ve}
-  - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: ve}
+  - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: lbp}
   - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance}
   - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router}
   # Non-parametric -lw baselines (#228) — kde + knn only (sub-second/cell on CPU

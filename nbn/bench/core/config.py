@@ -195,7 +195,8 @@ def build_adapter(spec: BaselineSpec, *, require_engine: bool = False) -> Any:
         )
 
     if lib == "pomegranate":
-        return PomegranateAdapter(device=device, **kw)
+        return PomegranateAdapter(
+            device=device, inference_method=spec.inference_method, **kw)
 
     if lib == "pyro":
         _need_engine("PyroAdapter")

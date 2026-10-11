@@ -374,7 +374,7 @@ class TestBuildAdapter:
         spec = BaselineSpec("pomegranate", "discrete", "mle")
         adapter = build_adapter(spec)
         assert isinstance(adapter, PomegranateAdapter)
-        assert adapter.name == "pomegranate-discrete-ve"
+        assert adapter.name == "pomegranate-discrete-lbp"
 
     def test_pyro(self):
         spec = BaselineSpec("pyro", "empirical", "empirical", "importance")
@@ -909,7 +909,7 @@ _MATRIX = [
     ("nbn-neuralcat-ve",        "discrete",           BaselineSpec("nbn", "neuralcat", "mle", "ve"),         None),
     ("pgmpy-mle-ve",            "discrete",           BaselineSpec("pgmpy", "discrete","mle", "ve"),         None),
     ("pgmpy-bayes-ve",          "discrete",           BaselineSpec("pgmpy", "discrete","bayes","ve"),        None),
-    ("pomegranate-discrete-ve", "discrete",           BaselineSpec("pomegranate","discrete","mle"),          None),
+    ("pomegranate-discrete-lbp", "discrete",          BaselineSpec("pomegranate","discrete","mle"),          None),
     ("pyro-empirical-importance","discrete",          BaselineSpec("pyro","empirical","empirical","importance"), "pyro"),
     # ---- Continuous LG ----
     ("nbn-lg-lw",               "continuous_lg",      BaselineSpec("nbn", "lg",        "mle", "lw"),         None),

@@ -47,6 +47,7 @@ import pandas as pd
 from nbn.bench._paper_agg import (
     log_axis_ok,
     method_style,  # noqa: F401  (re-exported for callers/tests)
+    normalize_baselines,
     ACCURACY_METRICS,
     CLOSER_TO_VALUE,
     CONTINUOUS_FAMILIES,
@@ -849,6 +850,7 @@ def run_plot(
     output_dir = Path(output_dir)
     frames = [pd.read_parquet(p) for p in sorted(paths, key=str)]
     df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+    df = normalize_baselines(df)
     required = {"benchmark", "family", "problem_id", "seed", "baseline",
                 "metric", "value", "status", "query_role", "query_kind"}
     missing = required - set(df.columns)

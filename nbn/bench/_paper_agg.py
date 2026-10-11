@@ -78,6 +78,22 @@ DEPRECATED_CONTINUOUS_METRICS = frozenset({"tv_per_node", "jsd_per_node"})
 FAILURE_STATUSES = frozenset({"timeout", "oom", "error"})
 
 
+# Renamed baseline labels: old result files are read under the new name so a
+# base run and its reruns group as one method. pomegranate's predict_proba is
+# loopy belief propagation, never variable elimination (D10).
+BASELINE_ALIASES = {"pomegranate-discrete-ve": "pomegranate-discrete-lbp"}
+
+
+def normalize_baselines(df: pd.DataFrame) -> pd.DataFrame:
+    """Rewrite legacy baseline labels (:data:`BASELINE_ALIASES`) in place of
+    a copy; frames without a ``baseline`` column pass through."""
+    if "baseline" not in df.columns or not df["baseline"].isin(BASELINE_ALIASES).any():
+        return df
+    out = df.copy()
+    out["baseline"] = out["baseline"].replace(BASELINE_ALIASES)
+    return out
+
+
 def parse_baseline(baseline: str) -> tuple[str, str]:
     """('nbn-cat-ve') -> ('nbn', 'cat-ve')."""
     parts = str(baseline).split("-", 1)
