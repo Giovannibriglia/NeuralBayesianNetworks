@@ -206,7 +206,18 @@ def _ensure_cached(name: str) -> Path:
     """Download a discrete ``.bif.gz`` to the cache and decompress if absent.
 
     Returns the local path to the uncompressed ``.bif`` file.
+
+    Concurrency-safe: several processes (pytest-xdist workers, parallel
+    SLURM jobs sharing ``~/.cache``) may populate the same network at once.
+    Both the download and the decompression write to a private temporary
+    file in the cache directory and publish it with ``os.replace`` (atomic
+    on POSIX and Windows within one filesystem), so a reader that sees
+    ``<name>.bif`` always sees a complete file. Racing writers each produce
+    an identical complete file; the last replace wins.
     """
+    import os
+    import tempfile
+
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     local_bif = _CACHE_DIR / f"{name}.bif"
     if local_bif.exists():
@@ -214,18 +225,29 @@ def _ensure_cached(name: str) -> Path:
 
     url = _bif_url(name)
     logger.info("Downloading bnlearn network %s from %s", name, url)
-    local_gz = _CACHE_DIR / f"{name}.bif.gz"
+    fd_gz, tmp_gz = tempfile.mkstemp(prefix=f".{name}.", suffix=".bif.gz.part",
+                                     dir=_CACHE_DIR)
+    fd_bif, tmp_bif = tempfile.mkstemp(prefix=f".{name}.", suffix=".bif.part",
+                                       dir=_CACHE_DIR)
+    os.close(fd_bif)
     try:
-        with urllib.request.urlopen(
-            url, timeout=_DOWNLOAD_TIMEOUT_S, context=_ssl_context(),
-        ) as response:
-            local_gz.write_bytes(response.read())
-    except Exception as e:  # noqa: BLE001 — re-raised with context
-        raise RuntimeError(f"Failed to download {name}.bif.gz from {url}: {e}") from e
+        try:
+            with os.fdopen(fd_gz, "wb") as f_gz, urllib.request.urlopen(
+                url, timeout=_DOWNLOAD_TIMEOUT_S, context=_ssl_context(),
+            ) as response:
+                f_gz.write(response.read())
+        except Exception as e:  # noqa: BLE001 — re-raised with context
+            raise RuntimeError(f"Failed to download {name}.bif.gz from {url}: {e}") from e
 
-    with gzip.open(local_gz, "rb") as f_in, open(local_bif, "wb") as f_out:
-        f_out.write(f_in.read())
-    local_gz.unlink()  # keep only the decompressed .bif
+        with gzip.open(tmp_gz, "rb") as f_in, open(tmp_bif, "wb") as f_out:
+            f_out.write(f_in.read())
+        os.replace(tmp_bif, local_bif)
+    finally:
+        for tmp in (tmp_gz, tmp_bif):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
     return local_bif
 
 
