@@ -13,7 +13,7 @@
 # =============================================================================
 version: "v0.14"
 benchmark: synthetic
-config_name: batch_speed_smoke
+config_name: batch_speed_smoke2
 metrics: timing
 
 batch_sizes: [1, 4]

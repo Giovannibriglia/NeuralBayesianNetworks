@@ -43,7 +43,7 @@
 # Wall-clock budget: < 90 seconds on CPU.
 version: "v0.13"
 benchmark: synthetic
-config_name: smoke
+config_name: smoke_random_only
 metrics: all
 
 selector:
