@@ -927,3 +927,115 @@ def test_cuda_model_to_cuda_stores_indexed_device():
 
     m2 = NBN([], {"A": ("continuous", 1)}, device="cuda")
     assert m2.device.index is not None
+
+
+# ---------------------------------------------------------------------------
+# Round 3 — N4: whole-model pickle from origin/master with node__ names
+# ---------------------------------------------------------------------------
+
+
+def test_n4_master_pickle_with_node_prefix_names_loads():
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "data" / "master_node_prefix_pickle.pt"
+    payload = torch.load(path, weights_only=False)
+    model = payload["model"]
+    assert set(model.mechanisms.keys()) == {"node__a", "b.c"}
+    torch.testing.assert_close(model.log_prob(payload["data"]), payload["ref"])
+    # Re-pickling with the branch keeps working (layout marker now set).
+    import io
+    buf = io.BytesIO()
+    torch.save(model, buf)
+    buf.seek(0)
+    again = torch.load(buf, weights_only=False)
+    torch.testing.assert_close(again.log_prob(payload["data"]), payload["ref"])
+    assert set(again.mechanisms.keys()) == {"node__a", "b.c"}
+
+
+def test_n4_branch_pickle_with_reserved_names_round_trips():
+    import io
+
+    model, data = _discrete_chain(["train", "node__x", "a.b"])
+    model.auto_mechanisms()
+    model.fit(data)
+    buf = io.BytesIO()
+    torch.save(model, buf)
+    buf.seek(0)
+    loaded = torch.load(buf, weights_only=False)
+    assert set(loaded.mechanisms.keys()) == {"train", "node__x", "a.b"}
+    torch.testing.assert_close(loaded.log_prob(data), model.log_prob(data))
+
+
+# ---------------------------------------------------------------------------
+# Round 3 — N5: rescaled constant weights must not shift order statistics
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("device", available_devices())
+@pytest.mark.parametrize("n", [100, 1000, 5000, 20000])
+def test_n5_weighted_quantile_constant_fractional_weights_exact(device, n):
+    from nbn.learning.weighting import weighted_quantile
+
+    x = torch.arange(n, dtype=torch.float32).reshape(-1, 1)
+    q = torch.tensor([0.1, 0.25, 0.5, 0.75, 0.9])
+    ref = torch.quantile(x, q, dim=0)
+    got = weighted_quantile(x.to(device), q, torch.full((n,), 1.0 / n, device=device))
+    torch.testing.assert_close(got.cpu(), ref, atol=1e-3, rtol=0)
+
+
+# ---------------------------------------------------------------------------
+# Round 3 — N7: weighted Fisher resampling without torch.multinomial
+# ---------------------------------------------------------------------------
+
+
+def test_n7_resample_by_weight_is_proportional_and_skips_zero_weights():
+    from nbn.update.online_laplace import _resample_by_weight
+
+    w = torch.tensor([0.0, 1.0, 3.0, 0.0, 4.0])
+    idx = _resample_by_weight(w, 80000)
+    counts = torch.bincount(idx, minlength=5).double() / 80000
+    assert counts[0] == 0 and counts[3] == 0
+    torch.testing.assert_close(counts[[1, 2, 4]], torch.tensor([0.125, 0.375, 0.5], dtype=torch.float64), atol=0.01, rtol=0)
+    torch.manual_seed(3)
+    a = _resample_by_weight(w, 50)
+    torch.manual_seed(3)
+    assert torch.equal(a, _resample_by_weight(w, 50))
+
+
+def test_n7_weighted_consolidate_does_not_use_multinomial(monkeypatch):
+    """multinomial caps at 2**24 categories; the sampler must not depend on it."""
+    from nbn.update import online_laplace
+
+    def _boom(*a, **k):
+        raise RuntimeError("number of categories cannot exceed 2^24")
+
+    monkeypatch.setattr(torch, "multinomial", _boom)
+    model, data = _mdn_model()
+    model.fit(data, epochs=2, consolidate=False)
+    mech = model.mechanisms["B"]
+    w = torch.rand(300)
+    online_laplace.consolidate(mech, data["B"], data["A"], weights=w, sample_cap=64)
+    assert torch.isfinite(mech._ewc_fisher).all()
+
+
+# ---------------------------------------------------------------------------
+# Round 3 — N8: skipped (non-updatable) nodes are logged once per update
+# ---------------------------------------------------------------------------
+
+
+def test_n8_update_logs_skipped_binning_nodes_once(caplog):
+    import logging
+
+    from nbn import NeuralBayesianNetwork as NBN
+
+    model = NBN([("X", "A")], {"X": ("continuous", 1), "A": ("discrete", 2)}, device="cpu")
+    model.auto_mechanisms(default_continuous="lg")
+    g = torch.Generator().manual_seed(0)
+    x = torch.randn(300, 1, generator=g)
+    data = {"X": x, "A": (x[:, 0] > 0).long()}
+    model.fit(data)
+    with caplog.at_level(logging.INFO, logger="nbn.update.orchestrate"):
+        hist = model.update(data)
+    assert hist.skipped == ["A"]
+    lines = [r for r in caplog.records if "not updated" in r.getMessage()]
+    assert len(lines) == 1 and "A (BinningCategoricalTable)" in lines[0].getMessage()

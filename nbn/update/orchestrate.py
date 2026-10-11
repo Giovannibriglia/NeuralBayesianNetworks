@@ -36,6 +36,11 @@ def update(
 ) -> UpdateHistory:
     """Fold ``data`` into an already-fitted ``model`` without rehearsal.
 
+    Mechanisms whose ``supports_update`` is False (e.g. the
+    ``BinningCategoricalTable`` that ``auto_mechanisms`` assigns to a discrete
+    node with a continuous parent) keep their fitted CPD unchanged; they are
+    listed in ``UpdateHistory.skipped`` and in one INFO log line per call.
+
     Parameters
     ----------
     model:
@@ -71,6 +76,7 @@ def update(
     model.to(dev)
 
     data_dev: Dict[str, torch.Tensor] = to_device(dict(data), dev)
+    _check_finite(data_dev, nodes)
 
     history = UpdateHistory(device=device)
     t0 = time.perf_counter()
@@ -85,6 +91,13 @@ def update(
             _restore(saved)
         raise
 
+    if history.skipped:
+        logger.info(
+            "update(): %d node(s) not updated (mechanism has no incremental "
+            "update; refit to fold new data in): %s",
+            len(history.skipped),
+            ", ".join(f"{n} ({type(model.mechanisms[n]).__name__})" for n in history.skipped),
+        )
     history.wall_clock_s = time.perf_counter() - t0
     return history
 
@@ -146,15 +159,7 @@ def _preflight(model, data, nodes) -> None:
         raise ValueError(
             f"update() needs a column for every node; missing {sorted(missing)}."
         )
-    # A single NaN row would be folded into the persisted sufficient
-    # statistics (LG normal equations, CPT counts) and poison every later
-    # update for good — there is no way to subtract it back out.
-    bad = [n for n in nodes if not _all_finite(data[n])]
-    if bad:
-        raise ValueError(
-            f"update() data contains NaN or infinite values in column(s) "
-            f"{sorted(bad)}; drop or impute those rows first."
-        )
+
     unfitted = [n for n in nodes if n not in model.mechanisms]
     if unfitted:
         raise RuntimeError(f"No mechanism registered for node(s) {sorted(unfitted)}.")
@@ -211,6 +216,22 @@ def _update_nodes(model, data_dev, nodes, forgetting, kwargs, history, backups) 
             )
 
 
-def _all_finite(t) -> bool:
-    t = torch.as_tensor(t)
-    return (not t.is_floating_point()) or bool(torch.isfinite(t).all())
+def _check_finite(data_dev, nodes) -> None:
+    """Refuse NaN / inf before any mechanism is touched.
+
+    A single NaN row would be folded into the persisted sufficient
+    statistics (LG normal equations, CPT counts) and poison every later
+    update for good — there is no way to subtract it back out.  One device
+    sync for all columns (they share a device by now), not one per column.
+    """
+    cols = [n for n in nodes if torch.is_tensor(data_dev[n]) and data_dev[n].is_floating_point()]
+    if not cols:
+        return
+    ok = torch.stack([torch.isfinite(data_dev[n]).all() for n in cols])
+    if bool(ok.all()):
+        return
+    bad = [n for n, good in zip(cols, ok.tolist()) if not good]
+    raise ValueError(
+        f"update() data contains NaN or infinite values in column(s) "
+        f"{sorted(bad)}; drop or impute those rows first."
+    )
