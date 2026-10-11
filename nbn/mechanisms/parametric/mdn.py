@@ -294,7 +294,7 @@ class MDNMechanism(Mechanism):
         # sequential per-sample backward passes — pure overhead for fit-only
         # workloads that never call update().
         if consolidate:
-            online_laplace.consolidate(self, x, parents)
+            online_laplace.consolidate(self, x, parents, weights=w_vec)
         # ``warm_started`` is True only where parameters were actually carried
         # over — never on the closed-form root branch, which recomputes.
         return {

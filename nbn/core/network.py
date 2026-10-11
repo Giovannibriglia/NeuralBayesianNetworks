@@ -673,9 +673,18 @@ class NeuralBayesianNetwork(nn.Module):
 
         Returns
         -------
-        torch.Tensor
-            For a single discrete target: ``[K]`` probability vector.
-            For continuous or multi-target: ``(weights, samples)`` tuple.
+        torch.Tensor or tuple
+            Single discrete target: ``[K]`` probability vector.
+            Several discrete targets answered exactly (``tensor_ve``, or the
+            default router when the joint table has at most
+            ``max_joint_elements`` entries and the plan fits in memory): the
+            joint posterior ``[K_1, ..., K_n]``, axes in ``targets`` order,
+            summing to 1; observed / intervened targets are one-hot axes.
+            Otherwise (continuous targets, likelihood weighting, or a joint
+            too large for exact inference): ``(weights [1, S], samples
+            [1, S, D])`` particles.  ``query_batch`` returns the same with a
+            leading ``B`` axis.  ``engine.last_engine`` on the default router
+            reports which engine answered.
 
         Notes
         -----

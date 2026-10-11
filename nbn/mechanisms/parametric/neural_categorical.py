@@ -150,7 +150,7 @@ class NeuralCategoricalMechanism(Mechanism):
             # data, so the bitwise epochs=0 contract still holds.
             self._root_logits = nn.Parameter(log_freq.to(device))
             if consolidate:
-                online_laplace.consolidate(self, x, None)
+                online_laplace.consolidate(self, x, None, weights=w_vec)
             return {"n_classes": k, "warm_started": False}
 
         parents = ensure_2d(parents).to(device=device)
@@ -195,7 +195,7 @@ class NeuralCategoricalMechanism(Mechanism):
         # sequential per-sample backward passes — pure overhead for fit-only
         # workloads that never call update().
         if consolidate:
-            online_laplace.consolidate(self, x, parents)
+            online_laplace.consolidate(self, x, parents, weights=w_vec)
         return {"n_classes": k, "d_pa": d_pa, "warm_started": warm}
 
     # ------------------------------------------------------------------
