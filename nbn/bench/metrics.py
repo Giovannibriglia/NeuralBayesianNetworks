@@ -541,6 +541,12 @@ def _compute_metrics_per_node(
         on a discrete target, ``"tv"`` on a continuous one).  The caller
         decides whether ``None`` becomes a ``not_supported`` row.
 
+    Raises
+    ------
+    ValueError
+        When a CPD pair's shapes differ (e.g. a fitted CPT on a truncated
+        state grid, #217). This used to be a silent ``continue`` that turned
+        the query into ``not_supported``; it is a method error (D5).
     """
     import math
 

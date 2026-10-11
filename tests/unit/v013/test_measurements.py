@@ -95,7 +95,9 @@ class _StubAdapter:
         # Return a valid Posterior based on target kind from the query's evidence
         # (we don't have the problem here, but we can return probs for discrete).
         # Structural tests don't care about correctness, just contract shape.
-        return Posterior(probs=torch.tensor([0.5, 0.5]))
+        # Uniform over the fixtures' default cardinality (4). A shorter vector
+        # is a method error since D5 (it used to be silently truncated).
+        return Posterior(probs=torch.full((4,), 0.25))
 
     def is_applicable(self, problem): return True
 

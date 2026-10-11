@@ -156,9 +156,21 @@ class CellResult:
     # Stamped per query by AccuracyAndTiming. Additive.
     oracle: str | None = None
 
+    # Position of the query in the cell's flattened query list (stamped by
+    # AccuracyAndTiming on every row of the query; for an unstarted timed-out
+    # group, the group's first position). Lets the paper aggregation average
+    # every method of a cell over the SAME queries (D5). None for legacy
+    # parquets and sentinels. Additive.
+    query_idx: int | None = None
+
 
 # Valid status values (for validation in implementations)
-VALID_STATUSES = frozenset({"ok", "timeout", "oom", "error", "not_supported"})
+# "no_result": the query ran but the oracle could produce no reference for it
+# (zero-probability evidence, collapsed LW ESS); identical for every baseline
+# of a cell, so it is neither a method failure nor an applicability gap.
+VALID_STATUSES = frozenset({
+    "ok", "timeout", "oom", "error", "not_supported", "no_result",
+})
 
 # Valid benchmark names (for validation)
 VALID_BENCHMARKS = frozenset({"synthetic", "scalability", "bnlearn"})

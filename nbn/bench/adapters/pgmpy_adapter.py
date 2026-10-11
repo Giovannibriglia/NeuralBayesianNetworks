@@ -276,6 +276,17 @@ class PgmpyAdapter:
         for node in problem.variables:
             if node not in bn.nodes():
                 bn.add_node(node)
+        # Declared state grid (#217): without it pgmpy infers each variable's
+        # states from the training data, so a state never observed is dropped
+        # — the CPT spans a truncated grid, VE answers on it (a K-1 vector,
+        # misaligned when the missing state is not the last) and evidence on
+        # the unseen state raises. With the declared grid, MLE gives unseen
+        # parent configurations a uniform row and BDeu prior mass covers
+        # unseen states, as in extract_learned_cpts.
+        state_names = {
+            n: list(range(int(c))) for n, (kind, c) in problem.variables.items()
+            if kind == "discrete"
+        }
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FutureWarning)
             if self.param_method == "bayes":
@@ -288,7 +299,8 @@ class PgmpyAdapter:
                 # (BayesianEstimator.get_parameters), not bn.fit().
                 from pgmpy.estimators import BayesianEstimator
 
-                estimator = BayesianEstimator(model=bn, data=df)
+                estimator = BayesianEstimator(
+                    model=bn, data=df, state_names=state_names)
                 cpds = estimator.get_parameters()
                 bn.add_cpds(*cpds)
             else:
@@ -297,11 +309,14 @@ class PgmpyAdapter:
                 try:
                     from pgmpy.parameter_estimator import DiscreteMLE
 
-                    bn.fit(df, estimator=DiscreteMLE())
+                    bn.fit(df, estimator=DiscreteMLE(state_names=state_names))
                 except (ImportError, TypeError):
                     from pgmpy.estimators import MaximumLikelihoodEstimator
 
-                    bn.fit(df, estimator=MaximumLikelihoodEstimator)
+                    cpds = MaximumLikelihoodEstimator(
+                        model=bn, data=df, state_names=state_names,
+                    ).get_parameters()
+                    bn.add_cpds(*cpds)
 
         self._model = bn
         self._infer = VariableElimination(bn)
@@ -471,12 +486,19 @@ class PgmpyAdapter:
             for k, v in q.evidence.items()
             if v is not None
         }
+        target = q.targets[0]
         result = self._infer.query(
-            variables=list(q.targets), evidence=ev, show_progress=False,
+            variables=[target], evidence=ev, show_progress=False,
         )
-        probs = torch.from_numpy(result.values).float().clamp_min(0.0)
+        values = torch.from_numpy(result.values).double().clamp_min(0.0).reshape(-1)
+        # Re-index from pgmpy's state axis to the declared value order 0..K-1
+        # (identity with declared state_names; fails loudly otherwise).
+        k = int(self.problem.variables[target][1]) if self.problem is not None \
+            else values.numel()
+        idx = _state_axis_index(target, list(result.state_names[target]), k)
+        probs = values[torch.tensor(idx)]
         probs = probs / probs.sum()
-        return Posterior(probs=probs)
+        return Posterior(probs=probs.float())
 
     def _query_lg(self, q: Query) -> Posterior:
         post_mean, post_std = self._lg_posterior_moments(q)

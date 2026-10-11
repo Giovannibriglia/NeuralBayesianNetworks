@@ -49,6 +49,7 @@ Reference: docs/v0.13-benchmark-redesign.md §3, §4.1
 from __future__ import annotations
 
 import dataclasses
+import math
 import time
 from typing import Any
 
@@ -238,12 +239,20 @@ class AccuracyAndTiming:
         per_query_metric_dicts: list[dict | None] = []
 
         per_query_oracle: list[str | None] = []
+        score_errors: dict[int, str] = {}
         for qi, (q, (posterior, _err)) in enumerate(zip(queries, posteriors)):
             if posterior is None:
                 per_query_metric_dicts.append(None)
                 per_query_oracle.append(None)
                 continue
-            mdict, tier = self._score_query(problem, q, posterior, query_index=qi)
+            try:
+                mdict, tier = self._score_query(problem, q, posterior, query_index=qi)
+            except Exception as exc:  # noqa: BLE001 - recorded as an error row
+                # A malformed posterior (wrong shape, NaN, missing field) is a
+                # method failure of THIS query: status "error" with the reason,
+                # never a silent not_supported / dropped row (D5, #198).
+                mdict, tier = None, None
+                score_errors[qi] = f"scoring failed: {type(exc).__name__}: {exc}"
             per_query_metric_dicts.append(mdict)
             per_query_oracle.append(tier)
 
@@ -269,6 +278,7 @@ class AccuracyAndTiming:
                 # exception; a scoring failure with no exception falls back to
                 # "error" (#127 Stage 4).
                 fail_status = query_statuses[i] if posterior is None else "error"
+                err_msg = err_msg or score_errors.get(i)
                 for mk in _METRIC_KEYS:
                     query_rows.append(CellResult(
                         benchmark=benchmark,
@@ -315,18 +325,25 @@ class AccuracyAndTiming:
                         batch_size=query_bsizes[i],
                     ))
                 # Failure rows carry no meaningful ESS (ess stays None).
-                rows.extend(query_rows)
+                rows.extend(dataclasses.replace(r, query_idx=i) for r in query_rows)
                 continue
 
             # Success: one row per metric.
             for mk in _METRIC_KEYS:
                 val = mdict.get(mk)
-                if val is None:
-                    status = "not_supported"
-                    value = float("nan")
-                elif mdict.get(f"{mk}_no_result"):
+                row_err = None
+                if mdict.get(f"{mk}_no_result"):
+                    # The oracle produced no reference for this query.
                     status = "no_result"
                     value = float("nan")
+                    row_err = "oracle produced no reference for this query"
+                elif val is None:
+                    status = "not_supported"
+                    value = float("nan")
+                elif not math.isfinite(float(val)):
+                    status = "error"
+                    value = float("nan")
+                    row_err = f"non-finite {mk} ({val})"
                 else:
                     status = "ok"
                     value = float(val)
@@ -346,7 +363,7 @@ class AccuracyAndTiming:
                     fit_time_s=fit_time_s,
                     query_time_s=q_time,
                     metrics_time_s=metrics_time_s,
-                    error_msg=None,
+                    error_msg=row_err,
                     batch_size=query_bsizes[i],
                 ))
             # Timing rows: one per timing metric; status always "ok" since the
@@ -381,7 +398,7 @@ class AccuracyAndTiming:
             q_khat = posterior.khat
             rows.extend(
                 dataclasses.replace(r, ess=q_ess, khat=q_khat,
-                                    oracle=per_query_oracle[i])
+                                    oracle=per_query_oracle[i], query_idx=i)
                 for r in query_rows
             )
 
@@ -415,6 +432,7 @@ class AccuracyAndTiming:
                     metrics_time_s=float("nan"),
                     error_msg="query budget exceeded",
                     batch_size=len(group),
+                    query_idx=flat_start,
                 ))
             for tk, tv in [
                 ("fit_time_s", fit_time_s),
@@ -439,6 +457,7 @@ class AccuracyAndTiming:
                     metrics_time_s=float("nan"),
                     error_msg="query budget exceeded",
                     batch_size=len(group),
+                    query_idx=flat_start,
                 ))
 
         return rows
@@ -460,7 +479,9 @@ class AccuracyAndTiming:
         Dispatches on target kind (discrete → cpd_pair; continuous →
         sample_pair).  The oracle's draws run under a seed derived from the
         problem and ``query_index`` — identical for every baseline of the cell.
-        On oracle failure, returns an all-None dict (caller emits no_result).
+        On oracle failure, returns a ``*_no_result``-flagged dict (caller emits
+        ``status="no_result"``); a malformed posterior raises (caller emits
+        ``status="error"`` with the reason).
         """
         target = q.targets[0]
         target_kind = problem.variables[target][0]
@@ -482,16 +503,31 @@ class AccuracyAndTiming:
                 source=self._tabular(problem),
             )
             if probs is None:
-                return dict.fromkeys(_METRIC_KEYS), tier
+                return _no_result(), tier
 
-            k = problem.variables[target][1]
+            k = int(problem.variables[target][1])
             true_logits = torch.log(probs.float().clamp_min(1e-12))
 
-            # Posterior.probs is the predicted probability vector.
+            # Posterior.probs is the predicted probability vector. Anything
+            # but a finite length-K distribution is a method error (D5, #198):
+            # the old ``[:k]`` slice let a truncated grid (pgmpy without
+            # state_names, #217) pass and a short vector fall through to
+            # not_supported.
             if posterior.probs is None:
-                return dict.fromkeys(_METRIC_KEYS), tier
-            pred_vec = posterior.probs.cpu().reshape(-1)[:k]
-            fit_logits = torch.log(pred_vec.clamp_min(1e-12))
+                raise ValueError(
+                    f"no probability vector for discrete target {target!r}")
+            pred_vec = posterior.probs.detach().cpu().double().reshape(-1)
+            if pred_vec.numel() != k:
+                raise ValueError(
+                    f"probability vector of length {pred_vec.numel()} for "
+                    f"{target!r}, which has {k} states")
+            if not bool(torch.isfinite(pred_vec).all()):
+                raise ValueError(f"non-finite posterior probabilities for {target!r}")
+            total = float(pred_vec.sum())
+            if pred_vec.min() < -1e-6 or abs(total - 1.0) > 1e-3:
+                raise ValueError(
+                    f"posterior for {target!r} is not a distribution (sum={total:.6g})")
+            fit_logits = torch.log((pred_vec / total).float().clamp_min(1e-12))
             cpd_pairs.append((true_logits, fit_logits))
 
         else:
@@ -502,10 +538,12 @@ class AccuracyAndTiming:
                 seed=oracle_seed,
             )
             if oracle is None or oracle.shape[0] < 100:
-                return dict.fromkeys(_METRIC_KEYS), tier
+                return _no_result(), tier
 
-            if posterior.samples is None:
-                return dict.fromkeys(_METRIC_KEYS), tier
+            if posterior.samples is None or posterior.samples.numel() == 0:
+                raise ValueError(f"no posterior samples for continuous target {target!r}")
+            if not bool(torch.isfinite(posterior.samples).all()):
+                raise ValueError(f"non-finite posterior samples for {target!r}")
             # D3: score every method at the same sample count. Methods draw
             # 50 (pyro) to 2048 (nbn) posterior samples; W1 / KS sampling
             # noise depends on that count, so both sides are brought to
@@ -536,6 +574,13 @@ class AccuracyAndTiming:
         src = tabular_source(problem)
         self._tabular_cache = (problem, src)
         return src
+
+
+def _no_result() -> dict:
+    """Metric dict for a query the oracle could not produce a reference for."""
+    out: dict = dict.fromkeys(_METRIC_KEYS)
+    out.update({f"{mk}_no_result": True for mk in _METRIC_KEYS})
+    return out
 
 
 def _resample_to(x: torch.Tensor, s: int, seed: int) -> torch.Tensor:

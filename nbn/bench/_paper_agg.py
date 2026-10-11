@@ -337,16 +337,38 @@ def _with_shared_base_fit(rows: pd.DataFrame, vcol: str) -> pd.DataFrame:
     return rows
 
 
+def _query_ids(rows: pd.DataFrame, keys: list[str]) -> pd.Series:
+    """Per-row query identifier within its cell: the ``query_idx`` column
+    (stamped since D5) or, for legacy parquets, the row's position among the
+    cell's rows of the metric (measurements emit queries in selector order,
+    which is deterministic per seed and identical across baselines)."""
+    pos = rows.groupby(keys, sort=False).cumcount()
+    if "query_idx" in rows.columns:
+        qi = pd.to_numeric(rows["query_idx"], errors="coerce")
+        return qi.where(qi.notna(), pos).astype(int)
+    return pos.astype(int)
+
+
 def cell_table(dfx: pd.DataFrame, metric: str) -> tuple[pd.DataFrame, dict]:
     """One row per attempted (method, x, inst) for ``metric``.
 
     Columns: ``method, x, inst, solved, value, code``. ``solved`` is True when
-    the cell has >= 1 ok row for the metric, no failure row, and no failure
-    sentinel; ``value`` is the per-cell reduction over ok rows (NaN when not
-    solved); ``code`` is the most frequent failure status (None when solved).
-    Cells whose rows are all applicability statuses (not_supported /
-    not_applicable) were never attempted and are omitted. An ok cell whose
-    reduced value is NaN counts as unsolved with code ``"nan"``.
+    the cell has >= 1 ok row for the metric, no failure row, no failure
+    sentinel and no ok row with a non-finite value; ``value`` is the per-cell
+    reduction (NaN when not solved); ``code`` is the most frequent failure
+    status (``"nan"`` for an ok row without a usable number; None when
+    solved). Cells whose rows are all applicability / no-reference statuses
+    (not_supported / not_applicable / no_result) were never attempted and are
+    omitted.
+
+    **Same queries for every method (D5).** For per-query reductions (mean,
+    sum) the value of a solved cell is computed over the queries that are
+    ``ok`` for *every* method that solved that ``(x, inst)``, so methods are
+    never averaged over different query subsets (e.g. one method's
+    ``not_supported`` / ``no_result`` query silently leaving its mean over an
+    easier subset). A solved cell sharing no query with the others becomes
+    unsolved with code ``"no_common_query"``. ``fit_time`` (one value per
+    cell) is not restricted.
 
     Also returns ``n_total``: ``{x: number of distinct instances at x}`` over
     every row of ``dfx`` (any metric / status, sentinels included), the
@@ -359,40 +381,65 @@ def cell_table(dfx: pd.DataFrame, metric: str) -> tuple[pd.DataFrame, dict]:
     sent_code = {k: g["status"].mode().iloc[0] for k, g in sentinel.groupby(keys)}
 
     rows, vcol, reducer = _metric_rows(dfx, metric)
-    records = []
-    seen = set()
+    rows = rows.copy()
+    rows["_q"] = _query_ids(rows, keys) if not rows.empty else pd.Series(dtype=int)
+    rows["_v"] = pd.to_numeric(rows[vcol], errors="coerce") if not rows.empty \
+        else pd.Series(dtype=float)
+
+    status_of: dict = {}
+    ok_queries: dict = {}
+    ok_rows: dict = {}
     for k, g in rows.groupby(keys):
         st = g["status"]
         okm = st == "ok"
         fail = st.isin(FAILURE_STATUSES)
         s_code = sent_code.get(k)
-        attempted = bool(okm.any() or fail.any() or s_code is not None)
-        if not attempted:
+        if not bool(okm.any() or fail.any() or s_code is not None):
             continue
-        seen.add(k)
-        solved = bool(okm.any() and not fail.any() and s_code is None)
-        if solved:
-            vals = pd.to_numeric(g.loc[okm, vcol], errors="coerce").dropna()
-            if reducer == "sum":
-                value = float(vals.sum()) if len(vals) else float("nan")
-            elif reducer == "first":
-                value = float(vals.iloc[0]) if len(vals) else float("nan")
+        ok_rows[k] = g[okm]
+        if okm.any() and not fail.any() and s_code is None:
+            if ok_rows[k]["_v"].isna().any():
+                # An ok status without a usable number (e.g. pomegranate's NaN
+                # posteriors, #198/#218) is not a result; it used to be dropped
+                # silently when other rows of the cell were finite. (+inf is a
+                # value: the unsmoothed-MLE recovery-KL sentinel.)
+                status_of[k] = (False, "nan")
             else:
-                value = float(vals.mean()) if len(vals) else float("nan")
-            code = None
-            if np.isnan(value):
-                # ok status but no usable number (e.g. pomegranate's NaN
-                # posteriors, #218): not a result, so not solved.
-                solved, code = False, "nan"
+                status_of[k] = (True, None)
+                ok_queries[k] = set(ok_rows[k]["_q"])
         else:
-            value = float("nan")
             code = (g.loc[fail, "status"].mode().iloc[0] if fail.any() else s_code)
+            status_of[k] = (False, code)
+
+    # Common query set per (x, inst) over the methods that solved it.
+    common: dict = {}
+    if reducer != "first":
+        for k, qs in ok_queries.items():
+            xi = (k[1], k[2])
+            common[xi] = qs if xi not in common else common[xi] & qs
+
+    records = []
+    for k, (solved, code) in status_of.items():
+        value = float("nan")
+        if solved:
+            g = ok_rows[k]
+            if reducer != "first":
+                g = g[g["_q"].isin(common.get((k[1], k[2]), set()))]
+            vals = g["_v"]
+            if vals.empty:
+                solved, code = False, "no_common_query"
+            elif reducer == "sum":
+                value = float(vals.sum())
+            elif reducer == "first":
+                value = float(vals.iloc[0])
+            else:
+                value = float(vals.mean())
         records.append(dict(method=k[0], x=k[1], inst=k[2], solved=solved,
                             value=value, code=code))
     # Sentinel-only cells (fit failure / seed-skip / worker death): no metric
     # row at all, but the cell was attempted and failed.
     for k, code in sent_code.items():
-        if k not in seen:
+        if k not in status_of:
             records.append(dict(method=k[0], x=k[1], inst=k[2], solved=False,
                                 value=float("nan"), code=code))
     cols = ["method", "x", "inst", "solved", "value", "code"]
