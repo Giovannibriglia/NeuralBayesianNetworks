@@ -436,7 +436,9 @@ class NBNAdapter:
             # Fit-time quality gate outcome (#249): "learned" or "lw_fallback".
             self.proposal_used = metrics.get("proposal_used")
         else:
-            self._engine_obj = HybridRouter()
+            # Pass the configured particle count to the router's LW fallback
+            # (it was silently left at the router default).
+            self._engine_obj = HybridRouter(n_samples=self.n_samples)
 
     def _prep_evidence(self, ev: dict) -> dict:
         """Normalise evidence values to [B, D] tensors on self.device.

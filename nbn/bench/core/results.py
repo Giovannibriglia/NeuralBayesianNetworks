@@ -163,6 +163,15 @@ class CellResult:
     # parquets and sentinels. Additive.
     query_idx: int | None = None
 
+    # Number of posterior samples the method returned for a CONTINUOUS target
+    # (stamped on every row of the query). Scoring compares the method's
+    # draws to the oracle's S = n_oracle_samples draws after a seeded
+    # resample to S; a method returning fewer than S draws still carries its
+    # own sampling noise, so rows with n_posterior_samples < S are flagged by
+    # this column (configs align n_samples to 2048 >= S). None for discrete
+    # targets, failures and legacy parquets. Additive.
+    n_posterior_samples: int | None = None
+
 
 # Valid status values (for validation in implementations)
 # "no_result": the query ran but the oracle could produce no reference for it

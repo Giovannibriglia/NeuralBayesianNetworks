@@ -65,12 +65,12 @@ selector:
 
 baselines:
   - {library: pgmpy,       mechanism: discrete,  param_method: mle, inference_method: ve}
-  - {library: pgmpy,       mechanism: lg,        param_method: lg,  inference_method: predict}
+  - {library: pgmpy,       mechanism: lg,        param_method: lg,  inference_method: predict, extra_kwargs: {n_samples: 2048}}
   - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: lbp}
-  - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance}
+  - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance, extra_kwargs: {n_samples: 2048}}
   - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ve}
-  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: lw, extra_kwargs: {n_samples: 512}}
-  - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router}
+  - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: lw, extra_kwargs: {n_samples: 2048}}
+  - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router, extra_kwargs: {n_samples: 2048}}
 
 n_queries_per_cell: 32
 per_cell_timeout_s: 60.0

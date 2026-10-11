@@ -49,6 +49,7 @@ Reference: docs/v0.13-benchmark-redesign.md §3, §4.1
 from __future__ import annotations
 
 import dataclasses
+import logging
 import math
 import time
 from typing import Any
@@ -61,6 +62,8 @@ from nbn.bench.core.seeding import derive_seed
 from nbn.bench.domains.base import BenchmarkProblem, Query
 from nbn.bench.metrics import _compute_metrics_per_node
 
+
+logger = logging.getLogger(__name__)
 
 _METRICS: tuple[str, ...] = ("tv", "jsd", "w1", "ks")
 _METRIC_KEYS: tuple[str, ...] = (
@@ -259,6 +262,18 @@ class AccuracyAndTiming:
             per_query_oracle.append(tier)
 
         metrics_time_s = time.perf_counter() - t_metrics
+        short = [m["_n_samples"] for m in per_query_metric_dicts
+                 if m and m.get("_n_samples") is not None
+                 and m["_n_samples"] < self.n_oracle_samples]
+        if short:
+            # D3: methods must return >= S draws for a noise-comparable score.
+            logger.warning(
+                "%s returned fewer posterior samples than the scoring count "
+                "S=%d on %d continuous queries (min %d): those scores include "
+                "the method's own sampling noise; rows are flagged by "
+                "n_posterior_samples", baseline, self.n_oracle_samples,
+                len(short), min(short),
+            )
 
         # ---- Phase 3: emit CellResult rows ----
         rows: list[CellResult] = []
@@ -400,7 +415,8 @@ class AccuracyAndTiming:
             q_khat = posterior.khat
             rows.extend(
                 dataclasses.replace(r, ess=q_ess, khat=q_khat,
-                                    oracle=per_query_oracle[i], query_idx=i)
+                                    oracle=per_query_oracle[i], query_idx=i,
+                                    n_posterior_samples=mdict.get("_n_samples"))
                 for r in query_rows
             )
 
@@ -559,11 +575,14 @@ class AccuracyAndTiming:
             )
             sample_pairs.append((oracle.reshape(-1).cpu(), fit))
 
-        return _compute_metrics_per_node(
+        out = _compute_metrics_per_node(
             cpd_pairs=cpd_pairs,
             sample_pairs=sample_pairs,
             metrics=_METRICS,
-        ), tier
+        )
+        if sample_pairs:
+            out["_n_samples"] = int(posterior.samples.numel())
+        return out, tier
 
     def _tabular(self, problem: BenchmarkProblem):
         """The true model's tabular CPT source, cached per problem (the same
