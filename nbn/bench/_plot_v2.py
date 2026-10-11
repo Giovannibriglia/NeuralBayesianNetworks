@@ -49,6 +49,7 @@ METRIC_YLABELS: Dict[str, str] = {
     "tv_per_node":    "TV per node (lower is better)",
     "jsd_per_node":   "JSD / log 2 per node (lower is better)",
     "w1_per_node":    "W₁ per node (lower is better)",
+    "ks_per_node":    "KS per node (lower is better)",
     "total_time_s":   "Total query time (s)",
     "fit_time_s":     "Fit time (s)",
     "query_time_s":   "Query time per query (s)",
@@ -58,7 +59,7 @@ METRIC_YLABELS: Dict[str, str] = {
 
 # Metrics where lower bound of std band is clipped at 0 (non-negative).
 NON_NEGATIVE_METRICS = frozenset({
-    "accuracy", "tv_per_node", "jsd_per_node", "w1_per_node",
+    "accuracy", "tv_per_node", "jsd_per_node", "w1_per_node", "ks_per_node",
     "cpd_accuracy", "total_time_s", "fit_time_s", "query_time_s", "metrics_time_s",
 })
 

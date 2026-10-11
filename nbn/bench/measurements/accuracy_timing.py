@@ -33,11 +33,14 @@ schema documented in docs/v0.13-benchmark-redesign.md §3.1.
 
 Output shape
 ------------
-Returns one ``CellResult`` per (query, metric) combination.  With N
-queries and metrics {tv_per_node, jsd_per_node, w1_per_node}:
-  * Discrete target: 2 rows per query (tv + jsd; w1 is not meaningful
-    on unordered categorical outcomes).
-  * Continuous target: up to 3 rows per query (tv + jsd + w1).
+Returns one ``CellResult`` per (query, metric) combination, metrics
+{tv_per_node, jsd_per_node, w1_per_node, ks_per_node}:
+  * Discrete target: tv + jsd ok; w1 / ks ``not_supported`` (unordered
+    categories).
+  * Continuous target: w1 + ks ok (bin-free, computed on the oracle and the
+    method's posterior at the same sample count S = ``n_oracle_samples``);
+    tv / jsd ``not_supported`` (the former 256-bin histogram estimate was
+    noise-dominated, D2).
   * Failed oracle / not-supported: 1 row per metric with
     ``status="no_result"`` or ``status="not_supported"``.
 
@@ -53,17 +56,21 @@ import torch
 
 from nbn.bench.core.oracle import conditional_posterior_samples, discrete_oracle
 from nbn.bench.core.results import CellResult
+from nbn.bench.core.seeding import derive_seed
 from nbn.bench.domains.base import BenchmarkProblem, Query
 from nbn.bench.metrics import _compute_metrics_per_node
 
 
-_METRICS: tuple[str, ...] = ("tv", "jsd", "w1")
-_METRIC_KEYS: tuple[str, ...] = ("tv_per_node", "jsd_per_node", "w1_per_node")
+_METRICS: tuple[str, ...] = ("tv", "jsd", "w1", "ks")
+_METRIC_KEYS: tuple[str, ...] = (
+    "tv_per_node", "jsd_per_node", "w1_per_node", "ks_per_node",
+)
 _TIMING_KEYS: tuple[str, ...] = ("fit_time_s", "query_time_s", "metrics_time_s")
 
 
 class AccuracyAndTiming:
-    """Compute per-query TV/JSD/W₁ accuracy and individually timed queries.
+    """Compute per-query TV/JSD (discrete) and W₁/KS (continuous) accuracy
+    and individually timed queries.
 
     Implements the v0.13 ``Measurement`` protocol.
 
@@ -455,8 +462,6 @@ class AccuracyAndTiming:
         problem and ``query_index`` — identical for every baseline of the cell.
         On oracle failure, returns an all-None dict (caller emits no_result).
         """
-        from nbn.bench.core.seeding import derive_seed
-
         target = q.targets[0]
         target_kind = problem.variables[target][0]
         ev_row = dict(q.evidence.items())
@@ -501,7 +506,18 @@ class AccuracyAndTiming:
 
             if posterior.samples is None:
                 return dict.fromkeys(_METRIC_KEYS), tier
-            sample_pairs.append((oracle.reshape(-1).cpu(), posterior.samples.cpu().reshape(-1)))
+            # D3: score every method at the same sample count. Methods draw
+            # 50 (pyro) to 2048 (nbn) posterior samples; W1 / KS sampling
+            # noise depends on that count, so both sides are brought to
+            # S = n_oracle_samples with a seeded resample (identical across
+            # reruns, independent of the adapter's RNG stream).
+            s = int(oracle.shape[0])
+            fit = _resample_to(
+                posterior.samples.detach().cpu().reshape(-1), s,
+                derive_seed("score_resample", problem.problem_id or problem.name,
+                            problem.seed, query_index),
+            )
+            sample_pairs.append((oracle.reshape(-1).cpu(), fit))
 
         return _compute_metrics_per_node(
             cpd_pairs=cpd_pairs,
@@ -520,6 +536,25 @@ class AccuracyAndTiming:
         src = tabular_source(problem)
         self._tabular_cache = (problem, src)
         return src
+
+
+def _resample_to(x: torch.Tensor, s: int, seed: int) -> torch.Tensor:
+    """``s`` draws from the empirical distribution of ``x`` (seeded).
+
+    ``len(x) == s``: unchanged. ``len(x) > s``: a uniformly random subset
+    without replacement. ``len(x) < s``: draws with replacement (the
+    method's own sample count still bounds its resolution; it no longer
+    changes the metric's noise level relative to other methods).
+    """
+    n = int(x.numel())
+    if n == s or n == 0:
+        return x
+    g = torch.Generator(device="cpu").manual_seed(int(seed))
+    if n > s:
+        idx = torch.randperm(n, generator=g)[:s]
+    else:
+        idx = torch.randint(0, n, (s,), generator=g)
+    return x[idx]
 
 
 # ---------------------------------------------------------------------------

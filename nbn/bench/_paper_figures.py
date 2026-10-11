@@ -49,6 +49,8 @@ from nbn.bench._paper_agg import (
     method_style,  # noqa: F401  (re-exported for callers/tests)
     ACCURACY_METRICS,
     CLOSER_TO_VALUE,
+    CONTINUOUS_FAMILIES,
+    DEPRECATED_CONTINUOUS_METRICS,
     DISCRETE_FAMILIES,
     HIGHER_IS_BETTER,
     LOWER_IS_BETTER,
@@ -450,7 +452,8 @@ def _table_slug(value: str) -> str:
 _PL_METRICS = frozenset({"param_recovery_tv", "param_recovery_kl",
                          "calibration_pit_ks", "calibration_sd_ratio",
                          "log_likelihood"})
-_INFERENCE_METRICS = frozenset({"tv_per_node", "jsd_per_node", "w1_per_node"})
+_INFERENCE_METRICS = frozenset({"tv_per_node", "jsd_per_node", "w1_per_node",
+                                "ks_per_node"})
 
 
 def _benchmark_caption(df_view) -> str:
@@ -503,7 +506,10 @@ def _write_table(out_path: Path, header_cols, rows, caption="", label="",
 def _metrics_for_family(family) -> list[str]:
     metrics = list(ACCURACY_METRICS)
     if family in DISCRETE_FAMILIES:
-        metrics = [m for m in metrics if m != "w1_per_node"]
+        metrics = [m for m in metrics if m not in ("w1_per_node", "ks_per_node")]
+    if family in CONTINUOUS_FAMILIES:
+        # Deprecated histogram TV / JSD on continuous samples (D2).
+        metrics = [m for m in metrics if m not in DEPRECATED_CONTINUOUS_METRICS]
     return metrics
 
 

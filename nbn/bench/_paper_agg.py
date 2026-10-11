@@ -39,12 +39,12 @@ import pandas as pd
 # --- Metric conventions --------------------------------------------------------
 
 ACCURACY_METRICS = (
-    "tv_per_node", "jsd_per_node", "w1_per_node", "log_likelihood",
+    "tv_per_node", "jsd_per_node", "w1_per_node", "ks_per_node", "log_likelihood",
     "param_recovery_tv", "param_recovery_kl",
     "calibration_pit_ks", "calibration_sd_ratio",
 )
 LOWER_IS_BETTER = frozenset({
-    "tv_per_node", "jsd_per_node", "w1_per_node",
+    "tv_per_node", "jsd_per_node", "w1_per_node", "ks_per_node",
     "param_recovery_tv", "param_recovery_kl", "calibration_pit_ks",
     "nll_per_node",
 })
@@ -54,6 +54,7 @@ METRIC_LABEL = {
     "tv_per_node": "TV",
     "jsd_per_node": "JSD",
     "w1_per_node": "W1",
+    "ks_per_node": "KS",
     "log_likelihood": "LL",
     "nll_per_node": "NLL per node",
     "param_recovery_tv": "TV (recovery)",
@@ -66,6 +67,14 @@ METRIC_LABEL = {
 }
 TIME_METRICS = ("query_time", "total_query_time", "fit_time")
 DISCRETE_FAMILIES = frozenset({"discrete"})
+# Families with no discrete node: their tv_per_node / jsd_per_node rows can
+# only come from the deprecated 256-bin histogram estimate on continuous
+# samples (removed in D2; noise-dominated, identical distributions -> TV 0.2).
+# Paper views skip them; continuous accuracy is W1 / KS.
+CONTINUOUS_FAMILIES = frozenset({
+    "continuous_lg", "continuous_nongauss", "continuous_gauss",
+})
+DEPRECATED_CONTINUOUS_METRICS = frozenset({"tv_per_node", "jsd_per_node"})
 FAILURE_STATUSES = frozenset({"timeout", "oom", "error"})
 
 
@@ -184,7 +193,7 @@ def clip_band(kind: str, lower: float, upper: float) -> tuple[float, float]:
     """Clip a band to the metric's natural range."""
     if kind == "time" or kind in LOWER_IS_BETTER:
         lower = max(0.0, lower)
-        if kind in {"tv_per_node", "jsd_per_node"}:
+        if kind in {"tv_per_node", "jsd_per_node", "ks_per_node"}:
             upper = min(1.0, upper)
         return lower, upper
     if kind in CLOSER_TO_VALUE:

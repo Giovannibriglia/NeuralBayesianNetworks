@@ -97,6 +97,7 @@ def write_markdown(wide: pd.DataFrame, path: str | Path) -> None:
         "tv_per_node":      "(per-node total variation, lower is better)",
         "jsd_per_node":     "(per-node Jensen-Shannon divergence / log 2, lower is better)",
         "w1_per_node":      "(per-node Wasserstein-1, lower is better)",
+        "ks_per_node":      "(per-node two-sample Kolmogorov-Smirnov, lower is better)",
         "total_time_s":     "(wall-clock query battery time, seconds)",
         "cpd_accuracy":     "(per-CPD accuracy)",
         "fit_time_s":       "(adapter.fit() wall-clock, seconds)",

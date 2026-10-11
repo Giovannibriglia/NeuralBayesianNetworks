@@ -228,7 +228,8 @@ def test_continuous_family_renders_w1_on_network_axis(tmp_path):
     out_dir = tmp_path / "figs_allzero"
     assert run_plot(parquet=parquet, output_dir=out_dir, aggregation="iqm_iqr") == 0
     plots = out_dir / "bnlearn" / "continuous_gauss" / "all" / "plots"
-    assert (plots / "tv_per_node_vs_network.pdf").exists()
+    # Histogram TV on continuous samples is deprecated (D2): not rendered.
+    assert not (plots / "tv_per_node_vs_network.pdf").exists()
     assert (plots / "w1_per_node_vs_network.pdf").exists()
     assert not list((out_dir / "bnlearn").rglob("*_vs_n_parameters*"))
 

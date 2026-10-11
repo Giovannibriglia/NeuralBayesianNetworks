@@ -123,26 +123,25 @@ def test_gaussian_shifted_mean_w1_closed_form():
     fit_s = torch.randn(5000) + 1.0
     res = _compute_metrics_per_node(
         sample_pairs=[(true_s, fit_s)],
-        metrics=("tv", "jsd", "w1"),
+        metrics=("tv", "jsd", "w1", "ks"),
     )
     assert abs(res["w1_per_node"] - 1.0) < 0.05
-    # Binned TV/JSD: distributions overlap heavily at 1σ separation;
-    # values should be moderate but non-zero.
-    assert 0.2 < res["tv_per_node"] < 0.6
-    assert 0.0 < res["jsd_per_node"] < 0.5
+    # KS of N(0,1) vs N(1,1) = 2*Phi(0.5) - 1 = 0.383.
+    assert abs(res["ks_per_node"] - 0.383) < 0.04
+    # Histogram TV/JSD are no longer computed on samples (D2).
+    assert res["tv_per_node"] is None and res["jsd_per_node"] is None
 
 
 def test_identical_samples_all_metrics_zero():
-    """Identical sample tensors → W₁ = TV = JSD = 0."""
+    """Identical sample tensors → W₁ = KS = 0."""
     torch.manual_seed(42)
     s = torch.randn(2000)
     res = _compute_metrics_per_node(
         sample_pairs=[(s, s.clone())],
-        metrics=("tv", "jsd", "w1"),
+        metrics=("tv", "jsd", "w1", "ks"),
     )
     assert res["w1_per_node"] < 1e-3
-    assert res["tv_per_node"] < 1e-3
-    assert res["jsd_per_node"] < 1e-3
+    assert res["ks_per_node"] < 1e-9
 
 
 # ── Hybrid: both lists populated ──────────────────────────────────────────
@@ -152,9 +151,8 @@ def test_hybrid_both_lists_populated():
     """Hybrid case: 1 discrete pair + 1 continuous pair.
 
     Helper averages each metric over all contributing pairs:
-    - TV averages over (discrete TV) + (binned continuous TV).
-    - JSD averages over (discrete JSD) + (binned continuous JSD).
-    - W1 averages over the continuous pair only (discrete-unordered skip).
+    - TV / JSD over the discrete pair only (no histogram TV on samples).
+    - W1 / KS over the continuous pair only (discrete-unordered skip).
 
     Each metric's value should be non-None and sanity-bounded.
     """
