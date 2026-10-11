@@ -174,9 +174,13 @@ class CellResult:
 
 
 # Valid status values (for validation in implementations)
-# "no_result": the query ran but the oracle could produce no reference for it
-# (zero-probability evidence, collapsed LW ESS); identical for every baseline
-# of a cell, so it is neither a method failure nor an applicability gap.
+# "no_result": the query ran but no score is defined for it -- the oracle
+# could produce no reference (zero-probability evidence under the TRUE model,
+# collapsed LW ESS; identical for every baseline of a cell), or the method's
+# own posterior is undefined because the evidence has zero probability under
+# its FITTED model (error_msg says which). Neither a method failure nor an
+# applicability gap: the paper's same-query averaging drops the query for
+# every method of the cell.
 VALID_STATUSES = frozenset({
     "ok", "timeout", "oom", "error", "not_supported", "no_result",
 })
