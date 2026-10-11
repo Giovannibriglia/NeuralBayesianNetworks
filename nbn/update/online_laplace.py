@@ -114,9 +114,8 @@ def _estimate_fisher(
     if weights is not None:
         w = weights.reshape(-1).detach()
         if n > sample_cap or bs > 1:
-            # multinomial on the CPU: identical on every backend.
             m = min(n, sample_cap)
-            idx = torch.multinomial(w.cpu().float(), m, replacement=True).to(device)
+            idx = _resample_by_weight(w, m).to(device)
             x = x.index_select(0, idx)
             if parents is not None:
                 parents = parents.index_select(0, idx)
@@ -162,6 +161,20 @@ def _estimate_fisher(
     total = float(num_batches) if w is None else float(w.sum())
     inv = 1.0 / max(total, 1e-12)
     return params, [f * inv for f in fisher]
+
+
+def _resample_by_weight(w: torch.Tensor, m: int) -> torch.Tensor:
+    """``m`` row indices drawn with replacement, P(row i) proportional to w_i.
+
+    Inverse-CDF sampling (``searchsorted`` on the cumulative weights) rather
+    than ``torch.multinomial``, which refuses more than 2**24 categories — a
+    weighted fit on >16.7M rows crashed here.  Runs on the CPU in float64 with
+    the global generator: identical on every backend and seed-reproducible.
+    A zero-weight row has an empty CDF interval and is never drawn.
+    """
+    cdf = w.detach().reshape(-1).cpu().to(torch.float64).cumsum(0)
+    u = torch.rand(m, dtype=torch.float64) * cdf[-1]
+    return torch.searchsorted(cdf, u, right=True).clamp_max(cdf.numel() - 1)
 
 
 class _LogProb(nn.Module):

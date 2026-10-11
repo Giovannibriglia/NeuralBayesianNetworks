@@ -981,3 +981,38 @@ def test_n5_weighted_quantile_constant_fractional_weights_exact(device, n):
     ref = torch.quantile(x, q, dim=0)
     got = weighted_quantile(x.to(device), q, torch.full((n,), 1.0 / n, device=device))
     torch.testing.assert_close(got.cpu(), ref, atol=1e-3, rtol=0)
+
+
+# ---------------------------------------------------------------------------
+# Round 3 — N7: weighted Fisher resampling without torch.multinomial
+# ---------------------------------------------------------------------------
+
+
+def test_n7_resample_by_weight_is_proportional_and_skips_zero_weights():
+    from nbn.update.online_laplace import _resample_by_weight
+
+    w = torch.tensor([0.0, 1.0, 3.0, 0.0, 4.0])
+    idx = _resample_by_weight(w, 80000)
+    counts = torch.bincount(idx, minlength=5).double() / 80000
+    assert counts[0] == 0 and counts[3] == 0
+    torch.testing.assert_close(counts[[1, 2, 4]], torch.tensor([0.125, 0.375, 0.5], dtype=torch.float64), atol=0.01, rtol=0)
+    torch.manual_seed(3)
+    a = _resample_by_weight(w, 50)
+    torch.manual_seed(3)
+    assert torch.equal(a, _resample_by_weight(w, 50))
+
+
+def test_n7_weighted_consolidate_does_not_use_multinomial(monkeypatch):
+    """multinomial caps at 2**24 categories; the sampler must not depend on it."""
+    from nbn.update import online_laplace
+
+    def _boom(*a, **k):
+        raise RuntimeError("number of categories cannot exceed 2^24")
+
+    monkeypatch.setattr(torch, "multinomial", _boom)
+    model, data = _mdn_model()
+    model.fit(data, epochs=2, consolidate=False)
+    mech = model.mechanisms["B"]
+    w = torch.rand(300)
+    online_laplace.consolidate(mech, data["B"], data["A"], weights=w, sample_cap=64)
+    assert torch.isfinite(mech._ewc_fisher).all()
