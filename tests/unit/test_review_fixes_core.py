@@ -157,7 +157,14 @@ def test_a3_legacy_raw_state_is_converted():
         torch.tensor(300.0), 1,
     )
     assert not rg.is_centred(legacy)
-    st = rg.accumulate(legacy, rg.batch_statistics(pa.float(), x.float()))
+    rg._LEGACY_WARNED = False
+    with pytest.warns(UserWarning, match="refit"):
+        st = rg.accumulate(legacy, rg.batch_statistics(pa.float(), x.float()))
+    # Once per process, not on every call (R10).
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        rg.accumulate(legacy, rg.batch_statistics(pa.float(), x.float()))
     pooled = rg.batch_statistics(torch.cat([pa, pa]).float(), torch.cat([x, x]).float())
     for got, want in zip(rg.solve(st), rg.solve(pooled)):
         torch.testing.assert_close(got, want, atol=1e-4, rtol=1e-4)

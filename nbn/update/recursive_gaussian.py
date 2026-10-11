@@ -38,6 +38,7 @@ use by :func:`unpack`.
 """
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import torch
@@ -96,6 +97,7 @@ def unpack(state: NormalEquationState, dtype: torch.dtype | None = None):
     p = A.shape[0] - 1
     if is_centred(state):
         return N, A[:p, p], B[p], A[:p, :p], B[:p], c
+    _warn_legacy_once()
     n = N.clamp_min(torch.finfo(dt).tiny)
     mz = A[:p, p] / n
     mx = B[p] / n
@@ -103,6 +105,27 @@ def unpack(state: NormalEquationState, dtype: torch.dtype | None = None):
     Czx = B[:p] - n * torch.outer(mz, mx)
     cxx = c - n * mx * mx
     return N, mz, mx, Czz, Czx, cxx
+
+
+_LEGACY_WARNED = False
+
+
+def _warn_legacy_once() -> None:
+    """The conversion is exact algebra, but the raw float32 sums it starts
+    from already lost digits at large data offsets; only a refit recovers
+    them.  Warn once per process, not on every update."""
+    global _LEGACY_WARNED
+    if _LEGACY_WARNED:
+        return
+    _LEGACY_WARNED = True
+    warnings.warn(
+        "Converting linear-Gaussian sufficient statistics saved in the old "
+        "raw normal-equation layout.  Those float32 sums lose precision when "
+        "the data has a large offset (sigma can be badly off); refit the "
+        "model (model.fit) on the original data to rebuild exact statistics.",
+        UserWarning,
+        stacklevel=3,
+    )
 
 
 def batch_statistics(parents, x, weights=None):
