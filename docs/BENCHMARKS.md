@@ -81,6 +81,24 @@ why and which run it is merged into.
 | `synthetic/reruns/learning_curves_pgmpy_lg.yaml` | `param-learning` | <= v0.20.1 | same, for the training-set-size sweep |
 | `synthetic/reruns/{complete,scalability}_continuous.yaml`, `*_discrete_avi.yaml`, `batch_speed_avi.yaml`, `bnlearn/reruns/*.yaml` | `inference` | <= v0.18.3 | v0.19.0 oracle and AVI-gate fixes |
 
+**Scoring-methodology fixes (fix/bench, after v0.20.2): every `inference`
+run made before them must be rerun in full** — the references, metrics and
+query sets changed, so old and new numbers are not comparable:
+
+- discrete targets are scored against the *exact* posterior (VE on the true
+  model) instead of a 5,000-row rejection sample; hybrid/CLG discrete
+  targets use likelihood weighting; each row records its reference in the
+  `oracle` column (`docs/v0.13-oracle-methodology.md`);
+- continuous targets are scored with W1 and KS (`ks_per_node`) at equal
+  sample counts; histogram TV/JSD on continuous samples is gone;
+- cells and oracle draws are seeded; the uniform selector draws a target per
+  query; evidence-free positions are one query, not B copies;
+- malformed posteriors are `error`, oracle failures `no_result`; the paper
+  tables average every method over the same queries (`query_idx`) and add
+  the shared base fit to fit-once reloaders' fit time;
+- `pomegranate-discrete-ve` is now `pomegranate-discrete-lbp` (it runs loopy
+  BP); old files are read under the new label.
+
 `learning_curves.yaml` and `parameter_learning_complete.yaml` declare
 `metrics: log_likelihood`, so they **must** run under `param-learning`;
 `inference` refuses them and prints the command to use.
@@ -199,7 +217,7 @@ source:                       # synthetic shown; bnlearn takes a network list
   seeds: [0]
   n_train: 2048
   n_test: 512
-  n_reference: 5000           # oracle samples for continuous ground truth
+  n_reference: 5000           # reference-pool rows = LW-oracle ESS for discrete targets on hybrid nets (docs/v0.13-oracle-methodology.md)
   edge_density: 0.20
   max_in_degree: 2
   cardinality: 4

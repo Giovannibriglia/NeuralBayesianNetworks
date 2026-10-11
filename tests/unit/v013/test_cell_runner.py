@@ -135,15 +135,56 @@ class TestSubprocessLaunch:
 
         result = run_cell_in_subprocess(ctx, timeout_s=120)
 
-        assert result.classification == "completed"
-        assert result.exit_code == 0
-        assert len(result.rows) >= 1
+        diag = (f"classification={result.classification} exit_code="
+                f"{result.exit_code} rows={[(r.get('status'), r.get('error_msg')) for r in result.rows][:5]}"
+                f"\nworker output tail:\n{result.stderr[-3000:]}")
+        assert result.classification == "completed", diag
+        assert result.exit_code == 0, diag
+        assert len(result.rows) >= 1, diag
         # All rows carry the cell identity and a valid status.
         for row in result.rows:
-            assert row["problem_id"] == problem.problem_id
-            assert row["baseline"] == "nbn-cat-ve"
-            assert row["status"] in {"ok", "error", "timeout", "oom", "not_supported"}
-        assert any(r["status"] == "ok" for r in result.rows)
+            assert row["problem_id"] == problem.problem_id, diag
+            assert row["baseline"] == "nbn-cat-ve", diag
+            assert row["status"] in {"ok", "error", "timeout", "oom",
+                                     "not_supported", "no_result"}, diag
+        assert any(r["status"] == "ok" for r in result.rows), diag
+
+    def test_worker_writing_megabytes_to_stderr_does_not_deadlock(self, tmp_path):
+        """stdout/stderr used to be PIPEs that nobody drained while the parent
+        wait()ed: a worker writing more than the pipe buffer (~64 KiB) blocked
+        until the hard timeout. 2 MiB must now finish in seconds."""
+        import sys
+        import time
+
+        worker = tmp_path / "noisy_worker.py"
+        worker.write_text(
+            "import json, sys\n"
+            "sys.stdout.write('o' * (1024 * 1024))\n"
+            "sys.stdout.flush()\n"
+            "sys.stderr.write('w' * (2 * 1024 * 1024))\n"
+            "sys.stderr.write('\\nLAST-LINE-MARKER\\n')\n"
+            "open(sys.argv[2], 'w').write(json.dumps({'status': 'ok'}) + '\\n')\n"
+        )
+        t0 = time.perf_counter()
+        result = run_cell_in_subprocess(
+            {}, timeout_s=60, worker_cmd=[sys.executable, str(worker)])
+        elapsed = time.perf_counter() - t0
+        assert result.classification == "completed", result.stderr[-500:]
+        assert elapsed < 30, f"worker blocked on a full pipe ({elapsed:.0f}s)"
+        assert result.rows == [{"status": "ok"}]
+        assert "LAST-LINE-MARKER" in result.stderr
+
+    def test_synthesized_row_carries_exit_code_and_output_tail(self, tmp_path):
+        import sys
+
+        worker = tmp_path / "dying_worker.py"
+        worker.write_text("import sys\nsys.stderr.write('boom: CUDA error 700\\n')\n"
+                          "sys.exit(3)\n")
+        result = run_cell_in_subprocess(
+            {}, timeout_s=60, worker_cmd=[sys.executable, str(worker)])
+        msg = result.rows[0]["error_msg"]
+        assert "exit_code=3" in msg and "classification=completed" in msg
+        assert "boom: CUDA error 700" in msg
 
 
 @pytest.mark.slow

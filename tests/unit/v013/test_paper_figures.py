@@ -228,7 +228,8 @@ def test_continuous_family_renders_w1_on_network_axis(tmp_path):
     out_dir = tmp_path / "figs_allzero"
     assert run_plot(parquet=parquet, output_dir=out_dir, aggregation="iqm_iqr") == 0
     plots = out_dir / "bnlearn" / "continuous_gauss" / "all" / "plots"
-    assert (plots / "tv_per_node_vs_network.pdf").exists()
+    # Histogram TV on continuous samples is deprecated (D2): not rendered.
+    assert not (plots / "tv_per_node_vs_network.pdf").exists()
     assert (plots / "w1_per_node_vs_network.pdf").exists()
     assert not list((out_dir / "bnlearn").rglob("*_vs_n_parameters*"))
 
@@ -714,3 +715,37 @@ def test_many_networks_split_into_parts(tmp_path):
     tex = (out_dir / "bnlearn" / "discrete" / "all" / "tables"
            / "tv_per_node_vs_network.tex").read_text()
     assert "0.05$\\pm$0" in tex
+
+
+# --- #248: per-cell success / status unit ---------------------------------------
+
+def _pl_mixed_frame():
+    """PL baseline: ok cells at n in {10, 20} (accuracy rows only), fit-timeout
+    sentinels at n = 50 -- pooled, the sentinels used to zero it out."""
+    rows = []
+    for pid in ("10", "20"):
+        for seed in (0, 1):
+            for m in ("param_recovery_tv", "log_likelihood"):
+                rows.append({"baseline": "nbn-neuralcat", "family": "discrete",
+                             "problem_id": pid, "seed": seed, "metric": m,
+                             "value": 0.1, "status": "ok"})
+    for seed in (0, 1):
+        rows.append({"baseline": "nbn-neuralcat", "family": "discrete",
+                     "problem_id": "50", "seed": seed, "metric": "status",
+                     "value": float("nan"), "status": "timeout"})
+    return pd.DataFrame(rows)
+
+
+def test_per_query_success_is_averaged_per_cell_248():
+    from nbn.bench._paper_figures import per_query_success
+
+    rate = per_query_success(_pl_mixed_frame())["nbn-neuralcat"]
+    assert rate == pytest.approx(100.0 * 4 / 6)     # was 0.0 (pooled)
+
+
+def test_status_counts_keep_pl_ok_cells_next_to_sentinels_248():
+    from nbn.bench._paper_figures import per_query_status_counts
+
+    counts = per_query_status_counts(_pl_mixed_frame())
+    assert counts.loc["nbn-neuralcat", "ok"] == 8    # was 0 (pooled unit)
+    assert counts.loc["nbn-neuralcat", "timeout"] == 2

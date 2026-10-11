@@ -95,7 +95,9 @@ class _StubAdapter:
         # Return a valid Posterior based on target kind from the query's evidence
         # (we don't have the problem here, but we can return probs for discrete).
         # Structural tests don't care about correctness, just contract shape.
-        return Posterior(probs=torch.tensor([0.5, 0.5]))
+        # Uniform over the fixtures' default cardinality (4). A shorter vector
+        # is a method error since D5 (it used to be silently truncated).
+        return Posterior(probs=torch.full((4,), 0.25))
 
     def is_applicable(self, problem): return True
 
@@ -421,8 +423,8 @@ class TestAccuracyAndTimingBehavioral:
     def _validate_rows(self, result: list, n_queries: int) -> None:
         """Assert basic structural contracts on a measure() result."""
         # Six rows per query: 3 accuracy (tv, jsd, w1) + 3 timing.
-        assert len(result) == n_queries * 6
-        accuracy_metrics = {"tv_per_node", "jsd_per_node", "w1_per_node"}
+        assert len(result) == n_queries * 7
+        accuracy_metrics = {"tv_per_node", "jsd_per_node", "w1_per_node", "ks_per_node"}
         timing_metrics = {"fit_time_s", "query_time_s", "metrics_time_s"}
         for row in result:
             assert isinstance(row, CellResult)
@@ -537,7 +539,7 @@ class TestAccuracyAndTimingBehavioral:
         adapter.fit(problem, epochs=_FIT_EPOCHS)
         m = AccuracyAndTiming()
         result = m.measure(problem, adapter, queries)
-        assert len(result) == len(queries) * 6
+        assert len(result) == len(queries) * 7
 
     def test_metrics_covered_are_accuracy_and_timing(self, discrete_data):
         problem, queries = discrete_data
@@ -546,7 +548,7 @@ class TestAccuracyAndTimingBehavioral:
         m = AccuracyAndTiming()
         result = m.measure(problem, adapter, queries)
         metrics = {row.metric for row in result}
-        assert {"tv_per_node", "jsd_per_node", "w1_per_node"} <= metrics
+        assert {"tv_per_node", "jsd_per_node", "w1_per_node", "ks_per_node"} <= metrics
         assert {"fit_time_s", "query_time_s", "metrics_time_s"} <= metrics
 
     def test_w1_not_supported_for_discrete(self, discrete_data):
@@ -570,7 +572,7 @@ class TestQueryBudget:
         result = m.measure(problem, _StubAdapter(), queries, query_budget_s=float("inf"))
         timeout_rows = [r for r in result if r.status == "timeout"]
         assert len(timeout_rows) == 0
-        assert len(result) == len(queries) * 6  # 3 accuracy + 3 timing per query
+        assert len(result) == len(queries) * 7  # 4 accuracy + 3 timing per query
 
     def test_accuracy_timing_zero_budget_times_out_all_queries(self):
         """budget=0.0: cumulative 0.0 >= 0.0 before query 0 → all timeout."""
@@ -578,7 +580,7 @@ class TestQueryBudget:
         m = AccuracyAndTiming()
         result = m.measure(problem, _StubAdapter(), queries, query_budget_s=0.0)
         timeout_rows = [r for r in result if r.status == "timeout"]
-        assert len(timeout_rows) == len(queries) * 6
+        assert len(timeout_rows) == len(queries) * 7
 
     def test_accuracy_timing_timeout_rows_have_nan_query_time(self):
         problem, queries = _get_discrete_problem_and_queries()

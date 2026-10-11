@@ -123,13 +123,14 @@ class TestSelectionInvariants:
         for q in queries:
             assert q.kind == "marginal"
 
-    def test_same_target_across_all_queries(self):
-        """All queries in one select() call share the same target."""
-        sel = UniformRandomSelector()
+    def test_targets_vary_across_queries(self):
+        """D8: each query draws its own target and evidence set (one shared
+        target per cell made a seed's accuracy a single-node number)."""
         problem = _make_problem(n_nodes=8, n_test=30)
-        queries = sel.select(problem, n_queries=15, seed=0)
-        targets = {q.targets[0] for q in queries}
-        assert len(targets) == 1
+        sel = UniformRandomSelector()
+        queries = sel.select(problem, n_queries=20, seed=0)
+        assert len({q.targets[0] for q in queries}) > 1
+        assert len({frozenset(q.evidence) for q in queries}) > 1
 
 
 class TestCollapsePolicy:

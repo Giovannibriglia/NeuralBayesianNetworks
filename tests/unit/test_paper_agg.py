@@ -163,6 +163,26 @@ def test_cell_table_fit_time_from_column_in_pl_mode():
     assert sorted(fit[fit["method"] == "nbn-cat"]["value"]) == [3.0, 4.0]
 
 
+def test_fit_time_of_reloaders_includes_the_shared_base_fit():
+    """D4: a fit-once reloader's fit_time_s is attach only; the paper's
+    "Fit time" is base_fit_time_s + attach_time_s whenever both are stamped.
+    Rows without the split (non-nbn baselines) keep fit_time_s."""
+    rows = []
+    for s_ in range(2):
+        rows.append(_row("nbn-cat-ve", s_, metric="fit_time_s", value=10.2,
+                         base_fit_time_s=10.0, attach_time_s=0.2))
+        rows.append(_row("nbn-cat-ais", s_, metric="fit_time_s", value=3.0,
+                         base_fit_time_s=10.0, attach_time_s=2.9))
+        rows.append(_row("pgmpy-mle-ve", s_, metric="fit_time_s", value=1.5,
+                         base_fit_time_s=None, attach_time_s=None))
+    dfx = assign_x(pd.DataFrame(rows), "n_nodes", {"50": 50})
+    fit, _ = cell_table(dfx, "fit_time")
+    by = fit.groupby("method")["value"].first()
+    assert by["nbn-cat-ais"] == pytest.approx(12.9)   # was 3.0 (attach only)
+    assert by["nbn-cat-ve"] == pytest.approx(10.2)
+    assert by["pgmpy-mle-ve"] == pytest.approx(1.5)
+
+
 def test_cell_table_nan_ok_value_is_not_solved():
     """status ok with a NaN metric (pomegranate posteriors, #218) is not a
     result: unsolved with code 'nan'."""
@@ -171,6 +191,47 @@ def test_cell_table_nan_ok_value_is_not_solved():
     dfx = assign_x(df, "n_nodes", {"50": 50})
     cells, _ = cell_table(dfx, "tv_per_node")
     assert (~cells["solved"]).all() and set(cells["code"]) == {"nan"}
+
+
+def test_cell_table_partial_nan_ok_rows_fail_the_cell():
+    """D5: one ok row with a NaN value next to finite ones used to be dropped
+    by dropna (mean over the rest); it now fails the cell with code 'nan'."""
+    df = pd.DataFrame([
+        _row("pomegranate-discrete-lbp", 0, metric="tv_per_node", value=0.1, query_idx=0),
+        _row("pomegranate-discrete-lbp", 0, metric="tv_per_node", value=float("nan"),
+             query_idx=1),
+    ])
+    cells, _ = cell_table(assign_x(df, "n_nodes", {"50": 50}), "tv_per_node")
+    assert not cells["solved"].iloc[0] and cells["code"].iloc[0] == "nan"
+
+
+def test_cell_table_averages_every_method_over_the_same_queries():
+    """D5: method A is ok on queries {0,1,2}; method B's query 2 has no score
+    (not_supported). Both are averaged over {0,1} -- before, A's mean covered
+    the hard query 2 and B's did not."""
+    rows = []
+    for qi, (va, vb) in enumerate([(0.1, 0.1), (0.1, 0.1), (0.9, None)]):
+        rows.append(_row("A", 0, metric="tv_per_node", value=va, query_idx=qi))
+        rows.append(_row("B", 0, metric="tv_per_node",
+                         value=float("nan") if vb is None else vb,
+                         status="not_supported" if vb is None else "ok",
+                         query_idx=qi))
+    cells, _ = cell_table(assign_x(pd.DataFrame(rows), "n_nodes", {"50": 50}),
+                          "tv_per_node")
+    by = cells.set_index("method")
+    assert by.loc["A", "value"] == pytest.approx(0.1)   # was 0.3667
+    assert by.loc["B", "value"] == pytest.approx(0.1)
+
+
+def test_cell_table_legacy_rows_use_position_as_query_id():
+    rows = [_row("A", 0, metric="tv_per_node", value=v) for v in (0.2, 0.4)]
+    rows += [_row("B", 0, metric="tv_per_node", value=0.3),
+             _row("B", 0, metric="tv_per_node", value=float("nan"), status="no_result")]
+    cells, _ = cell_table(assign_x(pd.DataFrame(rows), "n_nodes", {"50": 50}),
+                          "tv_per_node")
+    by = cells.set_index("method")
+    assert by.loc["A", "value"] == pytest.approx(0.2)
+    assert by.loc["B", "value"] == pytest.approx(0.3)
 
 
 def test_cell_table_applicability_rows_are_not_attempted():

@@ -66,7 +66,7 @@ selector:
 baselines:
   - {library: pgmpy,       mechanism: discrete,  param_method: mle, inference_method: ve}
   - {library: pgmpy,       mechanism: lg,        param_method: lg,  inference_method: predict}
-  - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: ve}
+  - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: lbp}
   - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance}
   - {library: nbn,         mechanism: cat,       param_method: mle, inference_method: ve}
   - {library: nbn,         mechanism: lg,        param_method: mle, inference_method: lw, extra_kwargs: {n_samples: 512}}

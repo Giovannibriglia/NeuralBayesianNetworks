@@ -53,3 +53,38 @@ def test_missing_evidence_attribute_raises_instead_of_dropping_edges():
 
     with pytest.raises(AttributeError, match="no longer exposes"):
         adapter._lg_posterior_moments(_Q())
+
+
+def test_lg_joint_is_built_once_per_fit_not_per_query(monkeypatch):
+    """D9: the joint Gaussian (an O(n^3) inverse) was rebuilt on every query."""
+    import torch
+
+    from nbn.bench.adapters.pgmpy_adapter import PgmpyAdapter
+    from nbn.bench.domains.base import Query
+    from nbn.bench.problems import SyntheticConfig, SyntheticProblemSource
+
+    cfg = SyntheticConfig(families=["continuous_lg"], n_nodes_list=[6], seeds=[0],
+                          n_train=300, n_test=10, n_reference=50, edge_density=0.5)
+    problem = next(iter(SyntheticProblemSource().iter_problems(cfg)))
+    nodes = list(problem.variables)
+    queries = [Query(targets=(nodes[-1 - i],), evidence={nodes[i]: torch.tensor(0.1 * i)},
+                     kind="marginal") for i in range(5)]
+
+    fresh = []
+    for q in queries:                     # reference: a new adapter per query
+        a = PgmpyAdapter("lg", "predict")
+        a.fit(problem)
+        fresh.append(a._lg_posterior_moments(q))
+
+    adapter = PgmpyAdapter("lg", "predict")
+    adapter.fit(problem)
+    calls = []
+    real_inv = torch.linalg.inv
+    monkeypatch.setattr(torch.linalg, "inv", lambda m: calls.append(1) or real_inv(m))
+    cached = [adapter._lg_posterior_moments(q) for q in queries]
+    assert len(calls) == 1
+    for (m1, s1), (m2, s2) in zip(fresh, cached):
+        assert torch.allclose(m1, m2) and torch.allclose(s1, s2)
+    adapter.fit(problem)                  # a refit invalidates the cache
+    adapter._lg_posterior_moments(queries[0])
+    assert len(calls) == 2

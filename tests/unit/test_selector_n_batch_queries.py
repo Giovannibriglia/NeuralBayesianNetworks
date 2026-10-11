@@ -58,6 +58,16 @@ def _selectors(n_batch_queries: int):
 _IDS = ["uniform", "topological", "heaviest"]
 
 
+def _is_empty(q):
+    return all(v is None for v in q.evidence.values())
+
+
+def _positions(flat):
+    """(positions with concrete evidence, evidence-free positions)."""
+    n_empty = sum(_is_empty(q) for q in flat)
+    return len(flat) - n_empty, n_empty
+
+
 # ---- 1. Identity at defaults ---------------------------------------------------
 
 @pytest.mark.parametrize("make_sel", range(3), ids=_IDS)
@@ -92,12 +102,14 @@ def test_chunking_n10240_b512(make_sel):
     sel = _selectors(n_batch_queries=10240)[make_sel]
     problem = _make_problem(n_train=200)  # < N → replacement kicks in too
 
-    k = len(sel.select(problem, 4, seed=1))  # query positions
+    k, k_empty = _positions(sel.select(problem, 4, seed=1))
     groups = sel.select_groups(problem, 4, seed=1, batch_size=512)
 
     assert k > 0
-    assert len(groups) == k * 20  # ceil(10240/512) = 20 per position
-    assert all(len(g) == 512 for g in groups)
+    # ceil(10240/512) = 20 per position; evidence-free positions are one
+    # query (D7).
+    assert len(groups) == k * 20 + k_empty
+    assert sorted(len(g) for g in groups) == [1] * k_empty + [512] * (k * 20)
     # All queries in any group share (targets, evidence_keys) — §1.3.
     for g in groups:
         assert len({q.targets for q in g}) == 1
@@ -109,14 +121,20 @@ def test_last_chunk_handling_n100_b64(make_sel):
     sel = _selectors(n_batch_queries=100)[make_sel]
     problem = _make_problem(n_train=200)
 
-    k = len(sel.select(problem, 4, seed=1))
+    flat = sel.select(problem, 4, seed=1)
+    k, k_empty = _positions(flat)
     groups = sel.select_groups(problem, 4, seed=1, batch_size=64)
 
-    assert len(groups) == k * 2
-    # Per position: [64, 36], consecutively emitted.
-    for pos in range(k):
-        assert len(groups[2 * pos]) == 64
-        assert len(groups[2 * pos + 1]) == 36
+    assert len(groups) == k * 2 + k_empty
+    # Per full position: [64, 36], consecutively emitted; empty: [1].
+    i = 0
+    for q in flat:
+        if _is_empty(q):
+            assert len(groups[i]) == 1
+            i += 1
+        else:
+            assert [len(groups[i]), len(groups[i + 1])] == [64, 36]
+            i += 2
 
 
 # ---- 4. Sampling with replacement ------------------------------------------------
@@ -126,11 +144,12 @@ def test_replacement_when_train_smaller_than_n(make_sel):
     sel = _selectors(n_batch_queries=50)[make_sel]
     problem = _make_problem(n_train=10)
 
-    k = len(sel.select(problem, 2, seed=5))
+    k, k_empty = _positions(sel.select(problem, 2, seed=5))
     groups = sel.select_groups(problem, 2, seed=5, batch_size=50)
 
-    assert len(groups) == k  # one chunk per position (B == N)
-    assert all(len(g) == 50 for g in groups)  # no exception, 50 variants
+    assert len(groups) == k + k_empty  # one chunk per position (B == N)
+    # no exception, 50 variants (1 for an evidence-free position, D7)
+    assert sorted(len(g) for g in groups) == [1] * k_empty + [50] * k
 
 
 # ---- 5. Determinism ---------------------------------------------------------------
@@ -178,3 +197,40 @@ def test_empty_mode_variants_stay_empty():
     for i in empty_positions:
         for q in groups[i]:
             assert all(v is None for v in q.evidence.values())
+
+
+def test_empty_mode_position_is_one_query_not_b_copies():
+    """D7: an evidence-free position used to expand into n_batch_queries
+    identical queries. nbn answered the batch once and divided the time by B
+    while pomegranate ran B queries; it is now a single B=1 query for every
+    adapter."""
+    sel = HeaviestQueryByRole(n_batch_queries=8)
+    problem = _make_problem()
+    flat = sel.select(problem, 0, seed=2)
+    n_empty = sum(all(v is None for v in q.evidence.values()) for q in flat)
+    n_full = len(flat) - n_empty
+    assert n_empty and n_full
+
+    groups = sel.select_groups(problem, 0, seed=2, batch_size=4)
+    empty_groups = [g for g in groups
+                    if all(v is None for q in g for v in q.evidence.values())]
+    assert [len(g) for g in empty_groups] == [1] * n_empty
+    assert sum(len(g) for g in groups) == n_empty + 8 * n_full
+
+
+def test_query_timer_synchronizes_accelerator(monkeypatch):
+    """Per-query time on CUDA must include the kernels the query queued."""
+    from nbn.bench.measurements import _batch_dispatch as bd
+
+    calls = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda d=None: calls.append(d))
+
+    class _A:
+        device = "cuda:1"
+
+        def query(self, q):
+            return object()
+
+    bd.run_query_groups(_A(), [[object()], [object()]])
+    assert calls == ["cuda:1", "cuda:1"]

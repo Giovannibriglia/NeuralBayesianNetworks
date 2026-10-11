@@ -186,7 +186,8 @@ _BASELINE_LABEL = {
     "pgmpy-bayes-ve": "pgmpy Bayes+VE",
     "pgmpy-lg-predict": "pgmpy LG",
     "pgmpy-lg": "pgmpy LG",
-    "pomegranate-discrete-ve": "pomegranate",
+    "pomegranate-discrete-lbp": "pomegranate (LBP)",
+    "pomegranate-discrete-ve": "pomegranate (LBP)",   # pre-D10 label
     "pyro-empirical-importance": "pyro IS",
     "pgmpy-mle": "pgmpy MLE",
     "pgmpy-bayes": "pgmpy Bayes",

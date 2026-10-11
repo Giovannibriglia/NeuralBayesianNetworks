@@ -67,8 +67,11 @@ def load_run(item) -> pd.DataFrame:
 
     from nbn.bench._paper_figures import _resolve_parquet
 
+    from nbn.bench._paper_agg import normalize_baselines
+
     paths = _resolve_parquet([Path(item)])
-    return pd.concat([pd.read_parquet(p) for p in paths], ignore_index=True)
+    return normalize_baselines(
+        pd.concat([pd.read_parquet(p) for p in paths], ignore_index=True))
 
 
 def merge_runs(base, updates, out: Path) -> dict[str, int]:
