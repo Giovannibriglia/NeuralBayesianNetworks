@@ -500,8 +500,25 @@ class PgmpyAdapter:
             else values.numel()
         idx = _state_axis_index(target, list(result.state_names[target]), k)
         probs = values[torch.tensor(idx)]
-        probs = probs / probs.sum()
-        return Posterior(probs=probs.float())
+        total = float(probs.sum())
+        if not (total > 0) or not bool(torch.isfinite(probs).all()):
+            # 0/0. Undefined only if the evidence is impossible under the
+            # fitted CPTs (exact check); otherwise a numerical failure that
+            # the measurement reports as an error (D10).
+            return Posterior(probs=probs.float(),
+                             undefined_reason=self._undefined_reason(q, ev))
+        return Posterior(probs=(probs / total).float())
+
+    def _undefined_reason(self, q: Query, ev: dict) -> str | None:
+        from types import SimpleNamespace
+
+        from nbn.bench.core.exact_discrete import evidence_is_impossible, tabular_source
+
+        src = tabular_source(SimpleNamespace(true_model=self._model,
+                                             variables=self.problem.variables))
+        if src is not None and evidence_is_impossible(src, q.targets[0], ev):
+            return "P(evidence)=0 under the fitted CPTs, confirmed by exact elimination"
+        return None
 
     def _query_lg(self, q: Query) -> Posterior:
         post_mean, post_std = self._lg_posterior_moments(q)

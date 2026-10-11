@@ -199,6 +199,7 @@ class PomegranateAdapter:
             for parent, child in problem.dag
         ]
         self.model = BayesianNetwork(distributions=dist_objs, edges=edges_obj)
+        self._tab_src = None   # exact-check tables rebuilt from the new fit
         # Move the whole module (distributions + lazily-built factor graph) to
         # the resolved device. Build stays on CPU above; only the final model
         # is relocated. No-op for "cpu".
@@ -264,7 +265,46 @@ class PomegranateAdapter:
         # Back to CPU for downstream metric computation (consistent with the
         # other adapters, which return CPU posteriors).
         probs = result.float().detach().cpu()
-        return Posterior(probs=probs)
+        return Posterior(probs=probs, undefined_reason=self._undefined_reason(q, probs))
+
+    # -------------------------------------------------------------------------
+    # Zero-probability evidence (D10): tell an undefined posterior from a
+    # numerical failure
+    # -------------------------------------------------------------------------
+
+    def _tabular(self):
+        """The fitted CPTs as an exact_discrete.TabularSource (cached)."""
+        if getattr(self, "_tab_src", None) is None:
+            from nbn.bench.core.exact_discrete import TabularSource
+
+            parents = {n: tuple(p for p, c in self.problem.dag if c == n)
+                       for n in self._topo}
+
+            def table(n):
+                dist = self.model.distributions[self._node_to_idx[n]]
+                if not parents[n]:
+                    return dist.probs.detach().cpu().double().reshape(self._cards[n])
+                return dist.probs[0].detach().cpu().double()
+
+            self._tab_src = TabularSource(
+                lambda n: parents[n], lambda n: self._cards[n], table)
+        return self._tab_src
+
+    def _undefined_reason(self, q: Query, probs: torch.Tensor) -> str | None:
+        """``"P(e)=0 under the fitted CPTs (exact check)"`` when ``probs`` is
+        0/0 BECAUSE the evidence is impossible under the fitted model
+        (loopy BP returns NaN there); None for a finite posterior or when the
+        exact check finds P(e) > 0 / cannot decide (a numerical failure,
+        reported as an error)."""
+        if bool(torch.isfinite(probs).all()) and float(probs.sum()) > 0:
+            return None
+        from nbn.bench.core.exact_discrete import evidence_is_impossible
+
+        ev = {k: int(torch.as_tensor(v).reshape(-1)[0].item())
+              for k, v in q.evidence.items() if v is not None}
+        if evidence_is_impossible(self._tabular(), q.targets[0], ev):
+            return "P(evidence)=0 under the fitted CPTs, confirmed by exact elimination"
+        return None
 
     def query_batch(self, queries: list[Query]) -> list[Posterior]:
         """Library-level batching via pomegranate's row-batched
@@ -349,7 +389,9 @@ class PomegranateAdapter:
                 f"Unexpected predict_proba output for {self.name}: "
                 f"shape {tuple(probs.shape)}, expected [{b}, K]."
             )
-        return [Posterior(probs=probs[i]) for i in range(b)]
+        return [Posterior(probs=probs[i],
+                          undefined_reason=self._undefined_reason(queries[i], probs[i]))
+                for i in range(b)]
 
     # -------------------------------------------------------------------------
     # Applicability
