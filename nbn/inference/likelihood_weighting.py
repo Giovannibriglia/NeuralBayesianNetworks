@@ -5,6 +5,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 import torch
 
+from nbn.inference._validation import check_discrete_values
 from nbn.inference.base import InferenceEngine
 from nbn.inference.state import get_inference_state
 from nbn.utils.batching import ensure_2d
@@ -94,6 +95,8 @@ class LikelihoodWeightingEngine(InferenceEngine):
     n_samples: int
         Number of ancestral samples (particles) per query.
     """
+
+    _transient_caches = ("_cache",)
 
     def __init__(self, n_samples: int = 2048) -> None:
         self.n_samples = int(n_samples)
@@ -229,6 +232,11 @@ class LikelihoodWeightingEngine(InferenceEngine):
         *,
         squeeze: bool,
     ):
+        # Discrete evidence / do must be valid states: the sampler writes
+        # them verbatim into the particle buffer, and the CPT lookups that
+        # score them wrap -1 to the last state (R7).
+        check_discrete_values(model, {**(evidence or {}), **(do or {})},
+                              do_keys=(do or {}))
         s = n_samples or self.n_samples
         log_w, buf = self._run(model, targets, evidence, do, s)
 
