@@ -540,3 +540,71 @@ def test_b9_flow_accepts_float64_inputs(root):
     lp = mech.log_prob(x, None if root else pa)
     assert lp.shape == (64,) and torch.isfinite(lp).all()
     assert mech.sample(None if root else pa, 2).shape == (1 if root else 64, 2, 1)
+
+
+# ==========================================================================
+# A11 / B11 / C -- FlexCode: off-support density, degenerate span, sampler
+# ==========================================================================
+
+
+def _flexcode_root(y, **kw):
+    from nbn.mechanisms.non_parametric.flexcode import FlexCodeMechanism
+
+    mech = FlexCodeMechanism(**kw)
+    mech.fit_local(y, None)
+    return mech
+
+
+def test_a11_flexcode_density_is_normalised_over_the_real_line():
+    # Pre-fix: z was clamped into [0, 1], so every y off the support scored
+    # the boundary density and the integral over [-100, 100] was 4.29.  An
+    # exponential target leaves a high series value at the support's edges
+    # (1.4-1.9 pre-fix across seeds), which makes the leak visible.
+    y = -torch.log(torch.rand(2000, 1, generator=torch.Generator().manual_seed(0)))
+    mech = _flexcode_root(y)
+    grid = torch.linspace(-100.0, 100.0, 400001).unsqueeze(-1)
+    with torch.no_grad():
+        dens = mech.log_prob(grid, None).exp()
+    assert abs(float(torch.trapz(dens, grid[:, 0])) - 1.0) < 0.02
+    # Off the support: exactly the documented floor, finite.
+    far = mech.log_prob(torch.tensor([[-50.0], [50.0]]), None)
+    assert torch.isfinite(far).all()
+    span = mech._y_max - mech._y_min
+    coef = mech._coef(None, 1)
+    floor = math.log(mech.min_density) - torch.log(mech._normaliser(coef)) - torch.log(span)
+    torch.testing.assert_close(far, floor.expand(2))
+
+
+@pytest.mark.parametrize("value", [1.5, 1000.0, -3e4])
+def test_b11_flexcode_constant_target_is_finite(value):
+    # Pre-fix: the 1e-6 span floor vanished in float32 next to |y| ~ 1, so
+    # z = 0/0 and log_prob was NaN.
+    mech = _flexcode_root(torch.full((20, 1), value))
+    lp = mech.log_prob(torch.tensor([[value]]), None)
+    assert torch.isfinite(lp).all()
+    assert torch.isfinite(mech.sample(None, 10)).all()
+
+
+def test_b11_flexcode_single_row_with_parents_is_finite():
+    from nbn.mechanisms.non_parametric.flexcode import FlexCodeMechanism
+
+    mech = FlexCodeMechanism(epochs=2)
+    mech.fit_local(torch.tensor([[0.3]]), torch.tensor([[1.0]]))
+    lp = mech.log_prob(torch.tensor([[0.3], [0.2]]), torch.tensor([[1.0], [2.0]]))
+    assert torch.isfinite(lp).all()
+
+
+def test_c_flexcode_samples_are_continuous_and_match_the_density():
+    y = torch.randn(3000, 1, generator=torch.Generator().manual_seed(1))
+    mech = _flexcode_root(y, grid_size=64)
+    s = mech.sample(None, 20000).reshape(-1)
+    # Pre-fix: inverse-CDF returned grid nodes only (<= grid_size values).
+    assert s.unique().numel() > 10000
+    # Kolmogorov distance between the samples and the model's own CDF.
+    grid = torch.linspace(float(mech._y_min), float(mech._y_max), 20001)
+    with torch.no_grad():
+        dens = mech.log_prob(grid.unsqueeze(-1), None).exp()
+    cdf = torch.cumulative_trapezoid(dens, grid)
+    cdf = torch.cat([torch.zeros(1), cdf]) / cdf[-1]
+    emp = torch.searchsorted(s.sort().values, grid, right=True).float() / s.numel()
+    assert float((emp - cdf).abs().max()) < 0.02
