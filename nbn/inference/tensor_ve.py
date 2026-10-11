@@ -416,6 +416,18 @@ class TensorVariableElimination(InferenceEngine):
         prof = self._peak_profile(model, target, ev, tuple(sorted(do_keys)), order)
         return _peak_bytes_from_profile(prof, B)
 
+    def _chunk_budget_bytes(self, device, budget: float) -> float:
+        """Budget for sizing row-chunks: the stable budget, capped by live headroom.
+
+        CUDA's budget is already live headroom.  On CPU / MPS the stable
+        capacity-based budget decides *whether* VE runs; chunks additionally
+        fit ``memory_safety`` × what is free now (N1).
+        """
+        if torch.device(device).type == "cuda":
+            return budget
+        head = device_headroom_bytes(device)
+        return budget if head is None else min(budget, self.memory_safety * head)
+
     def fits_memory(self, model, target, evidence_keys=(), do_keys=(), *,
                     order: str = "min_fill",
                     host_fraction: float | None = None) -> bool:
@@ -472,15 +484,27 @@ class TensorVariableElimination(InferenceEngine):
         *,
         do: Mapping[str, torch.Tensor] | None = None,
         order: str = "min_fill",
+        host_fraction: float | None = None,
         **kwargs,
     ) -> torch.Tensor:
+        """Posterior for ``targets`` given one row of evidence / do-values.
+
+        ``host_fraction`` overrides ``host_memory_fraction`` for this call
+        (``HybridRouter`` passes its ``ve_host_fraction``).
+        """
+        # do-specific errors first (they name the offending do-target), then
+        # the whole-model discreteness check, then the shape of the row.
+        self._validate_do(model, dict(do or {}), evidence)
+        _require_discrete(model)
+        _require_single_row(evidence, do)
         if len(targets) != 1:
             # Joint query (R6): one row of the batched path, ``[K_1, …, K_n]``.
             row = {k: (v if isinstance(v, torch.Tensor) else torch.as_tensor(v)).reshape(1)
                    for k, v in (evidence or {}).items()}
             do_row = {k: (v if isinstance(v, torch.Tensor) else torch.as_tensor(v)).reshape(1)
                       for k, v in (do or {}).items()}
-            return self.query_batch(model, targets, row, do=do_row, order=order)[0]
+            return self.query_batch(model, targets, row, do=do_row, order=order,
+                                    host_fraction=host_fraction)[0]
         target = targets[0]
         evidence = evidence or {}
         do = dict(do or {})
@@ -509,7 +533,7 @@ class TensorVariableElimination(InferenceEngine):
 
         # Pre-allocation guard (single row), on every device — see
         # ``memory_budget_bytes``.  Raised before tabulating any CPT.
-        budget = self.memory_budget_bytes(device)
+        budget = self.memory_budget_bytes(device, host_fraction=host_fraction)
         if budget is not None:
             peak = self.estimate_peak_bytes(
                 model, target, tuple(ev_int), tuple(do_int), B=1, order=order,
@@ -598,6 +622,7 @@ class TensorVariableElimination(InferenceEngine):
         *,
         do: Mapping[str, torch.Tensor] | None = None,
         order: str = "min_fill",
+        host_fraction: float | None = None,
         **kwargs,
     ) -> torch.Tensor:
         """Vectorised batched VE.
@@ -625,6 +650,7 @@ class TensorVariableElimination(InferenceEngine):
         target = targets[0]
         do = dict(do or {})
         self._validate_do(model, do, evidence)
+        _require_discrete(model)
         device = model.device
 
         # Normalise evidence + do to [B] long tensors on `device`.  do-values
@@ -682,30 +708,43 @@ class TensorVariableElimination(InferenceEngine):
         # the whole batch it is split into the largest row-chunks that fit
         # the same budget (``_LIVESET_MULTIPLIER`` unchanged — separately
         # calibrated, #177/#178).
-        budget = self.memory_budget_bytes(device)
+        #
+        # N1: the *reject* decision uses the stable budget (so whether VE can
+        # answer at all does not depend on momentary memory pressure), but the
+        # *chunk size* also respects live headroom on CPU / MPS: chunking is
+        # exact, so smaller chunks change only the speed, never the answer —
+        # whereas sizing chunks to total RAM on a busy machine meant swap or
+        # the OOM killer.
+        budget = self.memory_budget_bytes(device, host_fraction=host_fraction)
         if budget is not None:
             ev_keys = tuple(sorted(k for k in ev_norm if k not in do))
             do_keys = tuple(sorted(do))
             prof = self._peak_profile(model, plan_target, ev_keys, do_keys, order)
+            peak_1 = _peak_bytes_from_profile(prof, 1)
+            if peak_1 > budget:
+                # Even a single row exceeds the budget: chunking cannot help.
+                raise OutOfMemoryError(
+                    _guard_message(peak_1, budget, device, order)
+                )
             peak_b = _peak_bytes_from_profile(prof, B)
-            if peak_b > budget:
-                peak_1 = _peak_bytes_from_profile(prof, 1)
-                chunk = _max_chunk_rows(peak_b, peak_1, B, budget)
-                if chunk == 0:
-                    # Even a single row exceeds the budget: chunking cannot help.
-                    raise OutOfMemoryError(
-                        _guard_message(peak_1, budget, device, order)
+            chunk_budget = self._chunk_budget_bytes(device, budget)
+            if peak_b > chunk_budget:
+                # At least one row per chunk: a row that fits the stable
+                # budget is always attempted (it is the best we can do).
+                chunk = max(1, _max_chunk_rows(peak_b, peak_1, B, chunk_budget))
+                if chunk < B:
+                    logger.info(
+                        "TensorVariableElimination.query_batch: estimated peak "
+                        "%.2f GiB for B=%d exceeds the chunk budget (%.2f GiB) "
+                        "on %s; splitting into chunks of %d rows.",
+                        peak_b / 1024 ** 3, B, chunk_budget / 1024 ** 3, device,
+                        chunk,
                     )
-                logger.info(
-                    "TensorVariableElimination.query_batch: estimated peak "
-                    "%.2f GiB for B=%d exceeds the memory budget (%.2f GiB) "
-                    "on %s; splitting into chunks of %d rows.",
-                    peak_b / 1024 ** 3, B, budget / 1024 ** 3, device, chunk,
-                )
-                return self._query_batch_chunked(
-                    model, targets, ev_norm, B=B, chunk=chunk,
-                    order=order, do_keys=tuple(do), **kwargs,
-                )
+                    return self._query_batch_chunked(
+                        model, targets, ev_norm, B=B, chunk=chunk,
+                        order=order, do_keys=tuple(do),
+                        host_fraction=host_fraction, **kwargs,
+                    )
 
         factors = self._extract_factors(model)
         # See ``query``: mutilation = drop the intervened CPTs, clamp the rest.
@@ -788,6 +827,7 @@ class TensorVariableElimination(InferenceEngine):
         chunk: int,
         order: str,
         do_keys: tuple[str, ...] = (),
+        host_fraction: float | None = None,
         **kwargs,
     ) -> torch.Tensor:
         """Run ``query_batch`` over row-chunks of ``ev_norm`` and concatenate.
@@ -809,9 +849,38 @@ class TensorVariableElimination(InferenceEngine):
             rows = {k: v[i:i + chunk] for k, v in ev_norm.items()}
             do_rows = {k: rows.pop(k) for k in do_keys}
             outs.append(self.query_batch(
-                model, targets, rows, do=do_rows, order=order, **kwargs,
+                model, targets, rows, do=do_rows, order=order,
+                host_fraction=host_fraction, **kwargs,
             ))
         return torch.cat(outs, dim=0)
+
+
+def _require_discrete(model) -> None:
+    """VE needs every mechanism discrete — checked before any planning.
+
+    The memory guard prices the plan from cardinalities, so on a hybrid
+    network it used to fail first with an opaque ``AttributeError``
+    (``'MDNMechanism' has no 'n_classes'``) instead of this message (N3).
+    """
+    for node, mech in model.mechanisms.items():
+        if not mech.is_discrete:
+            raise ValueError(
+                f"TensorVariableElimination only supports discrete mechanisms; "
+                f"node '{node}' has a continuous mechanism."
+            )
+
+
+def _require_single_row(evidence, do) -> None:
+    """``query`` takes one value per node; a batch belongs in ``query_batch``."""
+    for kind, values in (("evidence", evidence), ("do", do)):
+        for node, v in (values or {}).items():
+            n = v.numel() if isinstance(v, torch.Tensor) else torch.as_tensor(v).numel()
+            if n != 1:
+                raise ValueError(
+                    f"TensorVariableElimination.query takes one {kind} value per "
+                    f"node, got {n} values for {node!r}; use query_batch for a "
+                    f"batch of rows."
+                )
 
 
 def _plan_target(target, clamped: set):

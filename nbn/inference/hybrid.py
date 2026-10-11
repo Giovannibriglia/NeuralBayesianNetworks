@@ -151,17 +151,19 @@ class HybridRouter(InferenceEngine):
 
         if tw > self.treewidth_threshold:
             return self._use_lw(
-                "Treewidth %d > threshold %d; using likelihood weighting.",
+                "HybridRouter: induced treewidth %d > threshold %d for %s; "
+                "answering with likelihood weighting (approximate).",
                 tw, self.treewidth_threshold,
+                _describe(targets, evidence, do),
+                warn_key=("tw",) + _shape_key(model, targets, evidence, do),
             )
         if targets is not None and not self._ve_fits(
             model, tuple(targets) if multi else targets[0], evidence, do, order,
         ):
             return self._use_lw(
-                "HybridRouter: the exact VE plan for P(%s | %s) would exceed "
-                "the %s memory budget; answering with likelihood weighting "
-                "(approximate).", ", ".join(targets),
-                sorted({**(evidence or {}), **(do or {})}), model.device,
+                "HybridRouter: the exact VE plan for %s would exceed the %s "
+                "memory budget; answering with likelihood weighting "
+                "(approximate).", _describe(targets, evidence, do), model.device,
                 warn_key=_shape_key(model, targets, evidence, do),
             )
         self._last_engine = "tensor_ve"
@@ -194,12 +196,19 @@ class HybridRouter(InferenceEngine):
         a real bug and propagates (#232 precedent: broad catches here
         silently masked engine bugs).
         """
+        if not targets:
+            raise ValueError(f"targets must be distinct node names, got {targets!r}.")
         engine = self._select(
             model, targets, evidence, kwargs.get("do"),
             kwargs.get("order", "min_fill"),
         )
         try:
-            return getattr(engine, method)(model, targets, evidence, **kwargs)
+            call_kwargs = kwargs
+            if engine is self._ve:
+                # VE sizes its guard and chunks with the router's share of host
+                # memory, the same share the route was priced with.
+                call_kwargs = {**kwargs, "host_fraction": self.ve_host_fraction}
+            return getattr(engine, method)(model, targets, evidence, **call_kwargs)
         except Exception as exc:
             if engine is self._lw or not is_oom_error(exc):
                 raise  # LW itself OOMed, or not an OOM at all.
@@ -244,3 +253,12 @@ def _shape_key(model, targets, evidence, do) -> tuple:
         id(model), tuple(targets or ()),
         tuple(sorted(evidence or {})), tuple(sorted(do or {})),
     )
+
+
+def _describe(targets, evidence, do) -> str:
+    """``P(A, B | E1, E2; do(X))`` — names only, interventions kept apart."""
+    given = [", ".join(sorted(evidence))] if evidence else []
+    if do:
+        given.append(f"do({', '.join(sorted(do))})")
+    head = ", ".join(targets or ())
+    return f"P({head} | {'; '.join(given)})" if given else f"P({head})"
