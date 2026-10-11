@@ -314,15 +314,16 @@ class LinearGaussianMechanism(Mechanism):
         assert self._bias is not None, "Call fit_local before forward()."
         scale = self._scale()  # [D_x]
         parents = self._cast_parents(parents)
+        # Batch dims are everything but the last parent axis, so a particle
+        # block [B, S, D_pa] gives batch_shape [B, S] as the Mechanism
+        # contract says.  ``scale`` is expanded to ``loc``'s full shape: it
+        # used to be expanded to [B, D_x], which crashed Normal() on 3-D input.
         if self._input_dim == 0 or parents is None:
-            b = 1 if parents is None else ensure_2d(parents).shape[0]
-            loc = self._bias.unsqueeze(0).expand(b, -1)  # [B, D_x]
-            scale_e = scale.unsqueeze(0).expand(b, -1)
+            batch = (1,) if parents is None else tuple(ensure_2d(parents).shape[:-1])
+            loc = self._bias.expand(*batch, -1)  # [*batch, D_x]
         else:
-            parents_2d = ensure_2d(parents)  # [B, D_pa]
-            loc = parents_2d @ self._weight + self._bias  # [B, D_x]
-            scale_e = scale.unsqueeze(0).expand(parents_2d.shape[0], -1)
-        return Independent(Normal(loc, scale_e), 1)
+            loc = ensure_2d(parents) @ self._weight + self._bias  # [*batch, D_x]
+        return Independent(Normal(loc, scale.expand_as(loc)), 1)
 
     def sample(self, parents: torch.Tensor | None, n: int = 1) -> torch.Tensor:
         """Return ``[B, n, D_x]``."""

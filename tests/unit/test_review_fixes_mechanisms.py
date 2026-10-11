@@ -77,3 +77,57 @@ def test_a4_linear_gaussian_offset_fit_is_replication_and_zero_weight_exact():
                  (weighted._bias, replicated._bias),
                  (weighted._scale(), replicated._scale())]:
         torch.testing.assert_close(a, b, atol=2e-3, rtol=1e-4)
+
+
+# ==========================================================================
+# B10 -- 3-D parents through LinearGaussian.forward; batched Dirac values
+# ==========================================================================
+
+
+def test_b10_linear_gaussian_forward_accepts_particle_parents():
+    # Pre-fix: scale was expanded to [B, D_x] against a [B, S, D_x] loc and
+    # Normal() raised a size mismatch.
+    g = torch.Generator().manual_seed(0)
+    pa = torch.randn(50, 2, generator=g)
+    x = pa.sum(1, keepdim=True) + torch.randn(50, 1, generator=g)
+    mech = LinearGaussianMechanism()
+    mech.fit_local(x, pa)
+    p3 = torch.randn(4, 3, 2, generator=g)
+    dist = mech.forward(p3)
+    assert tuple(dist.batch_shape) == (4, 3)
+    xs = torch.randn(4, 3, 1, generator=g)
+    torch.testing.assert_close(dist.log_prob(xs), mech.log_prob(xs, p3))
+
+
+def test_b10_linear_gaussian_root_forward_with_particle_parents():
+    mech = LinearGaussianMechanism()
+    mech.fit_local(torch.randn(30, 1), None)
+    assert tuple(mech.forward(torch.zeros(4, 3, 0)).batch_shape) == (4, 3)
+
+
+def test_b10_dirac_gaussian_batched_value():
+    # Pre-fix: a documented [B, D] value was flattened to [B*D] and every
+    # method crashed on the expand.
+    from nbn.mechanisms.parametric.dirac_gaussian import DiracGaussianMechanism
+
+    value = torch.tensor([[0.0, 1.0], [2.0, 3.0], [4.0, 5.0]])
+    mech = DiracGaussianMechanism(value, sigma=1e-3)
+    pa = torch.zeros(3, 1)
+    assert mech.output_dim == 2
+    dist = mech.forward(pa)
+    assert tuple(dist.batch_shape) == (3,) and tuple(dist.event_shape) == (2,)
+    torch.testing.assert_close(dist.mean, value)
+    s = mech.sample(pa, 4)
+    assert s.shape == (3, 4, 2)
+    torch.testing.assert_close(s.mean(1), value, atol=5e-3, rtol=0)
+    lp_at = mech.log_prob(value, pa)
+    lp_off = mech.log_prob(value + 0.01, pa)
+    assert lp_at.shape == (3,) and (lp_at > lp_off).all()
+    lp3 = mech.log_prob(value.unsqueeze(1).expand(3, 5, 2), pa)
+    assert lp3.shape == (3, 5)
+    torch.testing.assert_close(lp3[:, 0], lp_at)
+    # A vector value keeps broadcasting over any batch.
+    vec = DiracGaussianMechanism(torch.tensor([1.0, 2.0]))
+    assert vec.sample(torch.zeros(5, 1), 2).shape == (5, 2, 2)
+    assert vec.log_prob(torch.zeros(5, 3, 2), None).shape == (5, 3)
+
