@@ -186,3 +186,82 @@ def test_a15_neural_categorical_embeddings_accept_particle_parents():
     probs3 = mech.forward(p3).probs
     probs2 = mech.forward(p3.reshape(20, 2)).probs.reshape(4, 5, 3)
     torch.testing.assert_close(probs3, probs2)
+
+
+# ==========================================================================
+# A20 -- zero-weight rows must equal dropping them; #127 pseudo-count mass
+# ==========================================================================
+
+
+def _cat_data(n=60, seed=0):
+    g = torch.Generator().manual_seed(seed)
+    pa = torch.randint(0, 2, (n, 1), generator=g)
+    x = (pa[:, 0] + torch.randint(0, 2, (n,), generator=g)) % 2
+    return x, pa
+
+
+def test_a20_categorical_zero_weight_rows_do_not_widen_the_table():
+    from nbn.mechanisms import CategoricalTableMechanism
+
+    x, pa = _cat_data()
+    # A zero-weight row carrying an unseen class (4) and an unseen parent
+    # value (5).  Pre-fix it widened K to 5 and the parent axis to 6, and
+    # the widened class drew the #127 pseudo-count.
+    x_z = torch.cat([x, torch.tensor([4])])
+    pa_z = torch.cat([pa, torch.tensor([[5]])])
+    w = torch.cat([torch.ones(len(x)), torch.zeros(1)])
+    with_zero = CategoricalTableMechanism()
+    with_zero.fit_local(x_z, pa_z, weights=w)
+    dropped = CategoricalTableMechanism()
+    dropped.fit_local(x, pa)
+    assert with_zero.n_classes == dropped.n_classes == 2
+    assert with_zero._parent_cards == dropped._parent_cards == [2]
+    torch.testing.assert_close(with_zero._logits, dropped._logits)
+
+
+def test_a20_unobserved_class_pseudo_count_is_one_observation_in_total():
+    from nbn.mechanisms import CategoricalTableMechanism
+
+    # Parent row 0: 99 observations; row 1: a single one; row 2: none.
+    x = torch.cat([torch.randint(0, 2, (99,)), torch.tensor([0])])
+    pa = torch.cat([torch.zeros(99, 1), torch.ones(1, 1)]).long()
+    mech = CategoricalTableMechanism(alpha=0.0)
+    mech.fit_local(x, pa, n_classes=3, parent_cards=[3])
+    cpt = mech.cpt
+    # Pre-fix: the sparse row gave the never-seen class 2 half its mass and
+    # the empty row gave it all of it.
+    assert 0 < float(cpt[1, 2]) < 0.02
+    assert 0 < float(cpt[0, 2]) < 0.02
+    torch.testing.assert_close(cpt[0, 2], cpt[1, 2], atol=1e-3, rtol=0)
+    torch.testing.assert_close(cpt[2], torch.full((3,), 1 / 3))
+
+
+def test_a20_unobserved_class_pseudo_count_keeps_update_exact():
+    from nbn.mechanisms import CategoricalTableMechanism
+
+    x, pa = _cat_data(n=80, seed=4)
+    pooled = CategoricalTableMechanism()
+    pooled.fit_local(x, pa, n_classes=3, parent_cards=[2])
+    chunked = CategoricalTableMechanism()
+    chunked.fit_local(x[:30], pa[:30], n_classes=3, parent_cards=[2])
+    chunked.update_local(x[30:], pa[30:])
+    torch.testing.assert_close(chunked.cpt, pooled.cpt)
+
+
+def test_a20_flexcode_zero_weight_rows_do_not_move_the_support():
+    from nbn.mechanisms.non_parametric.flexcode import FlexCodeMechanism
+
+    g = torch.Generator().manual_seed(0)
+    y = torch.randn(200, 1, generator=g)
+    # Pre-fix: y_min/y_max spanned the zero-weight outlier at 1e3, so the
+    # whole basis was squeezed into a sliver of [0, 1].
+    y_z = torch.cat([y, torch.tensor([[1e3]])])
+    w = torch.cat([torch.ones(200), torch.zeros(1)])
+    with_zero = FlexCodeMechanism()
+    with_zero.fit_local(y_z, None, weights=w)
+    dropped = FlexCodeMechanism()
+    dropped.fit_local(y, None)
+    torch.testing.assert_close(with_zero._y_min, dropped._y_min)
+    torch.testing.assert_close(with_zero._y_max, dropped._y_max)
+    q = torch.linspace(-3, 3, 13).unsqueeze(-1)
+    torch.testing.assert_close(with_zero.log_prob(q, None), dropped.log_prob(q, None))

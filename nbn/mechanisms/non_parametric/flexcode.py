@@ -184,6 +184,7 @@ class FlexCodeMechanism(Mechanism):
         warm_start: bool = False,
         **kwargs,
     ) -> dict:
+        x, parents, weights = self._drop_zero_weight_rows(x, parents, weights)
         kwargs["weights"] = weights
         if self.sharpen == "auto":
             # The search sub-fits on a split and then refits on the full data,
@@ -207,6 +208,37 @@ class FlexCodeMechanism(Mechanism):
             self.sharpen = best
             return info
         return self._fit_core(x, parents, warm_start=warm_start, **kwargs)
+
+    @staticmethod
+    def _drop_zero_weight_rows(
+        x: torch.Tensor,
+        parents: torch.Tensor | None,
+        weights: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """Remove rows whose weight is exactly 0 before anything reads the data.
+
+        The loss and the moments already give such rows no influence, but the
+        z-space bounds ``(_y_min, _y_max)`` are a plain min/max of the data:
+        a zero-weight outlier stretched the support and squeezed every real
+        observation into a sliver of the basis' ``[0, 1]`` -- a zero weight
+        that was not equivalent to dropping the row.  Dropping up front also
+        keeps the ``sharpen="auto"`` hold-out split identical to the one a fit
+        on the dropped data draws.
+        """
+        if weights is None:
+            return x, parents, weights
+        w = validate_weights(
+            weights, ensure_2d(x).shape[0], where="FlexCodeMechanism.fit_local",
+        )
+        keep = w > 0
+        if bool(keep.all()):
+            return x, parents, weights
+        has_pa = parents is not None and parents.shape[-1] > 0
+        return (
+            ensure_2d(x)[keep.to(x.device)],
+            ensure_2d(parents)[keep.to(parents.device)] if has_pa else parents,
+            w[keep],
+        )
 
     def _select_sharpen(
         self,
