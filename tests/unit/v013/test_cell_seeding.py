@@ -55,3 +55,24 @@ def test_derive_seed_has_no_linear_collisions():
     assert derive_seed("cell", "10", 0, "nbn-cat-lw") != derive_seed(
         "cell", "10", 0, "nbn-cat-ve")
     assert derive_seed("x", 3) == derive_seed("x", 3)
+
+
+def test_rng_scope_initialises_cuda_before_saving_its_state(monkeypatch):
+    """CUDA-by-reading #4: rng_scope saved/restored the CUDA RNG only when
+    CUDA was already initialised; if the oracle touched CUDA first inside the
+    scope, the scope's seed leaked into the adapter's stream. With CUDA
+    available it is now initialised, saved and restored every time."""
+    from nbn.bench.core import seeding
+
+    calls = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
+    monkeypatch.setattr(torch.cuda, "init", lambda: calls.append("init"))
+    monkeypatch.setattr(torch.cuda, "get_rng_state_all",
+                        lambda: calls.append("save") or ["state"])
+    monkeypatch.setattr(torch.cuda, "set_rng_state_all",
+                        lambda s: calls.append(("restore", tuple(s))))
+    monkeypatch.setattr(torch.cuda, "manual_seed_all", lambda s: None)
+    with seeding.rng_scope(7):
+        calls.append("body")
+    assert calls == ["init", "save", "body", ("restore", ("state",))]
