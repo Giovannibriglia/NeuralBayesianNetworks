@@ -336,3 +336,104 @@ def test_a21_binning_accepts_parent_cards_from_fit():
     mech = _binning_mech(parent_kinds=[("discrete", 3)], n_bins=2, n_categories=2)
     mech.fit_local(x, pa, parent_cards=[4], n_classes=2)
     assert mech._parent_cards == [4]
+
+
+# ==========================================================================
+# A10 / B9 / B11 -- MDN: child standardisation, float64 inputs, one row
+# ==========================================================================
+
+
+def _wide_data(n=2000, seed=0, scale=3000.0, offset=0.0):
+    g = torch.Generator().manual_seed(seed)
+    pa = torch.randn(n, 1, generator=g)
+    x = offset + scale * pa + scale * torch.randn(n, 1, generator=g)
+    return x, pa
+
+
+def test_a10_mdn_fits_a_wide_target_as_well_as_linear_gaussian():
+    from nbn.mechanisms import MDNMechanism
+
+    # Pre-fix: log_scale <= 7 capped each component at ~1097 raw units, so
+    # a target with spread ~4000 scored NLL 15.0 against LG's 9.4.
+    x, pa = _wide_data()
+    lg = LinearGaussianMechanism()
+    lg.fit_local(x, pa)
+    mdn = MDNMechanism(num_components=3, hidden=(32,))
+    mdn.fit_local(x, pa, epochs=40, lr=3e-3, batch_size=256, consolidate=False)
+    with torch.no_grad():
+        nll_lg = float(-lg.log_prob(x, pa).mean())
+        nll_mdn = float(-mdn.log_prob(x, pa).mean())
+    assert nll_mdn < nll_lg + 0.2, (nll_mdn, nll_lg)
+    s = mdn.sample(pa[:500], 4)
+    # Samples come back in raw units.
+    assert 2000 < float(s.std()) < 7000
+
+
+def test_a10_mdn_density_integrates_to_one_in_raw_units():
+    from nbn.mechanisms import MDNMechanism
+
+    x, pa = _wide_data(n=500, scale=50.0, offset=1000.0)
+    mdn = MDNMechanism(num_components=2, hidden=(16,))
+    mdn.fit_local(x, pa, epochs=5, consolidate=False)
+    grid = torch.linspace(0.0, 2000.0, 20001).unsqueeze(-1)
+    with torch.no_grad():
+        dens = mdn.log_prob(grid, torch.zeros(len(grid), 1)).exp()
+    assert abs(float(torch.trapz(dens, grid[:, 0])) - 1.0) < 1e-2
+
+
+def test_a10_mdn_child_standardisation_frozen_under_warm_start():
+    from nbn.mechanisms import MDNMechanism
+
+    x, pa = _wide_data(n=300, scale=5.0)
+    mdn = MDNMechanism(num_components=2, hidden=(8,))
+    mdn.fit_local(x, pa, epochs=2, consolidate=False)
+    m0, s0 = mdn._x_mean.clone(), mdn._x_std.clone()
+    mdn.fit_local(x + 100.0, pa, epochs=2, consolidate=False, warm_start=True)
+    torch.testing.assert_close(mdn._x_mean, m0)
+    torch.testing.assert_close(mdn._x_std, s0)
+    mdn.fit_local(x + 100.0, pa, epochs=2, consolidate=False)
+    assert float((mdn._x_mean - m0).abs().max()) > 50.0
+    # The buffers are part of the snapshot round trip.
+    assert {"_x_mean", "_x_std"} <= set(mdn.state_dict())
+
+
+def test_a10_mdn_weighted_child_standardisation_is_replication_exact():
+    from nbn.mechanisms import MDNMechanism
+
+    x, pa = _wide_data(n=60, scale=5.0, offset=3.0)
+    w = torch.randint(0, 4, (60,), generator=torch.Generator().manual_seed(5)).float()
+    idx = _replicate(w)
+    a = MDNMechanism(num_components=2, hidden=(8,))
+    a.fit_local(x, pa, weights=w, epochs=0, consolidate=False)
+    b = MDNMechanism(num_components=2, hidden=(8,))
+    b.fit_local(x[idx], pa[idx], epochs=0, consolidate=False)
+    torch.testing.assert_close(a._x_mean, b._x_mean)
+    torch.testing.assert_close(a._x_std, b._x_std)
+
+
+@pytest.mark.parametrize("root", [True, False])
+def test_b9_mdn_accepts_float64_inputs(root):
+    from nbn.mechanisms import MDNMechanism
+
+    x, pa = _wide_data(n=100, scale=1.0)
+    x, pa = x.double(), (None if root else pa.double())
+    mdn = MDNMechanism(num_components=2, hidden=(8,))
+    # Pre-fix: "mat1 and mat2 must have the same dtype" (float64 data,
+    # float32 MLP).
+    mdn.fit_local(x, pa, epochs=2)
+    lp = mdn.log_prob(x, pa)
+    assert lp.shape == (100,) and torch.isfinite(lp).all()
+    assert mdn.sample(pa, 3).shape == (1 if root else 100, 3, 1)
+
+
+@pytest.mark.parametrize("root", [True, False])
+def test_b11_mdn_fits_a_single_row(root):
+    from nbn.mechanisms import MDNMechanism
+
+    x, pa = _wide_data(n=2, scale=1.0)
+    mdn = MDNMechanism(num_components=2, hidden=(8,))
+    # Pre-fix: the unbiased std of one row is NaN and clamp_min passes it
+    # through -> Normal(scale=NaN) raised.
+    mdn.fit_local(x[:1], None if root else pa[:1], epochs=2, consolidate=False)
+    lp = mdn.log_prob(x, None if root else pa)
+    assert torch.isfinite(lp).all()
