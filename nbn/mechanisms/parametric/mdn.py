@@ -14,7 +14,11 @@ from nbn.learning.weighting import (
     weighted_moments,
 )
 from nbn.learning.warm_start import check_branch, check_shapes
-from nbn.mechanisms.base import Mechanism
+from nbn.mechanisms.base import (
+    Mechanism,
+    _ensure_optional_buffers,
+    _sync_optional_buffers,
+)
 from nbn.update import online_laplace
 # _sanitise_parents was promoted to nbn.utils.batching (v0.14) so the flow
 # mechanism can share the identical guard; re-exported via this import for the
@@ -133,6 +137,18 @@ class MDNMechanism(Mechanism):
     # ------------------------------------------------------------------
     # Fitting
     # ------------------------------------------------------------------
+
+    # Buffers added after this mechanism's first release; ``None`` is the
+    # identity map the older format used.  See nbn/mechanisms/base.py.
+    _OPTIONAL_BUFFERS = ("_x_mean", "_x_std")
+
+    def __setstate__(self, state) -> None:
+        super().__setstate__(state)
+        _ensure_optional_buffers(self, self._OPTIONAL_BUFFERS)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs) -> None:
+        _sync_optional_buffers(self, state_dict, prefix, self._OPTIONAL_BUFFERS)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def fit_local(
         self,

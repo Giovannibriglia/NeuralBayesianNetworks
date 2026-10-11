@@ -735,3 +735,85 @@ def test_c_kde_update_local_accepts_cpu_batch_into_accelerator_model(device):
     mech.update_local(y[30:], pa[30:], weights=torch.full((10,), 2.0))
     assert mech._train_y.shape[0] == 40 and mech._train_logw.device.type == device
     assert torch.isfinite(mech.log_prob(y.to(device), pa.to(device))).all()
+
+
+# ==========================================================================
+# R1 -- checkpoints written by origin/master (pre-standardisation MDN/flow)
+# ==========================================================================
+#
+# tests/data/master_mdn_flow_*.pt were produced by *origin/master* code with
+# tests/data/make_master_mdn_flow_checkpoint.py: A (root MDN), B | A (MDN),
+# C | B (flow), D (root flow).  Those mechanisms predate the _x_*/_pa_*
+# standardisation buffers; on load they must behave exactly as on master
+# (identity standardisation), not raise AttributeError or silently rescale.
+
+_DATA_DIR = __import__("pathlib").Path(__file__).resolve().parents[1] / "data"
+
+
+def _master_ckpt():
+    pytest.importorskip("zuko")
+    from nbn import NeuralBayesianNetwork as NBN
+
+    model = NBN.load(str(_DATA_DIR / "master_mdn_flow_model.pt"))
+    ref = torch.load(_DATA_DIR / "master_mdn_flow_ref.pt", weights_only=False)
+    return model, ref
+
+
+def test_r1_master_checkpoint_scores_exactly_as_on_master():
+    model, ref = _master_ckpt()
+    with torch.no_grad():
+        per_node = model.log_prob(ref["data"], per_node=True)
+    for node, lp in ref["per_node"].items():
+        torch.testing.assert_close(per_node[node], lp, atol=1e-5, rtol=1e-5, msg=node)
+
+
+def test_r1_master_checkpoint_samples_and_keeps_working():
+    model, ref = _master_ckpt()
+    s = model.sample(64)
+    assert all(torch.isfinite(v).all() for v in s.values())
+    for node in ("B", "C"):
+        mech = model.mechanisms[node]
+        pa = ref["data"]["A" if node == "B" else "B"][:5]
+        assert torch.isfinite(mech.forward(pa).sample()).all()
+        assert torch.isfinite(mech.log_prob(ref["data"][node][:5], pa)).all()
+
+
+def test_r1_master_checkpoint_warm_start_continues_in_master_units():
+    model, ref = _master_ckpt()
+    data = ref["data"]
+    model.fit(data, epochs=1, warm_start=True)
+    # Warm start freezes standardisation: a master-made model has none, so
+    # it keeps the identity map rather than acquiring one mid-trajectory.
+    for node in ("B", "C"):
+        assert model.mechanisms[node]._x_mean is None
+    assert torch.isfinite(model.log_prob(data)).all()
+
+
+def test_r1_master_checkpoint_update_runs():
+    model, ref = _master_ckpt()
+    model.update({k: v[:50] for k, v in ref["data"].items()}, epochs=1)
+    assert torch.isfinite(model.log_prob(ref["data"])).all()
+
+
+def test_r1_master_state_dict_loads_strictly_into_a_branch_fit():
+    model, ref = _master_ckpt()
+    data = ref["data"]
+    fresh = __import__("copy").deepcopy(model)
+    fresh.fit(data, epochs=1)           # branch fit: buffers populated
+    for node in ("B", "C"):
+        assert fresh.mechanisms[node]._x_mean is not None
+    for node, sd in ref["state_dicts"].items():
+        fresh.mechanisms[node].load_state_dict(sd)   # strict
+    with torch.no_grad():
+        per_node = fresh.log_prob(data, per_node=True)
+    for node, lp in ref["per_node"].items():
+        torch.testing.assert_close(per_node[node], lp, atol=1e-5, rtol=1e-5, msg=node)
+    # ...and a branch state_dict loads back into a master-made mechanism.
+    branch = __import__("copy").deepcopy(model)
+    branch.fit(data, epochs=1)
+    for node in ("B", "C"):
+        model.mechanisms[node].load_state_dict(branch.mechanisms[node].state_dict())
+        torch.testing.assert_close(
+            model.mechanisms[node].log_prob(data[node], data["A" if node == "B" else "B"]),
+            branch.mechanisms[node].log_prob(data[node], data["A" if node == "B" else "B"]),
+        )
