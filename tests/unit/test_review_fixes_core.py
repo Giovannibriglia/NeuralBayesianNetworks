@@ -927,3 +927,40 @@ def test_cuda_model_to_cuda_stores_indexed_device():
 
     m2 = NBN([], {"A": ("continuous", 1)}, device="cuda")
     assert m2.device.index is not None
+
+
+# ---------------------------------------------------------------------------
+# Round 3 — N4: whole-model pickle from origin/master with node__ names
+# ---------------------------------------------------------------------------
+
+
+def test_n4_master_pickle_with_node_prefix_names_loads():
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "data" / "master_node_prefix_pickle.pt"
+    payload = torch.load(path, weights_only=False)
+    model = payload["model"]
+    assert set(model.mechanisms.keys()) == {"node__a", "b.c"}
+    torch.testing.assert_close(model.log_prob(payload["data"]), payload["ref"])
+    # Re-pickling with the branch keeps working (layout marker now set).
+    import io
+    buf = io.BytesIO()
+    torch.save(model, buf)
+    buf.seek(0)
+    again = torch.load(buf, weights_only=False)
+    torch.testing.assert_close(again.log_prob(payload["data"]), payload["ref"])
+    assert set(again.mechanisms.keys()) == {"node__a", "b.c"}
+
+
+def test_n4_branch_pickle_with_reserved_names_round_trips():
+    import io
+
+    model, data = _discrete_chain(["train", "node__x", "a.b"])
+    model.auto_mechanisms()
+    model.fit(data)
+    buf = io.BytesIO()
+    torch.save(model, buf)
+    buf.seek(0)
+    loaded = torch.load(buf, weights_only=False)
+    assert set(loaded.mechanisms.keys()) == {"train", "node__x", "a.b"}
+    torch.testing.assert_close(loaded.log_prob(data), model.log_prob(data))

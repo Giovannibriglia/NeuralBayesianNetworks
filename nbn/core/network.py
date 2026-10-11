@@ -52,6 +52,27 @@ class _AliasModuleDict(nn.ModuleDict):
     _TOKEN = "__DOT__"
     _PREFIX = "node__"
     _version = 0  # class default; becomes an instance attribute on mutation
+    # Key-escaping scheme of this instance's ``_modules``.  1 = dots only
+    # (origin/master <= v0.14, no marker attribute); 2 = dots + ``node__``
+    # escape.  Stored per instance so unpickling can tell the two apart: the
+    # same raw key ``node__a`` means node "node__a" in layout 1 but node "a"
+    # (escaped) in layout 2.
+    _LAYOUT = 2
+
+    def __init__(self, modules=None):
+        super().__init__(modules)
+        self._layout = self._LAYOUT
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        if self.__dict__.get("_layout", 1) < self._LAYOUT:
+            # Whole-model pickle written before the escape existed: re-key
+            # every raw key with the current scheme (keeps insertion order).
+            old = list(self._modules.items())
+            self._modules.clear()
+            for raw, mod in old:
+                self._modules[self._safe(raw.replace(self._TOKEN, "."))] = mod
+            self._layout = self._LAYOUT
 
     @classmethod
     def _safe(cls, key: str) -> str:
