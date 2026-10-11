@@ -12,12 +12,27 @@ if TYPE_CHECKING:
 class InferenceEngine(ABC):
     """Abstract base class for inference engines.
 
+    Subclasses list their per-model memo attributes in ``_transient_caches``.
+    Those memos hold ``weakref``s to models (``nbn.inference._cache``), which
+    cannot be pickled and would be meaningless in another process anyway, so
+    pickling / deep-copying an engine — or a model that holds one, e.g.
+    ``torch.save(model)`` after a query — starts those memos empty (R14b).
+
     All engines must implement:
     * ``query(model, targets, evidence)`` — single query, returns a
       ``torch.distributions.Distribution`` or a tensor of probabilities.
     * ``query_batch(model, targets, evidence)`` — batched query returning
       ``[B, K]`` tensor where K is the number of target states.
     """
+
+    _transient_caches: tuple[str, ...] = ()
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        for name in self._transient_caches:
+            if name in state:
+                state[name] = {}
+        return state
 
     @abstractmethod
     def query(

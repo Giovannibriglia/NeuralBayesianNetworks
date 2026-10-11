@@ -96,6 +96,8 @@ class LikelihoodWeightingEngine(InferenceEngine):
         Number of ancestral samples (particles) per query.
     """
 
+    _transient_caches = ("_cache",)
+
     def __init__(self, n_samples: int = 2048) -> None:
         self.n_samples = int(n_samples)
         self._cache: Dict = {}

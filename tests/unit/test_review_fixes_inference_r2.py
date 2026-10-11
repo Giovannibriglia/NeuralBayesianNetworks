@@ -50,3 +50,31 @@ def test_r7_integral_float_evidence_still_accepted():
     out = eng.query_batch(model, [nodes[-1]], {nodes[0]: torch.tensor([[1.0], [2.0]])})
     ref = torch.stack([brute_posterior(model, nodes[-1], {nodes[0]: v}) for v in (1, 2)])
     torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-5)
+
+
+# --------------------------------------------------------------------------- #
+# R14b — a model (and its engine) stays picklable after queries
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("engine", ["auto", "tensor_ve", "likelihood_weighting"])
+def test_r14b_torch_save_after_query(engine, tmp_path):
+    import copy
+    import pickle
+
+    model = _random_discrete()
+    model._engine_spec = engine
+    nodes = list(model.dag.topological_order())
+    ev = {nodes[0]: torch.tensor(1)}
+    model.query([nodes[-1]], ev)
+    model.query_batch([nodes[-1]], {nodes[0]: torch.tensor([0, 1])})
+    path = tmp_path / "m.pt"
+    torch.save(model, path)
+    loaded = torch.load(path, weights_only=False)
+    torch.testing.assert_close(
+        loaded.query([nodes[-1]], ev, engine=_engines()["ve"]),
+        brute_posterior(model, nodes[-1], {nodes[0]: 1}), atol=1e-5, rtol=1e-5)
+    # The engine itself pickles and deep-copies, with its memos reset.
+    eng = model._engine
+    assert pickle.loads(pickle.dumps(eng)) is not None
+    copy.deepcopy(eng)

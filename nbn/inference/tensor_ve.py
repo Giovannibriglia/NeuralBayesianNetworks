@@ -50,6 +50,8 @@ _LIVESET_MULTIPLIER = 3.0
 class TensorVariableElimination(InferenceEngine):
     """Log-domain VE for discrete BNs (single-row + truly batched queries)."""
 
+    _transient_caches = ("_factor_cache", "_plan_cache", "_cost_cache")
+
     def __init__(
         self,
         treewidth_threshold: int = 25,
