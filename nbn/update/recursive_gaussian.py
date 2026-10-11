@@ -53,10 +53,14 @@ class NormalEquationState:
     layout for backward compatibility; read them through :func:`unpack`."""
 
     A: torch.Tensor; B: torch.Tensor; c: torch.Tensor; N: torch.Tensor; input_dim: int
+    # Layout known at construction (True for everything this module builds);
+    # None = read the A[p, p] marker, which costs a device sync.
+    centred: bool | None = None
 
     def to(self, device):
         return NormalEquationState(self.A.to(device), self.B.to(device),
-                                   self.c.to(device), self.N.to(device), self.input_dim)
+                                   self.c.to(device), self.N.to(device), self.input_dim,
+                                   self.centred)
 
 
 def design_matrix(parents, x):
@@ -76,12 +80,14 @@ def _pack(N, mz, mx, Czz, Czx, cxx, input_dim, dtype) -> NormalEquationState:
     A[p, :p] = mz
     B = torch.cat([Czx, mx.reshape(1, -1)], dim=0)
     return NormalEquationState(
-        A.to(dtype), B.to(dtype), cxx.to(dtype), N.to(dtype), input_dim,
+        A.to(dtype), B.to(dtype), cxx.to(dtype), N.to(dtype), input_dim, True,
     )
 
 
 def is_centred(state: NormalEquationState) -> bool:
     """True for the centred layout (``A[p, p] == 0``), False for legacy raw."""
+    if state.centred is not None:
+        return state.centred
     return bool(state.A[-1, -1] == 0)
 
 
@@ -195,7 +201,10 @@ def solve(state, *, ridge: float = 1e-6, min_scale: float = 1e-3):
     # in that device's widest dtype; the system is only ``[D_pa, D_pa]``.
     ld = linalg_device(device)
     acc = accum_dtype(ld)
-    N, mz, mx, Czz, Czx, cxx = (t.to(ld) for t in unpack(state.to(ld), acc))
+    A, B, c, N = _hop((state.A, state.B, state.c, state.N), ld)
+    N, mz, mx, Czz, Czx, cxx = unpack(
+        NormalEquationState(A, B, c, N, state.input_dim, state.centred), acc,
+    )
     d_x = Czx.shape[1]
     p = Czz.shape[0]
     if state.input_dim == 0 or p == 0:
@@ -210,4 +219,20 @@ def solve(state, *, ridge: float = 1e-6, min_scale: float = 1e-3):
     n = N.clamp_min(1.0)
     std = (sse.clamp_min(0.0) / n).clamp_min(min_scale * min_scale).sqrt()
     std = std.clamp_min(min_scale)
-    return tuple(t.to(device=device, dtype=dtype) for t in (W, b, torch.log(std)))
+    # Cast before the hop: the solve dtype (float64) may not exist on device.
+    return _hop((W.to(dtype), b.to(dtype), torch.log(std).to(dtype)), device)
+
+
+def _hop(tensors, device):
+    """Move several tensors with ONE transfer (each ``.to`` across devices is
+    a separate copy and, from MPS/CUDA to the CPU, a separate sync)."""
+    tensors = tuple(tensors)
+    if all(t.device == torch.device(device) for t in tensors):
+        return tensors
+    dt = tensors[0].dtype
+    flat = torch.cat([t.reshape(-1).to(dt) for t in tensors]).to(device)
+    out, i = [], 0
+    for t in tensors:
+        out.append(flat[i:i + t.numel()].reshape(t.shape))
+        i += t.numel()
+    return tuple(out)
