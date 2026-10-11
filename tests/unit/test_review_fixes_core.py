@@ -964,3 +964,20 @@ def test_n4_branch_pickle_with_reserved_names_round_trips():
     loaded = torch.load(buf, weights_only=False)
     assert set(loaded.mechanisms.keys()) == {"train", "node__x", "a.b"}
     torch.testing.assert_close(loaded.log_prob(data), model.log_prob(data))
+
+
+# ---------------------------------------------------------------------------
+# Round 3 — N5: rescaled constant weights must not shift order statistics
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("device", available_devices())
+@pytest.mark.parametrize("n", [100, 1000, 5000, 20000])
+def test_n5_weighted_quantile_constant_fractional_weights_exact(device, n):
+    from nbn.learning.weighting import weighted_quantile
+
+    x = torch.arange(n, dtype=torch.float32).reshape(-1, 1)
+    q = torch.tensor([0.1, 0.25, 0.5, 0.75, 0.9])
+    ref = torch.quantile(x, q, dim=0)
+    got = weighted_quantile(x.to(device), q, torch.full((n,), 1.0 / n, device=device))
+    torch.testing.assert_close(got.cpu(), ref, atol=1e-3, rtol=0)

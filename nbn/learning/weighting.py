@@ -223,6 +223,13 @@ def weighted_quantile(
     if not bool((w == w.round()).all()):
         # Reliability weights: only relative sizes matter (see docstring).
         w = w * (effective_sample_size(w) / w.sum().clamp_min(_MIN_TOTAL_WEIGHT))
+        # Rescaled constant weights come out as 1 +- a few ulp, and the
+        # cumulative sum of those crosses an integer boundary one row early
+        # (N=1000, w=1/N gave the 99th instead of the 100th order statistic).
+        # Snap values within rounding noise of an integer back onto it.
+        r = w.round()
+        tol = 1e3 * torch.finfo(acc).eps * r.abs().clamp_min(1.0)
+        w = torch.where((w - r).abs() <= tol, r, w)
     order = td.argsort(dim=0)                                  # [N, D]
     xs = torch.gather(td, 0, order)                            # sorted per column
     cum = w[order].cumsum(0)                                   # [N, D]
