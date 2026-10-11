@@ -13,7 +13,11 @@ from nbn.learning.weighting import (
     weighted_mean,
     weighted_moments,
 )
-from nbn.mechanisms.base import Mechanism
+from nbn.mechanisms.base import (
+    Mechanism,
+    _ensure_optional_buffers,
+    _sync_optional_buffers,
+)
 from nbn.utils.batching import _sanitise_parents, ensure_2d, flatten_samples
 
 
@@ -134,6 +138,21 @@ class NormalizingFlowMechanism(Mechanism):
             hidden_features=list(self.hidden),
             bins=self.bins,
         ).to(device)
+
+    # Buffers added after this mechanism's first release; ``None`` is the
+    # identity map the older format used.  See nbn/mechanisms/base.py.
+    _OPTIONAL_BUFFERS = ("_x_mean", "_x_std", "_pa_mean", "_pa_std")
+
+    def __setstate__(self, state) -> None:
+        super().__setstate__(state)
+        _ensure_optional_buffers(self, self._OPTIONAL_BUFFERS)
+        # Master-format flows had no context clamp attribute; 50 sigma (the
+        # default) is inert for them, since they have no _pa_mean either.
+        self.__dict__.setdefault("_pa_clamp", 50.0)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs) -> None:
+        _sync_optional_buffers(self, state_dict, prefix, self._OPTIONAL_BUFFERS)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def fit_local(
         self,
