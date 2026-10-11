@@ -229,6 +229,8 @@ class PgmpyAdapter:
         self._lg_topo: list[str] | None = None  # topological order (LG path)
         # node -> (parents, beta [1+P] float64, std): the fitted LG conditionals
         self._lg_params: dict[str, tuple[list[str], torch.Tensor, float]] = {}
+        # (μ, Σ, node index) of the fitted LG joint, built once per fit (D9).
+        self._lg_joint_cache: tuple | None = None
         self.problem: BenchmarkProblem | None = None
 
     # -------------------------------------------------------------------------
@@ -391,6 +393,7 @@ class PgmpyAdapter:
 
         self._model = bn
         self._lg_topo = topo
+        self._lg_joint_cache = None   # rebuilt lazily from the new CPDs
         self._kind = "continuous_lg"
 
     # -------------------------------------------------------------------------
@@ -526,15 +529,27 @@ class PgmpyAdapter:
         Returns:
             (post_mean, post_std), each a 1-element float tensor.
         """
+        mu, Sigma, node_idx = self._lg_joint()
+        return self._lg_posterior_moments_from_joint(q, mu, Sigma, node_idx)
+
+    def _lg_joint(self):
+        """Joint Gaussian ``(μ, Σ, node index)`` of the fitted LG network.
+
+        Built once per fit and cached (D9): it used to be re-assembled and
+        inverted — O(n³) — on every query.
+        """
+        cached = getattr(self, "_lg_joint_cache", None)
+        if cached is not None:
+            return cached
         assert self._model is not None and self._lg_topo is not None
         topo = self._lg_topo
         node_idx = {n: i for i, n in enumerate(topo)}
         n_total = len(topo)
 
         # Assemble SEM:  X = A·X + b + ε,  ε ~ N(0, D)
-        A = torch.zeros(n_total, n_total)
-        b_vec = torch.zeros(n_total)
-        d = torch.zeros(n_total)
+        A = torch.zeros(n_total, n_total, dtype=torch.float64)
+        b_vec = torch.zeros(n_total, dtype=torch.float64)
+        d = torch.zeros(n_total, dtype=torch.float64)
         for cpd in self._model.get_cpds():
             j = node_idx[cpd.variable]
             betas = cpd.beta
@@ -564,11 +579,14 @@ class PgmpyAdapter:
             d[j] = float(cpd.std) ** 2
 
         # Joint moments: μ = (I-A)⁻¹ b ;  Σ = (I-A)⁻¹ D (I-A)⁻ᵀ
-        eye = torch.eye(n_total)
+        eye = torch.eye(n_total, dtype=torch.float64)
         IA_inv = torch.linalg.inv(eye - A)
         mu = IA_inv @ b_vec
         Sigma = IA_inv @ torch.diag(d) @ IA_inv.T
+        self._lg_joint_cache = (mu, Sigma, node_idx)
+        return self._lg_joint_cache
 
+    def _lg_posterior_moments_from_joint(self, q: Query, mu, Sigma, node_idx):
         target_idx = node_idx[q.targets[0]]
         # Skip None-valued evidence (Phase 3 empty mode): an empty ev_idx
         # falls through to the unconditional marginal branch below, which is
@@ -579,12 +597,12 @@ class PgmpyAdapter:
             if v is not None
         ]
         ev_idx = [i for i, _ in observed]
-        ev_vals = torch.tensor([val for _, val in observed])
+        ev_vals = torch.tensor([val for _, val in observed], dtype=torch.float64)
 
         if not ev_idx:
             return (
-                mu[target_idx : target_idx + 1],
-                Sigma[target_idx, target_idx].clamp_min(0.0).sqrt().reshape(1),
+                mu[target_idx : target_idx + 1].float(),
+                Sigma[target_idx, target_idx].clamp_min(0.0).sqrt().reshape(1).float(),
             )
 
         mu_t = mu[target_idx]
@@ -598,7 +616,7 @@ class PgmpyAdapter:
             Sigma_ee, Sigma_te,
         )
         post_std = post_var.clamp_min(1e-12).sqrt()
-        return post_mean.reshape(1), post_std.reshape(1)
+        return post_mean.reshape(1).float(), post_std.reshape(1).float()
 
     def query_batch(self, queries: list[Query]) -> list[Posterior]:
         """Sequential default (PR 1, #148). Pgmpy stays sequential
