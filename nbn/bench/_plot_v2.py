@@ -317,20 +317,39 @@ def _render_family_metric(
         )
         any_drawn = True
 
-    # DNF cells for this specific (family, metric).
-    # #123: filter to applicable baselines so the DNF annotation doesn't
-    # count registry-excluded baselines (e.g., gpytorch post-#97) whose
-    # error rows are present in the parquet but not plotted.
+    # DNF cells for this specific (family, metric) (#123 Issue A).
+    # * Applicable baselines only: registry-excluded baselines are not
+    #   plotted, so their failures must not inflate the tally.
+    # * This metric's rows plus whole-cell ``status`` sentinels only: failure
+    #   rows of OTHER metrics (timing rows, other accuracy metrics) used to be
+    #   counted in every metric's figure.
+    # * One entry per failed CELL (baseline, problem, seed), not per
+    #   (baseline, problem, status) group across seeds, so "DNF: N cells"
+    #   means N cells.
     applicable = [bl for bl in baselines if is_applicable(bl, family)]
+    cell_cols = ["baseline", "problem_id"] + (["seed"] if "seed" in df.columns else [])
     err_sub = df[
         (df["family"] == family)
         & (df["baseline"].isin(applicable))
+        & (df["metric"].isin([metric, "status"]))
         & (df["status"].isin(["error", "timeout", "oom"]))
     ]
     if not err_sub.empty:
-        err_grouped = err_sub.groupby(["baseline", "problem_id", "status"]).size()
-        for (bl, pid, st), _ in err_grouped.items():
-            error_footnotes.append(f"  n={pid} {bl}: {st}")
+        for key, g in err_sub.groupby(cell_cols):
+            bl, pid = key[0], key[1]
+            seed_txt = f" seed={key[2]}" if len(key) > 2 else ""
+            st = g["status"].mode().iloc[0]
+            error_footnotes.append(f"  n={pid}{seed_txt} {bl}: {st}")
+
+    # Baselines with data for this (family, metric) that the applicability
+    # registry excludes from the figure (#123 Issue B): listed in a sidecar
+    # and counted in a corner note instead of vanishing silently.
+    excl = df[
+        (df["family"] == family)
+        & (df["metric"] == metric)
+        & (~df["baseline"].isin(applicable))
+    ]
+    excluded = excl.groupby("baseline").size().to_dict() if not excl.empty else {}
 
     if not any_drawn:
         ax.text(
@@ -355,6 +374,22 @@ def _render_family_metric(
         ax.text(
             0.98, 0.98,
             f"DNF: {len(error_footnotes)} cells (see *_dnf.txt)",
+            fontsize=7, alpha=0.6, ha="right", va="top",
+            transform=ax.transAxes,
+        )
+
+    if excluded:
+        (out_dir / f"{output_prefix}_{view_name}_excluded.txt").write_text(
+            f"Baselines with {metric} rows for family={family} that are not "
+            f"applicable to it (nbn.bench.core.applicability) and are not "
+            f"plotted:\n"
+            + "".join(f"  {bl}: {n} rows\n" for bl, n in sorted(excluded.items())),
+            encoding="utf-8",
+        )
+        ax.text(
+            0.98, 0.93,
+            f"not plotted (not applicable): {len(excluded)} baseline(s), "
+            f"see *_excluded.txt",
             fontsize=7, alpha=0.6, ha="right", va="top",
             transform=ax.transAxes,
         )

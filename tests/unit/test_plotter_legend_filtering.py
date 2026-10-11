@@ -347,30 +347,35 @@ def dense_dnf_render(tmp_path: Path) -> dict:
             output_dir=tmp_path,
             output_prefix="parameter_learning_paper",
             formats=("png",),
-            metrics=["total_time_s"],   # only render the timing metric
+            # The DNF rows are accuracy rows; since #123 a figure counts only
+            # its own metric's failures, so render the accuracy figure.
+            metrics=["accuracy"],
         )
     finally:
         plt.Figure.savefig = orig_savefig
         plt.close("all")
 
-    # DNF cells are all in continuous_nongauss; only that family's figure
-    # gets a sidecar when rendering total_time_s.
-    nongauss_dnf_count = len(
-        df[
-            (df["family"] == "continuous_nongauss")
-            & (df["status"].isin(["error", "timeout", "oom"]))
-        ].groupby(["baseline", size_col, "status"]).size()
-    )
+    # DNF cells are all in continuous_nongauss: one entry per failed cell
+    # (baseline, n, seed) of an applicable baseline (#123).
+    from nbn.bench.core.applicability import is_applicable
+
+    nongauss = df[
+        (df["family"] == "continuous_nongauss")
+        & (df["status"].isin(["error", "timeout", "oom"]))
+    ]
+    nongauss = nongauss[nongauss["baseline"].map(
+        lambda b: is_applicable(b, "continuous_nongauss"))]
+    nongauss_dnf_count = len(nongauss.groupby(["baseline", size_col, "seed"]).size())
     return {
         "figures_dir": figures_dir,
         "output_prefix": "parameter_learning_paper",
         # Per-family view name: <family>_<metric>_vs_problem_id
-        "view_name": "continuous_nongauss_total_time_s_vs_problem_id",
+        "view_name": "continuous_nongauss_accuracy_vs_problem_id",
         "expected_dnf_count": nongauss_dnf_count,
         "texts": captured["texts"],
         "subplotpars": captured["subplotpars"],
         "sidecar_path": figures_dir / (
-            "parameter_learning_paper_continuous_nongauss_total_time_s_vs_problem_id_dnf.txt"
+            "parameter_learning_paper_continuous_nongauss_accuracy_vs_problem_id_dnf.txt"
         ),
     }
 
@@ -405,7 +410,7 @@ def test_dense_dnf_no_footer_overlap(dense_dnf_render: dict) -> None:
     first_line = sidecar.read_text(encoding="utf-8").splitlines()[0]
     # New per-family sidecar header format.
     expected_header = (
-        "Error/timeout/oom cells for family=continuous_nongauss, metric=total_time_s:"
+        "Error/timeout/oom cells for family=continuous_nongauss, metric=accuracy:"
     )
     assert first_line == expected_header, (
         f"sidecar first line mismatch: got {first_line!r}, "
@@ -439,6 +444,8 @@ def test_dense_dnf_no_footer_overlap(dense_dnf_render: dict) -> None:
     assert "Error/timeout/oom cells" in sidecar_content, (
         "DNF sidecar must list 'Error/timeout/oom cells'"
     )
+    n_entries = len([ln for ln in sidecar_content.splitlines() if ln.startswith("  n=")])
+    assert n_entries == dense_dnf_render["expected_dnf_count"], expected_dnf_text
     assert dense_dnf_render["expected_dnf_count"] > 0, (
         "expected_dnf_count must be > 0 for this regression test to be meaningful"
     )
@@ -452,3 +459,35 @@ def test_dense_dnf_no_footer_overlap(dense_dnf_render: dict) -> None:
         "old conditional rect bottom '0.04 if error_footnotes else 0.01' "
         "detected in _render_family_metric source; old layout may have regressed"
     )
+
+
+def test_dnf_counts_this_metrics_failed_cells_and_lists_excluded(tmp_path: Path) -> None:
+    """#123 A: the tally counted failure rows of every metric and grouped
+    seeds together; it now counts failed cells (baseline, n, seed) of the
+    rendered metric (+ status sentinels). #123 B: baselines with data that
+    the registry excludes are listed in an *_excluded.txt sidecar."""
+    p = tmp_path / "raw" / "metrics.parquet"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    _write_synthetic_parquet([
+        {"family": "discrete", "n_nodes": 5, "seed": 0, "baseline": "nbn-cat-ve",
+         "metric": "accuracy", "value": 0.05, "status": "ok"},
+        # two seeds of one baseline time out -> two cells
+        {"family": "discrete", "n_nodes": 5, "seed": 0, "baseline": "pgmpy-mle-ve",
+         "metric": "accuracy", "value": float("nan"), "status": "timeout"},
+        {"family": "discrete", "n_nodes": 5, "seed": 1, "baseline": "pgmpy-mle-ve",
+         "metric": "accuracy", "value": float("nan"), "status": "timeout"},
+        # a failure of ANOTHER metric must not count in the accuracy figure
+        {"family": "discrete", "n_nodes": 5, "seed": 0, "baseline": "nbn-cat-ve",
+         "metric": "total_time_s", "value": float("nan"), "status": "error"},
+        # data from a baseline not applicable to discrete -> excluded sidecar
+        {"family": "discrete", "n_nodes": 5, "seed": 0, "baseline": "pgmpy-lg-predict",
+         "metric": "accuracy", "value": 0.3, "status": "ok"},
+    ], p)
+    render_figures(parquet_path=p, output_dir=tmp_path, output_prefix="dnfB",
+                   formats=("png",), metrics=["accuracy"])
+    figs = tmp_path / "figures"
+    text = (figs / "dnfB_discrete_accuracy_vs_problem_id_dnf.txt").read_text()
+    entries = [ln for ln in text.splitlines() if ln.startswith("  n=")]
+    assert len(entries) == 2 and all("pgmpy-mle-ve" in e for e in entries)
+    excluded = (figs / "dnfB_discrete_accuracy_vs_problem_id_excluded.txt").read_text()
+    assert "pgmpy-lg-predict: 1 rows" in excluded
