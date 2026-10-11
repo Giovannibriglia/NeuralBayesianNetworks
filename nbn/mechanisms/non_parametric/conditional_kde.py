@@ -62,6 +62,7 @@ import torch
 from torch.distributions import Distribution
 
 from nbn.learning.weighting import (
+    effective_sample_size,
     validate_weights,
     weighted_mean,
     weighted_moments,
@@ -91,16 +92,14 @@ def _bandwidth_n(weights: torch.Tensor | None, n_rows: int) -> float:
 
     The switch is deliberately discrete (``[1, 1, 1]`` -> 3, ``[1, 1, 1.01]``
     -> ~3.0): each branch is the right reading of its own kind of weight.
-    Computed locally here; to be unified with a shared
-    ``effective_sample_size`` helper in :mod:`nbn.learning.weighting`.
+    The non-integer branch is :func:`nbn.learning.weighting.effective_sample_size`.
     """
     if weights is None:
         return float(n_rows)
     w = weights.reshape(-1)
-    total = w.sum()
     if bool(torch.equal(w, w.round())):
-        return float(total)
-    return float(total * total / w.pow(2).sum().clamp_min(torch.finfo(w.dtype).tiny))
+        return float(w.sum())
+    return float(effective_sample_size(w))
 
 
 class _KDEConditionalDistribution(Distribution):

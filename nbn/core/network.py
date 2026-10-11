@@ -169,7 +169,9 @@ class NeuralBayesianNetwork(nn.Module):
 
     * ``query`` / ``query_batch`` — variable elimination detaches when it
       builds its factors, and likelihood weighting runs under
-      ``torch.inference_mode()``.  Both are deliberate performance decisions.
+      ``torch.no_grad()``.  Both are deliberate performance decisions; the
+      returned tensors are ordinary tensors (usable in later autograd graphs
+      and in-place operations).
     * ``intervene(do=...)`` — it returns a ``copy.deepcopy``, so the returned
       model's parameters are fresh leaves and backward through it reaches
       neither the original model nor the caller's intervention value.
@@ -617,7 +619,8 @@ class NeuralBayesianNetwork(nn.Module):
         -----
         The result is **not differentiable**: variable elimination detaches at
         factor build and likelihood weighting runs under
-        ``torch.inference_mode()``.  For a gradient path through an
+        ``torch.no_grad()`` (outputs are ordinary tensors).  For a gradient
+        path through an
         intervention use ``sample(n, do=...)``; for one through a likelihood
         use ``log_prob``.
         """
