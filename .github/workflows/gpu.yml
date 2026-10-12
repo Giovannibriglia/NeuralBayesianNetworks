@@ -2,9 +2,9 @@ name: gpu
 
 # CUDA lane, on a self-hosted Linux runner with NVIDIA GPU(s) (register it
 # with the labels self-hosted, linux, gpu).  It never runs on push or pull
-# requests, so a missing runner can never block a PR: it is started by hand
-# (e.g. before a release) or by the weekly schedule, and a scheduled run
-# simply queues until such a runner is online.
+# requests, so a missing runner can never block a PR, and it has no schedule:
+# with no runner registered a scheduled run would only queue and fail.  Start
+# it by hand (e.g. before a release) once a runner is online.
 #
 # Selection: the cuda / multi_gpu tests (they skip cleanly with fewer
 # devices) plus the slow suite, whose default device resolves to cuda here.
@@ -13,15 +13,13 @@ name: gpu
 
 on:
   workflow_dispatch: {}
-  schedule:
-    - cron: "0 4 * * 0"   # Sundays 04:00 UTC
 
 jobs:
   cuda:
     runs-on: [self-hosted, linux, gpu]
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
