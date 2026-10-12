@@ -136,31 +136,99 @@ def _levels(mount: str, rel: str | None) -> list[str]:
     return out
 
 
-def _walk(levels, limit_file, usage_file, stat_key, unlimited=None):
-    """Tightest ``(limit, usage)`` over ``levels`` (leaf first)."""
-    best_limit = best_room = None
-    leaf_usage = None
-    for d in levels:
-        limit = _read_int(os.path.join(d, limit_file))
-        usage = _read_int(os.path.join(d, usage_file))
-        if limit is not None and unlimited is not None and limit >= unlimited:
-            limit = None
-        if usage is not None:
-            usage -= _stat_value(os.path.join(d, "memory.stat"), stat_key)
-            if leaf_usage is None:
-                leaf_usage = usage
-        if limit is None:
+class _CgroupLayout:
+    """This process's memory-cgroup levels and their limits (cached per process).
+
+    The cgroup a process lives in and the limits on its levels are set when
+    the job starts and practically never change, while the walk that finds
+    them costs several file reads per level (0.3 ms on a 7-level SLURM tree,
+    run several times per query).  So the layout is read once per process;
+    only *usage* — which does change — is re-read, and only when a caller
+    needs headroom.  ``refresh_cgroup_cache()`` forces a re-read.
+    """
+
+    __slots__ = ("levels", "limits", "usage_file", "stat_key")
+
+    def __init__(self, levels, limits, usage_file, stat_key) -> None:
+        self.levels = levels          # leaf first
+        self.limits = limits          # per level, None = unlimited
+        self.usage_file = usage_file
+        self.stat_key = stat_key
+
+    @property
+    def limit(self) -> int | None:
+        known = [x for x in self.limits if x is not None]
+        return min(known) if known else None
+
+
+_layout_cache: dict = {}
+
+
+def refresh_cgroup_cache() -> None:
+    """Forget the cached cgroup layout (e.g. after a job's limit changed)."""
+    _layout_cache.clear()
+
+
+def _discover_layout() -> _CgroupLayout | None:
+    v2_rel, v1_rel = _own_cgroup_paths()
+    v2_levels = _levels(_CGROUP_ROOT, v2_rel)
+    if any(os.path.exists(os.path.join(d, f)) for d in v2_levels
+           for f in ("memory.max", "memory.current")):
+        limits = [_read_int(os.path.join(d, "memory.max")) for d in v2_levels]
+        return _CgroupLayout(v2_levels, limits, "memory.current", "inactive_file")
+    v1_levels = _levels(os.path.join(_CGROUP_ROOT, "memory"), v1_rel)
+    if any(os.path.exists(os.path.join(d, f)) for d in v1_levels
+           for f in ("memory.limit_in_bytes", "memory.usage_in_bytes")):
+        limits = []
+        for d in v1_levels:
+            lim = _read_int(os.path.join(d, "memory.limit_in_bytes"))
+            limits.append(None if lim is not None and lim >= _CGROUP_UNLIMITED else lim)
+        return _CgroupLayout(v1_levels, limits, "memory.usage_in_bytes",
+                             "total_inactive_file")
+    return None
+
+
+def _layout() -> _CgroupLayout | None:
+    # Keyed on the pid (a forked child may live in another cgroup) and on the
+    # two paths (tests point them at fake trees).
+    key = (os.getpid(), _CGROUP_ROOT, _PROC_SELF_CGROUP)
+    if key not in _layout_cache:
+        _layout_cache.clear()
+        _layout_cache[key] = _discover_layout()
+    return _layout_cache[key]
+
+
+def _usage(layout: _CgroupLayout, d: str) -> int | None:
+    usage = _read_int(os.path.join(d, layout.usage_file))
+    if usage is not None:
+        usage -= _stat_value(os.path.join(d, "memory.stat"), layout.stat_key)
+    return usage
+
+
+def cgroup_limit() -> int | None:
+    """Smallest memory limit on this process's cgroup path (cached, no usage read)."""
+    layout = _layout()
+    return None if layout is None else layout.limit
+
+
+def cgroup_headroom() -> int | None:
+    """Tightest ``limit - usage`` over the limited levels of the cgroup path.
+
+    Usage is read only on levels that carry a limit: unlimited levels cannot
+    constrain the headroom.
+    """
+    layout = _layout()
+    if layout is None:
+        return None
+    room = None
+    for d, lim in zip(layout.levels, layout.limits):
+        if lim is None:
             continue
-        best_limit = limit if best_limit is None else min(best_limit, limit)
+        usage = _usage(layout, d)
         if usage is not None:
-            room = limit - usage
-            best_room = room if best_room is None else min(best_room, room)
-    if best_limit is None:
-        return None, leaf_usage
-    if best_room is None:
-        return best_limit, leaf_usage
-    # Report the usage that makes ``limit - usage`` the tightest headroom.
-    return best_limit, best_limit - best_room
+            r = lim - usage
+            room = r if room is None else min(room, r)
+    return room
 
 
 def cgroup_memory() -> tuple[int | None, int | None]:
@@ -175,37 +243,56 @@ def cgroup_memory() -> tuple[int | None, int | None]:
     cgroup namespace it is e.g. ``system.slice/slurmstepd.scope/job_42/…``
     (v2) or ``memory/slurm/uid_1000/job_42/…`` (v1), with the limit set on an
     intermediate level.  So the path comes from ``/proc/self/cgroup`` and
-    every level from the leaf up to the root is read: the limit is the
+    every level from the leaf up to the root is considered: the limit is the
     smallest one, and ``limit - usage`` the tightest remaining headroom over
-    all levels.  Missing files are skipped level by level.
+    the limited levels (``usage`` is reported so that this holds).  Without
+    any limit, ``usage`` is the leaf-most level's own usage.  Missing files
+    are skipped level by level.
     """
-    v2_rel, v1_rel = _own_cgroup_paths()
-    limit, usage = _walk(
-        _levels(_CGROUP_ROOT, v2_rel), "memory.max", "memory.current",
-        "inactive_file",
-    )
-    if limit is not None or usage is not None:
-        return limit, usage
-    return _walk(
-        _levels(os.path.join(_CGROUP_ROOT, "memory"), v1_rel),
-        "memory.limit_in_bytes", "memory.usage_in_bytes", "total_inactive_file",
-        unlimited=_CGROUP_UNLIMITED,
-    )
+    layout = _layout()
+    if layout is None:
+        return None, None
+    limit = layout.limit
+    if limit is not None:
+        room = cgroup_headroom()
+        if room is not None:
+            return limit, limit - room
+    for d in layout.levels:
+        usage = _usage(layout, d)
+        if usage is not None:
+            return limit, usage
+    return limit, None
+
+
+_physical_total_cache: dict = {}
+
+
+def _physical_total_bytes() -> int | None:
+    """Physical RAM (cached per process: it does not change)."""
+    pid = os.getpid()
+    if pid not in _physical_total_cache:
+        total = None
+        try:
+            import psutil  # optional (bench extra)
+
+            total = int(psutil.virtual_memory().total)
+        except Exception:  # noqa: BLE001 - missing or broken psutil → sysconf
+            try:
+                total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+            except (ValueError, OSError, AttributeError):
+                total = None
+        _physical_total_cache.clear()
+        _physical_total_cache[pid] = total
+    return _physical_total_cache[pid]
 
 
 def host_total_bytes() -> int | None:
-    """Stable host memory capacity: physical RAM, capped by the cgroup limit."""
-    total = None
-    try:
-        import psutil  # optional (bench extra)
+    """Stable host memory capacity: physical RAM, capped by the cgroup limit.
 
-        total = int(psutil.virtual_memory().total)
-    except Exception:  # noqa: BLE001 - missing or broken psutil → sysconf
-        try:
-            total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-        except (ValueError, OSError, AttributeError):
-            total = None
-    limit, _ = cgroup_memory()
+    No file is read after the first call in a process.
+    """
+    total = _physical_total_bytes()
+    limit = cgroup_limit()
     if limit is not None:
         total = limit if total is None else min(total, limit)
     return total
@@ -227,9 +314,9 @@ def host_available_bytes() -> int | None:
                         break
         except (OSError, ValueError, IndexError):
             pass
-    limit, usage = cgroup_memory()
-    if limit is not None and usage is not None:
-        room = max(0, limit - usage)
+    room = cgroup_headroom()
+    if room is not None:
+        room = max(0, room)
         avail = room if avail is None else min(avail, room)
     return avail
 

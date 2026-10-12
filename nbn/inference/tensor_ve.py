@@ -57,6 +57,30 @@ logger = logging.getLogger(__name__)
 # device is the budget it is compared with (``memory_budget_bytes``).
 _LIVESET_MULTIPLIER = 3.0
 
+# Plans whose estimated peak is below this fraction of the stable memory
+# budget skip the live-headroom check that sizes chunks (it reads memory
+# statistics, cgroup usage files on Linux): they cannot need chunking.
+_HEADROOM_CHECK_FRACTION = 0.01
+
+# MPS reductions are wrong on large tensors (torch 2.14.1, macOS 26, Apple
+# M-series).  ``torch.logsumexp`` on MPS silently returns wrong values (inf
+# rows, or rows off by ~10) while element-wise ops stay correct, and VE's
+# every elimination step is a broadcast sum followed by ``logsumexp`` — so it
+# returned plausible wrong posteriors once a batch grew large.  Measured
+# (2026-10-12, probe in the R4 review): on a *strided* input — VE's factors
+# are permuted views — every element at flat offset >= 2^27 comes back wrong
+# ([40, 4^12] wrong from row 8, [160, 4^11] from row 32, [640, 4^10] from row
+# 128); contiguous inputs held up to ~2^30 elements but failed below 2^31 for
+# some shapes.  On MPS, row-chunks are therefore capped so the largest
+# intermediate factor stays below this many elements, and a query whose
+# single row is already beyond it is refused (``HybridRouter`` answers it
+# with LW).  MPS-only; lift or remove once the torch / Metal reduction is fixed.
+_MPS_MAX_ELEMENTS = 2 ** 27
+
+
+class MPSTensorLimitError(RuntimeError):
+    """A VE plan needs an intermediate factor larger than MPS reduces correctly."""
+
 
 class TensorVariableElimination(InferenceEngine):
     """Log-domain VE for discrete BNs (single-row + truly batched queries)."""
@@ -431,7 +455,21 @@ class TensorVariableElimination(InferenceEngine):
     def fits_memory(self, model, target, evidence_keys=(), do_keys=(), *,
                     order: str = "min_fill",
                     host_fraction: float | None = None) -> bool:
-        """Whether one row of this query fits the budget (larger B is chunked)."""
+        """Whether one row of this query fits the budget (larger B is chunked).
+
+        On MPS a row must also keep every intermediate factor under
+        ``_MPS_MAX_ELEMENTS`` (beyond it MPS reductions are wrong).
+        """
+        elem_cap = _max_tensor_elements(model.device)
+        if elem_cap is not None:
+            ev = tuple(sorted(k for k in evidence_keys if k not in set(do_keys)))
+            plan_target = _plan_target(target, set(ev) | set(do_keys))
+            if plan_target is not None and _rows_within_elements(
+                self._peak_profile(model, plan_target, ev, tuple(sorted(do_keys)),
+                                   order),
+                elem_cap,
+            ) == 0:
+                return False
         budget = self.memory_budget_bytes(model.device, host_fraction=host_fraction)
         if budget is None:
             return True
@@ -542,6 +580,13 @@ class TensorVariableElimination(InferenceEngine):
                 raise OutOfMemoryError(
                     _guard_message(peak, budget, device, order)
                 )
+        elem_cap = _max_tensor_elements(device)
+        if elem_cap is not None:
+            prof = self._peak_profile(
+                model, target, tuple(sorted(ev_int)), tuple(sorted(do_int)), order,
+            )
+            if _rows_within_elements(prof, elem_cap) == 0:
+                raise MPSTensorLimitError(_mps_limit_message(prof, elem_cap))
 
         factors = self._extract_factors(model)
 
@@ -716,35 +761,49 @@ class TensorVariableElimination(InferenceEngine):
         # whereas sizing chunks to total RAM on a busy machine meant swap or
         # the OOM killer.
         budget = self.memory_budget_bytes(device, host_fraction=host_fraction)
-        if budget is not None:
+        elem_cap = _max_tensor_elements(device)
+        if budget is not None or elem_cap is not None:
             ev_keys = tuple(sorted(k for k in ev_norm if k not in do))
             do_keys = tuple(sorted(do))
             prof = self._peak_profile(model, plan_target, ev_keys, do_keys, order)
             peak_1 = _peak_bytes_from_profile(prof, 1)
-            if peak_1 > budget:
+            if budget is not None and peak_1 > budget:
                 # Even a single row exceeds the budget: chunking cannot help.
                 raise OutOfMemoryError(
                     _guard_message(peak_1, budget, device, order)
                 )
-            peak_b = _peak_bytes_from_profile(prof, B)
-            chunk_budget = self._chunk_budget_bytes(device, budget)
-            if peak_b > chunk_budget:
-                # At least one row per chunk: a row that fits the stable
-                # budget is always attempted (it is the best we can do).
-                chunk = max(1, _max_chunk_rows(peak_b, peak_1, B, chunk_budget))
-                if chunk < B:
-                    logger.info(
-                        "TensorVariableElimination.query_batch: estimated peak "
-                        "%.2f GiB for B=%d exceeds the chunk budget (%.2f GiB) "
-                        "on %s; splitting into chunks of %d rows.",
-                        peak_b / 1024 ** 3, B, chunk_budget / 1024 ** 3, device,
-                        chunk,
-                    )
-                    return self._query_batch_chunked(
-                        model, targets, ev_norm, B=B, chunk=chunk,
-                        order=order, do_keys=tuple(do),
-                        host_fraction=host_fraction, **kwargs,
-                    )
+            chunk, reason = B, None
+            if elem_cap is not None:
+                rows = _rows_within_elements(prof, elem_cap)
+                if rows == 0:
+                    raise MPSTensorLimitError(_mps_limit_message(prof, elem_cap))
+                if rows < chunk:
+                    chunk, reason = rows, f"the MPS {elem_cap}-element tensor limit"
+            if budget is not None:
+                peak_b = _peak_bytes_from_profile(prof, B)
+                # Live headroom costs a syscall / cgroup usage read; a plan this
+                # small next to the stable budget cannot need chunking.
+                if peak_b > _HEADROOM_CHECK_FRACTION * budget:
+                    chunk_budget = self._chunk_budget_bytes(device, budget)
+                    if peak_b > chunk_budget:
+                        # At least one row per chunk: a row that fits the
+                        # stable budget is always attempted.
+                        rows = max(1, _max_chunk_rows(peak_b, peak_1, B, chunk_budget))
+                        if rows < chunk:
+                            chunk = rows
+                            reason = (f"the {chunk_budget / 1024 ** 3:.2f} GiB chunk "
+                                      f"budget (estimated peak "
+                                      f"{peak_b / 1024 ** 3:.2f} GiB for B={B})")
+            if chunk < B:
+                logger.info(
+                    "TensorVariableElimination.query_batch on %s: splitting B=%d "
+                    "into chunks of %d rows to respect %s.", device, B, chunk, reason,
+                )
+                return self._query_batch_chunked(
+                    model, targets, ev_norm, B=B, chunk=chunk,
+                    order=order, do_keys=tuple(do),
+                    host_fraction=host_fraction, **kwargs,
+                )
 
         factors = self._extract_factors(model)
         # See ``query``: mutilation = drop the intervened CPTs, clamp the rest.
@@ -853,6 +912,36 @@ class TensorVariableElimination(InferenceEngine):
                 host_fraction=host_fraction, **kwargs,
             ))
         return torch.cat(outs, dim=0)
+
+
+def _max_tensor_elements(device) -> int | None:
+    """Largest intermediate factor (elements) VE may build on ``device``."""
+    return _MPS_MAX_ELEMENTS if torch.device(device).type == "mps" else None
+
+
+def _rows_within_elements(profile: tuple[int, int], cap: int) -> int:
+    """Rows per chunk keeping every intermediate factor below ``cap`` elements.
+
+    ``profile`` is ``(batch_free, per_row)`` from ``_peak_profile``: with ``c``
+    rows the largest factor has ``max(batch_free, c * per_row)`` elements.
+    0 when not even one row fits.
+    """
+    batch_free, per_row = profile
+    if batch_free >= cap or per_row >= cap:
+        return 0
+    if per_row == 0:
+        return 1 << 62  # nothing carries the batch axis: any B fits
+    return (cap - 1) // per_row
+
+
+def _mps_limit_message(profile: tuple[int, int], cap: int) -> str:
+    return (
+        f"TensorVariableElimination: this query needs an intermediate factor of "
+        f"{max(profile):,} elements, but MPS reductions return wrong values past "
+        f"{cap:,} elements (torch 2.14.1); refusing rather than answering "
+        f"wrongly.  Run it on CPU/CUDA, or use HybridRouter / likelihood "
+        f"weighting, which answers it approximately."
+    )
 
 
 def _require_discrete(model) -> None:

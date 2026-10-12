@@ -95,12 +95,16 @@ class _FakeVM:
 
 
 def _fake_psutil(monkeypatch, total, available):
+    from nbn.inference import _memory
+
     psutil = pytest.importorskip("psutil")
     monkeypatch.setattr(psutil, "virtual_memory", lambda: _FakeVM(total, available))
+    # Physical RAM is cached per process; start from the fake machine.
+    monkeypatch.setattr(_memory, "_physical_total_cache", {})
 
 
 def test_n1_chunks_fit_live_headroom_not_total_ram(monkeypatch):
-    """32 GiB machine with little free: B=400 must be chunked to what is free."""
+    """Ample RAM but little free: B=400 must be chunked to what is free."""
     from unittest import mock
 
     from nbn import TensorVariableElimination
@@ -113,7 +117,9 @@ def test_n1_chunks_fit_live_headroom_not_total_ram(monkeypatch):
     peak_b = eng.estimate_peak_bytes(model, t, (e,), B=B)
     per_row = peak_b / B
     available = int(peak_b / 40 / 0.9)  # room for ~10 rows
-    _fake_psutil(monkeypatch, total=32 * GiB, available=available)
+    # Total RAM 20x the plan: the batch fits the stable budget many times
+    # over (and is not "trivially small", which would skip the check).
+    _fake_psutil(monkeypatch, total=int(20 * peak_b), available=available)
     vals = torch.arange(B) % 3
     with mock.patch.object(eng, "_query_batch_chunked",
                            wraps=eng._query_batch_chunked) as spy:
@@ -132,8 +138,9 @@ def test_n1_at_least_one_row_when_free_memory_is_tiny(monkeypatch):
 
     model = _random_discrete(seed=3)
     nodes = list(model.dag.topological_order())
-    _fake_psutil(monkeypatch, total=32 * GiB, available=1)
     eng = TensorVariableElimination()
+    peak_b = eng.estimate_peak_bytes(model, nodes[-1], (nodes[0],), B=3)
+    _fake_psutil(monkeypatch, total=int(20 * peak_b), available=1)
     with mock.patch.object(eng, "_query_batch_chunked",
                            wraps=eng._query_batch_chunked) as spy:
         out = eng.query_batch(model, [nodes[-1]], {nodes[0]: torch.tensor([0, 1, 2])})

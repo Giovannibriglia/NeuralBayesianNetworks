@@ -9,7 +9,7 @@ import torch
 from nbn.inference._memory import is_oom_error, release_cached_memory
 from nbn.inference.base import InferenceEngine
 from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
-from nbn.inference.tensor_ve import TensorVariableElimination
+from nbn.inference.tensor_ve import MPSTensorLimitError, TensorVariableElimination
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +162,8 @@ class HybridRouter(InferenceEngine):
         ):
             return self._use_lw(
                 "HybridRouter: the exact VE plan for %s would exceed the %s "
-                "memory budget; answering with likelihood weighting "
+                "memory budget (or, on MPS, the largest tensor MPS reduces "
+                "correctly); answering with likelihood weighting "
                 "(approximate).", _describe(targets, evidence, do), model.device,
                 warn_key=_shape_key(model, targets, evidence, do),
             )
@@ -210,8 +211,11 @@ class HybridRouter(InferenceEngine):
                 call_kwargs = {**kwargs, "host_fraction": self.ve_host_fraction}
             return getattr(engine, method)(model, targets, evidence, **call_kwargs)
         except Exception as exc:
-            if engine is self._lw or not is_oom_error(exc):
-                raise  # LW itself OOMed, or not an OOM at all.
+            # An MPS plan past the reliable tensor size is refused by VE; like
+            # an OOM, LW can still answer it.
+            if engine is self._lw or not (
+                    is_oom_error(exc) or isinstance(exc, MPSTensorLimitError)):
+                raise  # LW itself failed, or not a resource limit at all.
             oom = type(exc).__name__
         # Retry OUTSIDE the except block: inside it the exception's traceback
         # keeps VE's frames — and every intermediate tensor they hold — alive,
