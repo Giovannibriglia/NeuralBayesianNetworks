@@ -243,6 +243,31 @@ def test_cell_table_applicability_rows_are_not_attempted():
     assert cells.empty
 
 
+def test_failed_cells_are_counted_per_metric_and_per_seed():
+    """#123 (Issue A), ported from the retired ``_plot_v2`` plotter: a metric's
+    DNF tally counts *that metric's* failed cells, one per (baseline, x, seed)
+    -- another metric's failure rows must not leak in, and two failed queries
+    of one seed are one failed cell, not two."""
+    rows = []
+    for s in range(3):
+        rows.append(_row("nbn-cat-lw", s, metric="w1_per_node", value=0.1))
+        failed = s < 2
+        rows.append(_row("nbn-cat-lw", s, metric="tv_per_node",
+                         value=float("nan") if failed else 0.2,
+                         status="error" if failed else "ok"))
+    rows.append(_row("nbn-cat-lw", 0, metric="tv_per_node", value=float("nan"),
+                     status="error"))                       # 2nd failed query, seed 0
+    dfx = assign_x(pd.DataFrame(rows), "n_nodes", {"50": 50})
+
+    w1, _ = cell_table(dfx, "w1_per_node")
+    assert len(w1) == 3 and w1["solved"].all()              # tv failures don't leak
+
+    tv, _ = cell_table(dfx, "tv_per_node")
+    assert len(tv) == 3                                     # one row per seed
+    assert int((~tv["solved"]).sum()) == 2
+    assert set(tv.loc[~tv["solved"], "code"]) == {"error"}
+
+
 # --- views --------------------------------------------------------------------
 
 def test_all_view_k_over_n_and_failure_code():

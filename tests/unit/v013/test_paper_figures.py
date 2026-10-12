@@ -6,7 +6,6 @@ Covers, on tiny synthetic parquets:
 3. Lookups (n_nodes resolution, n_parameters), applicability filtering
 4. Learning-curve (n_train) and bnlearn (network) x axes
 5. Divergence panel, bold-best, benchmark-named captions
-6. The deprecated scripts/make_paper_figures.py shim still works + warns
 """
 from __future__ import annotations
 
@@ -16,9 +15,6 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-
-_SHIM = Path(__file__).resolve().parents[3] / "scripts" / "make_paper_figures.py"
-
 
 def _make_minimal_parquet(tmp_path: Path) -> Path:
     """Tiny DataFrame matching the melted v3 parquet schema (bnlearn/discrete,
@@ -368,19 +364,6 @@ def test_filter_unsupported_baselines_reports_broken_library(caplog):
     assert "pgmpy-mle-ve" in warn[0].getMessage() and "sklearn too old" in warn[0].getMessage()
     info = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
     assert any("nbn-lg-lw" in m and "not applicable" in m for m in info)
-
-
-def test_deprecated_shim_still_works_and_warns(tmp_path):
-    parquet = _make_minimal_parquet(tmp_path)
-    out_dir = tmp_path / "figures_shim"
-    result = subprocess.run(
-        [sys.executable, str(_SHIM), "--parquet", str(parquet),
-         "--output-dir", str(out_dir)],
-        capture_output=True, text=True,
-    )
-    assert result.returncode == 0, f"shim failed: {result.stderr[-800:]}"
-    assert "deprecat" in (result.stdout + result.stderr).lower()
-    assert list(out_dir.rglob("*.pdf"))
 
 
 # --- n_train learning-curve axis ---------------------------------------------

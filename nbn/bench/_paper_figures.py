@@ -1,8 +1,7 @@
 """Generate paper figures + LaTeX tables from a benchmark parquet.
 
 Public entry point: :func:`run_plot`, invoked by ``nbn-bench plot``
-(``nbn/bench/cli.py``); ``scripts/make_paper_figures.py`` remains as a
-deprecation shim.
+(``nbn/bench/cli.py``).
 
 Every figure is a **grouped bar plot** over the benchmark's discrete x grid
 (``n_nodes``, ``n_train``, ``batch_size`` or bnlearn ``network``); every

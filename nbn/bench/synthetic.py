@@ -15,11 +15,6 @@ data regimes:
 The generator is the foundation for the v0.4 crash-test framework: every
 metric reported by the parameter-learning and inference crash tests is
 defined relative to the true mechanism returned here.
-
-Backward compatibility
-----------------------
-The v0.3 helper ``generate_synthetic_hybrid(...)`` is kept as a thin
-deprecation shim that forwards to ``make_synthetic_bn(family='hybrid', ...)``.
 """
 from __future__ import annotations
 
@@ -672,57 +667,8 @@ def _resolve_device(device: str | torch.device) -> torch.device:
     return resolve_device(device)
 
 
-# ---------------------------------------------------------------------- #
-# Backwards-compat shim
-# ---------------------------------------------------------------------- #
-
-
-def generate_synthetic_hybrid(
-    n_nodes: int = 50,
-    discrete_frac: float = 0.5,
-    edge_prob: float = 0.15,
-    seed: int = 0,
-) -> Tuple[NeuralBayesianNetwork, Dict[str, torch.Tensor]]:
-    """**Deprecated** — use :func:`make_synthetic_bn` instead.
-
-    This shim preserves the v0.3 signature of ``generate_synthetic_hybrid``
-    and forwards to :func:`make_synthetic_bn` with the hybrid family.
-
-    Parameters
-    ----------
-    n_nodes:
-        Total number of nodes in the generated DAG.
-    discrete_frac:
-        Fraction of *discrete* nodes; the new generator parameterises the
-        complementary fraction (``fraction_continuous = 1 - discrete_frac``).
-    edge_prob:
-        Edge density (passed through as ``edge_density``).
-    seed:
-        Reproducibility seed.
-
-    Returns
-    -------
-    A ``(true_model, train_data)`` pair, mirroring the v0.3 return contract.
-    """
-    warnings.warn(
-        "generate_synthetic_hybrid is deprecated; use "
-        "make_synthetic_bn(family='hybrid', ...) instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    bn = make_synthetic_bn(
-        family="hybrid",
-        n_nodes=n_nodes,
-        edge_density=edge_prob,
-        fraction_continuous=max(min(1.0 - discrete_frac, 0.99), 0.01),
-        seed=seed,
-    )
-    return bn.true_model, bn.train_data
-
-
 __all__ = [
     "Family",
     "SyntheticBN",
     "make_synthetic_bn",
-    "generate_synthetic_hybrid",
 ]
