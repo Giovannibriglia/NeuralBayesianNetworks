@@ -133,8 +133,8 @@ Launch long runs from a plain terminal (or `tmux` / `nohup`), not an IDE's
 embedded terminal. On Linux desktops, systemd-oomd kills the IDE's whole
 process group under memory pressure.
 
-The [`notebooks/`](../notebooks) folder has one Google Colab notebook per
-paper-scale benchmark, for running on a cloud GPU.
+On a remote CUDA host, install the same way and run the same `nbn-bench`
+commands (or `scripts/run_all_benchmarks.sh`) there.
 
 Each invocation writes one run directory; the parquet is the canonical
 artefact (figures and tables are never generated automatically):

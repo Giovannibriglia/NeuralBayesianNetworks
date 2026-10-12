@@ -175,8 +175,14 @@ print(model.log_prob(data).mean())
 
 To choose a mechanism per node instead of `auto_mechanisms()`, call
 `model.set_mechanism("SoilMoisture", LinearGaussianMechanism())` (all
-mechanisms import from `nbn`) before `fit`. More
-end-to-end examples (continuous, hybrid, neural, interventional) are in
+mechanisms import from `nbn`) before `fit`.
+
+**Examples.** [`examples/`](examples) has one executed notebook with plots per
+feature, each checked against a known ground truth: parameter learning,
+inference engines, interventions, sampling, incremental updates, a gallery of
+the continuous mechanisms, batching / devices / persistence, and autograd
+(01–08), then structural causal models and probability sets (`nbn.scm`,
+`nbn.uncertainty`; 09–13). More end-to-end examples are in
 [`tests/integration/`](tests/integration).
 
 ## Core concepts
@@ -272,8 +278,7 @@ nbn-bench plot results/benchmark_synthetic_smoke_<timestamp> --output-dir result
 
 The configs, metrics, the paper-scale runs (`scripts/run_all_benchmarks.sh`),
 the figures and how to reproduce the published numbers are documented in
-**[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)**. Colab notebooks for each
-paper-scale benchmark are in [`notebooks/`](notebooks).
+**[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)**.
 
 ## Development
 
@@ -284,7 +289,8 @@ pytest -n auto -m "slow or not slow"  # everything runnable here (network tests 
 pytest -m "slow or subprocess"        # benchmark-harness lane: real cell workers, the CLI
 pytest -m mps                         # Metal tests (macOS); -m cuda / -m multi_gpu on NVIDIA hosts
 pytest -p no:xdist -m perf tests/perf # wall-clock assertions, on a quiet machine
-ruff check nbn/ tests/ scripts/ && mypy nbn/core nbn/mechanisms
+pytest --nbmake examples/             # execute the example notebooks
+ruff check nbn/ tests/ examples/ scripts/ && mypy nbn/core nbn/mechanisms
 ```
 
 Repository layout:
@@ -296,7 +302,7 @@ Repository layout:
     tests/bench/         nbn.bench tests (bench/integration/: runner, CLI, bnlearn)
     tests/perf/          wall-clock assertions (-m perf)
     tests/data/          fixtures, incl. vendored bnlearn .bif networks
-    notebooks/           Colab notebooks for the paper-scale benchmarks
+    examples/            executed Jupyter notebooks: one per feature, then SCMs and probability sets
     scripts/             run_all_benchmarks.sh and other helpers
     docs/                benchmark guide, design notes and audits
 

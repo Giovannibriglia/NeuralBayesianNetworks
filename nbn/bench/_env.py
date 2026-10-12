@@ -46,7 +46,8 @@ class Requirement:
 
 
 # Mirrors [project.dependencies] + the runtime extras of pyproject.toml.
-# ``dev`` (test / docs toolchain) is deliberately not here.
+# ``dev`` (test / docs toolchain) and ``examples`` (notebook tooling) are
+# deliberately not here.
 REQUIREMENTS: tuple[Requirement, ...] = (
     Requirement("torch", "torch", ">=2.2", "core"),
     Requirement("networkx", "networkx", ">=3.0", "core"),

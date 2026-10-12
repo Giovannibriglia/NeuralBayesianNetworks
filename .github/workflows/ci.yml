@@ -2,44 +2,51 @@ name: CI
 
 # Lanes (markers are declared in pyproject.toml, wired in tests/conftest.py):
 #
-#   test        Linux CPU, py3.10-3.12   the fast gate = pytest's default
+#   lint        Linux CPU, py3.12        environment check, ruff, mypy (once)
+#   test        Linux CPU, py3.10/3.14   the fast gate = pytest's default
 #                                         selection (not slow / subprocess /
-#                                         network / perf / cuda / multi_gpu)
+#                                         network / perf / cuda / multi_gpu),
+#                                         on the oldest and newest supported
+#                                         Python
 #   bench       Linux CPU, py3.12        slow + subprocess tests (real cell
 #                                         workers, the nbn-bench CLI) and the
 #                                         benchmark smoke runs
-#   network     Linux CPU, py3.12        tests that may download bnlearn
-#                                         networks, with the cache restored
 #   macos       macOS arm64 (MPS)        the fast gate on a real Metal device,
 #                                         then the mps-marked tests with the
 #                                         CPU fallback disabled
+#   notebooks   Linux CPU, py3.12        executes the notebooks in examples/
+#                                         (pytest --nbmake)
 #
-# CUDA (self-hosted) and the nightly full run live in gpu.yml / nightly.yml.
+# Elsewhere: the network-marked tests (bnlearn downloads) and the full suite
+# run in nightly.yml; CUDA runs by hand in gpu.yml (self-hosted runner).
+#
+# Triggers: pull requests, pushes to master, and by hand. Pushes to other
+# branches do not run CI on their own (open a PR), so a PR commit runs once.
 
 on:
   push:
-    branches: ["**"]
+    branches: [master]
   pull_request:
+  workflow_dispatch: {}
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer push supersedes an older one on a PR branch; on master every
+  # merge is tested to the end.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0  # setuptools-scm needs full history
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
           cache: pip
 
       - name: Install
@@ -53,31 +60,48 @@ jobs:
         run: nbn-bench check-env
 
       - name: Lint
-        run: ruff check nbn/ tests/ notebooks/ scripts/
+        run: ruff check nbn/ tests/ examples/ scripts/
 
       - name: Type-check core
         run: mypy nbn/core nbn/mechanisms
 
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oldest supported (requires-python) and newest released Python.
+        python-version: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install --prefer-binary -e ".[dev,bench,neural,gp,mcmc]"
+
       - name: Test (fast gate)
         # The default selection; torch's thread pool is pinned per xdist
         # worker in tests/conftest.py.
-        run: pytest -n auto --cov=nbn --cov-report=xml
-
-      - uses: codecov/codecov-action@v4
-        if: matrix.python-version == '3.11'
-        with:
-          files: ./coverage.xml
-          fail_ci_if_error: false
+        run: pytest -n auto
 
   bench:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -104,39 +128,36 @@ jobs:
 
       - name: Upload smoke figures
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: smoke-figures
           path: results/**/*.png
           if-no-files-found: ignore
 
-  network:
+  # Executes every notebook in examples/ on the CPU. The outputs stored in the
+  # notebooks are not compared, only that every cell runs without an error.
+  notebooks:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
 
-      - name: Restore bnlearn network cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/nbn/bnlearn
-          key: bnlearn-${{ hashFiles('nbn/bench/problems/bnlearn.py') }}
-          restore-keys: bnlearn-
-
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install --prefer-binary -e ".[dev,bench,neural,gp,mcmc]"
+          pip install --prefer-binary -e ".[all,dev]"
 
-      - name: Network tests (bnlearn downloads)
-        run: pytest -n auto -m "network and not perf and not cuda and not multi_gpu"
+      - name: Execute the example notebooks
+        env:
+          MPLBACKEND: Agg
+        run: pytest --nbmake examples/
 
   # Apple Silicon lane. GitHub's macos-latest runners are arm64 Macs with a
   # Metal-capable GPU, so ``torch.backends.mps.is_available()`` is True and
@@ -145,12 +166,13 @@ jobs:
   # float64-free accumulation paths and the CPU-hop linear solves.
   macos:
     runs-on: macos-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
