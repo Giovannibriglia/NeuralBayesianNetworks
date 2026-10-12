@@ -13,6 +13,8 @@ name: CI
 #   macos       macOS arm64 (MPS)        the fast gate on a real Metal device,
 #                                         then the mps-marked tests with the
 #                                         CPU fallback disabled
+#   notebooks   Linux CPU, py3.12        executes the notebooks in examples/
+#                                         (pytest --nbmake)
 #
 # CUDA (self-hosted) and the nightly full run live in gpu.yml / nightly.yml.
 
@@ -53,7 +55,7 @@ jobs:
         run: nbn-bench check-env
 
       - name: Lint
-        run: ruff check nbn/ tests/ notebooks/ scripts/
+        run: ruff check nbn/ tests/ examples/ scripts/
 
       - name: Type-check core
         run: mypy nbn/core nbn/mechanisms
@@ -137,6 +139,31 @@ jobs:
 
       - name: Network tests (bnlearn downloads)
         run: pytest -n auto -m "network and not perf and not cuda and not multi_gpu"
+
+  # Executes every notebook in examples/ on the CPU. The outputs stored in the
+  # notebooks are not compared, only that every cell runs without an error.
+  notebooks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install --prefer-binary -e ".[all,dev]"
+
+      - name: Execute the example notebooks
+        env:
+          MPLBACKEND: Agg
+        run: pytest --nbmake examples/
 
   # Apple Silicon lane. GitHub's macos-latest runners are arm64 Macs with a
   # Metal-capable GPU, so ``torch.backends.mps.is_available()`` is True and
