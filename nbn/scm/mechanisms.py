@@ -528,12 +528,12 @@ class AdditiveNoiseMechanism(StructuralMechanism):
         """``g(pa)``: ``[B, D_x]`` (or ``[B, S, D_x]``); ``[1, D_x]`` for ``None``."""
         if not self.is_fitted:
             raise RuntimeError(f"{type(self).__name__}: call fit_local first.")
-        device = self._pa_mean.device
+        device, dtype = self._pa_mean.device, self._pa_mean.dtype  # follows .to(dtype)
         if parents is None:
-            return self.net(torch.zeros(1, 0, device=device))
+            return self.net(torch.zeros(1, 0, device=device, dtype=dtype))
         if parents.shape[-1] == 0:
-            return self.net(torch.zeros(*parents.shape[:-1], 0, device=device))
-        z = (to_device_dtype(parents, device, torch.float32) - self._pa_mean) / self._pa_std
+            return self.net(torch.zeros(*parents.shape[:-1], 0, device=device, dtype=dtype))
+        z = (to_device_dtype(parents, device, dtype) - self._pa_mean) / self._pa_std
         return self.net(z)
 
     def structural(self, parents: torch.Tensor | None, noise: torch.Tensor) -> torch.Tensor:
@@ -541,7 +541,7 @@ class AdditiveNoiseMechanism(StructuralMechanism):
 
     def residual(self, x: torch.Tensor, parents: torch.Tensor | None) -> torch.Tensor:
         """Exact noise ``u = x - g(pa)``, ``[B, D]`` (``[B, S, D]`` for 3-D ``x``)."""
-        x = ensure_2d(x).to(torch.float32)
+        x = self._as_own(x)
         if x.dim() == 3 and parents is not None and parents.dim() == 2:
             parents = parents.unsqueeze(1).expand(-1, x.shape[1], -1)
         return x - self.location(parents)
@@ -554,12 +554,39 @@ class AdditiveNoiseMechanism(StructuralMechanism):
     def forward(self, parents: torch.Tensor | None) -> Distribution:
         return self.noise.distribution(self.location(parents))
 
+    def cdf(self, x: torch.Tensor, parents: torch.Tensor | None) -> torch.Tensor:
+        """``P(X <= x | pa) = F_U(x - g(pa))``, shape ``[B]`` (1-D children only)."""
+        self._require_scalar("cdf")
+        return self.noise.cdf(self.residual(x, parents)[:, 0])
+
+    def quantile(self, p: torch.Tensor | float, parents: torch.Tensor | None) -> torch.Tensor:
+        """Conditional ``p``-quantile ``g(pa) + F_U^{-1}(p)``, shape ``[B]`` (1-D children only)."""
+        self._require_scalar("quantile")
+        loc = self.location(parents)[:, 0]
+        p_t = torch.as_tensor(p, dtype=loc.dtype, device=loc.device).reshape(-1)
+        loc, p_t = torch.broadcast_tensors(loc, p_t)
+        eps = torch.finfo(loc.dtype).eps  # finite quantiles at 0 and 1
+        return loc + self.noise.icdf(p_t.clamp(eps, 1.0 - eps))
+
+    def _require_scalar(self, what: str) -> None:
+        if self.output_dim != 1:
+            raise ValueError(
+                f"{type(self).__name__}.{what} needs a 1-D child (got {self.output_dim} dims)."
+            )
+
     def log_prob(self, x: torch.Tensor, parents: torch.Tensor | None) -> torch.Tensor:
         """``log p(x | pa)`` for ``x`` ``[B]``, ``[B, D]`` or ``[B, S, D]``; returns ``[B]`` / ``[B, S]``."""
-        x = ensure_2d(x).to(torch.float32)
+        x = self._as_own(x)
         if x.dim() == 3 and parents is not None and parents.dim() == 2:
             parents = parents.unsqueeze(1).expand(-1, x.shape[1], -1)
         return self.forward(parents).log_prob(x)
+
+    def _as_own(self, x: torch.Tensor) -> torch.Tensor:
+        """``x`` as 2-D (or 3-D) on the mechanism's device and in its dtype (float32 before a fit)."""
+        x = ensure_2d(x)
+        if self._pa_mean is None:
+            return x.to(torch.float32)
+        return to_device_dtype(x, self._pa_mean.device, self._pa_mean.dtype)
 
     @staticmethod
     def _parents_or_empty(parents: torch.Tensor | None, x: torch.Tensor) -> torch.Tensor:

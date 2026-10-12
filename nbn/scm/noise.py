@@ -98,6 +98,16 @@ class GaussianNoise(nn.Module):
     def sample(self, n: int) -> torch.Tensor:
         return torch.randn(n, self.dim, device=self.log_scale.device) * self.scale
 
+    def cdf(self, u: torch.Tensor) -> torch.Tensor:
+        """``P(U <= u)`` for a 1-D law, elementwise."""
+        _require_1d(self.dim, "cdf")
+        return Normal(0.0, self.scale[0].to(u)).cdf(u)
+
+    def icdf(self, p: torch.Tensor) -> torch.Tensor:
+        """The ``p``-quantile of a 1-D law, elementwise."""
+        _require_1d(self.dim, "icdf")
+        return Normal(0.0, self.scale[0].to(p)).icdf(p)
+
 
 class GaussianMixtureNoise(nn.Module):
     """Diagonal Gaussian mixture noise, fitted to residuals by (weighted) EM."""
@@ -176,3 +186,29 @@ class GaussianMixtureNoise(nn.Module):
     def sample(self, n: int) -> torch.Tensor:
         zeros = torch.zeros(n, self.dim, device=self.means.device)
         return self.distribution(zeros).sample()
+
+    def cdf(self, u: torch.Tensor) -> torch.Tensor:
+        """``P(U <= u)`` for a 1-D mixture, elementwise: ``sum_c w_c Phi((u - mu_c) / s_c)``."""
+        _require_1d(self.dim, "cdf")
+        weights = torch.softmax(self.mix_logits, -1).to(u)
+        means = self.means[:, 0].to(u)
+        scales = self.log_scales[:, 0].exp().clamp_min(self.min_scale).to(u)
+        return (weights * Normal(means, scales).cdf(u.unsqueeze(-1))).sum(-1)
+
+    @torch.no_grad()
+    def icdf(self, p: torch.Tensor, steps: int = 60) -> torch.Tensor:
+        """The ``p``-quantile of a 1-D mixture by bisection (the CDF is monotone; no gradient)."""
+        _require_1d(self.dim, "icdf")
+        scales = self.log_scales[:, 0].exp().clamp_min(self.min_scale)
+        span = (self.means[:, 0].abs() + 12.0 * scales).max().to(p)
+        lo, hi = torch.full_like(p, -1.0) * span, torch.full_like(p, 1.0) * span
+        for _ in range(steps):
+            mid = 0.5 * (lo + hi)
+            below = self.cdf(mid) < p
+            lo, hi = torch.where(below, mid, lo), torch.where(below, hi, mid)
+        return 0.5 * (lo + hi)
+
+
+def _require_1d(dim: int, what: str) -> None:
+    if dim != 1:
+        raise ValueError(f"{what} is defined for 1-D noise only (this law has {dim} dimensions).")

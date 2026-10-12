@@ -12,6 +12,8 @@ Test                              Null hypothesis
 :func:`freshness_test`            the noise at ``t`` and ``t + 1`` is independent
 :func:`residual_dependence_test`  the noises of two nodes are independent
 :func:`context_invariance_test`   ``C ⊥ X | pa(X)`` for a dataset/policy id ``C``
+:func:`noise_independence_test`   the abducted noise is independent of the parents
+:func:`calibration_by_bins_test`  the fitted CDF is calibrated in every parent region
 ================================  ============================================
 
 Discrete tests use a parametric bootstrap: every replicate is refitted on a
@@ -27,7 +29,7 @@ from typing import Dict, Literal, Mapping, Sequence
 
 import torch
 
-from nbn.scm._stats import chi2_sf, ks_two_sample, normal_two_sided_p
+from nbn.scm._stats import chi2_sf, ks_two_sample, ks_uniform, normal_two_sided_p, require_cpu_generator
 from nbn.scm.fitting import child_law, fit_offset_law, log_likelihood, offset_transfer, rows_table
 from nbn.scm.mechanisms import (
     AdditiveNoiseMechanism,
@@ -221,6 +223,113 @@ def residual_dependence_test(
     raise ValueError(f"Unknown method '{method}'.")
 
 
+@torch.no_grad()
+def noise_independence_test(
+    model,
+    data: Mapping[str, torch.Tensor],
+    node: str,
+    n_permutations: int = 200,
+    max_rows: int = 2000,
+    generator: torch.Generator | None = None,
+) -> DiagnosticResult:
+    """Is the abducted noise of ``node`` independent of its parents?
+
+    The structural form ``X := f(pa, U)`` assumes ``U ⊥ pa``.  This test
+    abducts the noise of every row and runs an HSIC permutation test against
+    the parents (the residual-independence check of additive-noise model
+    fitting, Peters, Janzing & Schölkopf, *Elements of Causal Inference*,
+    §4.2.1).  Use data that were **not** used to fit the mechanism: fitting
+    and testing on the same rows can hide or create dependence.  A rejection
+    shows the per-parent reading of a :class:`PITBandSet` is unsafe; a pass
+    only fails to detect a violation (it does not prove independence).  At
+    most ``max_rows`` rows are used (HSIC memory is quadratic).  ``generator``
+    (a CPU generator) makes the subsample and the permutations reproducible.
+    """
+    data = _on_model_device(model, data)
+    mech = _structural(model, node)
+    parents = model.parent_values(data, node)
+    if parents is None:
+        raise ValueError(f"'{node}' has no parents: nothing to be independent of.")
+    noise = mech.abduct(data[node], parents, 1)[0]
+    n = noise.shape[0]
+    require_cpu_generator(generator, "noise_independence_test")
+    if n > max_rows:
+        keep = torch.randperm(n, generator=generator)[:max_rows].to(noise.device)
+        noise, parents = noise[keep], parents[keep]
+    statistic, p_value = _hsic_permutation(noise, parents, n_permutations, generator)
+    return DiagnosticResult(
+        "noise_independence", statistic, p_value,
+        null=f"the noise of '{node}' is independent of its parents",
+        details={"method": "hsic", "permutations": n_permutations, "rows": int(noise.shape[0])},
+    )
+
+
+@torch.no_grad()
+def calibration_by_bins_test(
+    model, data: Mapping[str, torch.Tensor], node: str, n_bins: int = 4,
+    reference: Literal["uniform", "other_bins"] = "uniform",
+    generator: torch.Generator | None = None,
+) -> DiagnosticResult:
+    """Is the fitted CDF calibrated in every region of the inputs?
+
+    Sorts held-out rows by the predicted median ``F_hat^{-1}(1/2 | pa)``
+    (continuous children) or mean class index (discrete children),
+    splits them into ``n_bins`` equal-count bins and looks at the probability
+    integral transform ``W = F_hat(x | pa)`` in each bin:
+
+    * ``reference="uniform"`` — each bin against Uniform(0, 1) (one-sample KS,
+      Bonferroni over bins): is the raw model calibrated in every bin?  This
+      is the per-bin comparison of model and data of Kochenderfer et al.,
+      *Algorithms for Validation*, §2.5.3, pp. 48–49.
+    * ``reference="other_bins"`` — bins against each other (pairwise two-sample
+      KS, Bonferroni): does ``W`` have the same law everywhere, uniform or not?
+      This is the assumption that lets :func:`nbn.scm.pit_band_set` (which
+      recalibrates a uniform miscalibration) bound every conditional
+      probability.
+
+    A pooled check can hide a model that is right on average and wrong in one
+    region; per-bin checks are the remedy.  Binning on the predicted median is
+    a 1-D projection of the parents: with several parents it only sees
+    miscalibration that varies along that projection.  A pass does not prove
+    calibration.  Use rows not used for fitting.
+
+    Discrete children (structural categorical mechanisms) use the randomized
+    PIT (drawn with the CPU ``generator``) and bins of the predicted mean class
+    index.
+    """
+    from nbn.scm.calibration import _calibration_rows, _mechanism, pit_values
+
+    if reference not in ("uniform", "other_bins"):
+        raise ValueError(f"reference must be 'uniform' or 'other_bins', got {reference!r}.")
+    mech = _mechanism(model, node, need=("cdf",))
+    x, parents = _calibration_rows(model, data, node, None, None)
+    if parents is None:
+        raise ValueError(f"'{node}' has no parents: there is nothing to bin.")
+    if not 2 <= n_bins <= x.shape[0]:
+        raise ValueError(f"n_bins must lie in [2, {x.shape[0]}] (number of rows), got {n_bins}.")
+    pit = pit_values(model, data, node, generator=generator)
+    if getattr(mech, "is_discrete", False):  # predicted mean class index
+        probs = mech.probs(parents, x.shape[0])
+        key = (probs * torch.arange(probs.shape[-1], device=probs.device, dtype=probs.dtype)).sum(-1)
+    else:
+        key = mech.quantile(0.5, parents)
+    order = torch.argsort(key)
+    bins = [pit[chunk] for chunk in torch.tensor_split(order, n_bins)]
+    if reference == "uniform":
+        results = [ks_uniform(b) for b in bins]
+        statistic, p_min = min(results, key=lambda r: r[1])
+        p_value, method = min(1.0, p_min * n_bins), "KS vs Uniform(0, 1) per bin, Bonferroni"
+        null = f"the fitted CDF of '{node}' is calibrated in every bin of the predicted median"
+    else:
+        statistic, p_value, _ = _pairwise_ks(bins)
+        method = "pairwise two-sample KS, Bonferroni"
+        null = f"the PIT of '{node}' has the same law in every bin of the predicted median"
+    return DiagnosticResult(
+        "calibration_by_bins", statistic, p_value, null=null,
+        details={"method": method, "bins": n_bins, "rows_per_bin": int(bins[-1].numel())},
+    )
+
+
 # ===========================================================================
 # Context (regime / policy) invariance
 # ===========================================================================
@@ -383,7 +492,8 @@ def _pearson(a: torch.Tensor, b: torch.Tensor) -> tuple[float, float]:
     return float(rho), float(normal_two_sided_p(z))
 
 
-def _hsic_permutation(a: torch.Tensor, b: torch.Tensor, n_permutations: int) -> tuple[float, float]:
+def _hsic_permutation(a: torch.Tensor, b: torch.Tensor, n_permutations: int,
+                      generator: torch.Generator | None = None) -> tuple[float, float]:
     a = a.reshape(a.shape[0], -1).to(torch.float32)
     b = to_device_dtype(b.reshape(b.shape[0], -1), a.device, torch.float32)
     n = a.shape[0]
@@ -399,7 +509,7 @@ def _hsic_permutation(a: torch.Tensor, b: torch.Tensor, n_permutations: int) -> 
     observed = float((k_a * k_b).sum() / n**2)
     exceed = 0
     for _ in range(n_permutations):
-        perm = torch.randperm(n, device=a.device)
+        perm = torch.randperm(n, generator=generator).to(a.device)  # CPU generator: reproducible
         exceed += int((k_a * k_b[perm][:, perm]).sum() / n**2 >= observed)
     return observed, (1 + exceed) / (1 + n_permutations)
 

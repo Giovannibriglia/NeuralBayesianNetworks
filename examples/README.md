@@ -9,6 +9,7 @@ uv run python examples/01_discrete_noise_and_probability_sets.py
 uv run python examples/02_confounding_and_noise_diagnostics.py
 uv run python examples/03_continuous_noise_and_counterfactuals.py
 uv run python examples/04_mdp_trajectories_factored_sets.py
+uv run python examples/05_discrete_counterfactuals.py
 ```
 
 | Script | Shows |
@@ -17,6 +18,7 @@ uv run python examples/04_mdp_trajectories_factored_sets.py
 | `02_confounding_and_noise_diagnostics.py` | episodes from three behaviour policies, one confounded; `context_invariance_test` (policy as context) flags it; `noise_sharing_test`, `noise_tying_test`, `freshness_test` with Benjamini–Hochberg — and how to read a rejection |
 | `03_continuous_noise_and_counterfactuals.py` | `AdditiveNoiseMechanism` with an MLP location and mixture noise; held-out likelihood vs Gaussian noise; DKW band on `P(a < X <= b | pa)`; `counterfactual_sample` |
 | `04_mdp_trajectories_factored_sets.py` | `transitions_from_episodes`; one mechanism per next-state variable; trajectory-aware sets (`sampling="trajectory"`), the budget split across variables, and bounds on a transition probability of the factored kernel |
+| `05_discrete_counterfactuals.py` | `StructuralNeuralCategorical` with two declared couplings (Gumbel-max, monotone) giving different counterfactuals from one kernel; `counterfactual_bounds` over every compatible SCM and `counterfactual_bounds_from_sets` over a confidence box; randomized-PIT band, `calibration_by_bins_test`, `conformal_sets` |
 
 All scripts run on the CPU in a few seconds; pass `device="mps"` or
 `device="cuda"` to the model to run them on an accelerator.
