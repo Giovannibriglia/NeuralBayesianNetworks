@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import numbers
 import warnings
 from typing import List
 
@@ -16,6 +18,26 @@ from nbn.utils.device import to_device_dtype
 _CARDINALITY_WARN_THRESHOLD = 1_000_000
 
 
+def validate_dirichlet_alpha(alpha) -> float:
+    """``alpha`` as a float, or ``ValueError`` unless it is a finite number >= 0.
+
+    A negative pseudo-count can drive a count below zero (a negative
+    "probability" before normalisation) and NaN / inf poison every CPT row,
+    so both are rejected where the value enters (#160).
+    """
+    if isinstance(alpha, bool) or not isinstance(alpha, numbers.Real):
+        raise ValueError(
+            f"Dirichlet alpha must be a real number, got {alpha!r} "
+            f"({type(alpha).__name__})."
+        )
+    value = float(alpha)
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(
+            f"Dirichlet alpha (pseudo-count) must be finite and >= 0, got {alpha!r}."
+        )
+    return value
+
+
 class CategoricalTableMechanism(Mechanism):
     """Tabular categorical CPD stored as a CPT in logit space.
 
@@ -27,8 +49,9 @@ class CategoricalTableMechanism(Mechanism):
     Parameters
     ----------
     alpha:
-        Dirichlet pseudo-count for Laplace smoothing (default 1.0 = uniform
-        Dirichlet prior with 1 pseudo-observation per class).
+        Symmetric Dirichlet pseudo-count added to every class count (default
+        0.0 = unsmoothed MLE, pgmpy parity; 1.0 = Laplace).  Must be a finite
+        number >= 0.
 
     Notes
     -----
@@ -46,7 +69,7 @@ class CategoricalTableMechanism(Mechanism):
         # exactly (no smoothing) so accuracy on small networks is on par.
         # Pass ``alpha=1.0`` to recover the v0.2 behaviour (uniform prior).
         super().__init__()
-        self.alpha = float(alpha)
+        self.alpha = validate_dirichlet_alpha(alpha)
         # Populated by fit_local:
         self._logits: nn.Parameter | None = None  # shape [prod(pa_cards), K]
         self._n_classes: int = 0

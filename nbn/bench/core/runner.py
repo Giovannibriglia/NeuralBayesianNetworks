@@ -494,7 +494,8 @@ def _resolve_batch_sizes(
 def _fit_identity_key(spec: BaselineSpec, problem: Any) -> tuple:
     """The key deciding which baselines share a base fit (LOCKED fields).
 
-    ``(library, mechanism, epochs, batch_size, lr, family, problem_id, seed)``.
+    ``(library, mechanism, epochs, batch_size, lr, alpha, family, problem_id,
+    seed)``.
     This is the SINGLE source of truth — both grouping (`_assign_fit_roles`)
     and the cache filename (`_fit_cache_filename`) derive from it; never
     recompute inline.
@@ -506,9 +507,10 @@ def _fit_identity_key(spec: BaselineSpec, problem: Any) -> tuple:
         (``NBNAdapter.load_base_and_attach``; the ``.to()`` is what resets the
         network's cached ``device`` attribute), so two baselines differing
         only in device still share.
-    ``epochs``/``batch_size``/``lr`` are the ``extra_kwargs`` entries that
-    affect ``model.fit()`` today; if a future kwarg does, it MUST be added
-    here. ``None`` (absent from config) means "mechanism-designed budget" and
+    ``epochs``/``batch_size``/``lr``/``alpha`` are the ``extra_kwargs``
+    entries that affect ``model.fit()`` today (``alpha``: the Dirichlet
+    pseudo-count of the count-table CPTs, #160); if a future kwarg does, it
+    MUST be added here. ``None`` (absent from config) means "mechanism-designed budget" and
     is a DISTINCT identity from any explicit value — do not collapse it to a
     numeric default.
     """
@@ -519,8 +521,10 @@ def _fit_identity_key(spec: BaselineSpec, problem: Any) -> tuple:
     batch_size = int(batch_size) if batch_size is not None else None
     lr = extra.get("lr")
     lr = float(lr) if lr is not None else None
+    alpha = extra.get("alpha")
+    alpha = float(alpha) if alpha is not None else None
     return (
-        spec.library, spec.mechanism, epochs, batch_size, lr,
+        spec.library, spec.mechanism, epochs, batch_size, lr, alpha,
         getattr(problem, "family", ""),
         getattr(problem, "problem_id", ""),
         getattr(problem, "seed", 0),
