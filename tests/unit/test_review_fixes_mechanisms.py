@@ -39,9 +39,9 @@ def test_a4_linear_gaussian_recovers_slope_under_large_parent_offset(device):
     x, pa = _offset_lg_data(device=device)
     mech = LinearGaussianMechanism()
     mech.fit_local(x, pa)
-    assert abs(float(mech._weight.reshape(-1)[0]) - 0.5) < 0.02
-    assert abs(float(mech._bias.reshape(-1)[0]) - 100.0) < 2.0
-    assert abs(float(mech._scale().reshape(-1)[0]) - 0.1) < 0.01
+    assert abs(float(mech._weight.detach().reshape(-1)[0]) - 0.5) < 0.02
+    assert abs(float(mech._bias.detach().reshape(-1)[0]) - 100.0) < 2.0
+    assert abs(float(mech._scale().detach().reshape(-1)[0]) - 0.1) < 0.01
 
 
 def test_a4_linear_gaussian_matches_float64_ridge_normal_equations():
