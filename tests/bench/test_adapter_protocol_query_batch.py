@@ -4,8 +4,9 @@ PR 1 of the batched-queries sequence: the protocol gains
 ``query_batch(queries) -> list[Posterior]`` and a module-level
 ``default_query_batch`` sequential helper that every existing adapter
 opts into.  These tests verify only that the default helper is a
-faithful passthrough — batched-vs-sequential equivalence for the real
-library-batched overrides lives in PR 2/3 test files.
+faithful passthrough on a recording mock — batched-vs-sequential
+equivalence on the real adapters (including pgmpy through this helper)
+lives in test_query_batch_contract.py.
 
 Reference: docs/v0.14-batched-queries-design.md §1.2, §3.3, §7.1.
 """
@@ -14,14 +15,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from nbn.bench.adapters import (
-    NBNAdapter,
-    PgmpyAdapter,
-    PomegranateAdapter,
-    PyroAdapter,
-)
 from nbn.bench.core.interfaces import default_query_batch
-from nbn.bench.domains.base import BenchmarkProblem, Query
+from nbn.bench.domains.base import Query
 from nbn.bench.domains.posterior import Posterior
 
 
@@ -47,32 +42,6 @@ class _RecordingAdapter:
         probs = torch.zeros(4)
         probs[idx] = 1.0
         return Posterior(probs=probs)
-
-
-def _make_small_discrete_problem(
-    n_samples: int = 300, seed: int = 0,
-) -> BenchmarkProblem:
-    """3-node binary BN: X0 → X1 → X2 (same shape as the pgmpy adapter tests)."""
-    torch.manual_seed(seed)
-    dag = [("X0", "X1"), ("X1", "X2")]
-    train_data = {
-        "X0": torch.randint(0, 2, (n_samples,)),
-        "X1": torch.randint(0, 2, (n_samples,)),
-        "X2": torch.randint(0, 2, (n_samples,)),
-    }
-    variables = {
-        "X0": ("discrete", 2),
-        "X1": ("discrete", 2),
-        "X2": ("discrete", 2),
-    }
-    return BenchmarkProblem(
-        name="test_discrete",
-        dag=dag,
-        variables=variables,
-        train_data=train_data,
-        test_data=train_data,
-        queries=[],
-    )
 
 
 # ---- Default helper: passthrough semantics ----------------------------------
@@ -114,30 +83,3 @@ class TestDefaultQueryBatch:
         ]
         with pytest.raises(RuntimeError, match="boom"):
             default_query_batch(adapter, queries)
-
-
-# ---- Default helper: equivalence on a real adapter ---------------------------
-
-@pytest.mark.slow
-class TestDefaultQueryBatchRealAdapter:
-    def test_equivalent_to_sequential_query_calls_pgmpy(self):
-        """pgmpy on a 3-node BN: helper output == looped query(), bitwise."""
-        adapter = PgmpyAdapter(param_method="mle", inference_method="ve")
-        problem = _make_small_discrete_problem(n_samples=500, seed=42)
-        adapter.fit(problem)
-
-        queries = [
-            Query(
-                targets=("X2",),
-                evidence={"X0": torch.tensor(v)},
-                kind="marginal",
-            )
-            for v in (0, 1, 0)
-        ]
-
-        batched = default_query_batch(adapter, queries)
-        sequential = [adapter.query(q) for q in queries]
-
-        assert len(batched) == len(sequential) == 3
-        for b, s in zip(batched, sequential):
-            assert torch.equal(b.probs, s.probs)  # bitwise identical (VE is exact)
