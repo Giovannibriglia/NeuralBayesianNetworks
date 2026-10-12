@@ -120,7 +120,7 @@ def test_mps_cap_only_on_mps():
         assert _max_tensor_elements(torch.device(dev)) is None
 
 
-@pytest.mark.skipif("mps" not in available_devices(), reason="needs MPS")
+@pytest.mark.mps
 def test_mps_real_device_chunks_under_the_cap(monkeypatch):
     from nbn import TensorVariableElimination
     from nbn.inference import tensor_ve

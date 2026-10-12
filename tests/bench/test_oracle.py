@@ -22,6 +22,7 @@ from nbn.bench.core.oracle import (
     filter_ground_truth,
 )
 from nbn.bench.problems import SyntheticConfig, SyntheticProblemSource
+from tests.conftest import available_accelerators
 
 
 # ---------------------------------------------------------------------------
@@ -310,14 +311,12 @@ def test_forward_clamp_handles_degenerate_evidence_dim() -> None:
 # Test 4 — filter_ground_truth handles mixed-device evidence (gpu)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="requires cuda to surface the device-mismatch path",
-)
-def test_filter_ground_truth_handles_mixed_device_evidence() -> None:
+@pytest.mark.parametrize("device", available_accelerators())
+def test_filter_ground_truth_handles_mixed_device_evidence(device) -> None:
     """filter_ground_truth must not raise RuntimeError when ground_truth.samples
-    are on CUDA but evidence values are on CPU (v0.5c bug 1 regression)."""
-    problem = _make_problem("hybrid", n_nodes=10, seed=0, device="cuda")
+    are on an accelerator but evidence values are on CPU (v0.5c bug 1
+    regression; any accelerator surfaces the device-mismatch path)."""
+    problem = _make_problem("hybrid", n_nodes=10, seed=0, device=device)
 
     continuous_node = next(
         n for n, (kind, _) in problem.variables.items() if kind == "continuous"

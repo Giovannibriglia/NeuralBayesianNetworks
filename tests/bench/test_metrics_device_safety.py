@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from nbn.bench.metrics import wasserstein_1d
+from tests.conftest import available_accelerators
 
 
 def test_wasserstein_1d_cpu_cpu_returns_nonneg_float() -> None:
@@ -22,16 +23,16 @@ def test_wasserstein_1d_cpu_cpu_returns_nonneg_float() -> None:
     assert result.value >= 0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs cuda")
-def test_wasserstein_1d_mixed_devices_does_not_raise() -> None:
-    """wasserstein_1d(cuda, cpu) must not raise RuntimeError.
+@pytest.mark.parametrize("device", available_accelerators())
+def test_wasserstein_1d_mixed_devices_does_not_raise(device) -> None:
+    """wasserstein_1d(accelerator, cpu) must not raise RuntimeError.
 
     PR-B §A.1 regression: before the .cpu() fix, mixed-device subtraction
     raised RuntimeError: Expected all tensors to be on the same device.
     """
-    a_cuda = torch.randn(50, device="cuda")
+    a_acc = torch.randn(50, device=device)
     b_cpu = torch.randn(50)
-    result = wasserstein_1d(a_cuda, b_cpu)
+    result = wasserstein_1d(a_acc, b_cpu)
     assert isinstance(result.value, float)
     assert result.value >= 0
 

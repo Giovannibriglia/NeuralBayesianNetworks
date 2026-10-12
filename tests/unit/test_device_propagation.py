@@ -16,7 +16,7 @@ from nbn.mechanisms import (
 )
 from nbn.utils.device import assert_on_device, resolve_device, to_device
 
-from tests.conftest import available_devices
+from tests.conftest import available_accelerators, available_devices
 
 DEVICES = available_devices()
 
@@ -130,9 +130,9 @@ def test_query_keyword_device_rejected(device):
         model.sample(n=2, device="cpu")
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for round-trip")
-def test_round_trip_cpu_cuda_preserves_results():
-    """cpu → cuda round-trip must preserve query results to ≤1e-5."""
+@pytest.mark.parametrize("device", available_accelerators())
+def test_round_trip_cpu_accelerator_preserves_results(device):
+    """cpu → accelerator round-trip must preserve query results to ≤1e-5."""
     model = NeuralBayesianNetwork(
         [("A", "B")],
         variables={"A": ("discrete", 2), "B": ("discrete", 2)},
@@ -148,6 +148,6 @@ def test_round_trip_cpu_cuda_preserves_results():
         model.set_mechanism(n, m)
 
     p_cpu = model.query(["A"]).cpu()
-    model.to("cuda")
-    p_cuda = model.query(["A"]).cpu()
-    assert torch.allclose(p_cpu, p_cuda, atol=1e-5)
+    model.to(device)
+    p_acc = model.query(["A"]).cpu()
+    assert torch.allclose(p_cpu, p_acc, atol=1e-5)

@@ -57,12 +57,10 @@ def test_predictive_samples_shape_continuous(mechanism):
     _assert_predictive_shape(prob, a)
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda
 def test_predictive_samples_shape_flexcode_gpu():
     # FlexCode trains a 200-epoch MLP — CPU-intractable at benchmark scale
-    # (#223); exercised on GPU only. CI skips via `-m "not gpu and not slow"`.
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA required for the flexcode baseline")
+    # (#223); exercised on GPU only. runs in the CUDA lane (`-m cuda`).
     prob, a = _problem("continuous_lg", "flexcode", device="cuda")
     _assert_predictive_shape(prob, a)
 

@@ -6,9 +6,11 @@ from __future__ import annotations
 import pytest
 import torch
 
-from tests.conftest import available_devices
+from tests.conftest import available_accelerators, available_devices
 
-ACCELERATORS = [d for d in available_devices() if d != "cpu"]
+# Device-transfer tests run on the real accelerators only; on a CPU-only host
+# they are reported as skipped instead of passing as a vacuous cpu->cpu move.
+ACCELERATORS = available_accelerators()
 
 
 # ---------------------------------------------------------------------------
@@ -16,7 +18,7 @@ ACCELERATORS = [d for d in available_devices() if d != "cpu"]
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("device", ACCELERATORS or ["cpu"])
+@pytest.mark.parametrize("device", ACCELERATORS)
 def test_a1_to_device_accelerator_to_cpu_reads_back_values(device):
     from nbn.utils.device import to_device
 
@@ -299,7 +301,7 @@ def _lg_model(device):
     return model, data
 
 
-@pytest.mark.parametrize("device", ACCELERATORS or ["cpu"])
+@pytest.mark.parametrize("device", ACCELERATORS)
 def test_b3_cpu_refreshes_device(device):
     model, data = _lg_model(device)
     model.fit(data)
@@ -312,7 +314,7 @@ def test_b3_cpu_refreshes_device(device):
     assert s["B"].device.type == "cpu"
 
 
-@pytest.mark.parametrize("device", ACCELERATORS or ["cpu"])
+@pytest.mark.parametrize("device", ACCELERATORS)
 def test_b3_device_refresh_for_parameterless_model(device):
     model, _ = _lg_model("cpu")          # mechanisms registered, not fitted
     if device == "cuda":
@@ -916,7 +918,7 @@ def test_cuda_realise_device_pins_index_or_leaves_others():
         assert realise_device("cuda:0").index == 0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+@pytest.mark.cuda
 def test_cuda_model_to_cuda_stores_indexed_device():
     model, data = _lg_model("cpu")
     model.to("cuda")

@@ -68,11 +68,9 @@ def test_calibration_ok_on_continuous(mechanism):
     _assert_calibration_ok(prob, _fitted(prob, mechanism))
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda
 def test_calibration_ok_flexcode_gpu():
-    # FlexCode is gpu-only at benchmark scale (#223); CI skips via `not gpu`.
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA required for the flexcode baseline")
+    # FlexCode is gpu-only at benchmark scale (#223); runs in the CUDA lane (`-m cuda`).
     prob = _problem("continuous_lg")
     adapter = NBNAdapter(mechanism="flexcode", engine=None, device="cuda")
     adapter.fit(prob, epochs=8)

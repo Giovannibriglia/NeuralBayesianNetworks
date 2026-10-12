@@ -344,10 +344,8 @@ class TestNonParametricInferenceLW:
         # non-trivial diversity (not a degenerate point mass)
         assert posterior.samples.reshape(-1).unique().numel() > 1
 
-    @pytest.mark.gpu
+    @pytest.mark.cuda
     def test_flexcode_lw_query_valid_posterior_gpu(self):
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA required for the flexcode baseline")
         adapter = NBNAdapter(mechanism="flexcode", engine="lw", device="cuda")
         problem = _make_small_continuous_problem(n_samples=500, seed=42)
         adapter.fit(problem)

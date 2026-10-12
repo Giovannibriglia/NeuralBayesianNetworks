@@ -210,17 +210,11 @@ def test_estimator_returns_zero_when_plan_is_empty() -> None:
     assert peak == 0
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason=(
-        "guard's `device.type == 'cuda'` branch requires a real cuda "
-        "device — the upstream evidence-to-device move tries to "
-        "initialise the cuda driver, which fails before the guard runs "
-        "on a fake-cuda mock.  Cuda end-to-end verification is deferred "
-        "to Giovanni's laptop per the v0.6b round-2 brief; the "
-        "estimator's algebra is exercised by the two cpu tests above."
-    ),
-)
+# Needs a real CUDA device: the guard's ``device.type == 'cuda'`` branch sits
+# behind the evidence-to-device move, which initialises the driver, so a
+# fake-cuda mock fails before the guard runs.  The estimator's algebra is
+# covered on CPU above; this runs in the CUDA CI lane (``-m cuda``).
+@pytest.mark.cuda
 def test_query_batch_oom_guard_raises_on_constrained_cuda_device() -> None:
     """When even a SINGLE evidence row's estimated peak exceeds 90% of free
     cuda memory, ``query_batch`` must raise ``torch.cuda.OutOfMemoryError``
