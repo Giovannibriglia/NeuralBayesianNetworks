@@ -82,6 +82,32 @@ _DEFAULT_TABLE_ALPHA: dict[str, float] = {
 }
 
 
+def _yaml_alpha(alpha: Any) -> Any:
+    """A numeric string as a float: PyYAML (YAML 1.1) reads ``1e-5`` — an
+    exponent without a dot — as the *string* ``'1e-5'``."""
+    if isinstance(alpha, str):
+        try:
+            return float(alpha.strip())
+        except ValueError:
+            return alpha  # rejected, with its value, by validate_dirichlet_alpha
+    return alpha
+
+
+def table_alpha(mechanism: str, alpha: Any = None) -> float | None:
+    """The Dirichlet pseudo-count the tables of ``mechanism`` get: ``alpha``
+    if set, else the mechanism's default (``None``: it has no tables).
+
+    The fit-once-save-reload identity uses it, so ``alpha`` unset and set to
+    its default share one base fit."""
+    alpha = _yaml_alpha(alpha)
+    if alpha is None:
+        return _DEFAULT_TABLE_ALPHA.get(mechanism)
+    try:
+        return float(alpha)
+    except (TypeError, ValueError):
+        return None
+
+
 def _alpha_tag(alpha: float) -> str:
     """``alpha`` for a baseline label: positional, no exponent, no ``-``.
 
@@ -193,6 +219,7 @@ class NBNAdapter:
         # the mechanism's default.  Validated here, at construction, so a bad
         # YAML value fails when the runner first builds the adapter.
         default_alpha = _DEFAULT_TABLE_ALPHA.get(mechanism)
+        alpha = _yaml_alpha(alpha)
         if alpha is not None:
             if default_alpha is None:
                 raise ValueError(

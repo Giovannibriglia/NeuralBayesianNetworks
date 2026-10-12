@@ -60,6 +60,7 @@ from nbn.bench._paper_agg import (
     is_nbn,
     log_axis_ok,
     method_style,
+    nbn_parts,
     metric_kind,
     parse_baseline,
     rank_key,
@@ -222,11 +223,10 @@ def short_label(baseline: str) -> str:
         return _BASELINE_LABEL[baseline]
     lib, rest = parse_baseline(baseline)
     if lib == "nbn" and rest:
-        parts = rest.split("-")
-        mech = _MECH_LABEL.get(parts[0], parts[0])
-        if len(parts) > 1:
-            return f"NBN {mech}+{_ENGINE_LABEL.get(parts[1], parts[1].upper())}"
-        return f"NBN {mech}"
+        mech, engine, alpha = nbn_parts(baseline)
+        base = _BASELINE_LABEL.get(f"nbn-{mech}") or f"NBN {_MECH_LABEL.get(mech, mech)}"
+        label = f"{base}+{_ENGINE_LABEL.get(engine, engine.upper())}" if engine else base
+        return f"{label} (α={alpha[len('alpha'):]})" if alpha else label
     return baseline
 
 

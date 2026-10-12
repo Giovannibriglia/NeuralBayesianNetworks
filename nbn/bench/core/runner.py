@@ -509,7 +509,8 @@ def _fit_identity_key(spec: BaselineSpec, problem: Any) -> tuple:
         only in device still share.
     ``epochs``/``batch_size``/``lr``/``alpha`` are the ``extra_kwargs``
     entries that affect ``model.fit()`` today (``alpha``: the Dirichlet
-    pseudo-count of the count-table CPTs, #160); if a future kwarg does, it
+    pseudo-count of the count-table CPTs, #160, normalised so that unset and
+    the mechanism's default share a fit); if a future kwarg does, it
     MUST be added here. ``None`` (absent from config) means "mechanism-designed budget" and
     is a DISTINCT identity from any explicit value — do not collapse it to a
     numeric default.
@@ -522,7 +523,12 @@ def _fit_identity_key(spec: BaselineSpec, problem: Any) -> tuple:
     lr = extra.get("lr")
     lr = float(lr) if lr is not None else None
     alpha = extra.get("alpha")
-    alpha = float(alpha) if alpha is not None else None
+    if spec.library == "nbn":
+        # Unset and the mechanism's default are the same fit (review #301).
+        from nbn.bench.adapters.nbn_adapter import table_alpha
+        alpha = table_alpha(spec.mechanism, alpha)
+    else:
+        alpha = float(alpha) if alpha is not None else None
     return (
         spec.library, spec.mechanism, epochs, batch_size, lr, alpha,
         getattr(problem, "family", ""),

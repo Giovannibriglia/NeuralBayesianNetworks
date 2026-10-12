@@ -87,7 +87,7 @@ def test_tiny_alpha_label_has_no_dash_and_parses():
 # ---- validation -------------------------------------------------------------
 
 @pytest.mark.parametrize("bad", [-1.0, -1e-9, math.nan, math.inf, -math.inf,
-                                 "0.5", True, [0.5]])
+                                 "abc", "-1", True, [0.5]])
 def test_invalid_alpha_is_rejected_by_the_adapter(bad):
     with pytest.raises(ValueError, match="alpha"):
         NBNAdapter(mechanism="cat", engine="ve", device="cpu", alpha=bad)
@@ -157,13 +157,54 @@ def test_alpha_is_part_of_the_fit_identity():
     """Baselines that differ only in alpha must not share a cached base fit."""
     problem = _problem()
 
-    def spec(**extra):
-        return BaselineSpec(library="nbn", mechanism="cat", param_method="mle",
+    def spec(mechanism="cat", **extra):
+        return BaselineSpec(library="nbn", mechanism=mechanism, param_method="mle",
                             inference_method="ve", extra_kwargs=extra)
 
     assert _fit_identity_key(spec(), problem) != _fit_identity_key(spec(alpha=0.5), problem)
     assert (_fit_identity_key(spec(alpha=0.5), problem)
-            == _fit_identity_key(spec(alpha=0.5), problem))
+            == _fit_identity_key(spec(alpha="0.5"), problem))
+    # Regression (review #301): unset and the mechanism's default are the same
+    # fit and the same label, so they must share one base fit.
+    assert _fit_identity_key(spec(), problem) == _fit_identity_key(spec(alpha=0.0), problem)
+    assert (_fit_identity_key(spec("cat-bayes"), problem)
+            == _fit_identity_key(spec("cat-bayes", alpha=1), problem))
+
+
+def test_yaml_exponent_without_a_dot_is_accepted(tmp_path):
+    """Regression (review #301): PyYAML reads ``1e-5`` as the string '1e-5';
+    the adapter converts numeric strings, and still rejects other strings."""
+    p = tmp_path / "raw.yaml"
+    p.write_text(yaml.safe_dump(yaml.safe_load(_config(tmp_path, []).read_text()))
+                 .replace("baselines: []", "baselines:\n- {library: nbn, mechanism: cat, "
+                          "param_method: mle, inference_method: ve, "
+                          "extra_kwargs: {alpha: 1e-5}}"))
+    cfg = load_runner_config(p, jsonl_path=tmp_path / "m.jsonl")
+    assert cfg.baselines[0].extra_kwargs["alpha"] == "1e-5"  # what PyYAML gives
+    adapter = build_adapter(cfg.baselines[0])
+    assert adapter.alpha == 1e-5 and adapter.name == "nbn-cat-alpha0.00001-ve"
+    with pytest.raises(ValueError, match="alpha"):
+        NBNAdapter(mechanism="cat", engine="ve", device="cpu", alpha="lots")
+
+
+@pytest.mark.parametrize("label,approach_key,engine,short", [
+    ("nbn-cat-alpha0.5-ve", "nbn-cat-alpha0.5", "ve", "NBN cat+VE (α=0.5)"),
+    ("nbn-cat-bayes-ve", "nbn-cat-bayes", "ve", "NBN cat-Bayes+VE"),
+    ("nbn-cat-bayes-alpha0.01-lw", "nbn-cat-bayes-alpha0.01", "lw",
+     "NBN cat-Bayes+LW (α=0.01)"),
+    ("nbn-mdn-alpha2", "nbn-mdn-alpha2", "", "NBN MDN (α=2)"),
+])
+def test_plot_labels_keep_the_engine_and_the_alpha(label, approach_key, engine, short):
+    """Regression (review #301): the alpha tag fell back to the grey colour and
+    ``short_label`` dropped the engine ('NBN cat+ALPHA0.5'); the same engine
+    loss hit 'nbn-cat-bayes-ve' ('NBN cat+BAYES') on master."""
+    from nbn.bench._paper_agg import _APPROACH_COLOR, approach, method_style
+    from nbn.bench._paper_panels import short_label
+
+    assert approach(label) == (approach_key, engine)
+    base = "nbn-" + label.split("-")[1] + ("-bayes" if "-bayes" in label else "")
+    assert method_style(label)[0] == _APPROACH_COLOR[base]
+    assert short_label(label) == short
 
 
 def _problem(n: int = 40, seed: int = 0) -> BenchmarkProblem:

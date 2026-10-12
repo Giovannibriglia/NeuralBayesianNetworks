@@ -31,6 +31,7 @@ for accuracy and per-query time, sum for total query time, first for fit time).
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -121,9 +122,29 @@ _ENGINE_HATCH = {"ve": "", "lw": "/////", "ais": ".....", "avi": "xxxxx"}
 _STYLE_FALLBACK = "#BBBBBB"
 
 
+_NBN_ENGINES = (*_ENGINE_HATCH, "router")
+_ALPHA_TAG = re.compile(r"alpha\d+(\.\d+)?")
+
+
+def nbn_parts(baseline: str) -> tuple[str, str, str]:
+    """``(mechanism, engine, alpha tag)`` of an nbn label.
+
+    'nbn-cat-bayes-alpha0.5-ve' -> ('cat-bayes', 've', 'alpha0.5');
+    'nbn-hybrid-router' -> ('hybrid', 'router', ''); 'nbn-cat' -> ('cat', '', '').
+    The alpha tag is the Dirichlet pseudo-count of a non-default config
+    (``NBNAdapter``, #160).
+    """
+    parts = parse_baseline(baseline)[1].split("-")
+    alpha = next((p for p in parts if _ALPHA_TAG.fullmatch(p)), "")
+    parts = [p for p in parts if p != alpha]
+    engine = parts.pop() if len(parts) > 1 and parts[-1] in _NBN_ENGINES else ""
+    return "-".join(parts), engine, alpha
+
+
 def approach(baseline: str) -> tuple[str, str]:
     """(approach key, engine) of a baseline: 'nbn-cat-bayes' -> ('nbn-cat-bayes',
-    ''), 'nbn-mdn-lw' -> ('nbn-mdn', 'lw'), 'pgmpy-mle-ve' -> ('pgmpy-mle', ''),
+    ''), 'nbn-mdn-lw' -> ('nbn-mdn', 'lw'), 'nbn-cat-alpha0.5-ve' ->
+    ('nbn-cat-alpha0.5', 've'), 'pgmpy-mle-ve' -> ('pgmpy-mle', ''),
     'pyro-empirical-importance' -> ('pyro', '')."""
     lib, rest = parse_baseline(baseline)
     parts = rest.split("-") if rest else []
@@ -131,17 +152,19 @@ def approach(baseline: str) -> tuple[str, str]:
         if lib == "pgmpy" and parts:
             return f"pgmpy-{parts[0]}", ""
         return lib, ""
-    engine = parts[-1] if parts and parts[-1] in _ENGINE_HATCH else ""
-    mech = parts[:-1] if engine else parts
-    if len(mech) > 1 and mech[1] == "router":
-        mech = mech[:1]
-    return "nbn-" + "-".join(mech), engine
+    mech, engine, alpha = nbn_parts(baseline)
+    if engine == "router":
+        engine = ""
+    return "nbn-" + mech + (f"-{alpha}" if alpha else ""), engine
 
 
 def method_style(baseline: str) -> tuple[str, str]:
-    """(hex colour, hatch) of a method, identical in every figure."""
+    """(hex colour, hatch) of a method, identical in every figure.  A tagged
+    Dirichlet alpha keeps its mechanism's colour (the label tells them apart)."""
     key, engine = approach(baseline)
-    return _APPROACH_COLOR.get(key, _STYLE_FALLBACK), _ENGINE_HATCH.get(engine, "")
+    base = _ALPHA_TAG.sub("", key).rstrip("-")
+    color = _APPROACH_COLOR.get(key, _APPROACH_COLOR.get(base, _STYLE_FALLBACK))
+    return color, _ENGINE_HATCH.get(engine, "")
 
 
 def log_axis_ok(metric: str) -> bool:

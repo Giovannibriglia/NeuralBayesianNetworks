@@ -243,7 +243,10 @@ fallback of `lg`/`mdn`/`flow`/`hybrid`/`kde`/`knn`/`flexcode`),
 (finite, >= 0). Unset keeps the mechanism default (0 for `cat`, 1 for
 `cat-bayes`) and the usual label; any other value is tagged into the label,
 e.g. `nbn-cat-alpha0.5-ve`, so runs with different priors stay apart.
-`neuralcat` has no tables and rejects `alpha`.
+`neuralcat` has no tables and rejects `alpha`. Numeric strings are accepted:
+PyYAML reads an exponent without a dot, such as `1e-5`, as a string, and the
+adapter converts it. Setting `alpha` to the mechanism's default changes
+neither the label nor the fit cache.
 
 ## Reproducing the paper numbers
 
