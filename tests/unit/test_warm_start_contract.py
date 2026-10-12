@@ -31,7 +31,7 @@ Note the snapshot idiom.  ``copy.deepcopy(state_dict())`` is mandatory, per
 ``test_parameter_snapshot_contract`` (PR #258): ``state_dict()`` aliases the
 live parameters, so the naive spelling compares a snapshot against itself and
 passes regardless of the implementation.  Warm-starting makes that requirement
-reach further — see ``test_uncopied_snapshot_is_clobbered_by_a_warm_fit``.
+reach further — see ``test_parameter_snapshot_contract::test_an_uncopied_state_dict_is_not_a_snapshot``.
 """
 from __future__ import annotations
 
@@ -744,41 +744,9 @@ def test_warm_start_on_an_unfitted_mechanism_builds_cold_and_says_so(name):
         assert mech.is_fitted
 
 
-def test_uncopied_snapshot_is_clobbered_by_a_warm_fit():
-    """Warm-starting widens the reach of the PR #258 deepcopy requirement.
-
-    A *cold* refit allocates new parameter tensors, so an uncopied
-    ``state_dict()`` accidentally survived a subsequent ``fit_local``.  Under
-    ``warm_start=True`` the objects persist and the fit mutates them in place,
-    so the snapshot is clobbered by the very call it was taken to undo — and
-    a backtracking revert would restore the already-stepped values.  Nothing
-    raises.  Pinned as a trap, alongside the correct idiom.
-    """
-    mech, x, pa, kw = _mdn()
-    mech.fit_local(x, pa, **{**kw, "epochs": 5})
-
-    naive = mech.state_dict()                 # aliases the live parameters
-    correct = copy.deepcopy(mech.state_dict())
-    mech.fit_local(x, pa, **{**kw, "epochs": 5}, warm_start=True)
-
-    assert torch.equal(naive["net.0.weight"], mech.state_dict()["net.0.weight"]), (
-        "the uncopied snapshot did not track the live parameters -- if this "
-        "starts passing the trap is gone and this test should be retired"
-    )
-    assert not torch.equal(correct["net.0.weight"], mech.state_dict()["net.0.weight"])
-
-    # The correct idiom reverts; the naive one is a silent no-op.
-    mech.load_state_dict(correct)
-    assert _same(mech, correct)
-
-
-def test_the_same_uncopied_snapshot_survived_a_cold_refit():
-    """Why the hazard is new rather than pre-existing."""
-    mech, x, pa, kw = _mdn()
-    mech.fit_local(x, pa, **{**kw, "epochs": 5})
-    naive = mech.state_dict()
-    mech.fit_local(x, pa, **{**kw, "epochs": 5}, warm_start=False)
-    assert not torch.equal(naive["net.0.weight"], mech.state_dict()["net.0.weight"])
+# The uncopied-snapshot trap under warm vs cold refits is pinned with the
+# optimiser-step trap in test_parameter_snapshot_contract.py
+# (test_an_uncopied_state_dict_is_not_a_snapshot[warm_fit / cold_refit]).
 
 
 # ==========================================================================

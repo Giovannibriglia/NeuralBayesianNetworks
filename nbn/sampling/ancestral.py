@@ -1,13 +1,80 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, Mapping
+from typing import TYPE_CHECKING, Any, Dict, Mapping
 
 import torch
 
+from nbn.core.variables import validate_discrete_value
 from nbn.mechanisms.parametric.deterministic import DeterministicMechanism
+from nbn.utils.device import to_device
 
 if TYPE_CHECKING:
     from nbn.core.network import NeuralBayesianNetwork
+
+
+def _normalise_do_value(model, node: str, val: Any, dev: torch.device) -> torch.Tensor:
+    """Turn a user do-value into a float ``[D]`` (or ``[1, D]``) tensor on ``dev``.
+
+    Accepts Python scalars, 0-d tensors and integer tensors (``do={"A": 1}``
+    used to crash, and an int64 value produced int64 samples for that node).
+    Float tensors keep their dtype and autograd graph, so ``sample(do=...)``
+    stays differentiable w.r.t. the intervention value.
+    """
+    t = val if isinstance(val, torch.Tensor) else torch.as_tensor(val)
+    t = to_device(t, dev)
+    if not t.is_floating_point():
+        t = t.to(torch.get_default_dtype())
+    if t.dim() == 0:
+        t = t.reshape(1)
+    # Every node here yields exactly ``n`` rows, so there is no axis for a
+    # per-row intervention value to live on.  Without this check a batched
+    # do-value died further down in ``expand`` with an opaque shape error.
+    if t.dim() > 1 and t.shape[0] != 1:
+        raise ValueError(
+            f"Batched do-value for '{node}' (shape {tuple(t.shape)}): "
+            f"ancestral sampling draws one mutilated model's worth of "
+            f"samples and has no batch axis to vary the intervention "
+            f"along.  Loop over the values, or use "
+            f"query()/query_batch(do=...), which accept a batch."
+        )
+    var = model.variables.get(node)
+    if var is not None and var.is_discrete:
+        validate_discrete_value(node, t, var.cardinality)
+    return t
+
+
+def _normalise_evidence(model, node: str, val: Any, n: int, dev: torch.device) -> torch.Tensor:
+    """Shape evidence for ``node`` to ``[n, D]``, or raise.
+
+    Accepted: a scalar / 0-d tensor; ``[D]`` (one value for every row);
+    ``[n]`` for a one-dimensional node (one value per row); ``[1, D]`` or
+    ``[n, D]``.  Anything else raises: a ``[B, D]`` evidence with
+    ``B not in (1, n)`` used to be stored as-is, so its rows silently paired
+    up with the wrong samples of every other node.
+    """
+    t = val if isinstance(val, torch.Tensor) else torch.as_tensor(val)
+    shape = tuple(t.shape)
+    t = to_device(t, dev)
+    var = model.variables.get(node)
+    d = int(var.dim) if var is not None else (t.shape[-1] if t.dim() > 1 else 1)
+    if t.dim() == 0:
+        t = t.reshape(1, 1)
+    elif t.dim() == 1:
+        if t.shape[0] == d:
+            t = t.reshape(1, d)            # documented [D] form
+        elif d == 1 and t.shape[0] == n:
+            t = t.reshape(n, 1)            # per-row values of a scalar node
+    if t.dim() != 2 or t.shape[-1] != d or t.shape[0] not in (1, n):
+        raise ValueError(
+            f"Evidence for '{node}' has shape {shape}; expected a scalar, "
+            f"[{d}], [1, {d}] or [{n}, {d}] (leading dim 1 or n={n}, last "
+            f"dim = the variable's dimension {d})."
+        )
+    if var is not None and var.is_discrete:
+        # A negative index would silently wrap to the last state in a CPT
+        # lookup, an out-of-range one crash deep inside a mechanism.
+        validate_discrete_value(node, t, var.cardinality, what="Evidence")
+    return t.expand(n, d)
 
 
 def ancestral_sample(
@@ -17,58 +84,70 @@ def ancestral_sample(
     do: Mapping[str, torch.Tensor] | None = None,
     device: str | None = None,
     return_log_prob: bool = False,
-) -> Dict[str, torch.Tensor]:
+    return_log_weight: bool = False,
+):
     """Batched ancestral sampler.
 
     Traverses the topological order once, sampling each node conditioned on
-    its already-sampled parents.  Evidence nodes are clamped to their observed
-    values; do-intervened nodes are clamped without contributing likelihood.
+    its already-sampled parents.
+
+    **Evidence is clamped, not conditioned on.**  An evidence node takes its
+    observed value and its descendants are sampled given it, but its
+    *ancestors* are drawn from the prior — so the samples follow the clamped
+    (do-like for descendants) distribution, **not** the posterior
+    ``p(. | evidence)``.  For the posterior, weight each sample by
+    ``exp(log_weight)`` (``return_log_weight=True``) and self-normalise: that
+    is likelihood weighting.  Or use ``model.query``.
+
+    Do-intervened nodes are clamped without contributing likelihood.
 
     Parameters
     ----------
     model: NeuralBayesianNetwork
     n: number of samples.
     evidence:
-        Dict mapping node name → tensor of shape ``[D]`` or ``[B, D]``.
-        When provided, ``n`` samples are drawn and evidence rows are replicated.
+        Dict node → value: a scalar, ``[D]`` (same for every row), ``[1, D]``
+        or ``[n, D]`` (one value per row; ``[n]`` for a scalar node).  Other
+        shapes raise.
     do:
-        Do-intervention values.  A ``DeterministicMechanism`` replaces the
-        node's CPD on its downstream path (mutilated graph).
+        Do-intervention values (Python scalar, 0-d or ``[D]`` tensor; one
+        value per node).  A ``DeterministicMechanism`` replaces the node's
+        CPD on its downstream path (mutilated graph).  Discrete values must
+        be integral state indices in range.
     device:
         Override device.
     return_log_prob:
-        If True, also return per-sample log-probabilities under the model.
+        If True, also return the per-sample ``[n]`` log-probability of the
+        whole sample under the mutilated model — sampled *and* evidence
+        nodes, do-targets excluded.  This is a joint density, not a
+        likelihood-weighting weight.
+    return_log_weight:
+        If True, also return the per-sample ``[n]`` likelihood-weighting
+        log-weight ``sum_{e in evidence} log p(e | pa(e))`` (zeros without
+        evidence).
 
     Returns
     -------
-    Dict[str, torch.Tensor]
-        One tensor per node with shape ``[n, D_x]`` (or ``[B, n, D_x]`` if
-        evidence has batch dimension B).
+    ``samples`` — a dict node → ``[n, D_x]`` — alone, or a tuple
+    ``(samples, log_prob)``, ``(samples, log_weight)`` or
+    ``(samples, log_prob, log_weight)`` according to the flags.
     """
     dev = torch.device(device or model.device)
-    evidence = evidence or {}
+    evidence = dict(evidence or {})
     do = dict(do or {})
+    unknown = sorted(k for k in (*evidence, *do) if k not in model.variables)
+    if unknown:
+        raise ValueError(f"Unknown evidence/do node(s): {unknown}.")
 
     # Build a potentially mutilated mechanism dict
     mechanisms = dict(model.mechanisms)
     for node, val in do.items():
-        val_t = val.to(dev)
-        # Every node here yields exactly ``n`` rows, so there is no axis for a
-        # per-row intervention value to live on.  Without this check a batched
-        # do-value died further down in ``expand`` with an opaque shape error
-        # ("expanded size (10) must match existing size (3)").
-        if val_t.dim() > 1 and val_t.shape[0] != 1:
-            raise ValueError(
-                f"Batched do-value for '{node}' (shape {tuple(val_t.shape)}): "
-                f"ancestral sampling draws one mutilated model's worth of "
-                f"samples and has no batch axis to vary the intervention "
-                f"along.  Loop over the values, or use "
-                f"query()/query_batch(do=...), which accept a batch."
-            )
-        mechanisms[node] = DeterministicMechanism(val_t)
+        mechanisms[node] = DeterministicMechanism(_normalise_do_value(model, node, val, dev))
+    ev = {k: _normalise_evidence(model, k, v, n, dev) for k, v in evidence.items()}
 
     out: Dict[str, torch.Tensor] = {}
     log_probs: Dict[str, torch.Tensor] = {}
+    want_lp = return_log_prob or return_log_weight
 
     for node in model.dag.topological_order():
         parents = model.dag.parents(node)
@@ -80,16 +159,11 @@ def ancestral_sample(
         else:
             pa_tensor = None
 
-        if node in evidence:
-            val = evidence[node].to(dev)
-            if val.dim() == 1:
-                val = val.unsqueeze(0).expand(n, -1)
-            elif val.dim() == 0:
-                val = val.unsqueeze(0).unsqueeze(0).expand(n, 1)
+        if node in ev:
+            val = ev[node]
             out[node] = val
-            if return_log_prob:
-                lp = mechanisms[node].log_prob(val, pa_tensor)
-                log_probs[node] = lp
+            if want_lp:
+                log_probs[node] = mechanisms[node].log_prob(val, pa_tensor)
         elif node in do:
             out[node] = mechanisms[node].sample(pa_tensor, n=1).squeeze(1).expand(n, -1)
         else:
@@ -116,10 +190,19 @@ def ancestral_sample(
                 samp = samp.squeeze(1)
             out[node] = samp.reshape(n, -1)
             if return_log_prob:
-                lp = mechanisms[node].log_prob(out[node], pa_tensor)
-                log_probs[node] = lp
+                log_probs[node] = mechanisms[node].log_prob(out[node], pa_tensor)
 
+    def _total(nodes) -> torch.Tensor:
+        total = torch.zeros(n, device=dev)
+        for k in nodes:
+            total = total + log_probs[k].reshape(n)
+        return total
+
+    extras = []
     if return_log_prob:
-        total_lp = sum(log_probs.values())
-        return out, total_lp  # type: ignore[return-value]
+        extras.append(_total(log_probs))
+    if return_log_weight:
+        extras.append(_total(ev))
+    if extras:
+        return (out, *extras)
     return out

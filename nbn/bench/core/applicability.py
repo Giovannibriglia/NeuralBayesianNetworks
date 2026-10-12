@@ -128,6 +128,9 @@ BASELINE_FAMILY_APPLICABILITY: dict[str, BaselineApplicability] = {
         accuracy_supported=False,
     ),
     "pomegranate-discrete":      BaselineApplicability(frozenset({"discrete"})),
+    # predict_proba is loopy BP (D10). "-ve" is the pre-D10 label of the same
+    # baseline, kept so old result files keep their applicability.
+    "pomegranate-discrete-lbp":  BaselineApplicability(frozenset({"discrete"})),
     "pomegranate-discrete-ve":   BaselineApplicability(frozenset({"discrete"})),
     "pyro-empirical":            BaselineApplicability(
         frozenset({"discrete", "continuous_lg", "hybrid"})),

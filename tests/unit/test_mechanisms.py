@@ -1,8 +1,8 @@
-"""Unit tests for all mechanisms.
+"""Mechanism-specific unit tests (normalisation, gradient flow, root nodes,
+parent sanitisation).
 
-For each mechanism we verify:
-1. log_prob of MC samples integrates to ≈1 (Monte Carlo estimate of Z).
-2. Gradients flow: loss.backward() gives non-None grads on all parameters.
+The shape / is_fitted / device contract shared by every mechanism lives in
+test_mechanism_conformance.py.
 """
 import math
 
@@ -45,16 +45,6 @@ class TestCategoricalTable:
         probs = mech.cpt  # [n_parent_states, K]
         assert torch.allclose(probs.sum(-1), torch.ones(probs.shape[0]), atol=1e-5)
 
-    def test_sample_shape(self):
-        mech, x, pa = self._fitted()
-        s = mech.sample(pa[:4], n=10)
-        assert s.shape == (4, 10, 1)
-
-    def test_log_prob_shape(self):
-        mech, x, pa = self._fitted()
-        lp = mech.log_prob(x[:5], pa[:5])
-        assert lp.shape == (5,)
-
     def test_grad_flow(self):
         mech, x, pa = self._fitted()
         loss = -mech.log_prob(x[:32], pa[:32]).mean()
@@ -78,16 +68,6 @@ class TestLinearGaussian:
         mech = LinearGaussianMechanism()
         mech.fit_local(x, pa)
         return mech, x, pa
-
-    def test_sample_shape(self):
-        mech, x, pa = self._fitted()
-        s = mech.sample(pa[:4], n=10)
-        assert s.shape == (4, 10, 1)
-
-    def test_log_prob_shape(self):
-        mech, x, pa = self._fitted()
-        lp = mech.log_prob(x[:5], pa[:5])
-        assert lp.shape == (5,)
 
     def test_log_prob_finite(self):
         mech, x, pa = self._fitted()
@@ -126,16 +106,6 @@ class TestMDN:
         mech.fit_local(x, pa, epochs=20, lr=1e-3, batch_size=128)
         return mech, x, pa
 
-    def test_sample_shape(self):
-        mech, x, pa = self._fitted()
-        s = mech.sample(pa[:4], n=10)
-        assert s.shape == (4, 10, 1)
-
-    def test_log_prob_shape(self):
-        mech, x, pa = self._fitted()
-        lp = mech.log_prob(x[:5], pa[:5])
-        assert lp.shape == (5,)
-
     def test_log_prob_finite(self):
         mech, x, pa = self._fitted()
         lp = mech.log_prob(x, pa)
@@ -169,11 +139,17 @@ class TestDeterministic:
         assert (s == 3.0).all()
 
     def test_log_prob_zero(self):
+        # Zero at the delta's value only.  This test used to assert 0 for
+        # random x, pinning the bug where every state scored as certain
+        # (review finding A13); off-value states get _LOG_ZERO, matching
+        # tabulate().
+        from nbn.mechanisms.parametric.deterministic import _LOG_ZERO
+
         val = torch.tensor([1.0])
         mech = DeterministicMechanism(val)
-        x = torch.randn(10, 1)
-        lp = mech.log_prob(x, None)
-        assert (lp == 0.0).all()
+        assert (mech.log_prob(val.expand(10, 1), None) == 0.0).all()
+        x = torch.randn(10, 1) + 5.0
+        assert (mech.log_prob(x, None) == _LOG_ZERO).all()
 
 
 # ── NormalizingFlow with Long (discrete) parents ──────────────────────────────

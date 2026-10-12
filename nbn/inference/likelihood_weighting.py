@@ -5,9 +5,11 @@ from typing import Dict, List, Tuple
 import numpy as np
 import torch
 
+from nbn.inference._validation import check_discrete_values
 from nbn.inference.base import InferenceEngine
 from nbn.inference.state import get_inference_state
 from nbn.utils.batching import ensure_2d
+from nbn.utils.device import to_device_dtype
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +97,8 @@ class LikelihoodWeightingEngine(InferenceEngine):
         Number of ancestral samples (particles) per query.
     """
 
+    _transient_caches = ("_cache",)
+
     def __init__(self, n_samples: int = 2048) -> None:
         self.n_samples = int(n_samples)
         self._cache: Dict = {}
@@ -148,7 +152,7 @@ class LikelihoodWeightingEngine(InferenceEngine):
         fixed: List[torch.Tensor | None] = [None] * len(state.topo_order)
         for node, val in {**do, **evidence}.items():
             idx = state.node_to_idx[node]
-            v = ensure_2d(val.to(device=device, dtype=dtype))  # [B, D]
+            v = ensure_2d(to_device_dtype(val, device, dtype))  # [B, D]
             fixed[idx] = v.unsqueeze(1).expand(b, s, -1)  # [B, S, D]
 
         for i, node in enumerate(state.topo_order):
@@ -195,7 +199,12 @@ class LikelihoodWeightingEngine(InferenceEngine):
     # so this covers every public LW/AIS query entry; proposal TRAINING
     # (``AmortizedISEngine.train_proposal``) is not routed through ``query``
     # and keeps its gradients.
-    @torch.inference_mode()
+    #
+    # ``no_grad`` rather than ``inference_mode``: an inference-mode tensor
+    # can never enter autograd later nor be modified in place outside
+    # inference mode, so a caller who fed a posterior into a loss (as a
+    # constant target) or normalised it in place got a RuntimeError.  The
+    # saving that matters here — no per-particle graph — is the same.
     def query(
         self,
         model,
@@ -207,6 +216,28 @@ class LikelihoodWeightingEngine(InferenceEngine):
         return_psis_k: bool = False,
         **kwargs,
     ) -> torch.Tensor:
+        """Single query: a discrete single-target answer is ``[K]`` when B == 1."""
+        return self._query(model, targets, evidence, do, n_samples,
+                           return_ess, return_psis_k, squeeze=True)
+
+    @torch.no_grad()
+    def _query(
+        self,
+        model,
+        targets: List[str],
+        evidence: Dict[str, torch.Tensor] | None,
+        do: Dict[str, torch.Tensor] | None,
+        n_samples: int | None,
+        return_ess: bool,
+        return_psis_k: bool,
+        *,
+        squeeze: bool,
+    ):
+        # Discrete evidence / do must be valid states: the sampler writes
+        # them verbatim into the particle buffer, and the CPT lookups that
+        # score them wrap -1 to the last state (R7).
+        check_discrete_values(model, {**(evidence or {}), **(do or {})},
+                              do_keys=(do or {}))
         s = n_samples or self.n_samples
         log_w, buf = self._run(model, targets, evidence, do, s)
 
@@ -255,7 +286,9 @@ class LikelihoodWeightingEngine(InferenceEngine):
                     mask = (samp_vals == int(cv[ci])).float()
                     probs[:, ci] = (weights * mask).sum(dim=-1)
                 probs = probs / probs.sum(-1, keepdim=True).clamp_min(1e-12)
-                out = probs.squeeze(0) if b == 1 else probs
+                # Only ``query`` squeezes a lone row to ``[K]``; ``query_batch``
+                # always returns ``[B, K]`` so a B=1 batch keeps its batch axis.
+                out = probs.squeeze(0) if (squeeze and b == 1) else probs
                 return _wrap(out)
 
         state = get_inference_state(model, targets, tuple(sorted((evidence or {}).keys())),
@@ -274,6 +307,10 @@ class LikelihoodWeightingEngine(InferenceEngine):
         return_psis_k: bool = False,
         **kwargs,
     ) -> torch.Tensor:
-        """Batched query — all B evidence rows processed in a single GPU launch."""
-        return self.query(model, targets, evidence, return_ess=return_ess,
-                          return_psis_k=return_psis_k, **kwargs)
+        """Batched query — all B evidence rows processed in a single GPU launch.
+
+        Always ``[B, K]`` for a discrete target, including B == 1.
+        """
+        return self._query(model, targets, evidence, kwargs.get("do"),
+                           kwargs.get("n_samples"), return_ess, return_psis_k,
+                           squeeze=False)

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import torch
 
+from nbn.bench.core.seeding import derive_seed
 from nbn.bench.domains.base import BenchmarkProblem, Query
 
 
@@ -36,7 +37,9 @@ def make_query_groups(
       2. Build one Query variant per sampled row: same targets / kind /
          role metadata, evidence values read off the sampled row for the
          same evidence keys. ``None`` (empty-mode) evidence values are
-         preserved as ``None`` — variants keep the position's mode.
+         preserved as ``None`` — variants keep the position's mode. A
+         position with no concrete evidence value at all is a single query
+         and is emitted once (D7), not ``n_batch_queries`` identical copies.
       3. Chunk the N variants into ``ceil(N / batch_size)`` inner lists
          of length <= batch_size, emitted consecutively (§2.3)
 
@@ -65,10 +68,22 @@ def make_query_groups(
 
     groups: list[list[Query]] = []
     for pos_idx, base in enumerate(base_queries):
+        if all(v is None for v in base.evidence.values()):
+            # Evidence-free position (empty mode / no evidence): every variant
+            # would be the same marginal query. Emitting N identical copies let
+            # an adapter that dedupes (nbn) answer once while the timer divided
+            # by N, against adapters that answered N times (D7). It is ONE
+            # query, emitted as a single-query group; its rows carry
+            # evidence_mode="empty" (batched-speed figures report that mode
+            # separately) and the PASS's batch size, so a sweep keeps each
+            # pass's copy in its own batch_size slice
+            # (measurements._batch_dispatch.stamped_batch_size).
+            groups.append([base])
+            continue
         # Per-position derived seed: same cell seed -> same rows, but
         # positions don't all reuse identical row indices.
         gen = torch.Generator(device="cpu").manual_seed(
-            seed * 1000 + 13 + pos_idx
+            derive_seed("batch-variants", seed, pos_idx)
         )
         if n_train >= n_batch_queries:
             idx = torch.randperm(n_train, generator=gen)[:n_batch_queries]

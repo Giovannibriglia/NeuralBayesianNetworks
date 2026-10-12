@@ -229,6 +229,8 @@ class PgmpyAdapter:
         self._lg_topo: list[str] | None = None  # topological order (LG path)
         # node -> (parents, beta [1+P] float64, std): the fitted LG conditionals
         self._lg_params: dict[str, tuple[list[str], torch.Tensor, float]] = {}
+        # (μ, Σ, node index) of the fitted LG joint, built once per fit (D9).
+        self._lg_joint_cache: tuple | None = None
         self.problem: BenchmarkProblem | None = None
 
     # -------------------------------------------------------------------------
@@ -276,6 +278,17 @@ class PgmpyAdapter:
         for node in problem.variables:
             if node not in bn.nodes():
                 bn.add_node(node)
+        # Declared state grid (#217): without it pgmpy infers each variable's
+        # states from the training data, so a state never observed is dropped
+        # — the CPT spans a truncated grid, VE answers on it (a K-1 vector,
+        # misaligned when the missing state is not the last) and evidence on
+        # the unseen state raises. With the declared grid, MLE gives unseen
+        # parent configurations a uniform row and BDeu prior mass covers
+        # unseen states, as in extract_learned_cpts.
+        state_names = {
+            n: list(range(int(c))) for n, (kind, c) in problem.variables.items()
+            if kind == "discrete"
+        }
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FutureWarning)
             if self.param_method == "bayes":
@@ -288,7 +301,8 @@ class PgmpyAdapter:
                 # (BayesianEstimator.get_parameters), not bn.fit().
                 from pgmpy.estimators import BayesianEstimator
 
-                estimator = BayesianEstimator(model=bn, data=df)
+                estimator = BayesianEstimator(
+                    model=bn, data=df, state_names=state_names)
                 cpds = estimator.get_parameters()
                 bn.add_cpds(*cpds)
             else:
@@ -297,11 +311,14 @@ class PgmpyAdapter:
                 try:
                     from pgmpy.parameter_estimator import DiscreteMLE
 
-                    bn.fit(df, estimator=DiscreteMLE())
+                    bn.fit(df, estimator=DiscreteMLE(state_names=state_names))
                 except (ImportError, TypeError):
                     from pgmpy.estimators import MaximumLikelihoodEstimator
 
-                    bn.fit(df, estimator=MaximumLikelihoodEstimator)
+                    cpds = MaximumLikelihoodEstimator(
+                        model=bn, data=df, state_names=state_names,
+                    ).get_parameters()
+                    bn.add_cpds(*cpds)
 
         self._model = bn
         self._infer = VariableElimination(bn)
@@ -376,6 +393,7 @@ class PgmpyAdapter:
 
         self._model = bn
         self._lg_topo = topo
+        self._lg_joint_cache = None   # rebuilt lazily from the new CPDs
         self._kind = "continuous_lg"
 
     # -------------------------------------------------------------------------
@@ -471,12 +489,36 @@ class PgmpyAdapter:
             for k, v in q.evidence.items()
             if v is not None
         }
+        target = q.targets[0]
         result = self._infer.query(
-            variables=list(q.targets), evidence=ev, show_progress=False,
+            variables=[target], evidence=ev, show_progress=False,
         )
-        probs = torch.from_numpy(result.values).float().clamp_min(0.0)
-        probs = probs / probs.sum()
-        return Posterior(probs=probs)
+        values = torch.from_numpy(result.values).double().clamp_min(0.0).reshape(-1)
+        # Re-index from pgmpy's state axis to the declared value order 0..K-1
+        # (identity with declared state_names; fails loudly otherwise).
+        k = int(self.problem.variables[target][1]) if self.problem is not None \
+            else values.numel()
+        idx = _state_axis_index(target, list(result.state_names[target]), k)
+        probs = values[torch.tensor(idx)]
+        total = float(probs.sum())
+        if not (total > 0) or not bool(torch.isfinite(probs).all()):
+            # 0/0. Undefined only if the evidence is impossible under the
+            # fitted CPTs (exact check); otherwise a numerical failure that
+            # the measurement reports as an error (D10).
+            return Posterior(probs=probs.float(),
+                             undefined_reason=self._undefined_reason(q, ev))
+        return Posterior(probs=(probs / total).float())
+
+    def _undefined_reason(self, q: Query, ev: dict) -> str | None:
+        from types import SimpleNamespace
+
+        from nbn.bench.core.exact_discrete import evidence_is_impossible, tabular_source
+
+        src = tabular_source(SimpleNamespace(true_model=self._model,
+                                             variables=self.problem.variables))
+        if src is not None and evidence_is_impossible(src, q.targets[0], ev):
+            return "P(evidence)=0 under the fitted CPTs, confirmed by exact elimination"
+        return None
 
     def _query_lg(self, q: Query) -> Posterior:
         post_mean, post_std = self._lg_posterior_moments(q)
@@ -504,15 +546,27 @@ class PgmpyAdapter:
         Returns:
             (post_mean, post_std), each a 1-element float tensor.
         """
+        mu, Sigma, node_idx = self._lg_joint()
+        return self._lg_posterior_moments_from_joint(q, mu, Sigma, node_idx)
+
+    def _lg_joint(self):
+        """Joint Gaussian ``(μ, Σ, node index)`` of the fitted LG network.
+
+        Built once per fit and cached (D9): it used to be re-assembled and
+        inverted — O(n³) — on every query.
+        """
+        cached = getattr(self, "_lg_joint_cache", None)
+        if cached is not None:
+            return cached
         assert self._model is not None and self._lg_topo is not None
         topo = self._lg_topo
         node_idx = {n: i for i, n in enumerate(topo)}
         n_total = len(topo)
 
         # Assemble SEM:  X = A·X + b + ε,  ε ~ N(0, D)
-        A = torch.zeros(n_total, n_total)
-        b_vec = torch.zeros(n_total)
-        d = torch.zeros(n_total)
+        A = torch.zeros(n_total, n_total, dtype=torch.float64)
+        b_vec = torch.zeros(n_total, dtype=torch.float64)
+        d = torch.zeros(n_total, dtype=torch.float64)
         for cpd in self._model.get_cpds():
             j = node_idx[cpd.variable]
             betas = cpd.beta
@@ -542,11 +596,14 @@ class PgmpyAdapter:
             d[j] = float(cpd.std) ** 2
 
         # Joint moments: μ = (I-A)⁻¹ b ;  Σ = (I-A)⁻¹ D (I-A)⁻ᵀ
-        eye = torch.eye(n_total)
+        eye = torch.eye(n_total, dtype=torch.float64)
         IA_inv = torch.linalg.inv(eye - A)
         mu = IA_inv @ b_vec
         Sigma = IA_inv @ torch.diag(d) @ IA_inv.T
+        self._lg_joint_cache = (mu, Sigma, node_idx)
+        return self._lg_joint_cache
 
+    def _lg_posterior_moments_from_joint(self, q: Query, mu, Sigma, node_idx):
         target_idx = node_idx[q.targets[0]]
         # Skip None-valued evidence (Phase 3 empty mode): an empty ev_idx
         # falls through to the unconditional marginal branch below, which is
@@ -557,12 +614,12 @@ class PgmpyAdapter:
             if v is not None
         ]
         ev_idx = [i for i, _ in observed]
-        ev_vals = torch.tensor([val for _, val in observed])
+        ev_vals = torch.tensor([val for _, val in observed], dtype=torch.float64)
 
         if not ev_idx:
             return (
-                mu[target_idx : target_idx + 1],
-                Sigma[target_idx, target_idx].clamp_min(0.0).sqrt().reshape(1),
+                mu[target_idx : target_idx + 1].float(),
+                Sigma[target_idx, target_idx].clamp_min(0.0).sqrt().reshape(1).float(),
             )
 
         mu_t = mu[target_idx]
@@ -576,7 +633,7 @@ class PgmpyAdapter:
             Sigma_ee, Sigma_te,
         )
         post_std = post_var.clamp_min(1e-12).sqrt()
-        return post_mean.reshape(1), post_std.reshape(1)
+        return post_mean.reshape(1).float(), post_std.reshape(1).float()
 
     def query_batch(self, queries: list[Query]) -> list[Posterior]:
         """Sequential default (PR 1, #148). Pgmpy stays sequential

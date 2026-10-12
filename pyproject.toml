@@ -109,8 +109,22 @@ fallback_version = "0.14.0.dev0+unknown"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--tb=short -q"
-markers = ["gpu: requires CUDA GPU", "slow: slow test skipped in fast CI"]
+# The default selection is the fast gate. Lanes widen it with `-m ...`
+# (a later -m overrides this one); `-m "slow or not slow"` selects everything
+# runnable on the host. See tests/conftest.py and .github/workflows/ci.yml.
+addopts = """--tb=short -q -ra --strict-markers \
+  -m 'not slow and not subprocess and not network and not perf and not cuda and not multi_gpu'"""
+xfail_strict = true
+markers = [
+    "slow: more than ~3 s of CPU; excluded from the fast gate",
+    "subprocess: launches bench cell workers or the nbn-bench CLI",
+    "network: may download (bnlearn.com) when the cache is cold",
+    "perf: wall-clock or speed-ratio assertions; run on a quiet runner",
+    "cuda: needs a CUDA device (auto-added for device='cuda' params)",
+    "multi_gpu: needs two or more CUDA devices",
+    "mps: needs Apple Metal (auto-added for device='mps' params)",
+    "gpu: legacy alias of cuda",
+]
 
 [tool.coverage.run]
 source = ["nbn"]

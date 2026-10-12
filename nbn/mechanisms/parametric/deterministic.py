@@ -5,6 +5,7 @@ from torch.distributions import Distribution
 
 from nbn.mechanisms.base import Mechanism
 from nbn.utils.batching import ensure_2d
+from nbn.utils.device import to_device_dtype
 
 # Log-probability stand-in for "impossible state" in a tabulated delta CPD.
 # A true ``-inf`` propagates NaN through variable elimination's factor
@@ -12,6 +13,34 @@ from nbn.utils.batching import ensure_2d
 # float32, so this is numerically a hard zero without the NaN hazard, and
 # sums of a handful of them stay far inside float32's range.
 _LOG_ZERO = -1e9
+
+
+def _delta_log_prob(x: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+    """``0`` where ``x`` equals the delta's ``value`` (every event dim), else ``_LOG_ZERO``.
+
+    Both delta log-probs used to return ``0`` for *every* ``x``, i.e. a CPD
+    that claimed any state was certain -- inconsistent with ``tabulate()``,
+    which puts ``_LOG_ZERO`` off the intervened state, so the same model
+    scored the same assignment differently under sampling-based and exact
+    inference.  ``_LOG_ZERO`` rather than ``-inf`` for the reason given
+    above.  ``isclose`` because a continuous value may round-trip through a
+    dtype cast (the intervened value is stored as float); discrete class
+    indices are small integers and compare exactly either way.
+
+    ``value`` and ``x`` broadcast with torch's trailing-axis rules (callers
+    align any particle axis first).
+    """
+    if x.is_floating_point():
+        dtype = x.dtype
+    elif value.is_floating_point():
+        dtype = value.dtype
+    else:
+        dtype = torch.get_default_dtype()
+    xv = x.to(dtype)
+    v = to_device_dtype(value, x.device, dtype)
+    match = torch.isclose(xv, v, rtol=1e-5, atol=1e-6).all(-1)
+    zero = torch.zeros((), dtype=dtype, device=x.device)
+    return torch.where(match, zero, torch.full_like(zero, _LOG_ZERO))
 
 
 class _DeltaDistribution(Distribution):
@@ -30,7 +59,7 @@ class _DeltaDistribution(Distribution):
         return self.sample(sample_shape)
 
     def log_prob(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.zeros(x.shape[:-1], device=x.device, dtype=x.dtype)
+        return _delta_log_prob(x, self._value)
 
 
 class DeterministicMechanism(Mechanism):
@@ -90,7 +119,13 @@ class DeterministicMechanism(Mechanism):
         return val.unsqueeze(1).expand(-1, n, -1)
 
     def log_prob(self, x: torch.Tensor, parents: torch.Tensor | None) -> torch.Tensor:
-        return torch.zeros(x.shape[:-1], device=x.device, dtype=x.dtype)
+        if x.dim() == 1:          # [B] labels -> [B, 1], result [B]
+            x = x.unsqueeze(-1)
+        value = self._fixed_value
+        if value.dim() == 2 and x.dim() == 3:
+            # A per-row [B, D] value is shared by that row's S particles.
+            value = value.unsqueeze(1)
+        return _delta_log_prob(x, value)
 
     # Vacuously true: fit_local estimates nothing from the data (the CPD is
     # fixed at construction), so there is no statistic for a weight to bias.

@@ -53,6 +53,7 @@ from nbn.inference.recognition_net import ParentConditionedProposal
 from nbn.inference.state import get_inference_state
 from nbn.sampling.ancestral import ancestral_sample
 from nbn.utils.batching import ensure_2d
+from nbn.utils.device import to_device_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -383,7 +384,7 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
             v = samples[node]
             if v.dim() >= 2:
                 v = v[..., 0]
-            cols.append(v.reshape(-1).to(device=dev, dtype=torch.float32))
+            cols.append(to_device_dtype(v.reshape(-1), dev, torch.float32))
         return torch.stack(cols, dim=1)
 
     @staticmethod
@@ -444,7 +445,7 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
                     v = test[node]
                     if v.dim() >= 2:
                         v = v[..., 0]
-                    evidence[node] = v.reshape(-1, 1).to(device=dev, dtype=torch.float32)
+                    evidence[node] = to_device_dtype(v.reshape(-1, 1), dev, torch.float32)
             return {"evidence": evidence, "target": tgt}
         except Exception as exc:  # pragma: no cover - diagnostic safety
             logger.warning(
@@ -579,7 +580,7 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
         fixed: List[torch.Tensor | None] = [None] * len(state.topo_order)
         for node, val in {**do, **evidence}.items():
             idx = state.node_to_idx[node]
-            v = ensure_2d(val.to(device=device, dtype=dtype))   # [B, D]
+            v = ensure_2d(to_device_dtype(val, device, dtype))   # [B, D]
             fixed[idx] = v.unsqueeze(1).expand(b, s, -1)         # [B, S, D]
 
         # Evidence context: ONE trunk forward pass per query (evidence is fixed
@@ -589,7 +590,7 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
         ev_mask = torch.zeros(b, len(state.topo_order), device=device, dtype=dtype)
         for node, val in evidence.items():
             i = net.node_index[node]
-            v = ensure_2d(val.to(device=device, dtype=dtype))   # [B, D]
+            v = ensure_2d(to_device_dtype(val, device, dtype))   # [B, D]
             ev_values[:, i] = v[:, 0]
             ev_mask[:, i] = 1.0
         ctx = net.context(ev_values, ev_mask)                              # [B, d_ctx]

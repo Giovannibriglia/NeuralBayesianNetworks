@@ -195,7 +195,10 @@ class KNNConditionalMechanism(Mechanism):
             n, d_x = y.shape
             self.output_dim = d_x
             self._train_y = y
-            std = y.std(0, unbiased=True).clamp_min(self.min_bandwidth)
+            # nan_to_num: the unbiased std of a single row is NaN, which
+            # clamp_min passes through (NaN compares false) into every
+            # log_prob.  0 is the population value, so the floor applies.
+            std = y.std(0, unbiased=True).nan_to_num(0.0).clamp_min(self.min_bandwidth)
             self._b_global = (std * n ** (-1.0 / (d_x + 4.0)) * self.bw_factor).clamp_min(self.min_bandwidth)
 
         if parents is None or parents.shape[-1] == 0:
@@ -207,7 +210,9 @@ class KNNConditionalMechanism(Mechanism):
             pa = ensure_2d(parents).float().to(device)
             self._d_pa = pa.shape[1]
             self._pa_mean = pa.mean(0, keepdim=True)
-            self._pa_std = pa.std(0, keepdim=True).clamp_min(self.min_bandwidth)
+            self._pa_std = (
+                pa.std(0, keepdim=True).nan_to_num(0.0).clamp_min(self.min_bandwidth)
+            )
             self._train_pa = (pa - self._pa_mean) / self._pa_std
 
         self._k_eff = self.k if self.k is not None else max(1, int(round(math.sqrt(max(n, 1)))))

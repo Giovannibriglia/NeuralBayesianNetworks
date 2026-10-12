@@ -94,7 +94,7 @@ def test_estimate_fisher_falls_back_to_loop_when_vmap_fails(monkeypatch):
         torch.testing.assert_close(g, w)
 
 
-@pytest.mark.skipif("mps" not in available_devices(), reason="needs mps")
+@pytest.mark.mps
 def test_vmap_fisher_on_mps_runs_on_cpu_copy():
     """Metal is not trusted with the vmapped gradients (wrong on CI runners):
     the result must equal the CPU computation on the same parameters, and the

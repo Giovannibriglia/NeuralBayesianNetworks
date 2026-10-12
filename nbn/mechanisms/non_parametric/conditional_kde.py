@@ -38,7 +38,9 @@ Design notes
   Under per-sample weights the rule is replication-exact: the sample size is
   the total weight, the scale is the frequency-weighted std, and the IQR is
   the weighted quantile (:func:`nbn.learning.weighting.weighted_quantile`),
-  so integer weights give the bandwidth of the replicated rows.
+  so integer weights give the bandwidth of the replicated rows.  Non-integer
+  weights (EM responsibilities) are not counts, so the sample size is Kish's
+  effective size ``(sum w)^2 / sum w^2`` instead (see :func:`_bandwidth_n`).
 * **Streaming.** The sufficient statistic of a KDE is its (weighted) sample,
   so ``update_local`` is exact: it appends the new rows to the stored sample
   and re-derives the standardisation and the rule-of-thumb bandwidths from
@@ -59,12 +61,45 @@ import math
 import torch
 from torch.distributions import Distribution
 
-from nbn.learning.weighting import validate_weights, weighted_moments, weighted_quantile
+from nbn.learning.weighting import (
+    effective_sample_size,
+    validate_weights,
+    weighted_mean,
+    weighted_moments,
+    weighted_quantile,
+)
 from nbn.utils.device import accum_dtype
 from nbn.mechanisms.base import Mechanism
 from nbn.utils.batching import _sanitise_parents, ensure_2d, flatten_samples
 
 _LOG_2PI = math.log(2.0 * math.pi)
+
+
+def _bandwidth_n(weights: torch.Tensor | None, n_rows: int) -> float:
+    """Sample size the rule-of-thumb bandwidth is evaluated at.
+
+    * Unweighted: ``N``.
+    * Integer weights: ``sum(w)``.  They are multiplicities, and replication
+      equivalence requires the bandwidth of the replicated rows, whose count
+      is exactly ``sum(w)``.
+    * Any non-integer weight: Kish's effective sample size
+      ``(sum w)^2 / sum w^2``.  Fractional weights (EM responsibilities,
+      importance weights) are not counts: ``sum(w)`` can be <= 1, which put
+      Scott's ``n^(-1/(d+4))`` at or above 1 -- a bandwidth as wide as the
+      data -- and scaling every weight by ``c`` changed the bandwidth although
+      the Nadaraya-Watson ratio itself is scale-invariant.  ``n_eff`` is
+      scale-invariant and equals ``N`` for equal weights.
+
+    The switch is deliberately discrete (``[1, 1, 1]`` -> 3, ``[1, 1, 1.01]``
+    -> ~3.0): each branch is the right reading of its own kind of weight.
+    The non-integer branch is :func:`nbn.learning.weighting.effective_sample_size`.
+    """
+    if weights is None:
+        return float(n_rows)
+    w = weights.reshape(-1)
+    if bool(torch.equal(w, w.round())):
+        return float(w.sum())
+    return float(effective_sample_size(w))
 
 
 class _KDEConditionalDistribution(Distribution):
@@ -188,11 +223,12 @@ class ConditionalKDEMechanism(Mechanism):
         one, so ``weights=None`` is byte-identical to the historical rule.
         """
         d = data.shape[1]
-        if weights is None:
-            n = float(data.shape[0])
-        else:
-            n = float(weights.sum())
+        n = _bandwidth_n(weights, data.shape[0])
         _, std = weighted_moments(data, weights, unbiased=True)
+        # One unweighted row: the unbiased std is NaN and would survive the
+        # clamps below (NaN compares false); use the population value 0, so
+        # the min_bandwidth floor applies.
+        std = std.nan_to_num(0.0)
         # Robust scale: min(std, IQR/1.349) when IQR is informative.
         q = weighted_quantile(
             data,
@@ -232,8 +268,19 @@ class ConditionalKDEMechanism(Mechanism):
             weights, ensure_2d(x).shape[0],
             where="ConditionalKDEMechanism.fit_local", device=x.device,
         )
+        if w is not None and not bool((w > 0).all()):
+            # Make "weight 0 == absent row" exact everywhere, not only in the
+            # logsumexps (where log 0 = -inf already drops it): a stored
+            # zero-weight row still occupied one of the k slots of the
+            # truncated neighbour search, and shifted the held-out split of
+            # bw_factor="auto".
+            keep = w > 0
+            x = ensure_2d(x)[keep.to(x.device)]
+            if parents is not None and parents.shape[-1] > 0:
+                parents = ensure_2d(parents)[keep.to(parents.device)]
+            w = w[keep]
         if self.bw_factor == "auto":
-            self.bw_factor = self._select_bw_factor(x, parents)
+            self.bw_factor = self._select_bw_factor(x, parents, weights=w)
         info = self._fit_core(x, parents, _w_vec=w, **kwargs)
         self._train_logw = (
             None if w is None
@@ -278,9 +325,12 @@ class ConditionalKDEMechanism(Mechanism):
                 f"update child dim {y_new.shape[1]} differs from the fitted "
                 f"{self._train_y.shape[1]}"
             )
+        # Validate onto the *model's* device: validating on x's device made
+        # a CPU batch into an MPS model a float64 CPU tensor, which cannot be
+        # moved to MPS ("Cannot convert a MPS Tensor to float64").
         w_new = validate_weights(
             weights, n_new, where="ConditionalKDEMechanism.update_local",
-            device=x.device,
+            device=device,
         )
         has_pa = parents is not None and parents.shape[-1] > 0
         if has_pa != (self._d_pa > 0) or (has_pa and parents.shape[-1] != self._d_pa):
@@ -309,7 +359,7 @@ class ConditionalKDEMechanism(Mechanism):
             ) + math.log(forgetting)
             logw_new = (
                 torch.zeros(n_new, dtype=acc, device=device)
-                if w_new is None else torch.log(w_new.to(device))
+                if w_new is None else torch.log(w_new)
             )
             logw_pool = torch.cat([logw_old, logw_new])
             info = self._fit_core(y_pool, pa_pool, _w_vec=logw_pool.exp())
@@ -323,8 +373,18 @@ class ConditionalKDEMechanism(Mechanism):
         parents: torch.Tensor | None,
         candidates: tuple[float, ...] = (0.2, 0.3, 0.45, 0.6, 0.8, 1.0),
         val_frac: float = 0.25,
+        weights: torch.Tensor | None = None,
     ) -> float:
-        """Pick ``bw_factor`` by held-out negative log-likelihood (lower better)."""
+        """Pick ``bw_factor`` by held-out negative log-likelihood (lower better).
+
+        Weighted on both sides, like the real fit: the sub-fit stores its
+        rows' weights (bandwidth rule *and* kernel mixture) and the held-out
+        score is the weighted mean NLL.  It ignored ``weights`` before, so
+        the factor was tuned for a data distribution the caller did not ask
+        for.  ``weights`` must already be free of zeros (``fit_local`` drops
+        those rows), which keeps the split identical to the one a fit on the
+        dropped data draws.
+        """
         y = ensure_2d(x).float()
         n = y.shape[0]
         gen = torch.Generator(device="cpu").manual_seed(0)
@@ -335,13 +395,19 @@ class ConditionalKDEMechanism(Mechanism):
         val_idx, fit_idx = perm[:n_val], perm[n_val:]
         has_pa = parents is not None and parents.shape[-1] > 0
         pa = ensure_2d(parents).float() if has_pa else None
+        w_fit = None if weights is None else weights[fit_idx.to(weights.device)]
+        w_val = None if weights is None else weights[val_idx.to(weights.device)]
         best_c, best_nll = 1.0, float("inf")
         for c in candidates:
             self.bw_factor = float(c)
-            self._fit_core(y[fit_idx], pa[fit_idx] if has_pa else None)
+            self._fit_core(y[fit_idx], pa[fit_idx] if has_pa else None, _w_vec=w_fit)
+            self._train_logw = (
+                None if w_fit is None
+                else torch.log(w_fit.to(self._train_y.device)).to(self._train_y.dtype)
+            )
             with torch.no_grad():
-                nll = float((-self.log_prob(
-                    y[val_idx], pa[val_idx] if has_pa else None)).mean())
+                nll = float(weighted_mean(-self.log_prob(
+                    y[val_idx], pa[val_idx] if has_pa else None), w_val))
             if nll == nll and nll < best_nll:  # nll == nll rejects NaN
                 best_nll, best_c = nll, float(c)
         self.bw_factor = "auto"  # restore the request; caller resolves to best_c
@@ -366,7 +432,9 @@ class ConditionalKDEMechanism(Mechanism):
             self._d_pa = pa.shape[1]
             pa_m, pa_s = weighted_moments(pa, w_vec, unbiased=True)
             self._pa_mean = pa_m.unsqueeze(0)
-            self._pa_std = pa_s.unsqueeze(0).clamp_min(self.min_bandwidth)
+            # nan_to_num: one unweighted row has a NaN unbiased std (see
+            # _rule_bandwidth); clamp_min would pass it through.
+            self._pa_std = pa_s.nan_to_num(0.0).unsqueeze(0).clamp_min(self.min_bandwidth)
             pa_std_space = (pa - self._pa_mean) / self._pa_std
             self._train_pa = pa_std_space
             self._h = self._rule_bandwidth(pa_std_space, w_vec)
@@ -526,7 +594,15 @@ class ConditionalKDEMechanism(Mechanism):
 
         if self._d_pa == 0 or parents is None:
             m = 1 if parents is None else ensure_2d(parents).shape[0]
-            idx = torch.randint(0, n, (m, n_samples), device=device)
+            if self._train_logw is None:
+                idx = torch.randint(0, n, (m, n_samples), device=device)
+            else:
+                # The mixture component of a weighted KDE is drawn with
+                # probability w_i / sum(w) -- the same weights log_prob uses.
+                # randint drew it uniformly, so samples ignored the weights.
+                idx = torch.distributions.Categorical(
+                    logits=self._train_logw.to(device),
+                ).sample((m, n_samples))
             base = ty[idx]                                    # [m, n, D_x]
             return base + b * torch.randn_like(base)
 
@@ -552,6 +628,10 @@ class ConditionalKDEMechanism(Mechanism):
             xq = xs[sl]                                        # [q, D_pa]
             dx = (xq.unsqueeze(1) - tpa.unsqueeze(0)) / h       # [q, N, D_pa]
             logw = (-0.5 * dx.pow(2)).sum(-1)                  # [q, N]
+            if self._train_logw is not None:
+                # Component logits carry log w_i, exactly as in log_prob's
+                # numerator (the truncated path above already did this).
+                logw = logw + self._train_logw.to(device).unsqueeze(0)
             idx = torch.distributions.Categorical(logits=logw).sample((n_samples,))  # [n, q]
             idx = idx.transpose(0, 1)                          # [q, n]
             base = ty[idx]                                     # [q, n, D_x]

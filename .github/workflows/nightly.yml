@@ -38,5 +38,14 @@ jobs:
       - name: Record resolved versions
         run: pip freeze
 
-      - name: Run the full suite
-        run: pytest -n auto -m "not gpu" -q --durations=25
+      - name: Run the full suite (everything but the device lanes and perf)
+        # Overrides the fast-gate default selection: slow, subprocess and
+        # network tests included.
+        run: >
+          pytest -n auto --durations=25
+          -m "not perf and not cuda and not multi_gpu"
+
+      - name: Performance assertions (serial, quiet runner)
+        # Wall-clock / speed-ratio tests (tests/perf) run without xdist so
+        # they do not compete with each other for cores.
+        run: pytest -p no:xdist -m perf tests/perf

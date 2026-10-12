@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 import torch
 
+from nbn.utils.device import to_device_dtype
+
 
 @dataclass
 class MetricResult:
@@ -158,6 +160,17 @@ def log_likelihood(log_probs: torch.Tensor) -> MetricResult:
 # / the adapters. ``true_cpts``/``learned_cpts``/``weights`` are aligned lists,
 # one entry per discrete node; entry i is [n_configs_i, K_i] / [n_configs_i].
 
+def _cpu64(t: torch.Tensor) -> torch.Tensor:
+    """``t`` detached, on the CPU, in float64.
+
+    Metrics reduce to Python floats, so they are computed on the CPU in full
+    precision.  Moving before casting matters: MPS has no float64, so
+    ``mps_tensor.double()`` raises (and a fused cross-device cast can garble
+    values; see :func:`nbn.utils.device.to_device_dtype`).
+    """
+    return to_device_dtype(t.detach(), "cpu", torch.float64)
+
+
 def frequency_weights(counts: torch.Tensor) -> torch.Tensor:
     """Normalize parent-config counts to weights that sum to 1.
 
@@ -167,7 +180,7 @@ def frequency_weights(counts: torch.Tensor) -> torch.Tensor:
     case (no samples) — with any real sample every row carries a count, so the
     clamp never bites and the weights sum to exactly 1.
     """
-    counts = counts.to(torch.float64)
+    counts = _cpu64(counts)
     return counts / counts.sum().clamp_min(1.0)
 
 
@@ -180,8 +193,8 @@ def _kl_rows_unclamped(p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
     not a clamped finite number (that is the whole point of the companion KL,
     and the signal pgmpy MLE hard zeros will produce in a later PR).
     """
-    p = p.to(torch.float64)
-    q = q.to(torch.float64)
+    p = _cpu64(p)
+    q = _cpu64(q)
     log_p = torch.log(p.clamp_min(1e-12))          # safe log(p); masked where p==0
     log_q = torch.log(q)                            # UNCLAMPED: q==0 -> -inf -> +inf KL
     per_class = p * (log_p - log_q)
@@ -200,10 +213,8 @@ def _weighted_node_reduce(
     even if its row is ``+inf`` (a 0*inf would otherwise NaN). A config with
     POSITIVE weight whose row is ``+inf`` correctly propagates ``+inf``.
     """
-    weights = weights.to(torch.float64)
-    contrib = torch.where(
-        weights > 0, weights * rows.to(torch.float64), torch.zeros_like(rows, dtype=torch.float64)
-    )
+    weights, rows = _cpu64(weights), _cpu64(rows)
+    contrib = torch.where(weights > 0, weights * rows, torch.zeros_like(rows))
     return contrib.sum()
 
 
@@ -288,8 +299,8 @@ def _pit_ks_single(predictive_samples: torch.Tensor, y: torch.Tensor) -> float:
     is ``max_i |sorted(PIT) - i/N|`` (one-sample KS vs the uniform grid). 0 is
     perfectly calibrated; larger is worse.
     """
-    samples = predictive_samples.detach().double()
-    yv = y.detach().double().reshape(-1, 1)
+    samples = _cpu64(predictive_samples)
+    yv = _cpu64(y).reshape(-1, 1)
     pit = (samples <= yv).double().mean(dim=1)          # [N]
     pit_sorted = torch.sort(pit).values
     n = pit_sorted.shape[0]
@@ -308,8 +319,8 @@ def _sd_ratio_single(
     is clamped at 1e-12 purely as a divide-by-zero numerical guard (a degenerate
     point-mass true conditional) — NOT a distributional smoothing clamp.
     """
-    pred_std = predictive_samples.detach().double().std(dim=1)
-    true_std = oracle_samples.detach().double().std(dim=1).clamp_min(1e-12)
+    pred_std = _cpu64(predictive_samples).std(dim=1)
+    true_std = _cpu64(oracle_samples).std(dim=1).clamp_min(1e-12)
     return float((pred_std / true_std).mean())
 
 
@@ -415,8 +426,35 @@ def gpu_peak_mb(device: torch.device) -> MetricResult:
 # ── new in v0.3: histogram-TV and k-NN KL for continuous samples ────────────
 
 
+def ks_distance(x: torch.Tensor, y: torch.Tensor) -> MetricResult:
+    """Two-sample Kolmogorov-Smirnov statistic ``sup_t |F_x(t) - F_y(t)|``.
+
+    Bin-free and invariant to monotone transforms of the axis; a single
+    outlier moves it by at most ``1/n``. In ``[0, 1]``, lower is better.
+    Unequal sample sizes are allowed (the statistic is exact for the two
+    empirical CDFs), but its sampling noise depends on both sizes, so the
+    benchmark compares samples at equal counts (see ``AccuracyAndTiming``).
+    """
+    xs = torch.sort(_cpu64(x).reshape(-1)).values
+    ys = torch.sort(_cpu64(y).reshape(-1)).values
+    if xs.numel() == 0 or ys.numel() == 0:
+        return MetricResult("ks_distance", float("nan"))
+    grid = torch.cat([xs, ys])
+    fx = torch.searchsorted(xs, grid, right=True).double() / xs.numel()
+    fy = torch.searchsorted(ys, grid, right=True).double() / ys.numel()
+    return MetricResult("ks_distance", float((fx - fy).abs().max()))
+
+
 def tv_continuous(x: torch.Tensor, y: torch.Tensor, *, bins: int = 256) -> MetricResult:
-    """Histogram-based total-variation distance between two 1-D sample sets."""
+    """Histogram-based total-variation distance between two 1-D sample sets.
+
+    **Deprecated for posterior scoring (D2).** With 256 equal-width bins over
+    ``[min, max]`` of both samples, two independent draws of the *same*
+    distribution score TV ≈ 0.2 at 2,000 samples (bin noise), and one outlier
+    stretches the range so every other sample lands in a handful of bins.
+    ``_compute_metrics_per_node`` scores continuous targets with W1 and KS
+    instead; this function is kept for backward compatibility only.
+    """
     x = x.reshape(-1).float(); y = y.reshape(-1).float()
     if x.numel() == 0 or y.numel() == 0:
         return MetricResult("tv_continuous", float("nan"))
@@ -473,69 +511,57 @@ def _compute_metrics_per_node(
     *,
     cpd_pairs: list[tuple[torch.Tensor, torch.Tensor]] | tuple = (),
     sample_pairs: list[tuple[torch.Tensor, torch.Tensor]] | tuple = (),
-    metrics: tuple[str, ...] = ("tv", "jsd", "w1"),
+    metrics: tuple[str, ...] = ("tv", "jsd", "w1", "ks"),
     n_bins: int = 256,
 ) -> dict[str, float | None]:
-    """Average TV / JSD / W₁ across a collection of CPD or sample pairs.
+    """Average accuracy metrics across a collection of CPD or sample pairs.
 
-    Single helper for both pipelines (param-learning + inference) and
-    both family classes (discrete + continuous), with hybrid handled
-    via per-target dispatch by the caller (discrete sub-targets go in
-    ``cpd_pairs``; continuous sub-targets go in ``sample_pairs``).
+    Single helper for both family classes (discrete + continuous), with
+    hybrid handled via per-target dispatch by the caller (discrete
+    sub-targets go in ``cpd_pairs``; continuous sub-targets go in
+    ``sample_pairs``).
 
     Parameters
     ----------
     cpd_pairs : sequence of (true_logits, fit_logits)
         Per-node pairs of tabulated CPDs in logit space (shape
-        ``[*parent_cards, K]`` or ``[K]``).  Used for discrete metrics
-        (TV, JSD); each pair contributes one TV and one JSD value
-        (averaged over parent configurations).  W₁ is **skipped** on
-        these pairs — the synthetic generator's discrete categories are
-        unordered, so W₁ collapses to ½·TV under any sensible metric
-        and is not informative.
+        ``[*parent_cards, K]`` or ``[K]``).  Discrete metrics: TV and JSD
+        (averaged over parent configurations). W₁ and KS are **skipped**
+        on these pairs: categories are unordered.
     sample_pairs : sequence of (true_samples, fit_samples)
-        Per-evaluation-row pairs of 1-D sample tensors (shape
-        ``[n_samples]``).  Used for continuous metrics: W₁ via
-        ``wasserstein_1d`` (sliced 1-D quantile-CDF) plus binned-TV
-        and binned-JSD via ``torch.histc`` with ``n_bins`` bins.
-    metrics : tuple of {"tv", "jsd", "w1"}
+        Per-evaluation-row pairs of 1-D sample tensors.  Continuous
+        metrics: W₁ (``wasserstein_1d``) and the two-sample KS statistic
+        (``ks_distance``). Both are bin-free; the caller supplies the two
+        samples at **equal counts** so their sampling noise does not depend
+        on a method's draw count (D2/D3).  TV and JSD are **not** computed
+        on samples any more: the former 256-bin histogram estimate was
+        noise-dominated (identical distributions → TV ≈ 0.2) and could be
+        gamed by a single outlier stretching the bin range.
+    metrics : tuple of {"tv", "jsd", "w1", "ks"}
         Which metrics to compute.  Output keys are
         ``"<name>_per_node"`` matching the long-form parquet's
         ``metric`` column convention.
-    n_bins : int, default 256
-        Histogram bin count for binned-TV / binned-JSD on
-        ``sample_pairs``.  Matches the default in
-        :func:`tv_continuous`.
+    n_bins : int
+        Unused; kept so existing keyword callers do not break.
 
     Returns
     -------
     dict[str, float | None]
         Mapping ``"<metric>_per_node"`` → average value.  ``None`` for
         a metric whose contributing-pair list is empty (e.g. ``"w1"``
-        on a pure-discrete cell, or ``"tv"`` on an empty fixture).
-        The caller decides whether ``None`` becomes a ``not_supported``
-        row, a skipped row, or a NaN.
+        on a discrete target, ``"tv"`` on a continuous one).  The caller
+        decides whether ``None`` becomes a ``not_supported`` row.
 
-    Notes
-    -----
-    Caller responsibility:
-
-    * Build ``cpd_pairs`` for discrete nodes only (use
-      ``Mechanism.tabulate(parent_cards)`` from Pass 8).
-    * Build ``sample_pairs`` for continuous nodes only (sample from
-      both true and fitted mechanisms at matched evidence rows).
-    * Hybrid families: send each node's contribution to the right
-      list based on ``variable_specs[node][0]``.
-
-    The shape-mismatch guard in the discrete branch (``true_logits.shape
-    != fit_logits.shape``) silently drops pairs to match the existing
-    ``_avg_tv_per_node`` behaviour from Pass 8 — these correspond to
-    cases where the fitted mechanism's parent cardinalities don't
-    match the truth (e.g. a categorical didn't see all parent
-    configurations in train_data and tabulated a smaller CPT).
+    Raises
+    ------
+    ValueError
+        When a CPD pair's shapes differ (e.g. a fitted CPT on a truncated
+        state grid, #217). This used to be a silent ``continue`` that turned
+        the query into ``not_supported``; it is a method error (D5).
     """
     import math
 
+    del n_bins
     out: dict[str, list[float]] = {m: [] for m in metrics}
 
     for true_logits, fit_logits in cpd_pairs:
@@ -552,7 +578,7 @@ def _compute_metrics_per_node(
             # Normalise by log(2) so the value lives in [0, 1].
             jsd_per_row = js_divergence(true_p, fit_p)
             out["jsd"].append(float(jsd_per_row.mean() / math.log(2)))
-        # "w1" intentionally skipped: discrete-unordered.
+        # "w1" / "ks" intentionally skipped: discrete-unordered.
 
     for true_s, fit_s in sample_pairs:
         true_s = true_s.reshape(-1).float()
@@ -561,22 +587,8 @@ def _compute_metrics_per_node(
             continue
         if "w1" in metrics:
             out["w1"].append(wasserstein_1d(true_s, fit_s).value)
-        if "tv" in metrics:
-            out["tv"].append(tv_continuous(true_s, fit_s, bins=n_bins).value)
-        if "jsd" in metrics:
-            lo = float(min(true_s.min(), fit_s.min()))
-            hi = float(max(true_s.max(), fit_s.max()))
-            if hi <= lo:
-                # Degenerate range: identical samples → JSD = 0.
-                out["jsd"].append(0.0)
-                continue
-            true_h = torch.histc(true_s, bins=n_bins, min=lo, max=hi)
-            true_h = true_h / true_h.sum().clamp_min(1e-12)
-            fit_h = torch.histc(fit_s, bins=n_bins, min=lo, max=hi)
-            fit_h = fit_h / fit_h.sum().clamp_min(1e-12)
-            out["jsd"].append(
-                float(js_divergence(true_h, fit_h) / math.log(2))
-            )
+        if "ks" in metrics:
+            out["ks"].append(ks_distance(true_s, fit_s).value)
 
     return {
         f"{m}_per_node": (float(sum(vals) / len(vals)) if vals else None)

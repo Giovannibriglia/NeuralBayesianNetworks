@@ -1,0 +1,227 @@
+"""Tests for GPU/device auto-detection across the v0.13 framework.
+
+Covers the device-flow fix (investigation report 2026-06-04): every nbn
+baseline silently ran on CPU because ``--device auto`` was collapsed to
+``None`` at the CLI and then to ``"cpu"`` at ``build_adapter``.
+
+Layers under test:
+  1. ``resolve_device()`` — the shared helper (table: tests/unit/test_resolve_device.py).
+  2. Per-adapter resolution — each adapter owns its translation (β).
+  3. CLI argument parsing — ``"auto"`` is the default and passes through.
+  4. ``CellResult.device`` — the new self-documenting column.
+  5. Smoke configs — no longer pin ``device: cpu``.
+
+The cuda-only assertions are skipped when no GPU is present (CI), so the
+suite is green on both Giovanni's laptop (RTX 4070) and GPU-less runners.
+"""
+from __future__ import annotations
+
+import dataclasses
+
+import pytest
+import torch
+
+from nbn.bench.adapters import (
+    NBNAdapter,
+    PgmpyAdapter,
+    PomegranateAdapter,
+    PyroAdapter,
+)
+from nbn.bench.core._device import resolve_device
+
+_HAS_CUDA = torch.cuda.is_available()
+_HAS_MPS = bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
+# auto resolves cuda > mps > cpu (nbn.utils.device.resolve_device).
+_EXPECTED_AUTO = "cuda" if _HAS_CUDA else ("mps" if _HAS_MPS else "cpu")
+
+
+def _expected_auto(adapter_cls) -> str:
+    """pyro's auto skips mps (launch-bound sampler; see pyro_adapter docstring)."""
+    if adapter_cls.__name__ == "PyroAdapter" and _EXPECTED_AUTO == "mps":
+        return "cpu"
+    return _EXPECTED_AUTO
+
+
+# 1. resolve_device() itself: table test in tests/unit/test_resolve_device.py.
+
+# ---------------------------------------------------------------------------
+# 2. Per-adapter device resolution (design choice β: per-adapter ownership)
+# ---------------------------------------------------------------------------
+
+def _make(adapter_cls):
+    """Construct each adapter with its required args, varying only device."""
+    if adapter_cls is NBNAdapter:
+        return lambda **kw: NBNAdapter(mechanism="cat", engine="lw", **kw)
+    if adapter_cls is PyroAdapter:
+        return lambda **kw: PyroAdapter(
+            mechanism="empirical", inference_method="importance", **kw,
+        )
+    if adapter_cls is PomegranateAdapter:
+        return lambda **kw: PomegranateAdapter(**kw)
+    if adapter_cls is PgmpyAdapter:
+        return lambda **kw: PgmpyAdapter(
+            param_method="mle", inference_method="ve", **kw,
+        )
+    raise AssertionError(adapter_cls)
+
+
+# pgmpy is excluded from the auto/cuda parametrization: it is CPU-only and
+# always reports "cpu" regardless of the device arg (tested separately).
+_GPU_CAPABLE = [NBNAdapter, PyroAdapter, PomegranateAdapter]
+
+
+class TestAdapterDeviceResolution:
+    @pytest.mark.parametrize("adapter_cls", _GPU_CAPABLE)
+    def test_default_none_auto_detects(self, adapter_cls):
+        adapter = _make(adapter_cls)(device=None)
+        assert str(adapter.device) == _expected_auto(adapter_cls)
+
+    @pytest.mark.parametrize("adapter_cls", _GPU_CAPABLE)
+    def test_auto_auto_detects(self, adapter_cls):
+        adapter = _make(adapter_cls)(device="auto")
+        assert str(adapter.device) == _expected_auto(adapter_cls)
+
+    @pytest.mark.parametrize("adapter_cls", _GPU_CAPABLE)
+    def test_explicit_cpu(self, adapter_cls):
+        adapter = _make(adapter_cls)(device="cpu")
+        assert str(adapter.device) == "cpu"
+
+    @pytest.mark.parametrize("adapter_cls", _GPU_CAPABLE)
+    @pytest.mark.skipif(not _HAS_CUDA, reason="no CUDA device available")
+    def test_explicit_cuda(self, adapter_cls):
+        adapter = _make(adapter_cls)(device="cuda")
+        assert str(adapter.device) == "cuda"
+
+    def test_pgmpy_is_cpu_only_for_none(self):
+        adapter = _make(PgmpyAdapter)(device=None)
+        assert adapter.device == "cpu"
+
+    def test_pgmpy_ignores_cuda_request(self):
+        # pgmpy accepts the arg but always runs on CPU (CPU-only library).
+        adapter = _make(PgmpyAdapter)(device="cuda")
+        assert adapter.device == "cpu"
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="no CUDA device available")
+class TestAdapterParamsLandOnCuda:
+    """When device=cuda, fitted model params actually live on the GPU."""
+
+    def _discrete_problem(self, n=300, seed=0):
+        from nbn.bench.domains.base import BenchmarkProblem
+
+        torch.manual_seed(seed)
+        dag = [("X0", "X1"), ("X1", "X2")]
+        td = {
+            "X0": torch.randint(0, 2, (n,)),
+            "X1": torch.randint(0, 2, (n,)),
+            "X2": torch.randint(0, 2, (n,)),
+        }
+        variables = dict.fromkeys(td, ("discrete", 2))
+        return BenchmarkProblem(
+            name="d", dag=dag, variables=variables,
+            train_data=td, test_data=td, queries=[],
+        )
+
+    def test_nbn_params_on_cuda(self):
+        adapter = NBNAdapter(mechanism="cat", engine="lw", device="cuda")
+        adapter.fit(self._discrete_problem(), epochs=2)
+        devs = {p.device.type for p in adapter.model.parameters()}
+        assert devs == {"cuda"}
+
+    def test_pomegranate_params_on_cuda(self):
+        adapter = PomegranateAdapter(device="cuda")
+        adapter.fit(self._discrete_problem())
+        devs = {p.device.type for p in adapter.model.parameters()}
+        assert devs == {"cuda"}
+
+
+# ---------------------------------------------------------------------------
+# 3. CLI integration: "auto" is the default and parses as a literal string
+# ---------------------------------------------------------------------------
+
+class TestCliDeviceParsing:
+    def _parse(self, *argv):
+        from nbn.bench.cli import _build_parser
+
+        return _build_parser().parse_args(list(argv))
+
+    def test_default_is_auto_string(self):
+        args = self._parse("inference", "--config", "x.yaml")
+        assert args.device == "auto"
+
+    def test_explicit_auto(self):
+        args = self._parse("inference", "--config", "x.yaml", "--device", "auto")
+        assert args.device == "auto"
+
+    def test_explicit_cuda(self):
+        args = self._parse("inference", "--config", "x.yaml", "--device", "cuda")
+        assert args.device == "cuda"
+
+    def test_explicit_cpu(self):
+        args = self._parse("inference", "--config", "x.yaml", "--device", "cpu")
+        assert args.device == "cpu"
+
+    def test_auto_not_collapsed_to_none(self):
+        # The bug: cli.py did `None if args.device == "auto" else args.device`.
+        # The dispatcher now assigns `device = args.device` verbatim, so the
+        # parsed value is never None for the default case.
+        args = self._parse("inference", "--config", "x.yaml")
+        assert args.device is not None
+
+
+# ---------------------------------------------------------------------------
+# 4. CellResult carries the device column
+# ---------------------------------------------------------------------------
+
+class TestCellResultDevice:
+    def _row(self, **overrides):
+        from nbn.bench.core.results import CellResult
+
+        base = dict(
+            benchmark="synthetic", family="discrete", problem_id="3",
+            seed=0, baseline="nbn-cat-lw", query_role="random",
+            metric="tv_per_node", value=0.1, status="ok",
+            fit_time_s=1.0, query_time_s=0.5, metrics_time_s=0.2,
+        )
+        base.update(overrides)
+        return CellResult(**base)
+
+    def test_device_field_present(self):
+        row = self._row(device="cuda")
+        assert row.device == "cuda"
+        assert "device" in {f.name for f in dataclasses.fields(row)}
+
+    def test_device_in_asdict(self):
+        row = self._row(device="cuda")
+        assert dataclasses.asdict(row)["device"] == "cuda"
+
+    def test_device_defaults_to_none(self):
+        # Additive column: omitting it must not break construction.
+        row = self._row()
+        assert row.device is None
+
+
+# ---------------------------------------------------------------------------
+# 5. Smoke configs no longer pin device: cpu
+# ---------------------------------------------------------------------------
+
+_SMOKE_CONFIGS = [
+    "nbn/bench/configs/bnlearn/smoke_tests/inference_smoke.yaml",
+    "nbn/bench/configs/synthetic/smoke_tests/scalability_smoke.yaml",
+]
+
+
+class TestSmokeConfigsDoNotPinDevice:
+    @pytest.mark.parametrize("rel_path", _SMOKE_CONFIGS)
+    def test_no_baseline_pins_device(self, rel_path):
+        from pathlib import Path
+
+        import yaml
+
+        repo_root = Path(__file__).resolve().parents[2]
+        cfg = yaml.safe_load((repo_root / rel_path).read_text())
+        pinned = [b for b in cfg["baselines"] if "device" in b]
+        assert pinned == [], (
+            f"{rel_path} still pins device on baselines: {pinned}; smoke "
+            f"configs should auto-detect (GPU locally, CPU on CI)."
+        )

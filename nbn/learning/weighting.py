@@ -41,6 +41,7 @@ from __future__ import annotations
 import torch
 
 from nbn.utils.device import accum_dtype
+from nbn.utils.device import to_device_dtype
 
 #: Guards ``0/0`` if a caller slips an all-zero vector past validation.
 _MIN_TOTAL_WEIGHT = 1e-12
@@ -81,7 +82,7 @@ def validate_weights(
             f"{n_rows} rows; weights are per-sample and must align with them."
         )
     target = w.device if device is None else torch.device(device)
-    w = w.to(device=target, dtype=accum_dtype(target))
+    w = to_device_dtype(w, target, accum_dtype(target))
     if not torch.isfinite(w).all():
         raise ValueError(f"{where}: weights contains NaN or infinite values.")
     if (w < 0).any():
@@ -112,7 +113,7 @@ def weighted_mean(
         return values.mean()
     v = values.reshape(-1)
     acc = accum_dtype(v.device)
-    w = weights.reshape(-1).to(device=v.device, dtype=acc)
+    w = to_device_dtype(weights.reshape(-1), v.device, acc)
     num = (w * v.to(acc)).sum()
     den = w.sum().clamp_min(_MIN_TOTAL_WEIGHT)
     return (num / den).to(values.dtype)
@@ -128,23 +129,68 @@ def weighted_moments(
     miss: the fit converges, but to a model standardised against a data
     distribution the caller did not ask for.  Accumulated in float64.
 
-    ``unbiased`` follows the *frequency-weight* convention — the denominator
-    is ``sum(w) - 1`` rather than ``n - 1`` — because that is what replicating
-    a row ``w_i`` times produces.  Passing the population form (``sum(w)``)
-    where the unweighted call site used ``n - 1`` is a 2%-scale error on small
-    samples: big enough to move a standardised model, small enough to read as
-    numerical noise.
+    ``unbiased`` picks the denominator by what the weights mean:
+
+    * **integer weights** are multiplicities, so the *frequency-weight*
+      convention ``sum(w) - 1`` applies — exactly what replicating a row
+      ``w_i`` times produces (replication equivalence stays exact).  Passing
+      the population form (``sum(w)``) where the unweighted call site used
+      ``n - 1`` is a 2%-scale error on small samples.
+    * **fractional weights** (normalised weights, EM responsibilities) use the
+      *reliability-weight* convention ``sum(w) - sum(w^2) / sum(w)``.  It is
+      invariant to rescaling the weights and equals ``n - 1`` (times the
+      common weight, which cancels) for constant weights.  The frequency form
+      is meaningless there: ``sum(w) - 1`` is ~0 or negative when the weights
+      sum to <= 1, and the std exploded by orders of magnitude.
+
+    The switch is deliberately discontinuous: ``w = [1, 3]`` (integers,
+    frequency rule, denominator 3) and ``w = [1, 3.0001]`` (reliability rule,
+    denominator ~1.5) give visibly different stds.  No single continuous rule
+    is both replication-exact for integer weights and scale-invariant for
+    fractional ones, and replication equivalence is the library's contract,
+    so integer weights win.  Weights that are integers "by accident" (e.g.
+    rounded responsibilities) are read as multiplicities — pass them as
+    fractions (or rescale) if they are reliabilities.
     """
     if weights is None:
         return t.mean(0), t.std(0, unbiased=unbiased)
     acc = accum_dtype(t.device)
     td = t.to(acc)
-    wd = weights.reshape(-1, 1).to(device=t.device, dtype=acc)
+    wd = to_device_dtype(weights.reshape(-1, 1), t.device, acc)
     tot = wd.sum().clamp_min(_MIN_TOTAL_WEIGHT)
     mean = (wd * td).sum(0) / tot
-    denom = (tot - 1.0).clamp_min(_MIN_TOTAL_WEIGHT) if unbiased else tot
+    if not unbiased:
+        denom = tot
+    elif bool((wd == wd.round()).all()):
+        denom = tot - 1.0                        # frequency weights
+    else:
+        denom = tot - wd.pow(2).sum() / tot      # reliability weights
+    # Clamp relative to the total so a single effective row (denom == 0, all
+    # deviations 0) gives std 0 instead of 0/0, whatever the weights' scale.
+    denom = denom.clamp_min(_MIN_TOTAL_WEIGHT * tot)
     var = (wd * (td - mean).pow(2)).sum(0) / denom
     return mean.to(t.dtype), var.sqrt().to(t.dtype)
+
+
+def effective_sample_size(
+    weights: torch.Tensor | None, n: int | None = None,
+) -> torch.Tensor | int:
+    """Kish's effective sample size ``(sum w)^2 / sum w^2``.
+
+    The right ``n`` for sample-size-driven rules (bandwidth selectors such as
+    Scott / Silverman, ``n - 1`` corrections) under fractional weights, where
+    ``sum(w)`` is arbitrary (normalised weights sum to 1) and the row count
+    over-counts rows whose weight is ~0.  Scale-invariant; equals the row
+    count for constant weights and 1 when a single row carries all weight.
+    ``weights=None`` returns ``n`` (the unweighted row count) unchanged.
+    """
+    if weights is None:
+        if n is None:
+            raise ValueError("effective_sample_size: pass n when weights is None.")
+        return n
+    w = weights.reshape(-1)
+    w = w.to(accum_dtype(w.device))
+    return (w.sum().pow(2) / w.pow(2).sum().clamp_min(_MIN_TOTAL_WEIGHT ** 2))
 
 
 def weighted_quantile(
@@ -158,16 +204,33 @@ def weighted_quantile(
     statistics.  The replicated, sorted column has ``M = sum(w)`` entries and
     entry ``j`` is the first sorted row whose cumulative weight exceeds ``j``;
     the quantile sits at position ``q * (M - 1)`` of that column and is
-    interpolated between its two neighbouring entries.  Non-integer weights
-    generalise naturally (``M`` is then real) and a zero weight drops the row
-    exactly.  Accumulated in float64.
+    interpolated between its two neighbouring entries.  A zero weight drops
+    the row exactly.  Accumulated in float64.
+
+    Non-integer weights are first rescaled to sum to the effective sample
+    size ``n_eff = (sum w)^2 / sum w^2``.  Using their raw sum as ``M`` made
+    the quantile depend on the weights' scale: normalised weights (sum 1)
+    put every quantile at position ``q * 0`` — the minimum — which flattened
+    binning thresholds and collapsed IQR-based bandwidths.  After rescaling,
+    constant weights reproduce the unweighted ``torch.quantile`` exactly and
+    any rescaling of the weights gives the same answer.
     """
     acc = accum_dtype(t.device)
     q = torch.as_tensor(q, device=t.device, dtype=acc).reshape(-1)
     if weights is None:
         return torch.quantile(t, q.to(t.dtype), dim=0)
     td = t.to(acc)
-    w = weights.reshape(-1).to(device=t.device, dtype=acc)
+    w = to_device_dtype(weights.reshape(-1), t.device, acc)
+    if not bool((w == w.round()).all()):
+        # Reliability weights: only relative sizes matter (see docstring).
+        w = w * (effective_sample_size(w) / w.sum().clamp_min(_MIN_TOTAL_WEIGHT))
+        # Rescaled constant weights come out as 1 +- a few ulp, and the
+        # cumulative sum of those crosses an integer boundary one row early
+        # (N=1000, w=1/N gave the 99th instead of the 100th order statistic).
+        # Snap values within rounding noise of an integer back onto it.
+        r = w.round()
+        tol = 1e3 * torch.finfo(acc).eps * r.abs().clamp_min(1.0)
+        w = torch.where((w - r).abs() <= tol, r, w)
     order = td.argsort(dim=0)                                  # [N, D]
     xs = torch.gather(td, 0, order)                            # sorted per column
     cum = w[order].cumsum(0)                                   # [N, D]

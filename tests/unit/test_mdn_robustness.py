@@ -288,7 +288,9 @@ def test_mdn_log_scale_output_clamp_issue_95() -> None:
     finally:
         mdn._pa_clamp = saved_pa_clamp
 
-    max_allowed = math.exp(mdn._log_scale_clamp)
+    # The clamp acts in standardised child units (_x_std, review finding
+    # A10), so the raw-unit bound is exp(clamp) child standard deviations.
+    max_allowed = math.exp(mdn._log_scale_clamp) * float(mdn._x_std.max())
     assert scale.max().item() <= max_allowed + 1e-4, (
         f"scale.max()={scale.max().item():.4f} > exp(7)≈{max_allowed:.4f}; "
         "output clamp not effective"
@@ -296,6 +298,7 @@ def test_mdn_log_scale_output_clamp_issue_95() -> None:
     assert torch.isfinite(scale).all(), "scale has Inf/NaN after output clamp"
 
 
+@pytest.mark.slow
 def test_make_synthetic_bn_continuous_nongauss_n5000_seed0_runs() -> None:
     """Regression test for the exact paper-config failure case.
 

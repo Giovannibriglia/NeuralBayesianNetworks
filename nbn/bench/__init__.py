@@ -47,7 +47,6 @@ from nbn.bench.metrics import (
 )
 from nbn.bench.synthetic import (
     SyntheticBN,
-    generate_synthetic_hybrid,
     make_synthetic_bn,
 )
 
@@ -74,7 +73,6 @@ __all__ = [
     # Synthetic generator
     "make_synthetic_bn",
     "SyntheticBN",
-    "generate_synthetic_hybrid",
     # Plugin contract types
     "BenchmarkDomain", "BenchmarkProblem", "GroundTruth", "Query",
     # Metrics

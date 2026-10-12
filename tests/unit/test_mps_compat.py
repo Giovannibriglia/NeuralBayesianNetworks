@@ -80,35 +80,6 @@ def test_accelerator_summary_names_a_backend():
     assert "accelerator" in text and "platform" in text
 
 
-def test_resolve_device_auto_prefers_mps_over_cpu(monkeypatch):
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
-    assert dev.resolve_device("auto").type == "mps"
-    assert dev.mps_available()
-    # The benchmark adapters follow the same preference order.
-    assert bench_resolve_device("auto") == "mps"
-    assert bench_resolve_device(None) == "mps"
-    assert bench_resolve_device("cpu") == "cpu"      # explicit wins
-
-
-def test_resolve_device_auto_prefers_cuda_over_mps(monkeypatch):
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
-    assert dev.resolve_device("auto").type == "cuda"
-    assert bench_resolve_device("auto") == "cuda"
-
-
-@pytest.mark.parametrize("cuda,mps,want", [
-    (True, True, "cuda"),
-    (False, True, "mps"),     # Apple Silicon: GPU-only baselines land on Metal
-    (False, False, "cuda"),   # no accelerator: fail into an error row, never cpu
-])
-def test_bench_gpu_spec_resolves_to_an_accelerator(monkeypatch, cuda, mps, want):
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
-    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: mps)
-    assert bench_resolve_device("gpu") == want
-
-
 @pytest.mark.parametrize("spec,want", [(None, "cpu"), ("auto", "cpu"), ("mps", "mps")])
 def test_pyro_auto_skips_mps(monkeypatch, spec, want):
     """pyro's launch-bound sampler times out on mps; auto keeps it on cpu."""

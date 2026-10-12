@@ -54,6 +54,7 @@ from torch import nn
 from torch.func import functional_call, grad, vmap
 
 from nbn.utils.batching import assume_finite_parents
+from nbn.utils.device import to_device_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +87,10 @@ def _flatten(tensors: List[torch.Tensor]) -> torch.Tensor:
     return torch.cat([t.reshape(-1) for t in tensors])
 
 
-def _estimate_fisher(mech, x, parents, *, fisher_batch_size: int, sample_cap: int):
+def _estimate_fisher(
+    mech, x, parents, *, fisher_batch_size: int, sample_cap: int,
+    weights: torch.Tensor | None = None,
+):
     """Diagonal empirical Fisher per trainable parameter.
 
     At the default ``fisher_batch_size = 1`` this is the exact per-sample
@@ -95,10 +99,30 @@ def _estimate_fisher(mech, x, parents, *, fisher_batch_size: int, sample_cap: in
     ``(params, fisher)`` where ``fisher[i]`` has the shape of ``params[i]``.
     Runs in eval mode (restores the prior mode) and under ``enable_grad`` so it
     works even if called inside a ``no_grad`` context.
+
+    ``weights`` (per-row multiplicities, as in ``fit(weights=)``) make it the
+    weighted mean ``sum w_i g_i^2 / sum w_i`` — with integer weights exactly
+    the Fisher of the replicated data.  When rows must be subsampled
+    (``n > sample_cap``) or gradients are batched, rows are instead resampled
+    with probability proportional to their weight, which is unbiased for the
+    same quantity.
     """
     params = _trainable_params(mech)
     n = int(x.shape[0])
     device = x.device
+    bs = max(int(fisher_batch_size), 1)
+    w = None
+    if weights is not None:
+        w = weights.reshape(-1).detach()
+        if n > sample_cap or bs > 1:
+            m = min(n, sample_cap)
+            idx = _resample_by_weight(w, m).to(device)
+            x = x.index_select(0, idx)
+            if parents is not None:
+                parents = parents.index_select(0, idx)
+            n, w = m, None
+        else:
+            w = to_device_dtype(w, device, params[0].dtype if params else torch.float32)
     if n > sample_cap:
         idx = torch.randperm(n, device=device)[:sample_cap]
         x = x.index_select(0, idx)
@@ -106,10 +130,9 @@ def _estimate_fisher(mech, x, parents, *, fisher_batch_size: int, sample_cap: in
             parents = parents.index_select(0, idx)
         n = sample_cap
 
-    bs = max(int(fisher_batch_size), 1)
     if bs == 1:
         try:
-            return params, _per_sample_fisher_vmap(mech, x, parents)
+            return params, _per_sample_fisher_vmap(mech, x, parents, w)
         except Exception as exc:  # a log_prob vmap cannot trace -> exact loop
             logger.debug(
                 "%s: vectorised Fisher unavailable (%s: %s); using the "
@@ -128,15 +151,31 @@ def _estimate_fisher(mech, x, parents, *, fisher_batch_size: int, sample_cap: in
             grads = torch.autograd.grad(
                 nll, params, retain_graph=False, allow_unused=True
             )
+            wi = 1.0 if w is None else w[i]      # w is only set when bs == 1
             for f, g in zip(fisher, grads):
                 if g is not None:  # allow_unused: a param not on the path → skip
-                    f.add_(g.detach().pow(2))
+                    f.add_(g.detach().pow(2) * wi)
             num_batches += 1
     if was_training:
         mech.train()
 
-    inv = 1.0 / max(num_batches, 1)
+    total = float(num_batches) if w is None else float(w.sum())
+    inv = 1.0 / max(total, 1e-12)
     return params, [f * inv for f in fisher]
+
+
+def _resample_by_weight(w: torch.Tensor, m: int) -> torch.Tensor:
+    """``m`` row indices drawn with replacement, P(row i) proportional to w_i.
+
+    Inverse-CDF sampling (``searchsorted`` on the cumulative weights) rather
+    than ``torch.multinomial``, which refuses more than 2**24 categories — a
+    weighted fit on >16.7M rows crashed here.  Runs on the CPU in float64 with
+    the global generator: identical on every backend and seed-reproducible.
+    A zero-weight row has an empty CDF interval and is never drawn.
+    """
+    cdf = w.detach().reshape(-1).cpu().to(torch.float64).cumsum(0)
+    u = torch.rand(m, dtype=torch.float64) * cdf[-1]
+    return torch.searchsorted(cdf, u, right=True).clamp_max(cdf.numel() - 1)
 
 
 class _LogProb(nn.Module):
@@ -150,7 +189,7 @@ class _LogProb(nn.Module):
         return self.mech.log_prob(x, parents)
 
 
-def _per_sample_fisher_vmap(mech, x, parents) -> List[torch.Tensor]:
+def _per_sample_fisher_vmap(mech, x, parents, weights=None) -> List[torch.Tensor]:
     """Exact per-sample empirical Fisher in one chunked ``vmap`` pass.
 
     Same estimator as the ``fisher_batch_size = 1`` loop: the mean over rows
@@ -169,6 +208,7 @@ def _per_sample_fisher_vmap(mech, x, parents) -> List[torch.Tensor]:
         cpu_mech = copy.deepcopy(mech).to("cpu")
         fisher = _per_sample_fisher_vmap(
             cpu_mech, x.cpu(), None if parents is None else parents.cpu(),
+            None if weights is None else weights.cpu(),
         )
         return [f.to(x.device) for f in fisher]
     if parents is not None:
@@ -200,7 +240,14 @@ def _per_sample_fisher_vmap(mech, x, parents) -> List[torch.Tensor]:
         torch.distributions.Distribution.set_default_validate_args(was_validating)
         if was_training:
             mech.train()
-    return [per_sample[k].pow(2).mean(0) for k in names]
+    if weights is None:
+        return [per_sample[k].pow(2).mean(0) for k in names]
+    w = weights.to(per_sample[names[0]].dtype) if names else weights
+    tot = w.sum().clamp_min(1e-12)
+    return [
+        (per_sample[k].pow(2) * w.reshape(-1, *[1] * (per_sample[k].dim() - 1))).sum(0) / tot
+        for k in names
+    ]
 
 
 def _store(mech, mu: torch.Tensor, fisher: torch.Tensor) -> None:
@@ -219,14 +266,18 @@ def consolidate(
     *,
     fisher_batch_size: int = 1,
     sample_cap: int = 4096,
+    weights: torch.Tensor | None = None,
 ) -> None:
     """Snapshot ``theta*`` and the diagonal Fisher ``F`` after a fit.
 
     Call at the end of ``fit_local`` (data still in hand).  Mechanism-agnostic:
     works for root and non-root via ``parameters()`` + ``log_prob`` only.
+    Pass the fit's ``weights`` so the Fisher describes the same weighted
+    data the parameters were fitted to.
     """
     params, fisher = _estimate_fisher(
-        mech, x, parents, fisher_batch_size=fisher_batch_size, sample_cap=sample_cap
+        mech, x, parents, fisher_batch_size=fisher_batch_size,
+        sample_cap=sample_cap, weights=weights,
     )
     mu = _flatten([p.detach() for p in params])
     fish = _flatten(fisher)

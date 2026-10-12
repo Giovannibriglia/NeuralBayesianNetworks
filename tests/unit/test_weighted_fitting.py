@@ -100,8 +100,16 @@ def test_validate_weights_rejects_unusable_input(bad, match):
 
 
 # ==========================================================================
-# Closed-form families: parameter equality
+# Replication equivalence, zero weights, unit weights -- per family
 # ==========================================================================
+# Closed-form families (and the KDE / FlexCode-root estimators) are compared on
+# their fitted parameters; gradient-trained families on their full-batch
+# gradients (see the module docstring).  A root FlexCode node's coefficients
+# are the closed form beta_j = E[phi_j(Z)]: that branch once computed
+# ``targets.mean(0)`` and dropped the validated weights, so
+# ``supports_weights = True`` was false for exactly this node type -- the fit
+# converged, to the unweighted estimator, silently.  It is pinned here with
+# the other estimators for that reason.
 
 
 def _lg_data(n=60, seed=0):
@@ -111,53 +119,126 @@ def _lg_data(n=60, seed=0):
     return x, pa, torch.randint(0, 4, (n,)).float()
 
 
-def test_linear_gaussian_replication_equivalence():
+def _assert_attrs_close(a, b, names, atol):
+    for name in names:
+        got, want = getattr(a, name), getattr(b, name)
+        got, want = (got() if callable(got) else got), (want() if callable(want) else want)
+        torch.testing.assert_close(got, want, atol=atol, rtol=0, msg=name)
+
+
+def _case_lg():
     x, pa, w = _lg_data()
-    idx = _replicate(w)
-    weighted = LinearGaussianMechanism()
-    weighted.fit_local(x, pa, weights=w)
-    replicated = LinearGaussianMechanism()
-    replicated.fit_local(x[idx], pa[idx])
-
-    torch.testing.assert_close(
-        weighted._weight, replicated._weight, atol=1e-5, rtol=0,
-    )
-    torch.testing.assert_close(weighted._bias, replicated._bias, atol=1e-5, rtol=0)
-    torch.testing.assert_close(
-        weighted._scale(), replicated._scale(), atol=1e-5, rtol=0,
-    )
+    return x, pa, w, LinearGaussianMechanism, {}
 
 
-def test_linear_gaussian_root_replication_equivalence():
+def _case_lg_root():
     x, _, w = _lg_data()
-    idx = _replicate(w)
-    weighted = LinearGaussianMechanism()
-    weighted.fit_local(x, None, weights=w)
-    replicated = LinearGaussianMechanism()
-    replicated.fit_local(x[idx], None)
-    torch.testing.assert_close(weighted._bias, replicated._bias, atol=1e-5, rtol=0)
-    torch.testing.assert_close(
-        weighted._scale(), replicated._scale(), atol=1e-5, rtol=0,
-    )
+    return x, None, w, LinearGaussianMechanism, {}
 
 
-def test_categorical_replication_equivalence():
+def _case_categorical():
     torch.manual_seed(0)
     pa = torch.randint(0, 3, (200, 1))
     x = torch.randint(0, 2, (200,))
     w = torch.randint(0, 4, (200,)).float()
+    return x, pa, w, CategoricalTableMechanism, {"parent_cards": [3], "n_classes": 2}
+
+
+def _case_kde():
+    torch.manual_seed(0)
+    pa = torch.randn(80, 2)
+    y = 0.7 * pa[:, :1] + 0.1 * torch.randn(80, 1)
+    w = torch.randint(1, 4, (80,)).float()
+    return y, pa, w, lambda: ConditionalKDEMechanism(bw_factor=0.5), {}
+
+
+def _case_flexcode_root():
+    torch.manual_seed(0)
+    x = torch.randn(60, 1)
+    w = torch.randint(1, 4, (60,)).float()
+    return x, None, w, lambda: FlexCodeMechanism(n_basis=7), {}
+
+
+def _cmp_lg(a, b, atol=1e-5):
+    _assert_attrs_close(a, b, ("_weight", "_bias", "_scale"), atol)
+
+
+def _cmp_lg_root(a, b, atol=1e-5):
+    _assert_attrs_close(a, b, ("_bias", "_scale"), atol)
+
+
+def _cmp_categorical(a, b, atol=1e-6):
+    torch.testing.assert_close(a.cpt, b.cpt, atol=atol, rtol=0)
+
+
+def _cmp_kde(a, b, atol=1e-5):
+    """The bandwidths (child and parent), the standardisation and the density."""
+    _assert_attrs_close(a, b, ("_b", "_h", "_pa_mean", "_pa_std"), atol)
+    qpa, qy = torch.randn(32, 2), torch.randn(32, 1)
+    torch.testing.assert_close(a.log_prob(qy, qpa), b.log_prob(qy, qpa), atol=1e-4, rtol=0)
+
+
+def _cmp_flexcode_root(a, b, atol=1e-5):
+    # The basis lives in the z-space fixed by (_y_min, _y_max); replicated
+    # rows have the same range, so the coefficients are directly comparable.
+    torch.testing.assert_close(a._y_min, b._y_min)
+    torch.testing.assert_close(a._y_max, b._y_max)
+    torch.testing.assert_close(a._root_coef, b._root_coef, atol=atol, rtol=0)
+
+
+_CLOSED_FORM = {
+    "linear_gaussian": (_case_lg, _cmp_lg),
+    "linear_gaussian_root": (_case_lg_root, _cmp_lg_root),
+    "categorical": (_case_categorical, _cmp_categorical),
+    "kde": (_case_kde, _cmp_kde),
+    "flexcode_root": (_case_flexcode_root, _cmp_flexcode_root),
+}
+
+
+@pytest.mark.parametrize("family", sorted(_CLOSED_FORM))
+def test_replication_equivalence_closed_form(family):
+    """Integer weights == fitting on the rows repeated that many times."""
+    case, compare = _CLOSED_FORM[family]
+    x, pa, w, factory, kw = case()
     idx = _replicate(w)
+    weighted = factory()
+    weighted.fit_local(x, pa, weights=w, **kw)
+    replicated = factory()
+    replicated.fit_local(x[idx], None if pa is None else pa[idx], **kw)
+    compare(weighted, replicated)
 
-    weighted = CategoricalTableMechanism()
-    weighted.fit_local(x, pa, weights=w, parent_cards=[3], n_classes=2)
-    replicated = CategoricalTableMechanism()
-    replicated.fit_local(x[idx], pa[idx], parent_cards=[3], n_classes=2)
-    torch.testing.assert_close(weighted.cpt, replicated.cpt, atol=1e-6, rtol=0)
+
+#: family -> (tolerance, exact?) for weights = ones vs weights = None.
+#: LinearGaussian is deliberately not bitwise: the weighted path hands LAPACK
+#: a freshly built sqrt(w)-scaled design matrix, and whether ``lstsq`` returns
+#: bit-identical coefficients depends on the BLAS thread count (identical
+#: single-threaded, ~1e-7 apart at 14 threads) -- a claim about scheduling,
+#: not weighting.  The categorical integer-count path scatter-adds the same
+#: float64 ones into the same bins and *is* exact.
+_UNIT_WEIGHT_TOL = {
+    "linear_gaussian": 1e-6,
+    "categorical": 0.0,
+    "kde": 1e-6,
+    "flexcode_root": 1e-6,
+}
 
 
-# ==========================================================================
-# Gradient-trained families: full-batch gradient equality
-# ==========================================================================
+@pytest.mark.parametrize("family", sorted(_UNIT_WEIGHT_TOL))
+def test_unit_weights_reproduce_the_unweighted_fit(family):
+    """The unweighted default must stay what it was."""
+    case, compare = _CLOSED_FORM[family]
+    x, pa, _, factory, kw = case()
+    ones = factory()
+    ones.fit_local(x, pa, weights=torch.ones(x.shape[0]), **kw)
+    plain = factory()
+    plain.fit_local(x, pa, **kw)
+    tol = _UNIT_WEIGHT_TOL[family]
+    if tol == 0.0:
+        assert torch.equal(ones.cpt, plain.cpt)
+    elif family == "kde":
+        _assert_attrs_close(plain, ones, ("_b", "_h", "_pa_mean", "_pa_std"), tol)
+    else:
+        compare(plain, ones, atol=tol)
 
 
 def _full_batch_grads(factory, x, parents, weights, seed=7):
@@ -177,89 +258,82 @@ def _max_abs_diff(a, b):
     return max(float((a[k] - b[k]).abs().max()) for k in a)
 
 
-def test_mdn_weighted_gradient_equals_replicated_gradient():
+def _grad_case_mdn():
     torch.manual_seed(0)
-    n = 40
-    pa = torch.randn(n, 2)
-    x = pa @ torch.tensor([[1.0], [-0.5]]) + 0.2 * torch.randn(n, 1)
-    w = torch.randint(1, 4, (n,)).float()
-    idx = _replicate(w)
-
-    def factory():
-        return MDNMechanism(num_components=3, hidden=(8,))
-
-    assert _max_abs_diff(
-        _full_batch_grads(factory, x, pa, w),
-        _full_batch_grads(factory, x[idx], pa[idx], None),
-    ) < 1e-6
+    pa = torch.randn(40, 2)
+    x = pa @ torch.tensor([[1.0], [-0.5]]) + 0.2 * torch.randn(40, 1)
+    return x, pa, torch.randint(1, 4, (40,)).float(), \
+        lambda: MDNMechanism(num_components=3, hidden=(8,)), 1e-6
 
 
-def test_neural_categorical_weighted_gradient_equals_replicated_gradient():
+def _grad_case_neural_categorical():
     torch.manual_seed(0)
-    n = 40
-    pa = torch.randn(n, 2)
-    x = torch.randint(0, 3, (n,))
-    w = torch.randint(1, 4, (n,)).float()
-    idx = _replicate(w)
-
-    def factory():
-        return NeuralCategoricalMechanism(n_classes=3, hidden=(8,))
-
-    assert _max_abs_diff(
-        _full_batch_grads(factory, x, pa, w),
-        _full_batch_grads(factory, x[idx], pa[idx], None),
-    ) < 1e-6
+    pa = torch.randn(40, 2)
+    x = torch.randint(0, 3, (40,))
+    return x, pa, torch.randint(1, 4, (40,)).float(), \
+        lambda: NeuralCategoricalMechanism(n_classes=3, hidden=(8,)), 1e-6
 
 
-def test_flow_weighted_gradient_equals_replicated_gradient():
+def _grad_case_flow():
     pytest.importorskip("zuko")
     from nbn.mechanisms.parametric.normalizing_flow import NormalizingFlowMechanism
 
     torch.manual_seed(0)
-    n = 24
-    x = torch.randn(n, 1)
-    w = torch.randint(1, 3, (n,)).float()
+    x = torch.randn(24, 1)
+    return x, None, torch.randint(1, 3, (24,)).float(), \
+        lambda: NormalizingFlowMechanism(num_transforms=1, hidden=(8,)), 1e-5
+
+
+_GRADIENT = {
+    "mdn": _grad_case_mdn,
+    "neural_categorical": _grad_case_neural_categorical,
+    "flow": _grad_case_flow,
+}
+
+
+@pytest.mark.parametrize("family", sorted(_GRADIENT))
+def test_replication_equivalence_of_the_full_batch_gradient(family):
+    x, pa, w, factory, tol = _GRADIENT[family]()
     idx = _replicate(w)
-
-    def factory():
-        return NormalizingFlowMechanism(num_transforms=1, hidden=(8,))
-
     assert _max_abs_diff(
-        _full_batch_grads(factory, x, None, w),
-        _full_batch_grads(factory, x[idx], None, None),
-    ) < 1e-5
+        _full_batch_grads(factory, x, pa, w),
+        _full_batch_grads(factory, x[idx], None if pa is None else pa[idx], None),
+    ) < tol
 
 
-# ==========================================================================
-# Zero weights are absence, not smallness
-# ==========================================================================
+# Zero weights are absence, not smallness: "down-weighted to almost nothing"
+# and "absent" are different claims, and only the second is the contract.
 
 
-def test_zero_weighted_rows_do_not_influence_linear_gaussian():
+def _zero_case_lg():
     x, pa, w = _lg_data()
     w = w.clone()
     w[:30] = 0.0
-    withzeros = LinearGaussianMechanism()
-    withzeros.fit_local(x, pa, weights=w)
-    dropped = LinearGaussianMechanism()
-    dropped.fit_local(x[30:], pa[30:], weights=w[30:])
-    torch.testing.assert_close(
-        withzeros._weight, dropped._weight, atol=1e-5, rtol=0,
-    )
-    torch.testing.assert_close(withzeros._bias, dropped._bias, atol=1e-5, rtol=0)
+    keep = slice(30, None)
+    return x, pa, w, keep, LinearGaussianMechanism, {}, \
+        lambda a, b: _assert_attrs_close(a, b, ("_weight", "_bias"), 1e-5)
 
 
-def test_zero_weighted_rows_do_not_influence_categorical():
+def _zero_case_categorical():
     torch.manual_seed(0)
     pa = torch.randint(0, 3, (120, 1))
     x = torch.randint(0, 2, (120,))
     w = torch.ones(120)
     w[:60] = 0.0
-    withzeros = CategoricalTableMechanism()
-    withzeros.fit_local(x, pa, weights=w, parent_cards=[3], n_classes=2)
-    dropped = CategoricalTableMechanism()
-    dropped.fit_local(x[60:], pa[60:], parent_cards=[3], n_classes=2)
-    torch.testing.assert_close(withzeros.cpt, dropped.cpt, atol=1e-6, rtol=0)
+    return x, pa, w, slice(60, None), CategoricalTableMechanism, \
+        {"parent_cards": [3], "n_classes": 2}, _cmp_categorical
+
+
+@pytest.mark.parametrize("family", ["linear_gaussian", "categorical"])
+def test_zero_weighted_rows_are_dropped_closed_form(family):
+    x, pa, w, keep, factory, kw, compare = {
+        "linear_gaussian": _zero_case_lg, "categorical": _zero_case_categorical,
+    }[family]()
+    withzeros = factory()
+    withzeros.fit_local(x, pa, weights=w, **kw)
+    dropped = factory()
+    dropped.fit_local(x[keep], pa[keep], weights=w[keep], **kw)
+    compare(withzeros, dropped)
 
 
 def test_zero_weighted_rows_do_not_influence_mdn_gradients():
@@ -277,45 +351,6 @@ def test_zero_weighted_rows_do_not_influence_mdn_gradients():
         _full_batch_grads(factory, x, pa, w),
         _full_batch_grads(factory, x[15:], pa[15:], None),
     ) < 1e-6
-
-
-# ==========================================================================
-# The unweighted default must stay byte-identical
-# ==========================================================================
-
-
-def test_unit_weights_reproduce_the_unweighted_linear_gaussian():
-    """To numerical precision, deliberately — not bitwise.
-
-    The weighted path multiplies the design matrix by ``sqrt(w)``, which is a
-    no-op numerically at ``w = 1`` but still hands LAPACK a freshly-built
-    tensor.  Whether ``lstsq`` then returns bit-identical coefficients depends
-    on the thread count (identical single-threaded, ~1e-7 apart at 14
-    threads), and the thread count now varies with how the suite is invoked.
-    Asserting bitwise equality here is therefore a claim about BLAS
-    scheduling, not about the weighting; the tolerance below is the real
-    contract.  The integer-count path in the next test *is* exact, and is
-    asserted as such.
-    """
-    x, pa, _ = _lg_data()
-    a = LinearGaussianMechanism()
-    a.fit_local(x, pa, weights=torch.ones(x.shape[0]))
-    b = LinearGaussianMechanism()
-    b.fit_local(x, pa)
-    torch.testing.assert_close(a._weight, b._weight, atol=1e-6, rtol=0)
-    torch.testing.assert_close(a._bias, b._bias, atol=1e-6, rtol=0)
-
-
-def test_unit_weights_reproduce_the_unweighted_categorical_exactly():
-    torch.manual_seed(0)
-    pa = torch.randint(0, 3, (150, 1))
-    x = torch.randint(0, 2, (150,))
-    a = CategoricalTableMechanism()
-    a.fit_local(x, pa, weights=torch.ones(150), parent_cards=[3], n_classes=2)
-    b = CategoricalTableMechanism()
-    b.fit_local(x, pa, parent_cards=[3], n_classes=2)
-    # Exact: both paths scatter-add the same float64 ones into the same bins.
-    assert torch.equal(a.cpt, b.cpt)
 
 
 # ==========================================================================
@@ -481,41 +516,6 @@ def test_weighted_quantile_unit_weights_reproduce_torch_quantile():
     torch.testing.assert_close(weighted_quantile(x, q, None), torch.quantile(x, q, dim=0))
 
 
-def test_kde_replication_equivalence():
-    """Integer weights must equal fitting on the replicated rows: the
-    bandwidths (child and parent), the standardisation and the density."""
-    torch.manual_seed(0)
-    pa = torch.randn(80, 2)
-    y = 0.7 * pa[:, :1] + 0.1 * torch.randn(80, 1)
-    w = torch.randint(1, 4, (80,)).float()
-    idx = _replicate(w)
-
-    weighted = ConditionalKDEMechanism(bw_factor=0.5)
-    weighted.fit_local(y, pa, weights=w)
-    replicated = ConditionalKDEMechanism(bw_factor=0.5)
-    replicated.fit_local(y[idx], pa[idx])
-
-    for name in ("_b", "_h", "_pa_mean", "_pa_std"):
-        torch.testing.assert_close(getattr(weighted, name), getattr(replicated, name),
-                                   atol=1e-5, rtol=0, msg=name)
-    qpa, qy = torch.randn(32, 2), torch.randn(32, 1)
-    torch.testing.assert_close(weighted.log_prob(qy, qpa), replicated.log_prob(qy, qpa),
-                               atol=1e-4, rtol=0)
-
-
-def test_kde_unit_weights_reproduce_the_unweighted_fit_exactly():
-    torch.manual_seed(0)
-    pa = torch.randn(60, 2)
-    y = torch.randn(60, 1)
-    plain = ConditionalKDEMechanism(bw_factor=0.5)
-    plain.fit_local(y, pa)
-    ones = ConditionalKDEMechanism(bw_factor=0.5)
-    ones.fit_local(y, pa, weights=torch.ones(60))
-    for name in ("_b", "_h", "_pa_mean", "_pa_std"):
-        torch.testing.assert_close(getattr(plain, name), getattr(ones, name),
-                                   atol=1e-6, rtol=0, msg=name)
-
-
 def test_kde_zero_weighted_points_leave_the_mixture():
     """log w = -inf removes the point from both logsumexps exactly."""
     torch.manual_seed(0)
@@ -542,52 +542,8 @@ def test_kde_weighting_shifts_density_toward_weighted_points():
 
 
 # ==========================================================================
-# FlexCode -- the root branch's closed-form coefficients
+# FlexCode -- root branch: zero weights
 # ==========================================================================
-# A root FlexCode node's coefficients are the closed form beta_j = E[phi_j(Z)].
-# That branch computed ``targets.mean(0)`` and dropped the validated weight
-# vector, so ``supports_weights = True`` was false for exactly this node type:
-# the fit converged, to the unweighted estimator.  Nothing raised and nothing
-# in the output said so -- the same silent-wrong-answer class as a
-# desynchronised weight vector, which is why it is pinned here rather than
-# left to the warm-start suite.
-
-
-def test_flexcode_root_replication_equivalence():
-    """Integer weights must equal fitting on the replicated rows."""
-    torch.manual_seed(0)
-    x = torch.randn(60, 1)
-    w = torch.randint(1, 4, (60,)).float()
-    idx = _replicate(w)
-
-    weighted = FlexCodeMechanism(n_basis=7)
-    weighted.fit_local(x, None, weights=w)
-    replicated = FlexCodeMechanism(n_basis=7)
-    replicated.fit_local(x[idx], None)
-
-    # The basis is evaluated in the z-space fixed by (_y_min, _y_max); the
-    # replicated data has the same min/max, so the two z-spaces coincide and
-    # the coefficients are directly comparable.
-    torch.testing.assert_close(weighted._y_min, replicated._y_min)
-    torch.testing.assert_close(weighted._y_max, replicated._y_max)
-    torch.testing.assert_close(
-        weighted._root_coef, replicated._root_coef, atol=1e-5, rtol=0,
-    )
-
-
-def test_flexcode_root_unit_weights_reproduce_the_unweighted_fit_exactly():
-    """weights=None and an all-ones vector must not merely agree -- be equal."""
-    torch.manual_seed(1)
-    x = torch.randn(50, 1)
-
-    unweighted = FlexCodeMechanism(n_basis=7)
-    unweighted.fit_local(x, None)
-    ones = FlexCodeMechanism(n_basis=7)
-    ones.fit_local(x, None, weights=torch.ones(50))
-
-    torch.testing.assert_close(
-        unweighted._root_coef, ones._root_coef, atol=1e-6, rtol=0,
-    )
 
 
 def test_flexcode_root_zero_weighted_rows_leave_the_estimate():
@@ -624,3 +580,67 @@ def test_flexcode_root_zero_weighted_rows_leave_the_estimate():
     assert not torch.allclose(
         masked._root_coef, pooled._root_coef, atol=1e-3,
     )
+
+
+# ==========================================================================
+# Model level, method="joint"
+# ==========================================================================
+# The joint loop owns its own permutation and gathers the weights with the
+# batch's indices ("or they desynchronise", nbn/learning/fit.py).  Pinned two
+# ways: full-batch replication equivalence, and zero-weight rows staying inert
+# under mini-batches, where a desynchronised gather would hand their weight
+# to other rows.
+
+
+def _joint_model(data, seed=0):
+    torch.manual_seed(seed)
+    m = NBN([("A", "B")], variables={"A": ("continuous", 1), "B": ("continuous", 1)},
+            device="cpu")
+    m.set_mechanism("A", LinearGaussianMechanism())
+    m.set_mechanism("B", LinearGaussianMechanism())
+    m.fit(data)                          # local fit: builds the parameters
+    return m
+
+
+def _ab(n=60, seed=0):
+    g = torch.Generator().manual_seed(seed)
+    a = torch.randn(n, 1, generator=g)
+    return {"A": a, "B": 2.0 * a + 0.5 + 0.3 * torch.randn(n, 1, generator=g)}
+
+
+@pytest.mark.filterwarnings("ignore:method='joint' refined nodes:UserWarning")
+def test_joint_fit_with_weights_matches_replicated_data():
+    data = _ab()
+    w = torch.randint(1, 4, (60,)).float()
+    idx = _replicate(w)
+    init = {k: v[:20] for k, v in data.items()}       # same start for both
+
+    weighted = _joint_model(init)
+    weighted.fit(data, method="joint", weights=w, epochs=3, batch_size=10**6, lr=1e-2)
+    replicated = _joint_model(init)
+    replicated.fit({k: v[idx] for k, v in data.items()}, method="joint",
+                   epochs=3, batch_size=10**6, lr=1e-2)
+
+    for (k, p), (_, q) in zip(weighted.named_parameters(), replicated.named_parameters()):
+        torch.testing.assert_close(p, q, atol=1e-5, rtol=0, msg=k)
+    unweighted = _joint_model(init)
+    unweighted.fit(data, method="joint", epochs=3, batch_size=10**6, lr=1e-2)
+    assert any(not torch.allclose(p, q, atol=1e-4) for p, q in
+               zip(weighted.parameters(), unweighted.parameters())), "weights did not bite"
+
+
+@pytest.mark.filterwarnings("ignore:method='joint' refined nodes:UserWarning")
+def test_joint_minibatch_fit_ignores_zero_weighted_outliers():
+    clean = _ab(n=64)
+    outliers = {"A": torch.zeros(64, 1), "B": torch.full((64, 1), 100.0)}
+    data = {k: torch.cat([clean[k], outliers[k]]) for k in clean}
+    w = torch.cat([torch.ones(64), torch.zeros(64)])
+
+    def _bias_after(weights):
+        m = _joint_model(clean)
+        m.fit(data, method="joint", weights=weights, epochs=20, batch_size=16, lr=1e-2)
+        return float(m.mechanisms["B"]._bias.detach().reshape(-1)[0])
+
+    start = float(_joint_model(clean).mechanisms["B"]._bias.detach().reshape(-1)[0])
+    assert abs(_bias_after(w) - start) < 0.05          # outliers inert
+    assert abs(_bias_after(None) - start) > 0.05       # ...and they would bite

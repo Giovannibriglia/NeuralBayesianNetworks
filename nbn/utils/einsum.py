@@ -8,8 +8,18 @@ def log_einsum_exp(equation: str, *operands: torch.Tensor) -> torch.Tensor:
     """Numerically stable log-domain einsum.
 
     Equivalent to ``torch.log(einsum(torch.exp(operands)))`` but avoids
-    underflow/overflow by subtracting per-operand maximum values before
+    overflow and most underflow by subtracting each operand's maximum before
     exponentiation.
+
+    Limits
+    ------
+    * An operand that is entirely ``-inf`` (an impossible configuration) has
+      no finite maximum; its shift is taken as 0 so the result is an exact
+      ``-inf`` rather than ``NaN`` (``-inf - (-inf)``).
+    * The shift is per *operand*, not per output cell, so a product of terms
+      that are each far below their operand's maximum can still underflow
+      after exponentiation.  Such cells come back as ``-inf`` — never as a
+      finite floor, which would be a confidently wrong number.
 
     Parameters
     ----------
@@ -23,12 +33,13 @@ def log_einsum_exp(equation: str, *operands: torch.Tensor) -> torch.Tensor:
     torch.Tensor
         Log of the einsum result.
     """
-    # Shift each operand by its max to prevent underflow.
-    shifts = [op.amax().detach() for op in operands]
-    shifted = [op - s for op, s in zip(operands, shifts)]
-    linear = [torch.exp(s) for s in shifted]
+    # Shift each operand by its max to prevent underflow; a non-finite max
+    # (all -inf, or +inf) would turn the shift itself into NaN, so use 0.
+    shifts = []
+    for op in operands:
+        m = op.amax().detach()
+        shifts.append(torch.where(torch.isfinite(m), m, torch.zeros_like(m)))
+    linear = [torch.exp(op - s) for op, s in zip(operands, shifts)]
     result = opt_einsum.contract(equation, *linear)
-    # Re-add all shifts as a scalar offset.
-    log_result = torch.log(result.clamp_min(1e-40))
-    total_shift = sum(shifts)
-    return log_result + total_shift
+    # No clamp: log(0) = -inf is the honest answer for an impossible cell.
+    return torch.log(result) + sum(shifts)

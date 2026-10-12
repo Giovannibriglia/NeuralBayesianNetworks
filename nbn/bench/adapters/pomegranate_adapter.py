@@ -2,17 +2,22 @@
 
 Stateful fit-then-query contract. Covers one inference label:
 
-  - pomegranate-discrete-ve
+  - pomegranate-discrete-lbp   (legacy result files: pomegranate-discrete-ve)
 
 Returns Posterior(probs=...) — the marginal or conditional probability
-vector for the target node, computed via pomegranate's predict_proba.
+vector for the target node, computed via pomegranate's predict_proba, which
+runs **loopy belief propagation** (sum-product on the factor graph, a fixed
+number of iterations): approximate on networks with undirected cycles. The
+label used to say "-ve" (variable elimination); it never was (D10).
 
 fit() builds per-node empirical (raw maximum-likelihood) CPTs from training
 data and passes them as pre-built distribution objects.  This avoids
-pomegranate's own optimiser path.  No smoothing is applied: a parent
-configuration never seen in training yields a zero (NaN-normalised) CPT row,
-i.e. the honest library-default behaviour with no adapter-side prior
-(v0.14 — adapter-side +1 Laplace removed for methodology fidelity).
+pomegranate's own optimiser path.  No smoothing is applied (v0.14 —
+adapter-side +1 Laplace removed for methodology fidelity), except that a
+parent configuration never seen in training gets a **uniform** row — the
+same convention as pgmpy MLE. It used to be ``0/0 = NaN``, which made
+predict_proba return NaN for every query touching that configuration
+(#218, #198).
 
 KEY BUG FIX PRESERVED (v0.5b / issue #31):
   row tensor must use dtype=torch.long before wrapping in
@@ -49,14 +54,14 @@ logger = logging.getLogger(__name__)
 class PomegranateAdapter:
     """Stateful pomegranate adapter implementing the v0.13 BaselineAdapter protocol.
 
-    Handles one inference label: pomegranate-discrete-ve.
+    Handles one inference label: pomegranate-discrete-lbp (loopy BP).
 
     Construction::
 
         adapter = PomegranateAdapter()
     """
 
-    name = "pomegranate-discrete-ve"
+    name = "pomegranate-discrete-lbp"
 
     # v0.14 (#148) §5.6: real library-batched query_batch override
     # (PR 3) — swept by the speed benchmark. See nbn_adapter for why
@@ -71,7 +76,16 @@ class PomegranateAdapter:
     # gate decides applicability.)
     supports_param_recovery: bool = True
 
-    def __init__(self, device: str | None = None, **kwargs: Any) -> None:
+    def __init__(self, device: str | None = None,
+                 inference_method: str | None = None, **kwargs: Any) -> None:
+        # Accepted engine spellings: "lbp" (what predict_proba runs), the
+        # legacy "ve" (pre-D10 configs; same engine, misnamed) and None
+        # (parameter learning). The label is fixed either way.
+        if inference_method not in (None, "lbp", "ve"):
+            raise ValueError(
+                f"PomegranateAdapter: unknown inference_method "
+                f"{inference_method!r}; pomegranate runs loopy BP ('lbp')."
+            )
         # None / "auto" -> cuda-if-available-else-cpu; concrete passes through.
         # pomegranate 1.x is torch-based: CPTs are built on CPU (counting is
         # cheap there) and the assembled BayesianNetwork is moved to
@@ -144,7 +158,8 @@ class PomegranateAdapter:
             if not parents:
                 counts = torch.zeros(k)
                 counts.scatter_add_(0, x, torch.ones_like(x, dtype=torch.float))
-                probs = counts / counts.sum()
+                probs = (counts / counts.sum() if counts.sum() > 0
+                         else torch.full((k,), 1.0 / k))
                 dist_objs.append(Categorical(self._table_dtype(probs.reshape(1, k))))
             else:
                 pa_cards = [self._cards[p] for p in parents]
@@ -167,7 +182,11 @@ class PomegranateAdapter:
                 cnt = torch.zeros(n_pa * k)
                 cnt.scatter_add_(0, flat, torch.ones_like(flat, dtype=torch.float))
                 cnt = cnt.reshape(n_pa, k)
-                probs = cnt / cnt.sum(-1, keepdim=True)
+                row = cnt.sum(-1, keepdim=True)
+                # Unseen parent configuration -> uniform row (pgmpy MLE
+                # convention), not 0/0 = NaN (#218).
+                probs = torch.where(row > 0, cnt / row.clamp_min(1.0),
+                                    torch.full_like(cnt, 1.0 / k))
                 # Reshape into pomegranate's [*pa_cards, K] layout
                 probs = self._table_dtype(probs.reshape(*pa_cards, k))
                 dist_objs.append(ConditionalCategorical([probs]))
@@ -180,6 +199,7 @@ class PomegranateAdapter:
             for parent, child in problem.dag
         ]
         self.model = BayesianNetwork(distributions=dist_objs, edges=edges_obj)
+        self._tab_src = None   # exact-check tables rebuilt from the new fit
         # Move the whole module (distributions + lazily-built factor graph) to
         # the resolved device. Build stays on CPU above; only the final model
         # is relocated. No-op for "cpu".
@@ -245,7 +265,46 @@ class PomegranateAdapter:
         # Back to CPU for downstream metric computation (consistent with the
         # other adapters, which return CPU posteriors).
         probs = result.float().detach().cpu()
-        return Posterior(probs=probs)
+        return Posterior(probs=probs, undefined_reason=self._undefined_reason(q, probs))
+
+    # -------------------------------------------------------------------------
+    # Zero-probability evidence (D10): tell an undefined posterior from a
+    # numerical failure
+    # -------------------------------------------------------------------------
+
+    def _tabular(self):
+        """The fitted CPTs as an exact_discrete.TabularSource (cached)."""
+        if getattr(self, "_tab_src", None) is None:
+            from nbn.bench.core.exact_discrete import TabularSource
+
+            parents = {n: tuple(p for p, c in self.problem.dag if c == n)
+                       for n in self._topo}
+
+            def table(n):
+                dist = self.model.distributions[self._node_to_idx[n]]
+                if not parents[n]:
+                    return dist.probs.detach().cpu().double().reshape(self._cards[n])
+                return dist.probs[0].detach().cpu().double()
+
+            self._tab_src = TabularSource(
+                lambda n: parents[n], lambda n: self._cards[n], table)
+        return self._tab_src
+
+    def _undefined_reason(self, q: Query, probs: torch.Tensor) -> str | None:
+        """``"P(e)=0 under the fitted CPTs (exact check)"`` when ``probs`` is
+        0/0 BECAUSE the evidence is impossible under the fitted model
+        (loopy BP returns NaN there); None for a finite posterior or when the
+        exact check finds P(e) > 0 / cannot decide (a numerical failure,
+        reported as an error)."""
+        if bool(torch.isfinite(probs).all()) and float(probs.sum()) > 0:
+            return None
+        from nbn.bench.core.exact_discrete import evidence_is_impossible
+
+        ev = {k: int(torch.as_tensor(v).reshape(-1)[0].item())
+              for k, v in q.evidence.items() if v is not None}
+        if evidence_is_impossible(self._tabular(), q.targets[0], ev):
+            return "P(evidence)=0 under the fitted CPTs, confirmed by exact elimination"
+        return None
 
     def query_batch(self, queries: list[Query]) -> list[Posterior]:
         """Library-level batching via pomegranate's row-batched
@@ -330,7 +389,9 @@ class PomegranateAdapter:
                 f"Unexpected predict_proba output for {self.name}: "
                 f"shape {tuple(probs.shape)}, expected [{b}, K]."
             )
-        return [Posterior(probs=probs[i]) for i in range(b)]
+        return [Posterior(probs=probs[i],
+                          undefined_reason=self._undefined_reason(queries[i], probs[i]))
+                for i in range(b)]
 
     # -------------------------------------------------------------------------
     # Applicability
@@ -376,13 +437,9 @@ class PomegranateAdapter:
         path, which re-estimates because pgmpy's ``bn.fit`` truncates the grid
         to observed states.)
 
-        Unseen-parent-config fill: a parent configuration with zero training
-        observations is stored as ``NaN`` in the fitted distribution
-        (``counts.sum() == 0`` → ``0/0``; a known adapter artifact, filed
-        separately as #218). Extraction fills those rows with uniform ``1/K`` to
-        match pgmpy-mle's fit-time uniform-fill under the same condition, keeping
-        cross-adapter recovery numbers directly comparable. If the fit-time NaN
-        is fixed in the adapter, this extraction-time fill can be removed.
+        Unseen-parent-config rows are uniform ``1/K`` since the fit fills them
+        (#218, matching pgmpy-mle); the extraction-time NaN fill below is kept
+        as a guard for models fitted by older versions.
 
         Hard zeros (a class with zero count under an OBSERVED parent config) are
         preserved — pomegranate is unsmoothed MLE, so they yield ``+inf``

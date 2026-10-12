@@ -117,11 +117,11 @@ baselines:
   - { library: nbn,   mechanism: knn,      param_method: mle,   inference_method: lw,      extra_kwargs: { batch_size: *BATCH_SIZE_FIT, n_samples: 2048 }, device: gpu }
   - { library: nbn,   mechanism: flexcode, param_method: mle,   inference_method: lw,      extra_kwargs: { batch_size: *BATCH_SIZE_FIT, n_samples: 2048 }, device: gpu }
   # other libraries
-  - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: ve}
-  - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance, device: cpu}
+  - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: lbp}
+  - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance, device: cpu, extra_kwargs: {n_samples: 2048}}
   - {library: pgmpy,       mechanism: discrete,  param_method: mle,   inference_method: ve}
   - {library: pgmpy,       mechanism: discrete,  param_method: bayes, inference_method: ve}
-  - {library: pgmpy,       mechanism: lg,        param_method: lg,    inference_method: predict}
+  - {library: pgmpy,       mechanism: lg,        param_method: lg,    inference_method: predict, extra_kwargs: {n_samples: 2048}}
 
 # Ignored by heaviest_by_role; required by the loader.
 n_queries_per_cell: 12

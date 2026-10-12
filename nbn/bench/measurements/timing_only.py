@@ -151,7 +151,9 @@ class TimingOnly:
 
         # Group dispatch — atomic batch failure, amortized timing,
         # #127-Stage-4 exception classification all live in the helper.
-        from nbn.bench.measurements._batch_dispatch import run_query_groups
+        from nbn.bench.measurements._batch_dispatch import (
+            pass_batch_size, run_query_groups, stamped_batch_size,
+        )
 
         outcomes, unstarted_groups = run_query_groups(
             adapter, query_groups, query_budget_s=query_budget_s,
@@ -208,7 +210,7 @@ class TimingOnly:
                 query_time_s=float("nan"),
                 metrics_time_s=0.0,
                 error_msg="query budget exceeded",
-                batch_size=len(group),
+                batch_size=stamped_batch_size(group, pass_batch_size(query_groups)),
             ))
 
         # Per-pass (cell x batch_size) rows: ONE fit_time_s row and ONE
@@ -223,7 +225,7 @@ class TimingOnly:
         # plus metric=="status", so these rows are never counted as queries.
         if not queries:
             return rows  # nothing was measured: no per-pass rows either
-        pass_batch_size = len(query_groups[0])
+        pass_b = pass_batch_size(query_groups)
         for tk, tv in (("fit_time_s", fit_time_s), ("metrics_time_s", 0.0)):
             rows.append(CellResult(
                 benchmark=benchmark,
@@ -239,7 +241,7 @@ class TimingOnly:
                 query_time_s=float("nan"),
                 metrics_time_s=0.0,
                 error_msg=None,
-                batch_size=pass_batch_size,
+                batch_size=pass_b,
             ))
 
         return rows

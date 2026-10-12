@@ -1,8 +1,7 @@
 """Generate paper figures + LaTeX tables from a benchmark parquet.
 
 Public entry point: :func:`run_plot`, invoked by ``nbn-bench plot``
-(``nbn/bench/cli.py``); ``scripts/make_paper_figures.py`` remains as a
-deprecation shim.
+(``nbn/bench/cli.py``).
 
 Every figure is a **grouped bar plot** over the benchmark's discrete x grid
 (``n_nodes``, ``n_train``, ``batch_size`` or bnlearn ``network``); every
@@ -47,9 +46,13 @@ import pandas as pd
 from nbn.bench._paper_agg import (
     log_axis_ok,
     method_style,  # noqa: F401  (re-exported for callers/tests)
+    normalize_baselines,
     ACCURACY_METRICS,
     CLOSER_TO_VALUE,
+    CONTINUOUS_FAMILIES,
+    DEPRECATED_CONTINUOUS_METRICS,
     DISCRETE_FAMILIES,
+    FAILURE_STATUSES,
     HIGHER_IS_BETTER,
     LOWER_IS_BETTER,
     METRIC_LABEL,
@@ -86,11 +89,13 @@ STATUS_COLORS = {
     "ok": "#2ca02c",
     "not_supported": "#7f7f7f",
     "not_applicable": "#b0b0b0",
+    "no_result": "#dbdb8d",
     "timeout": "#ff7f0e",
     "error": "#d62728",
     "oom": "#8c564b",
 }
-STATUS_ORDER = ("ok", "not_supported", "not_applicable", "timeout", "error", "oom")
+STATUS_ORDER = ("ok", "not_supported", "not_applicable", "no_result", "timeout",
+                "error", "oom")
 
 # Bar groups per figure before the x grid is split into ``_partK`` files
 # (bnlearn has 24 discrete networks; 8 groups x ~7 bars stays legible).
@@ -178,31 +183,69 @@ def n_parameters_lookup(df: pd.DataFrame) -> dict[tuple[str, str], float] | None
 
 # --- Per-query status extraction (success_rate.pdf) ---------------------------
 
+def _cell_keys(df: pd.DataFrame) -> list[str]:
+    """Columns identifying one benchmark cell (one fit of one baseline)."""
+    return [c for c in ("baseline", "family", "problem_id", "seed", "n_train")
+            if c in df.columns]
+
+
+def _cell_unit(g: pd.DataFrame) -> pd.DataFrame:
+    """The status unit of ONE cell: its per-query rows (``query_time_s``) plus
+    whole-cell sentinels (``status``); a parameter-learning cell has neither,
+    and its accuracy-metric rows are the unit."""
+    unit = g[g["metric"].isin(["query_time_s", "status"])]
+    if unit.empty:
+        unit = g[g["metric"].isin(ACCURACY_METRICS)]
+    return unit
+
+
 def per_query_success(df_cell: pd.DataFrame) -> dict[str, float]:
-    """Query-level success rate (%) per baseline; PL-mode cells (no per-query
-    rows) are binary on the presence of an ok accuracy-metric row."""
+    """Success rate (%) per baseline, averaged over its cells (#248).
+
+    Per cell: an inference cell scores ``ok queries / (queries + sentinels)``;
+    a parameter-learning cell (no per-query rows) is binary on the presence of
+    an ok accuracy-metric row. Deciding the unit per cell — not over the
+    pooled rows — keeps a baseline that solved its small problems and timed
+    out on the large ones at its true coverage (e.g. 5/7 sizes) instead of 0%
+    (pooled sentinels used to hide every successful PL cell).
+    """
     out = {}
-    for b, g in df_cell.groupby("baseline"):
+    if df_cell.empty:
+        return out
+    keys = _cell_keys(df_cell)
+    rates: dict[str, list[float]] = {}
+    for k, g in df_cell.groupby(keys, dropna=False):
+        b = k[0] if isinstance(k, tuple) else k
         executed = g[g["metric"] == "query_time_s"]
         sentinel = g[g["metric"] == "status"]
         total = len(executed) + len(sentinel)
         if total == 0:
             pl = g[g["metric"].isin(ACCURACY_METRICS)]
-            out[b] = 100.0 if bool((pl["status"] == "ok").any()) else 0.0
-            continue
-        ok = int((executed["status"] == "ok").sum())
-        out[b] = 100.0 * ok / total
+            if pl.empty or not (pl["status"].isin(["ok", *FAILURE_STATUSES])).any():
+                continue  # applicability-only cell: not attempted
+            rate = 100.0 if bool((pl["status"] == "ok").any()) else 0.0
+        else:
+            rate = 100.0 * int((executed["status"] == "ok").sum()) / total
+        rates.setdefault(b, []).append(rate)
+    for b, r in rates.items():
+        out[b] = float(np.mean(r))
     return out
 
 
 def per_query_status_counts(df_cell: pd.DataFrame) -> pd.DataFrame:
-    """Per-baseline status counts over the per-query unit (query_time_s rows +
-    whole-cell sentinels); PL-mode fallback counts accuracy-metric rows."""
-    unit = df_cell[df_cell["metric"].isin(["query_time_s", "status"])]
-    if unit.empty:
-        unit = df_cell[df_cell["metric"].isin(ACCURACY_METRICS)]
-    if unit.empty:
+    """Per-baseline status counts over the per-cell status unit (#248).
+
+    Each cell contributes its own unit (:func:`_cell_unit`): per-query rows +
+    sentinels for inference cells, accuracy-metric rows for
+    parameter-learning cells — so a PL baseline's ok cells still count when
+    other cells of the same baseline emitted timeout sentinels."""
+    if df_cell.empty:
         return pd.DataFrame()
+    units = [_cell_unit(g) for _, g in df_cell.groupby(_cell_keys(df_cell), dropna=False)]
+    units = [u for u in units if not u.empty]
+    if not units:
+        return pd.DataFrame()
+    unit = pd.concat(units, ignore_index=True)
     counts = unit.groupby(["baseline", "status"]).size().unstack(fill_value=0)
     unknown = [c for c in counts.columns if c not in STATUS_ORDER]
     if unknown:
@@ -450,7 +493,8 @@ def _table_slug(value: str) -> str:
 _PL_METRICS = frozenset({"param_recovery_tv", "param_recovery_kl",
                          "calibration_pit_ks", "calibration_sd_ratio",
                          "log_likelihood"})
-_INFERENCE_METRICS = frozenset({"tv_per_node", "jsd_per_node", "w1_per_node"})
+_INFERENCE_METRICS = frozenset({"tv_per_node", "jsd_per_node", "w1_per_node",
+                                "ks_per_node"})
 
 
 def _benchmark_caption(df_view) -> str:
@@ -503,7 +547,10 @@ def _write_table(out_path: Path, header_cols, rows, caption="", label="",
 def _metrics_for_family(family) -> list[str]:
     metrics = list(ACCURACY_METRICS)
     if family in DISCRETE_FAMILIES:
-        metrics = [m for m in metrics if m != "w1_per_node"]
+        metrics = [m for m in metrics if m not in ("w1_per_node", "ks_per_node")]
+    if family in CONTINUOUS_FAMILIES:
+        # Deprecated histogram TV / JSD on continuous samples (D2).
+        metrics = [m for m in metrics if m not in DEPRECATED_CONTINUOUS_METRICS]
     return metrics
 
 
@@ -802,6 +849,7 @@ def run_plot(
     output_dir = Path(output_dir)
     frames = [pd.read_parquet(p) for p in sorted(paths, key=str)]
     df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+    df = normalize_baselines(df)
     required = {"benchmark", "family", "problem_id", "seed", "baseline",
                 "metric", "value", "status", "query_role", "query_kind"}
     missing = required - set(df.columns)

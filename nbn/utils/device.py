@@ -47,16 +47,48 @@ def resolve_device(spec: str | torch.device | None) -> torch.device:
     return torch.device(spec)
 
 
+def realise_device(device: str | torch.device) -> torch.device:
+    """``resolve_device`` plus an explicit CUDA index.
+
+    ``torch.device("cuda")`` means "whatever the current CUDA device is *at
+    use time*".  A model that stores it keeps pointing at the current device
+    even after ``torch.cuda.set_device`` moved that elsewhere, so memory
+    budgets, synchronisation and cache keys could address a different GPU
+    than the one holding the parameters.  Pin the index the tensors were
+    actually placed on.  Other backends are returned unchanged.
+    """
+    d = resolve_device(device)
+    if d.type == "cuda" and d.index is None and torch.cuda.is_available():
+        return torch.device("cuda", torch.cuda.current_device())
+    return d
+
+
 def to_device(obj: Any, device: torch.device) -> Any:
     """Recursively move tensors / dicts / lists / modules to ``device``.
 
     Distributions are reconstructed lazily via the engine that produced them;
     here we move only the underlying parameters (e.g. ``loc``, ``scale``).
+
+    A float64 tensor headed for a device without float64 (MPS) is cast to
+    float32 in the same call: user data built from numpy is float64 by
+    default, and ``.to("mps")`` on it raises.  On CPU / CUDA the dtype is
+    left alone.
     """
     if obj is None:
         return None
     if isinstance(obj, torch.Tensor):
-        return obj.to(device, non_blocking=True) if obj.device != device else obj
+        device = torch.device(device)
+        if obj.dtype == torch.float64 and not supports_float64(device):
+            # Cast on the source device first; MPS cannot hold the float64.
+            return to_device_dtype(obj, device, torch.float32)
+        if obj.device == device:
+            return obj
+        # non_blocking is only safe for a pinned host -> accelerator copy.  A
+        # device -> CPU copy with non_blocking=True returns before the data
+        # has landed, so the caller reads zeros / garbage (seen on MPS; the
+        # same hazard exists on CUDA without an explicit synchronize).
+        nb = obj.device.type == "cpu" and device.type != "cpu" and obj.is_pinned()
+        return obj.to(device, non_blocking=nb)
     if isinstance(obj, nn.Module):
         return obj.to(device)
     if isinstance(obj, Mapping):
@@ -201,3 +233,18 @@ def accelerator_summary() -> str:
     if mps_available():
         return "mps (Apple Metal; float64 unavailable, accumulations run in float32)"
     return "none (cpu only)"
+
+
+def to_device_dtype(t: torch.Tensor, device, dtype: torch.dtype) -> torch.Tensor:
+    """Move ``t`` to ``device`` and cast it to ``dtype`` in the order every backend supports.
+
+    One fused ``t.to(device=..., dtype=...)`` is wrong on torch 2.14 for an
+    MPS tensor sent to the CPU as ``float64``: the values come back garbled
+    (errors up to 1e294).  Doing the two steps separately is exact, but the
+    order matters: a ``float64`` target is reached by moving first (MPS has no
+    ``float64``, so the cast must happen on the destination), any other dtype
+    by casting first (so a CPU ``float64`` tensor is never moved to MPS).
+    """
+    if dtype == torch.float64:
+        return t.to(device=device).to(dtype=dtype)
+    return t.to(dtype=dtype).to(device=device)

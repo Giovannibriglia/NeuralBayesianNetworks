@@ -33,11 +33,14 @@ schema documented in docs/v0.13-benchmark-redesign.md §3.1.
 
 Output shape
 ------------
-Returns one ``CellResult`` per (query, metric) combination.  With N
-queries and metrics {tv_per_node, jsd_per_node, w1_per_node}:
-  * Discrete target: 2 rows per query (tv + jsd; w1 is not meaningful
-    on unordered categorical outcomes).
-  * Continuous target: up to 3 rows per query (tv + jsd + w1).
+Returns one ``CellResult`` per (query, metric) combination, metrics
+{tv_per_node, jsd_per_node, w1_per_node, ks_per_node}:
+  * Discrete target: tv + jsd ok; w1 / ks ``not_supported`` (unordered
+    categories).
+  * Continuous target: w1 + ks ok (bin-free, computed on the oracle and the
+    method's posterior at the same sample count S = ``n_oracle_samples``);
+    tv / jsd ``not_supported`` (the former 256-bin histogram estimate was
+    noise-dominated, D2).
   * Failed oracle / not-supported: 1 row per metric with
     ``status="no_result"`` or ``status="not_supported"``.
 
@@ -46,24 +49,32 @@ Reference: docs/v0.13-benchmark-redesign.md §3, §4.1
 from __future__ import annotations
 
 import dataclasses
+import logging
+import math
 import time
 from typing import Any
 
 import torch
 
-from nbn.bench.core.oracle import filter_ground_truth, conditional_posterior_samples
+from nbn.bench.core.oracle import conditional_posterior_samples, discrete_oracle
 from nbn.bench.core.results import CellResult
+from nbn.bench.core.seeding import derive_seed
 from nbn.bench.domains.base import BenchmarkProblem, Query
 from nbn.bench.metrics import _compute_metrics_per_node
 
 
-_METRICS: tuple[str, ...] = ("tv", "jsd", "w1")
-_METRIC_KEYS: tuple[str, ...] = ("tv_per_node", "jsd_per_node", "w1_per_node")
+logger = logging.getLogger(__name__)
+
+_METRICS: tuple[str, ...] = ("tv", "jsd", "w1", "ks")
+_METRIC_KEYS: tuple[str, ...] = (
+    "tv_per_node", "jsd_per_node", "w1_per_node", "ks_per_node",
+)
 _TIMING_KEYS: tuple[str, ...] = ("fit_time_s", "query_time_s", "metrics_time_s")
 
 
 class AccuracyAndTiming:
-    """Compute per-query TV/JSD/W₁ accuracy and individually timed queries.
+    """Compute per-query TV/JSD (discrete) and W₁/KS (continuous) accuracy
+    and individually timed queries.
 
     Implements the v0.13 ``Measurement`` protocol.
 
@@ -73,26 +84,38 @@ class AccuracyAndTiming:
         Number of samples drawn from ``problem.true_model`` per query for
         continuous oracle estimation.  Default 2000 matches the v0.12
         ``_compute_inference_metrics`` setting.
-    eps_factor:
-        Evidence tolerance for discrete ground-truth rejection filter.
-        Continuous evidence nodes within ``eps_factor * std`` of the
-        observed value are accepted.  Default 0.50 matches v0.12.
-    n_eff_min:
-        Minimum effective sample size for the discrete rejection filter.
-        Queries with fewer than ``n_eff_min`` surviving reference rows are
-        skipped with ``status="no_result"``.  Default 10 matches v0.12.
+    n_reference:
+        Effective-particle budget of the discrete likelihood-weighting oracle
+        tier (hybrid / intractable networks). ``None`` (default) uses the
+        problem's ``n_reference`` — the size of its reference pool — so the
+        config's ``source.n_reference`` keeps governing every sample-based
+        reference. Discrete targets on all-discrete networks are scored
+        against the *exact* posterior (variable elimination on the true
+        CPTs) and ignore it. See ``nbn.bench.core.oracle.discrete_oracle``.
+    eps_factor, n_eff_min:
+        Parameters of the legacy rejection-filter fallback, used only when
+        the true model is unusable (rows flagged ``oracle="rejection"``).
     """
 
     def __init__(
         self,
         *,
         n_oracle_samples: int = 2000,
+        n_reference: int | None = None,
         eps_factor: float = 0.50,
         n_eff_min: int = 10,
     ) -> None:
         self.n_oracle_samples = n_oracle_samples
+        self.n_reference = n_reference
         self.eps_factor = eps_factor
         self.n_eff_min = n_eff_min
+
+    def __getstate__(self) -> dict:
+        # The measurement is pickled into every cell worker's context; the
+        # per-problem CPT cache holds closures and must not travel with it.
+        state = self.__dict__.copy()
+        state.pop("_tabular_cache", None)
+        return state
 
     # -----------------------------------------------------------------------
     # Measurement protocol
@@ -204,7 +227,9 @@ class AccuracyAndTiming:
         # Failure statuses are classified the same way as fit-time failures
         # (#127 Stage 4): a torch allocator failure raised during query must
         # classify as "oom", not "error". Batches are atomic (§4.2/§4.4).
-        from nbn.bench.measurements._batch_dispatch import run_query_groups
+        from nbn.bench.measurements._batch_dispatch import (
+            pass_batch_size, run_query_groups, stamped_batch_size,
+        )
 
         outcomes, unstarted_groups = run_query_groups(
             adapter, query_groups, query_budget_s=query_budget_s,
@@ -218,14 +243,39 @@ class AccuracyAndTiming:
         t_metrics = time.perf_counter()
         per_query_metric_dicts: list[dict | None] = []
 
-        for q, (posterior, _err) in zip(queries, posteriors):
+        per_query_oracle: list[str | None] = []
+        score_errors: dict[int, str] = {}
+        for qi, (q, (posterior, _err)) in enumerate(zip(queries, posteriors)):
             if posterior is None:
                 per_query_metric_dicts.append(None)
+                per_query_oracle.append(None)
                 continue
-            mdict = self._score_query(problem, q, posterior)
+            try:
+                mdict, tier = self._score_query(problem, q, posterior, query_index=qi)
+            except UndefinedPosterior as exc:
+                mdict, tier = {**_no_result(), "_reason": str(exc)}, None
+            except Exception as exc:  # noqa: BLE001 - recorded as an error row
+                # A malformed posterior (wrong shape, NaN, missing field) is a
+                # method failure of THIS query: status "error" with the reason,
+                # never a silent not_supported / dropped row (D5, #198).
+                mdict, tier = None, None
+                score_errors[qi] = f"scoring failed: {type(exc).__name__}: {exc}"
             per_query_metric_dicts.append(mdict)
+            per_query_oracle.append(tier)
 
         metrics_time_s = time.perf_counter() - t_metrics
+        short = [m["_n_samples"] for m in per_query_metric_dicts
+                 if m and m.get("_n_samples") is not None
+                 and m["_n_samples"] < self.n_oracle_samples]
+        if short:
+            # D3: methods must return >= S draws for a noise-comparable score.
+            logger.warning(
+                "%s returned fewer posterior samples than the scoring count "
+                "S=%d on %d continuous queries (min %d): those scores include "
+                "the method's own sampling noise; rows are flagged by "
+                "n_posterior_samples", baseline, self.n_oracle_samples,
+                len(short), min(short),
+            )
 
         # ---- Phase 3: emit CellResult rows ----
         rows: list[CellResult] = []
@@ -247,6 +297,7 @@ class AccuracyAndTiming:
                 # exception; a scoring failure with no exception falls back to
                 # "error" (#127 Stage 4).
                 fail_status = query_statuses[i] if posterior is None else "error"
+                err_msg = err_msg or score_errors.get(i)
                 for mk in _METRIC_KEYS:
                     query_rows.append(CellResult(
                         benchmark=benchmark,
@@ -293,18 +344,29 @@ class AccuracyAndTiming:
                         batch_size=query_bsizes[i],
                     ))
                 # Failure rows carry no meaningful ESS (ess stays None).
-                rows.extend(query_rows)
+                rows.extend(dataclasses.replace(r, query_idx=i) for r in query_rows)
                 continue
 
             # Success: one row per metric.
             for mk in _METRIC_KEYS:
                 val = mdict.get(mk)
-                if val is None:
-                    status = "not_supported"
-                    value = float("nan")
-                elif mdict.get(f"{mk}_no_result"):
+                row_err = None
+                if mdict.get(f"{mk}_no_result"):
+                    # The oracle produced no reference for this query.
                     status = "no_result"
                     value = float("nan")
+                    row_err = mdict.get(
+                        "_reason",
+                        "oracle produced no reference for this query (evidence "
+                        "with zero probability under the true model, or LW "
+                        "effective sample size below the floor)")
+                elif val is None:
+                    status = "not_supported"
+                    value = float("nan")
+                elif not math.isfinite(float(val)):
+                    status = "error"
+                    value = float("nan")
+                    row_err = f"non-finite {mk} ({val})"
                 else:
                     status = "ok"
                     value = float(val)
@@ -324,7 +386,7 @@ class AccuracyAndTiming:
                     fit_time_s=fit_time_s,
                     query_time_s=q_time,
                     metrics_time_s=metrics_time_s,
-                    error_msg=None,
+                    error_msg=row_err,
                     batch_size=query_bsizes[i],
                 ))
             # Timing rows: one per timing metric; status always "ok" since the
@@ -357,7 +419,12 @@ class AccuracyAndTiming:
             # every row of this query (float for lw/ais; None for ve/avi/others).
             q_ess = posterior.ess
             q_khat = posterior.khat
-            rows.extend(dataclasses.replace(r, ess=q_ess, khat=q_khat) for r in query_rows)
+            rows.extend(
+                dataclasses.replace(r, ess=q_ess, khat=q_khat,
+                                    oracle=per_query_oracle[i], query_idx=i,
+                                    n_posterior_samples=mdict.get("_n_samples"))
+                for r in query_rows
+            )
 
         # ---- Timeout rows for groups that never started ----
         # One row-set per unstarted GROUP (not per query), carrying the
@@ -388,7 +455,8 @@ class AccuracyAndTiming:
                     query_time_s=float("nan"),
                     metrics_time_s=float("nan"),
                     error_msg="query budget exceeded",
-                    batch_size=len(group),
+                    batch_size=stamped_batch_size(group, pass_batch_size(query_groups)),
+                    query_idx=flat_start,
                 ))
             for tk, tv in [
                 ("fit_time_s", fit_time_s),
@@ -412,7 +480,8 @@ class AccuracyAndTiming:
                     query_time_s=float("nan"),
                     metrics_time_s=float("nan"),
                     error_msg="query budget exceeded",
-                    batch_size=len(group),
+                    batch_size=stamped_batch_size(group, pass_batch_size(query_groups)),
+                    query_idx=flat_start,
                 ))
 
         return rows
@@ -426,63 +495,180 @@ class AccuracyAndTiming:
         problem: BenchmarkProblem,
         q: Query,
         posterior: Any,
-    ) -> dict[str, float | None]:
-        """Return ``{tv_per_node, jsd_per_node, w1_per_node}`` for one query.
+        *,
+        query_index: int = 0,
+    ) -> tuple[dict[str, float | None], str | None]:
+        """Return ``({tv_per_node, jsd_per_node, w1_per_node}, oracle tier)``.
 
         Dispatches on target kind (discrete → cpd_pair; continuous →
-        sample_pair).  Returns the ``_compute_metrics_per_node`` dict.
-        On oracle failure, returns all-None dict (caller emits no_result).
+        sample_pair).  The oracle's draws run under a seed derived from the
+        problem and ``query_index`` — identical for every baseline of the cell.
+        On oracle failure, returns a ``*_no_result``-flagged dict (caller emits
+        ``status="no_result"``); a malformed posterior raises (caller emits
+        ``status="error"`` with the reason).
         """
         target = q.targets[0]
         target_kind = problem.variables[target][0]
         ev_row = dict(q.evidence.items())
+        oracle_seed = derive_seed(
+            "oracle", problem.problem_id or problem.name, problem.seed, query_index,
+        )
 
         cpd_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
         sample_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
 
         if target_kind == "discrete":
-            oracle = filter_ground_truth(
-                problem, ev_row, target,
+            k = int(problem.variables[target][1])
+            # The method's vector is validated first: a malformed posterior is
+            # a method error whether or not a reference exists.
+            pred_vec = validated_probs(posterior, target, k)
+            probs, tier = discrete_oracle(
+                problem, target, ev_row,
+                n_particles=self.n_reference,
+                seed=oracle_seed,
                 eps_factor=self.eps_factor,
                 n_eff_min=self.n_eff_min,
+                source=self._tabular(problem),
             )
-            if oracle is None:
-                return dict.fromkeys(_METRIC_KEYS)
-
-            k = problem.variables[target][1]
-            empirical = torch.zeros(k)
-            empirical.scatter_add_(
-                0,
-                oracle.long().clamp(0, k - 1),
-                torch.ones_like(oracle, dtype=torch.float),
-            )
-            empirical = empirical / empirical.sum().clamp_min(1e-12)
-            true_logits = torch.log(empirical.clamp_min(1e-12))
-
-            # Posterior.probs is the predicted probability vector.
-            if posterior.probs is None:
-                return dict.fromkeys(_METRIC_KEYS)
-            pred_vec = posterior.probs.cpu().reshape(-1)[:k]
-            fit_logits = torch.log(pred_vec.clamp_min(1e-12))
+            if probs is None:
+                return _no_result(), tier
+            true_logits = torch.log(probs.float().clamp_min(1e-12))
+            fit_logits = torch.log(pred_vec.float().clamp_min(1e-12))
             cpd_pairs.append((true_logits, fit_logits))
 
         else:
             # Continuous or hybrid-continuous target.
+            tier = "lw"
             oracle = conditional_posterior_samples(
                 problem, [target], ev_row, n_samples=self.n_oracle_samples,
+                seed=oracle_seed,
             )
             if oracle is None or oracle.shape[0] < 100:
-                return dict.fromkeys(_METRIC_KEYS)
+                return _no_result(), tier
 
-            if posterior.samples is None:
-                return dict.fromkeys(_METRIC_KEYS)
-            sample_pairs.append((oracle.reshape(-1).cpu(), posterior.samples.cpu().reshape(-1)))
+            if posterior.samples is None or posterior.samples.numel() == 0:
+                raise ValueError(f"no posterior samples for continuous target {target!r}")
+            if not bool(torch.isfinite(posterior.samples).all()):
+                raise ValueError(f"non-finite posterior samples for {target!r}")
+            # D3: score every method at the same sample count. Methods draw
+            # 50 (pyro) to 2048 (nbn) posterior samples; W1 / KS sampling
+            # noise depends on that count, so both sides are brought to
+            # S = n_oracle_samples with a seeded resample (identical across
+            # reruns, independent of the adapter's RNG stream).
+            s = int(oracle.shape[0])
+            fit = _resample_to(
+                posterior.samples.detach().cpu().reshape(-1), s,
+                derive_seed("score_resample", problem.problem_id or problem.name,
+                            problem.seed, query_index),
+            )
+            sample_pairs.append((oracle.reshape(-1).cpu(), fit))
 
-        return _compute_metrics_per_node(
+        out = _compute_metrics_per_node(
             cpd_pairs=cpd_pairs,
             sample_pairs=sample_pairs,
             metrics=_METRICS,
         )
+        if sample_pairs:
+            out["_n_samples"] = int(posterior.samples.numel())
+        return out, tier
+
+    def _tabular(self, problem: BenchmarkProblem):
+        """The true model's tabular CPT source, cached per problem (the same
+        tables serve every query of the cell)."""
+        from nbn.bench.core.exact_discrete import tabular_source
+
+        cached = getattr(self, "_tabular_cache", None)
+        if cached is not None and cached[0] is problem:
+            return cached[1]
+        src = tabular_source(problem)
+        self._tabular_cache = (problem, src)
+        return src
+
+
+#: ``error_msg`` prefix of queries whose posterior is undefined because the
+#: evidence has zero probability under the method's fitted model.
+ZERO_PROB_EVIDENCE = "evidence has zero probability under the fitted model"
+
+
+class UndefinedPosterior(ValueError):
+    """The method's posterior is 0/0: P(evidence) = 0 under its fitted model.
+
+    Raised only when the adapter confirmed it (``Posterior.undefined_reason``).
+    Not a malformed answer but an undefined one: the query is recorded as
+    ``no_result`` for this method (reason in ``error_msg``), so the paper's
+    same-query averaging drops it for every method of the cell instead of
+    failing the method's whole seed. Libraries differ here: pomegranate's
+    loopy BP returns NaN, while pgmpy prunes the network before VE and often
+    returns a finite conditional for the same fitted parameters.
+    """
+
+
+def validated_probs(posterior: Any, target: str, k: int) -> torch.Tensor:
+    """The method's probability vector for a discrete target, normalised, or
+    ``ValueError`` with the reason (recorded as an ``error`` row).
+
+    Anything but a finite length-``k`` distribution is a method error (D5,
+    #198): the old ``[:k]`` slice let a truncated grid (pgmpy without
+    state_names, #217) pass and a short vector fall through to
+    not_supported. A NaN / inf / all-zero vector is an error too (a
+    numerical failure: LW with every particle at -inf weight, a NaN network,
+    overflow) -- UNLESS the adapter confirmed the evidence has zero
+    probability under its fitted model (``posterior.undefined_reason``, set
+    after an exact check on its CPTs). Only then is the posterior undefined
+    rather than wrong: :class:`UndefinedPosterior`, recorded as
+    ``no_result`` with a reason starting with :data:`ZERO_PROB_EVIDENCE` so
+    such queries can be counted per baseline (D10). Treating every NaN as
+    undefined hid real failures and let same-query averaging score the
+    other methods on an easier subset.
+    """
+    if posterior.probs is None:
+        raise ValueError(f"no probability vector for discrete target {target!r}")
+    pred_vec = posterior.probs.detach().cpu().double().reshape(-1)
+    if pred_vec.numel() != k:
+        raise ValueError(
+            f"probability vector of length {pred_vec.numel()} for "
+            f"{target!r}, which has {k} states")
+    total = float(pred_vec.sum()) if bool(torch.isfinite(pred_vec).all()) else None
+    if total is None or total == 0.0:
+        what = "NaN/inf" if total is None else "all-zero"
+        reason = getattr(posterior, "undefined_reason", None)
+        if reason:
+            raise UndefinedPosterior(
+                f"{ZERO_PROB_EVIDENCE}: posterior for {target!r} is {what} "
+                f"({reason})")
+        raise ValueError(
+            f"non-finite or all-zero posterior for {target!r} ({what}) "
+            f"without a confirmed zero-probability evidence")
+    if pred_vec.min() < -1e-6 or abs(total - 1.0) > 1e-3:
+        raise ValueError(
+            f"posterior for {target!r} is not a distribution (sum={total:.6g})")
+    return pred_vec / total
+
+
+def _no_result() -> dict:
+    """Metric dict for a query the oracle could not produce a reference for."""
+    out: dict = dict.fromkeys(_METRIC_KEYS)
+    out.update({f"{mk}_no_result": True for mk in _METRIC_KEYS})
+    return out
+
+
+def _resample_to(x: torch.Tensor, s: int, seed: int) -> torch.Tensor:
+    """``s`` draws from the empirical distribution of ``x`` (seeded).
+
+    ``len(x) == s``: unchanged. ``len(x) > s``: a uniformly random subset
+    without replacement. ``len(x) < s``: draws with replacement (the
+    method's own sample count still bounds its resolution; it no longer
+    changes the metric's noise level relative to other methods).
+    """
+    n = int(x.numel())
+    if n == s or n == 0:
+        return x
+    g = torch.Generator(device="cpu").manual_seed(int(seed))
+    if n > s:
+        idx = torch.randperm(n, generator=g)[:s]
+    else:
+        idx = torch.randint(0, n, (s,), generator=g)
+    return x[idx]
 
 
 # ---------------------------------------------------------------------------

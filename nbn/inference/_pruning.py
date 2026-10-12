@@ -67,23 +67,62 @@ def relevant_subnetwork(
         KeyError: if any target or evidence name is not a node in ``dag``.
     """
     target_set = {target} if isinstance(target, str) else set(target)
-    if evidence is None:
-        evidence_set: set[str] = set()
-    elif isinstance(evidence, Mapping):
-        evidence_set = set(evidence.keys())
-    else:
-        evidence_set = set(evidence)
+    evidence_set = _as_name_set(evidence)
 
+    _validate_names(dag, target_set | evidence_set)
+    top = _top_marked(dag, target_set, evidence_set)
+
+    # Top-marked nodes are the requisite ones; target and evidence are
+    # relevant by definition, even when isolated.
+    return top | target_set | evidence_set
+
+
+def requisite_nodes(
+    dag: nx.DiGraph,
+    target: str | Iterable[str],
+    evidence: Mapping[str, object] | Iterable[str] | None = None,
+) -> set[str]:
+    """Nodes whose CPT is needed for ``P(target | evidence)`` (#132).
+
+    The top-marked set of the Bayes-ball traversal — Shachter (1998)'s
+    requisite probability nodes — plus the target.  It differs from
+    :func:`relevant_subnetwork` only by the *non-requisite evidence* nodes:
+    observed nodes the ball never enters from a parent, e.g. an observed
+    parent or ancestor of the target.  Their CPT, evaluated at the observed
+    value, is a function of their own parents only and cancels in the
+    normalised posterior, so dropping it is exact — and it keeps those
+    parents (possibly high-cardinality) out of the elimination entirely.
+    The evidence *values* of such nodes still matter: they are clamped
+    wherever the node appears in a kept CPT's scope.
+    """
+    target_set = {target} if isinstance(target, str) else set(target)
+    evidence_set = _as_name_set(evidence)
+    _validate_names(dag, target_set | evidence_set)
+    return _top_marked(dag, target_set, evidence_set) | target_set
+
+
+def _as_name_set(evidence) -> set[str]:
+    if evidence is None:
+        return set()
+    if isinstance(evidence, Mapping):
+        return set(evidence.keys())
+    return set(evidence)
+
+
+def _validate_names(dag: nx.DiGraph, names: set[str]) -> None:
     # Validate every supplied name against the DAG up front -- a typo in
     # a query should fail loudly, not silently return an empty set.
     dag_nodes = set(dag.nodes())
-    for name in target_set | evidence_set:
+    for name in names:
         if name not in dag_nodes:
             raise KeyError(
                 f"node {name!r} not in DAG "
                 f"(have {sorted(dag_nodes)[:5]}...)"
             )
 
+
+def _top_marked(dag: nx.DiGraph, target_set: set[str], evidence_set: set[str]) -> set[str]:
+    """Top-marked nodes of the Bayes-ball traversal from ``target_set``."""
     # Bayes-ball search for requisite probability nodes (Shachter 1998).
     #
     # The ball visits each node having arrived from either a child
@@ -135,6 +174,4 @@ def relevant_subnetwork(
                 for child in dag.successors(node):
                     queue.append((child, _FROM_PARENT))
 
-    # Top-marked nodes are the requisite ones; target and evidence are
-    # relevant by definition, even when isolated.
-    return top | target_set | evidence_set
+    return top

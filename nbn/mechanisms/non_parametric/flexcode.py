@@ -41,6 +41,7 @@ from nbn.learning.weighting import (
 from nbn.mechanisms.base import Mechanism
 from nbn.mechanisms.parametric.mdn import _build_mlp
 from nbn.utils.batching import _sanitise_parents, ensure_2d, flatten_samples
+from nbn.utils.device import to_device_dtype
 
 
 def _may_have_duplicate_rows(rows: torch.Tensor) -> bool:
@@ -57,7 +58,7 @@ def _may_have_duplicate_rows(rows: torch.Tensor) -> bool:
     if d == 1:
         return torch.unique(rows[:, 0]).numel() < m
     g = torch.Generator(device="cpu").manual_seed(0x5F3759DF)
-    direction = torch.randn(d, generator=g).to(device=rows.device, dtype=rows.dtype)
+    direction = to_device_dtype(torch.randn(d, generator=g), rows.device, rows.dtype)
     return torch.unique(rows @ direction).numel() < m
 
 
@@ -170,8 +171,9 @@ class FlexCodeMechanism(Mechanism):
         phi[..., 0] = 1.0
         return phi
 
-    def _scale_to_z(self, y: torch.Tensor) -> torch.Tensor:
-        return ((y - self._y_min) / (self._y_max - self._y_min)).clamp(0.0, 1.0)
+    def _scale_to_z(self, y: torch.Tensor, clamp: bool = True) -> torch.Tensor:
+        z = (y - self._y_min) / (self._y_max - self._y_min)
+        return z.clamp(0.0, 1.0) if clamp else z
 
     # ------------------------------------------------------------------
     # Fitting
@@ -184,6 +186,7 @@ class FlexCodeMechanism(Mechanism):
         warm_start: bool = False,
         **kwargs,
     ) -> dict:
+        x, parents, weights = self._drop_zero_weight_rows(x, parents, weights)
         kwargs["weights"] = weights
         if self.sharpen == "auto":
             # The search sub-fits on a split and then refits on the full data,
@@ -207,6 +210,37 @@ class FlexCodeMechanism(Mechanism):
             self.sharpen = best
             return info
         return self._fit_core(x, parents, warm_start=warm_start, **kwargs)
+
+    @staticmethod
+    def _drop_zero_weight_rows(
+        x: torch.Tensor,
+        parents: torch.Tensor | None,
+        weights: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """Remove rows whose weight is exactly 0 before anything reads the data.
+
+        The loss and the moments already give such rows no influence, but the
+        z-space bounds ``(_y_min, _y_max)`` are a plain min/max of the data:
+        a zero-weight outlier stretched the support and squeezed every real
+        observation into a sliver of the basis' ``[0, 1]`` -- a zero weight
+        that was not equivalent to dropping the row.  Dropping up front also
+        keeps the ``sharpen="auto"`` hold-out split identical to the one a fit
+        on the dropped data draws.
+        """
+        if weights is None:
+            return x, parents, weights
+        w = validate_weights(
+            weights, ensure_2d(x).shape[0], where="FlexCodeMechanism.fit_local",
+        )
+        keep = w > 0
+        if bool(keep.all()):
+            return x, parents, weights
+        has_pa = parents is not None and parents.shape[-1] > 0
+        return (
+            ensure_2d(x)[keep.to(x.device)],
+            ensure_2d(parents)[keep.to(parents.device)] if has_pa else parents,
+            w[keep],
+        )
 
     def _select_sharpen(
         self,
@@ -297,7 +331,13 @@ class FlexCodeMechanism(Mechanism):
         if not warm:
             y_min = y.min()
             y_max = y.max()
-            span = (y_max - y_min).clamp_min(1e-6)
+            # Floor the span relative to the data's magnitude.  The old
+            # absolute 1e-6 floor vanished in float32 next to |y| ~ 1
+            # (constant y = 1.5 gave y_max - y_min == 0 after rounding, so
+            # z = 0/0 = NaN).  1e-3 * max(1, |y|) is far above float32
+            # resolution and still a spike relative to any real spread.
+            mag = torch.maximum(y_min.abs(), y_max.abs()).clamp_min(1.0)
+            span = torch.maximum(y_max - y_min, 1e-3 * mag)
             self._y_min = y_min - self.margin * span
             self._y_max = y_max + self.margin * span
         z = self._scale_to_z(y).squeeze(-1)                  # [N]
@@ -333,7 +373,9 @@ class FlexCodeMechanism(Mechanism):
             if not warm:
                 pa_m, pa_s = weighted_moments(pa, w_vec, unbiased=True)
                 self._pa_mean = pa_m.unsqueeze(0)
-                self._pa_std = pa_s.unsqueeze(0).clamp_min(1e-3)
+                # nan_to_num: the unbiased std of one unweighted row is NaN,
+                # which clamp_min passes through into every forward call.
+                self._pa_std = pa_s.nan_to_num(0.0).unsqueeze(0).clamp_min(1e-3)
             pa_std = (pa - self._pa_mean) / self._pa_std
             if not warm:
                 self.net = _build_mlp(self._d_pa, self.hidden, self.n_basis, self.activation).to(device)
@@ -456,24 +498,50 @@ class FlexCodeMechanism(Mechanism):
         b, s, _ = x.shape
         m = b * s
         coef, norm = self._coef_and_normaliser(parents, b, s)  # [m, J], [m]
-        y = x.reshape(m, 1).to(self._y_min.device)
-        z = self._scale_to_z(y).squeeze(-1)                  # [m]
-        dens_z = self._density_z(z, coef)                    # [m]
+        y = to_device_dtype(x.reshape(m, 1), self._y_min.device, self._y_min.dtype)
+        z = self._scale_to_z(y, clamp=False).squeeze(-1)     # [m]
+        # The series is only a density on the support [0, 1] it was
+        # normalised over.  z used to be clamped into it, so every y off the
+        # support scored the boundary density: integral over [-100, 100] of
+        # a N(0, 1) fit was 4.29.  Off the support the density is the same
+        # floor (min_density) the in-support value is clamped at, so the
+        # floor is one documented constant everywhere and stays finite --
+        # -inf would zero every likelihood-weighting particle on evidence
+        # that lands just outside the training range.
+        inside = (z >= 0.0) & (z <= 1.0)
+        dens_z = torch.where(
+            inside, self._density_z(z.clamp(0.0, 1.0), coef), torch.zeros_like(z),
+        )
         span = (self._y_max - self._y_min)
         log_p = torch.log(dens_z.clamp_min(self.min_density)) - torch.log(norm) - torch.log(span)
         log_p = log_p.reshape(b, s)
         return log_p.squeeze(1) if squeeze_s else log_p
 
     def sample(self, parents: torch.Tensor | None, n: int = 1) -> torch.Tensor:
+        """Inverse-CDF sampling, consistent with the trapezoidal normaliser.
+
+        Each grid cell ``[z_i, z_{i+1}]`` carries the trapezoid mass
+        ``(g_i + g_{i+1}) / 2 * dz`` -- the same rule ``_normaliser``
+        integrates with -- and the CDF is interpolated linearly inside the
+        cell.  The old sampler took a left-Riemann ``cumsum`` (a different
+        normaliser from the one log_prob divides by) and returned grid nodes
+        only: 1e5 draws had ~``grid_size`` distinct values.
+        """
         b = 1 if parents is None else ensure_2d(parents).shape[0]
         coef = self._coef(parents, b)                        # [B, J]
         gd = self._grid_density(coef)                        # [B, G]
-        cdf = torch.cumsum(gd, dim=1)
-        cdf = cdf / cdf[:, -1:].clamp_min(self.min_density)  # [B, G] in [0,1]
-        u = torch.rand(b, n, device=cdf.device)
-        # inverse-CDF via searchsorted per row
-        idx = torch.searchsorted(cdf, u)                     # [B, n]
-        idx = idx.clamp(max=self.grid_size - 1)
-        z = self._grid_z[idx]                                # [B, n]
+        dz = 1.0 / (self.grid_size - 1)
+        cell = 0.5 * (gd[:, :-1] + gd[:, 1:]) * dz           # [B, G-1]
+        # An all-zero row (the clipped series vanished everywhere) has no
+        # shape to follow: sample it uniformly rather than divide by zero.
+        dead = cell.sum(1, keepdim=True) <= 0
+        cell = torch.where(dead, torch.ones_like(cell), cell)
+        cdf = torch.cat([torch.zeros_like(cell[:, :1]), cell.cumsum(1)], dim=1)  # [B, G]
+        u = torch.rand(b, n, device=cdf.device, dtype=cdf.dtype) * cdf[:, -1:]
+        idx = (torch.searchsorted(cdf, u, right=True) - 1).clamp(0, self.grid_size - 2)
+        c_lo = torch.gather(cdf, 1, idx)
+        mass = torch.gather(cell, 1, idx)
+        frac = ((u - c_lo) / mass.clamp_min(torch.finfo(mass.dtype).tiny)).clamp(0.0, 1.0)
+        z = self._grid_z[idx] + frac * dz                    # [B, n]
         y = self._y_min + z * (self._y_max - self._y_min)
         return y.unsqueeze(-1)                               # [B, n, 1]

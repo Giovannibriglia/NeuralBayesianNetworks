@@ -202,11 +202,46 @@ def _bif_url(name: str) -> str:
     return f"https://www.bnlearn.com/bnrepository/{directory}/{name}.bif.gz"
 
 
+def _current_umask() -> int:
+    """The process umask, read without changing it where possible.
+
+    Linux exposes it in ``/proc/self/status`` (``Umask:`` line, kernel >=
+    4.7), which is thread-safe. Elsewhere (macOS, old kernels) the only API
+    is the ``os.umask`` set-and-restore round trip, which briefly changes the
+    process-wide mask: a file another thread creates in that window gets
+    mode & ~0o022. That fallback is acceptable here (cache population, best
+    effort) and documented rather than hidden.
+    """
+    import os
+
+    try:
+        with open("/proc/self/status", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("Umask:"):
+                    return int(line.split()[1], 8)
+    except (OSError, ValueError, IndexError):
+        pass
+    mask = os.umask(0o022)
+    os.umask(mask)
+    return mask
+
+
 def _ensure_cached(name: str) -> Path:
     """Download a discrete ``.bif.gz`` to the cache and decompress if absent.
 
     Returns the local path to the uncompressed ``.bif`` file.
+
+    Concurrency-safe: several processes (pytest-xdist workers, parallel
+    SLURM jobs sharing ``~/.cache``) may populate the same network at once.
+    Both the download and the decompression write to a private temporary
+    file in the cache directory and publish it with ``os.replace`` (atomic
+    on POSIX and Windows within one filesystem), so a reader that sees
+    ``<name>.bif`` always sees a complete file. Racing writers each produce
+    an identical complete file; the last replace wins.
     """
+    import os
+    import tempfile
+
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     local_bif = _CACHE_DIR / f"{name}.bif"
     if local_bif.exists():
@@ -214,18 +249,32 @@ def _ensure_cached(name: str) -> Path:
 
     url = _bif_url(name)
     logger.info("Downloading bnlearn network %s from %s", name, url)
-    local_gz = _CACHE_DIR / f"{name}.bif.gz"
+    fd_gz, tmp_gz = tempfile.mkstemp(prefix=f".{name}.", suffix=".bif.gz.part",
+                                     dir=_CACHE_DIR)
+    fd_bif, tmp_bif = tempfile.mkstemp(prefix=f".{name}.", suffix=".bif.part",
+                                       dir=_CACHE_DIR)
+    os.close(fd_bif)
     try:
-        with urllib.request.urlopen(
-            url, timeout=_DOWNLOAD_TIMEOUT_S, context=_ssl_context(),
-        ) as response:
-            local_gz.write_bytes(response.read())
-    except Exception as e:  # noqa: BLE001 — re-raised with context
-        raise RuntimeError(f"Failed to download {name}.bif.gz from {url}: {e}") from e
+        try:
+            with os.fdopen(fd_gz, "wb") as f_gz, urllib.request.urlopen(
+                url, timeout=_DOWNLOAD_TIMEOUT_S, context=_ssl_context(),
+            ) as response:
+                f_gz.write(response.read())
+        except Exception as e:  # noqa: BLE001 — re-raised with context
+            raise RuntimeError(f"Failed to download {name}.bif.gz from {url}: {e}") from e
 
-    with gzip.open(local_gz, "rb") as f_in, open(local_bif, "wb") as f_out:
-        f_out.write(f_in.read())
-    local_gz.unlink()  # keep only the decompressed .bif
+        with gzip.open(tmp_gz, "rb") as f_in, open(tmp_bif, "wb") as f_out:
+            f_out.write(f_in.read())
+        # mkstemp creates 0600; a shared cache (other users / SLURM jobs)
+        # needs the usual 0666 & ~umask a plain open() would have given.
+        os.chmod(tmp_bif, 0o666 & ~_current_umask())
+        os.replace(tmp_bif, local_bif)
+    finally:
+        for tmp in (tmp_gz, tmp_bif):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
     return local_bif
 
 
@@ -397,7 +446,7 @@ class _BnlearnContinuousModel:
         return out
 
     def weighted_sample(
-        self, n: int, evidence: dict, keep: list[str],
+        self, n: int, evidence: dict, keep: list[str], seed: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Likelihood-weighted particles for the oracle (#288).
 
@@ -405,6 +454,10 @@ class _BnlearnContinuousModel:
         with evidence clamped; each row's log-weight is
         ``Σ_{j∈E} log p(e_j | pa_j)``.  Returns ``(keep columns [n, len(keep)]
         float32, log-weights [n])``.
+
+        ``seed`` seeds the draw; ``None`` derives one from numpy's *global*
+        RNG (never from OS entropy), so the oracle's ``rng_scope`` makes
+        repeated calls reproducible (D6).
         """
         import numpy as np
 
@@ -414,7 +467,9 @@ class _BnlearnContinuousModel:
             if nd not in need:
                 need.add(nd)
                 stack.extend(self._parents(nd))
-        rng = np.random.default_rng()
+        if seed is None:
+            seed = int(np.random.randint(0, 2**31 - 1))
+        rng = np.random.default_rng(seed)
         values: dict[str, Any] = {}
         logw = np.zeros(n, dtype=np.float64)
         for node in self._topo:

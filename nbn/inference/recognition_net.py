@@ -411,10 +411,23 @@ class ParentConditionedProposal(nn.Module):
             pidx = getattr(self, f"_pidx_{gi}", None)
             if pidx is not None:
                 pv = xb[:, pidx]                             # [B, G, arity]
-                cards = [self.heads[self.node_order[p]].k
-                         for p in self.parents_idx[nodes[0]]]
-                ohs = [F.one_hot(pv[..., j].long(), c).float() for j, c in enumerate(cards)]
-                enc = torch.cat(ohs, dim=-1).permute(1, 0, 2)        # [G, B, sum_c]
+                # Encode exactly as ``encode_parents`` (the inference path):
+                # one-hot for discrete parents, the raw value for continuous
+                # ones.  One-hot-encoding every parent by ``head.k`` was wrong
+                # for a continuous parent of a discrete node (hybrid nets,
+                # #279): an MDN parent's ``k`` is its component count, so the
+                # input came out ``k - 1`` columns wider than the head
+                # (bmm "[1, 142] vs [1, 138]" with 5 components), or crashed
+                # on negative values.  Group members share the parent
+                # signature, so the first member's parents describe all.
+                cols = []
+                for j, p in enumerate(self.parents_idx[nodes[0]]):
+                    ph = self.heads[self.node_order[p]]
+                    if ph.kind == "discrete":
+                        cols.append(F.one_hot(pv[..., j].long(), ph.k).float())
+                    else:
+                        cols.append(pv[..., j:j + 1].float())
+                enc = torch.cat(cols, dim=-1).permute(1, 0, 2)       # [G, B, enc]
                 X = torch.cat([context.unsqueeze(0).expand(G, B, -1), enc], dim=-1)
             else:
                 X = context.unsqueeze(0).expand(G, B, -1)            # [G, B, d_ctx]

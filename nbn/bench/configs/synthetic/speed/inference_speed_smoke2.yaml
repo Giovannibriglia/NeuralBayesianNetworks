@@ -13,7 +13,7 @@
 # =============================================================================
 version: "v0.14"
 benchmark: synthetic
-config_name: batch_speed_smoke
+config_name: batch_speed_smoke2
 metrics: timing
 
 batch_sizes: [1, 4]
@@ -65,7 +65,7 @@ baselines:
   # nbn-hybrid (hybrid router)
   - {library: nbn,         mechanism: hybrid,    param_method: mle, inference_method: router,    extra_kwargs: {epochs: 1,  n_samples: 16}}
   # other libraries
-  - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: ve}
+  - {library: pomegranate, mechanism: discrete,  param_method: mle, inference_method: lbp}
   - {library: pyro,        mechanism: empirical, param_method: mle, inference_method: importance, batch_size: 1}
   - {library: pgmpy,       mechanism: discrete,  param_method: mle,   inference_method: ve, batch_size: 1}
   - {library: pgmpy,       mechanism: discrete,  param_method: bayes, inference_method: ve, batch_size: 1}

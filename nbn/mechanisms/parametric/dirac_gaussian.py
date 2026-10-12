@@ -65,19 +65,29 @@ class DiracGaussianMechanism(Mechanism):
         self._value = nn.Parameter(value.float().clone())
         self.sigma = float(sigma) if sigma is not None else float(config.DIRAC_GAUSSIAN_SIGMA)
 
+    def _loc(self) -> torch.Tensor:
+        """The intervention value as ``[B_v, D_x]`` (``B_v = 1`` for a vector).
+
+        A ``[B, D_x]`` value is documented as one target per batch row.  It
+        used to be flattened with ``view(1, -1)`` into a single ``B * D_x``
+        vector, so every method crashed on the subsequent expand; keep the
+        batch axis instead and let it broadcast against the query batch.
+        """
+        v = self._value
+        return v.reshape(1, -1) if v.dim() <= 1 else v.reshape(-1, v.shape[-1])
+
     def forward(self, parents: torch.Tensor | None) -> Independent:
         """Return ``N(value, sigma·I)`` with batch_shape derived from parents."""
-        if parents is None:
-            b = 1
-        else:
-            b = ensure_2d(parents).shape[0]
-        loc = self._value.view(1, -1).expand(b, self.output_dim)
+        loc = self._loc()
+        b = loc.shape[0] if parents is None else ensure_2d(parents).shape[0]
+        loc = loc.expand(b, self.output_dim)
         scale = torch.full_like(loc, self.sigma)
         return Independent(Normal(loc, scale), 1)
 
     def sample(self, parents: torch.Tensor | None, n: int = 1) -> torch.Tensor:
-        b = 1 if parents is None else ensure_2d(parents).shape[0]
-        loc = self._value.view(1, 1, -1).expand(b, n, self.output_dim)
+        loc = self._loc()
+        b = loc.shape[0] if parents is None else ensure_2d(parents).shape[0]
+        loc = loc.unsqueeze(1).expand(b, n, self.output_dim)
         return loc + self.sigma * torch.randn_like(loc)
 
     def log_prob(
@@ -90,7 +100,9 @@ class DiracGaussianMechanism(Mechanism):
             x = x.unsqueeze(1)
             squeeze_s = True
         b, s, d = x.shape
-        loc = self._value.view(1, 1, -1).expand(b, s, d)
+        # [B_v, 1, D]: a per-row value lines up with x's batch axis and is
+        # shared by that row's S particles; a vector value broadcasts.
+        loc = self._loc().unsqueeze(1).expand(b, s, d)
         # Independent Normal log-prob, summed over event dim
         var = self.sigma ** 2
         lp = -0.5 * (((x - loc) ** 2) / var
@@ -102,6 +114,16 @@ class DiracGaussianMechanism(Mechanism):
     # Vacuously true: fit_local estimates nothing from the data (the CPD is
     # fixed at construction), so there is no statistic for a weight to bias.
     supports_weights: bool = True
+
+    @property
+    def is_fitted(self) -> bool:
+        """Always True: the point mass is fully specified at construction.
+
+        Same contract as :class:`DeterministicMechanism`, its discrete sibling;
+        the base-class default (``False``) made an intervened continuous node
+        look unfitted to code that checks ``is_fitted``.
+        """
+        return True
 
     def fit_local(
         self,

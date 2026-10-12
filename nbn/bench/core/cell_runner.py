@@ -143,11 +143,29 @@ class CellRunResult:
     stderr: str = ""
 
 
+#: Bytes of the worker's combined stdout/stderr kept for diagnostics.
+_LOG_TAIL_BYTES = 64 * 1024
+#: Characters of that tail copied into a synthesized row's ``error_msg``.
+_ERROR_MSG_TAIL_CHARS = 2000
+
+
+def _read_tail(path: str, n_bytes: int = _LOG_TAIL_BYTES) -> str:
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - n_bytes))
+            return f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
 def run_cell_in_subprocess(
     ctx: dict,
     *,
     timeout_s: float | None = None,
     python_executable: str | None = None,
+    worker_cmd: list[str] | None = None,
 ) -> CellRunResult:
     """Run a cell in a subprocess and return the result rows.
 
@@ -159,6 +177,17 @@ def run_cell_in_subprocess(
         timeout_s: subprocess SIGTERMed if it runs longer than this
           many seconds. None = no timeout.
         python_executable: path to python (defaults to sys.executable).
+        worker_cmd: command prefix that runs the worker (input / output
+          paths are appended). Default ``[python, "-m",
+          "nbn.bench.core.cell_worker"]``; tests substitute stub workers.
+
+    The worker's stdout and stderr go to a temporary log FILE, never to a
+    pipe: a pipe that nobody drains while the parent ``wait()``s blocks the
+    worker as soon as it writes ~64 KiB (warnings, tqdm, tracebacks), and the
+    cell then sat idle until the hard timeout. A file has no such limit and
+    survives a kill. The last 64 KiB are returned in ``stderr`` and the tail
+    is copied, with ``exit_code`` and ``classification``, into the
+    ``error_msg`` of any row this function synthesizes.
 
     Returns:
         CellRunResult with parsed rows + classification.
@@ -175,6 +204,7 @@ def run_cell_in_subprocess(
 
     output_path = input_path.replace(".pkl", ".jsonl")
     Path(output_path).touch()  # ensure exists for partial-read on death
+    log_path = input_path.replace(".pkl", ".log")
 
     # Compute and pass the per-cell memory cap to the subprocess. The
     # worker applies RLIMIT_AS to itself on startup. The env-var name
@@ -183,18 +213,26 @@ def run_cell_in_subprocess(
     memory_limit_bytes = _compute_cell_memory_limit_bytes()
     env = os.environ.copy()
     env[MEMORY_LIMIT_ENV_VAR] = str(memory_limit_bytes)
+    # Safety net for reproducibility: str hashing is randomised per process,
+    # so any set/dict-order or hash() dependence anywhere in a cell (the
+    # benchmark code itself is audited for it) would make baselines of one
+    # cell see different queries. Pin it for every worker.
+    env["PYTHONHASHSEED"] = "0"
 
+    cmd = list(worker_cmd) if worker_cmd is not None else [
+        python_executable, "-m", "nbn.bench.core.cell_worker"]
     try:
-        # Launch the subprocess
-        proc = subprocess.Popen(
-            [python_executable, "-m", "nbn.bench.core.cell_worker",
-             input_path, output_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            # New process group so we can SIGTERM the whole group
-            start_new_session=True,
-            env=env,
-        )
+        # Launch the subprocess; output to a file (see docstring: no pipes).
+        with open(log_path, "wb") as log_f:
+            proc = subprocess.Popen(
+                [*cmd, input_path, output_path],
+                stdin=subprocess.DEVNULL,
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                # New process group so we can SIGTERM the whole group
+                start_new_session=True,
+                env=env,
+            )
 
         classification = "completed"
 
@@ -207,15 +245,14 @@ def run_cell_in_subprocess(
 
         exit_code = proc.returncode
 
-        # Drain the already-captured stderr now that the process has exited
-        # (read is non-blocking on a finished process). Logging only; does not
-        # affect the result rows (those come from the output file).
-        stderr_text = ""
-        if proc.stderr is not None:
-            try:
-                stderr_text = proc.stderr.read().decode("utf-8", "replace")
-            except Exception:
-                stderr_text = ""
+        # Worker output tail (logging / diagnostics only; the result rows
+        # still come from the output file).
+        stderr_text = _read_tail(log_path)
+        tail = stderr_text[-_ERROR_MSG_TAIL_CHARS:].strip()
+
+        def _diag() -> str:
+            return (f"classification={classification}, exit_code={exit_code}"
+                    + (f"; worker output tail:\n{tail}" if tail else ""))
 
         # If the subprocess died from a signal, mark as killed
         # (Negative return code on POSIX = killed by signal)
@@ -235,8 +272,7 @@ def run_cell_in_subprocess(
             status = _classification_to_status(classification, exit_code)
             rows = [{
                 "status": status,
-                "error_msg": f"subprocess produced no output rows "
-                             f"(classification={classification}, exit_code={exit_code})",
+                "error_msg": f"subprocess produced no output rows ({_diag()})",
             }]
         else:
             # Promote subprocess-level classification to a synthesized
@@ -250,8 +286,7 @@ def run_cell_in_subprocess(
                 status = _classification_to_status(classification, exit_code)
                 rows.append({
                     "status": status,
-                    "error_msg": f"subprocess {classification} "
-                                 f"(exit_code={exit_code})",
+                    "error_msg": f"subprocess {classification} ({_diag()})",
                     "_synthesized_by": "cell_runner",
                 })
 
@@ -263,7 +298,7 @@ def run_cell_in_subprocess(
         )
     finally:
         # Clean up temp files
-        for p in (input_path, output_path):
+        for p in (input_path, output_path, log_path):
             try:
                 os.unlink(p)
             except OSError:

@@ -10,10 +10,9 @@ import torch
 
 from nbn import NeuralBayesianNetwork
 from nbn.mechanisms import LinearGaussianMechanism
+from tests.conftest import available_devices
 
-DEVICES = ["cpu"]
-if torch.cuda.is_available():
-    DEVICES.append("cuda")
+DEVICES = available_devices()
 
 
 def _build_4node_continuous(device: str) -> NeuralBayesianNetwork:

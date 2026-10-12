@@ -1,5 +1,21 @@
 name: CI
 
+# Lanes (markers are declared in pyproject.toml, wired in tests/conftest.py):
+#
+#   test        Linux CPU, py3.10-3.12   the fast gate = pytest's default
+#                                         selection (not slow / subprocess /
+#                                         network / perf / cuda / multi_gpu)
+#   bench       Linux CPU, py3.12        slow + subprocess tests (real cell
+#                                         workers, the nbn-bench CLI) and the
+#                                         benchmark smoke runs
+#   network     Linux CPU, py3.12        tests that may download bnlearn
+#                                         networks, with the cache restored
+#   macos       macOS arm64 (MPS)        the fast gate on a real Metal device,
+#                                         then the mps-marked tests with the
+#                                         CPU fallback disabled
+#
+# CUDA (self-hosted) and the nightly full run live in gpu.yml / nightly.yml.
+
 on:
   push:
     branches: ["**"]
@@ -42,13 +58,41 @@ jobs:
       - name: Type-check core
         run: mypy nbn/core nbn/mechanisms
 
-      - name: Test
-        # Runs the slow-marked tests too. They were excluded because the suite
-        # took ~25 minutes; with torch's per-worker thread pool pinned under
-        # xdist (see tests/conftest.py) the whole thing is ~80s, so there is
-        # no longer anything to buy by skipping them -- and `slow` had become
-        # "never runs anywhere", since this was the only workflow.
-        run: pytest -n auto --cov=nbn --cov-report=xml -m "not gpu"
+      - name: Test (fast gate)
+        # The default selection; torch's thread pool is pinned per xdist
+        # worker in tests/conftest.py.
+        run: pytest -n auto --cov=nbn --cov-report=xml
+
+      - uses: codecov/codecov-action@v4
+        if: matrix.python-version == '3.11'
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install --prefer-binary -e ".[dev,bench,neural,gp,mcmc]"
+
+      - name: Slow and subprocess tests
+        # Excludes the network / perf / device lanes; loadgroup honours any
+        # xdist_group a test declares.
+        run: >
+          pytest -n auto --dist loadgroup
+          -m "(slow or subprocess) and not network and not perf and not cuda and not multi_gpu"
 
       - name: Parameter-learning smoke
         run: nbn-bench param-learning --config nbn/bench/configs/synthetic/smoke_tests/parameter_learning_smoke.yaml
@@ -62,22 +106,44 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: smoke-figures-py${{ matrix.python-version }}
+          name: smoke-figures
           path: results/**/*.png
           if-no-files-found: ignore
 
-      - uses: codecov/codecov-action@v4
-        if: matrix.python-version == '3.11'
+  network:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
         with:
-          files: ./coverage.xml
-          fail_ci_if_error: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Restore bnlearn network cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/nbn/bnlearn
+          key: bnlearn-${{ hashFiles('nbn/bench/problems/bnlearn.py') }}
+          restore-keys: bnlearn-
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install --prefer-binary -e ".[dev,bench,neural,gp,mcmc]"
+
+      - name: Network tests (bnlearn downloads)
+        run: pytest -n auto -m "network and not perf and not cuda and not multi_gpu"
 
   # Apple Silicon lane. GitHub's macos-latest runners are arm64 Macs with a
   # Metal-capable GPU, so ``torch.backends.mps.is_available()`` is True and
   # the device-parametrised tests (tests/conftest.py::available_devices)
   # run on ``mps`` for real -- the only place in CI that exercises the
   # float64-free accumulation paths and the CPU-hop linear solves.
-  test-macos:
+  macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -108,8 +174,17 @@ jobs:
           print("auto ->", resolve_device("auto"), "|", accelerator_summary())
           EOF
 
-      - name: Test
-        run: pytest -n auto -m "not gpu"
+      - name: Test (fast gate)
+        run: pytest -n auto
+
+      - name: MPS tests without the CPU fallback
+        # nbn/_mps_env.py defaults PYTORCH_ENABLE_MPS_FALLBACK=1 so that
+        # third-party ops missing on Metal run on the CPU.  NBN's own kernels
+        # must not depend on it: with the fallback off, an op without an MPS
+        # kernel raises instead of silently running on the CPU.
+        env:
+          PYTORCH_ENABLE_MPS_FALLBACK: "0"
+        run: pytest -n auto -m mps
 
       - name: Inference smoke on the default device (mps when available)
         run: nbn-bench inference --config nbn/bench/configs/synthetic/smoke_tests/inference_smoke.yaml --device auto

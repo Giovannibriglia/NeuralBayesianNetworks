@@ -18,6 +18,7 @@ from typing import Mapping
 import networkx as nx
 import torch
 
+from nbn.bench.core.seeding import derive_seed
 from nbn.bench.domains.base import BenchmarkProblem, Query
 
 
@@ -275,6 +276,10 @@ class _KindEvidenceAllocator:
     ) -> list[str]:
         """Build the candidate pool for evidence nodes.
 
+        Every pool is a list in a process-independent order: frozensets of
+        node names iterate in string-hash order (randomised per process by
+        PYTHONHASHSEED), so pools are sorted by (hardness, name) or by name.
+
         Spec §3.4 evidence pools table:
         - prediction + longest_path: ancestors of target, sorted by depth
           distance desc
@@ -293,15 +298,16 @@ class _KindEvidenceAllocator:
                 # Deepest ancestors are farthest in topological depth from target.
                 return sorted(
                     ancestors,
-                    key=lambda v: -(roles.depth.get(target, 0) - roles.depth.get(v, 0)),
+                    key=lambda v: (
+                        -(roles.depth.get(target, 0) - roles.depth.get(v, 0)), v),
                 )
             elif strategy == "mb_neighbors":
                 parents = roles.parents.get(target, frozenset())
                 co_parents = roles.co_parents.get(target, frozenset())
                 pool = list(parents | co_parents)
-                return sorted(pool, key=lambda v: -roles.mb_size.get(v, 0))
+                return sorted(pool, key=lambda v: (-roles.mb_size.get(v, 0), v))
             elif strategy == "random":
-                return list(roles.ancestors.get(target, frozenset()))
+                return sorted(roles.ancestors.get(target, frozenset()))
             else:
                 return []
         elif query_kind == "diagnosis":
@@ -309,18 +315,19 @@ class _KindEvidenceAllocator:
                 descendants = roles.descendants.get(target, frozenset())
                 return sorted(
                     descendants,
-                    key=lambda v: -(roles.depth.get(v, 0) - roles.depth.get(target, 0)),
+                    key=lambda v: (
+                        -(roles.depth.get(v, 0) - roles.depth.get(target, 0)), v),
                 )
             elif strategy == "mb_neighbors":
                 children = roles.children.get(target, frozenset())
                 # Per spec §5 Q3: co_children = co_parents (same structural set)
                 co_children = roles.co_parents.get(target, frozenset())
                 pool = list(children | co_children)
-                return sorted(pool, key=lambda v: -roles.mb_size.get(v, 0))
+                return sorted(pool, key=lambda v: (-roles.mb_size.get(v, 0), v))
             elif strategy == "random":
                 descendants = roles.descendants.get(target, frozenset())
                 all_nodes = set(roles.mb_size.keys())
-                return list(all_nodes - {target} - descendants)
+                return sorted(all_nodes - {target} - descendants)
             else:
                 return []
         else:
@@ -342,7 +349,10 @@ class _KindEvidenceAllocator:
         For random strategy: uniform shuffle, then take first n.
         """
         if strategy == "random":
-            pool_copy = list(pool)
+            # sorted() first: a pool built from a frozenset iterates in
+            # string-hash order, which differs per process (PYTHONHASHSEED),
+            # so the same seed shuffled a different list in every cell worker.
+            pool_copy = sorted(pool)
             rng.shuffle(pool_copy)
             return pool_copy[:n]
         else:
@@ -378,7 +388,10 @@ class _ValueAllocator:
 
         Determinism: same ``problem_seed`` + ``query_idx`` + ``seen`` state →
         same return. Each retry draws a row index from a fresh
-        ``random.Random(problem_seed * 997 + query_idx + retry)`` (spec §3.5).
+        ``random.Random(derive_seed("topological-values", problem_seed,
+        query_idx, retry))``. (Spec §3.5 used ``problem_seed * 997 + query_idx
+        + retry``, under which query q's retry 1 replayed query q+1's first
+        draw and seeds collided across problems, e.g. (0, 997) vs (1, 0).)
         The dedup key uses ``row_idx`` rather than the value tensor to avoid
         tensor hashability issues (spec §5 Q4).
         """
@@ -391,7 +404,8 @@ class _ValueAllocator:
         retries = self.max_retry if max_retry is None else max_retry
         key_nodes = frozenset(evidence_nodes)
         for retry in range(retries):
-            local = random.Random(problem_seed * 997 + query_idx + retry)
+            local = random.Random(
+                derive_seed("topological-values", problem_seed, query_idx, retry))
             row_idx = local.randrange(n_rows)
             key = (target, key_nodes, row_idx)
             if key in seen:

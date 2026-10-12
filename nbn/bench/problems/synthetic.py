@@ -191,7 +191,7 @@ class SyntheticProblemSource:
             device=cfg.device,
         )
 
-        gt_samples = _ensure_gt_samples(sbn)
+        gt_samples = _ensure_gt_samples(sbn, n_reference=cfg.n_reference, seed=seed)
 
         return BenchmarkProblem(
             name=sbn.name,
@@ -213,21 +213,26 @@ class SyntheticProblemSource:
 # Ground-truth pool synthesis
 # ---------------------------------------------------------------------------
 
-def _ensure_gt_samples(sbn) -> torch.Tensor | None:
+def _ensure_gt_samples(
+    sbn, n_reference: int = 5_000, seed: int = 0,
+) -> torch.Tensor | None:
     """Return the joint reference pool in topological-sort column order.
 
     For non-discrete families, ``sbn.ground_truth_samples`` is already
-    populated by ``make_synthetic_bn``.
+    populated by ``make_synthetic_bn`` (``n_reference`` rows).
 
     For discrete families, ``sbn.ground_truth_samples`` is ``None`` (by
-    design — discrete families use exact-match rejection on sampled
-    marginals, not a pre-computed pool, in the v0.12 runner).  We
-    synthesise a pool here so the problem carries its own oracle data.
+    design: their accuracy reference is the *exact* posterior, computed by
+    variable elimination on ``true_model``, see
+    ``nbn.bench.core.oracle.discrete_oracle``). We still synthesise a pool so
+    every problem carries ``n_reference`` reference rows: it sizes the
+    likelihood-weighting tier and backs the legacy rejection fallback.
 
-    The pool size is ``min(5_000, n_reference // 2)`` capped at the
-    v0.12 runner's convention (line 473: ``n_ref = min(5000, max(1000,
-    cfg.n_reference // 2))``).  We use 5_000 as a reasonable default
-    matching the v0.12 ``_compute_inference_metrics`` fallback.
+    The pool has ``cfg.n_reference`` rows (previously a hard-coded 5,000 that
+    ignored the config), halved above the generator's large-network
+    threshold exactly as ``make_synthetic_bn`` halves the continuous pools.
+    It is drawn under ``rng_scope(derive_seed("reference_pool", seed))`` —
+    reproducible, and the caller's RNG streams are untouched (D6).
 
     Columns are written in ``sbn.column_order`` (topological sort), which
     matches what ``nbn.bench.core.oracle.filter_ground_truth`` will
@@ -236,10 +241,15 @@ def _ensure_gt_samples(sbn) -> torch.Tensor | None:
     if sbn.ground_truth_samples is not None:
         return sbn.ground_truth_samples
 
-    # Discrete family: synthesise now.
-    n_ref = 5_000
+    from nbn.bench.core.seeding import derive_seed, rng_scope
+    from nbn.bench.synthetic import _REFERENCE_LARGE_NETWORK_THRESHOLD
+
+    n_ref = int(n_reference)
+    if sbn.n_nodes >= _REFERENCE_LARGE_NETWORK_THRESHOLD and n_ref > 10_000:
+        n_ref //= 2
     try:
-        with torch.no_grad():
+        with torch.no_grad(), rng_scope(derive_seed("reference_pool", seed),
+                                        getattr(sbn.true_model, "device", "cpu")):
             ref = sbn.true_model.sample(n=n_ref)
         pool = torch.cat(
             [ref[nm].reshape(n_ref, -1).float().cpu() for nm in sbn.column_order],

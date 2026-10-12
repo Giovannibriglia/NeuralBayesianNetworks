@@ -265,3 +265,56 @@ class Mechanism(nn.Module, ABC):
             f"{type(self).__name__}.tabulate() is only defined for "
             f"discrete mechanisms."
         )
+
+
+# ----------------------------------------------------------------------
+# Optional buffers added after a mechanism format was released
+# ----------------------------------------------------------------------
+#
+# Some mechanisms gained data-standardisation buffers (MDN's ``_x_mean`` /
+# ``_x_std``; the flow's ``_x_*`` and ``_pa_*``) whose ``None`` value means
+# "identity" -- exactly the parameterisation the older format used.  Two
+# persistence paths have to map "absent" onto that ``None``:
+#
+# * ``NBN.save``/``torch.load`` and ``copy.deepcopy`` unpickle the module
+#   through ``__setstate__``; an old pickle has no entry for the buffer in
+#   ``_buffers``, so every later attribute read raised ``AttributeError``.
+# * ``load_state_dict`` of an old ``state_dict`` into a freshly fitted module:
+#   strict loading reported the buffers as missing keys, and ``strict=False``
+#   kept the fitted module's standardisation under weights trained without
+#   it -- silently wrong numbers.
+
+
+def _ensure_optional_buffers(module: nn.Module, names: tuple[str, ...]) -> None:
+    """Register every buffer in ``names`` that an old pickle lacks, as ``None``."""
+    for name in names:
+        if name not in module._buffers:
+            module._buffers[name] = None
+
+
+def _sync_optional_buffers(
+    module: nn.Module, state_dict, prefix: str, names: tuple[str, ...],
+) -> None:
+    """Make ``module``'s optional buffers match ``state_dict`` before loading.
+
+    Called from ``_load_from_state_dict`` (before ``super()``), so the
+    standard per-key copy and the strict missing/unexpected-key checks then
+    see consistent sets:
+
+    * key present, local buffer ``None`` -> allocate it (the copy fills it);
+    * key absent, local buffer set, and the dict *does* carry this module's
+      other state -> the dict is in the older, unstandardised format: reset
+      the buffer to ``None`` (identity).  A dict with nothing for this module
+      at all is left alone, so a partial ``strict=False`` load keeps the
+      current buffers.
+    """
+    has_own_state = any(k.startswith(prefix) for k in state_dict)
+    ref = next(iter(module.parameters()), None)
+    for name in names:
+        key = prefix + name
+        if key in state_dict:
+            if module._buffers.get(name) is None:
+                t = state_dict[key].detach().clone()
+                module._buffers[name] = t if ref is None else t.to(ref.device)
+        elif has_own_state and module._buffers.get(name) is not None:
+            module._buffers[name] = None

@@ -57,6 +57,7 @@ from nbn.inference.base import InferenceEngine
 from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
 from nbn.inference.recognition_net import RecognitionNetwork
 from nbn.sampling.ancestral import ancestral_sample
+from nbn.utils.device import to_device_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,13 @@ class AmortizedVIEngine(InferenceEngine):
         self.proposal_used: str | None = None
         # LW engine that answers queries after a fallback (recognition_net unset).
         self._fallback: LikelihoodWeightingEngine | None = None
+        # LW engine for interventional queries, always available.  ``q`` is
+        # trained on observational evidence patterns of the unmutilated
+        # model; ``do(X)`` changes the model itself (X's CPT is cut), so no
+        # forward pass of the recognition net answers it.  Routing do= here
+        # keeps the "every engine honours do=" contract — it used to be
+        # swallowed by **kwargs and the observational q returned (A6).
+        self._do_engine = LikelihoodWeightingEngine(n_samples=self.n_samples)
 
     # ------------------------------------------------------------------
     # Training (called once, from adapter.fit())
@@ -426,8 +434,7 @@ class AmortizedVIEngine(InferenceEngine):
                     v = test[nd]
                     if v.dim() >= 2:
                         v = v[..., 0]
-                    ev[nd] = v.reshape(-1)[rows].reshape(-1, 1).to(
-                        device=dev, dtype=torch.float32)
+                    ev[nd] = to_device_dtype(v.reshape(-1)[rows].reshape(-1, 1), dev, torch.float32)
                 patterns.append({"evidence": ev, "target": tgt, "n_latent": len(latent)})
             return patterns
         except Exception as exc:  # pragma: no cover - diagnostic safety
@@ -590,7 +597,7 @@ class AmortizedVIEngine(InferenceEngine):
             v = samples[node]
             if v.dim() >= 2:
                 v = v[..., 0]
-            cols.append(v.reshape(-1).to(device=dev, dtype=torch.float32))
+            cols.append(to_device_dtype(v.reshape(-1), dev, torch.float32))
         return torch.stack(cols, dim=1)
 
     # ------------------------------------------------------------------
@@ -772,7 +779,7 @@ class AmortizedVIEngine(InferenceEngine):
                 test = ancestral_sample(model, n=n_eval, device=str(dev))
                 obs = net.node_order[: max(1, n_nodes // 2)]
                 evidence = {
-                    nd: test[nd].reshape(-1, 1).to(device=dev, dtype=torch.float32)
+                    nd: to_device_dtype(test[nd].reshape(-1, 1), dev, torch.float32)
                     for nd in obs
                 }
                 log_pe = self._log_marginal_discrete(model, net, evidence, dev)  # [B]
@@ -822,7 +829,7 @@ class AmortizedVIEngine(InferenceEngine):
             if v is None:
                 continue
             t = v if isinstance(v, torch.Tensor) else torch.as_tensor(v)
-            t = t.to(device=dev, dtype=torch.float32)
+            t = to_device_dtype(t, dev, torch.float32)
             if t.dim() == 0:
                 t = t.reshape(1)
             if t.dim() == 1:
@@ -849,9 +856,14 @@ class AmortizedVIEngine(InferenceEngine):
         assert self._fallback is None
         dev = self.device or model.device
         B, ev_values, mask = self._build_evidence(net, evidence, dev)
+        tgt = targets[0]
+        if tgt in (evidence or {}):
+            # Observed target: the posterior is a point mass at the observed
+            # value.  ``q(x_t | e)`` is a learned approximation that need not
+            # be (and was not) degenerate there.
+            return self._observed_target(net, tgt, ev_values[:, net.node_index[tgt]], B, dev)
         with torch.no_grad():
             params = net(ev_values, mask)              # [B, total]
-            tgt = targets[0]
             p = net.node_param_slice(params, tgt)
             dist = net.make_dist(tgt, p)
             if net.is_discrete(tgt):
@@ -862,6 +874,21 @@ class AmortizedVIEngine(InferenceEngine):
             w = torch.softmax(torch.zeros(B, S, device=dev), dim=-1)
             return w, s
 
+    def _observed_target(self, net, tgt, values, B, dev):
+        """Delta posterior for a target that is itself observed (``values`` ``[B]``)."""
+        head = net.heads[tgt]
+        if net.is_discrete(tgt):
+            out = torch.zeros(B, head.k, device=dev)
+            out.scatter_(1, values.long().reshape(B, 1), 1.0)
+            return out
+        # Continuous: S identical particles at the observed value, uniform
+        # weights — the same shape LW's clamped particles have.  (Only the
+        # first evidence column is encoded, so d_x > 1 targets are broadcast.)
+        S = self.n_samples
+        s = values.reshape(B, 1, 1).expand(B, S, head.d_x).clone()
+        w = torch.full((B, S), 1.0 / S, device=dev)
+        return w, s
+
     def query(
         self,
         model,
@@ -869,6 +896,10 @@ class AmortizedVIEngine(InferenceEngine):
         evidence: Dict[str, torch.Tensor] | None = None,
         **kwargs,
     ) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor]:
+        if kwargs.get("do"):
+            kwargs.setdefault("n_samples", self.n_samples)
+            return self._do_engine.query(model, targets, evidence, **kwargs)
+        kwargs.pop("do", None)
         if self.recognition_net is None and self._fallback is not None:
             # Fit-time gate rejected q (#249): plain likelihood weighting.
             return self._fallback.query(model, targets, evidence, **kwargs)
@@ -885,6 +916,12 @@ class AmortizedVIEngine(InferenceEngine):
         evidence: Dict[str, torch.Tensor],
         **kwargs,
     ) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor]:
+        if kwargs.get("do"):
+            # Per-row interventions: LW sizes B from evidence AND do, so a
+            # do-only sweep keeps its B rows (it used to collapse to B=1).
+            kwargs.setdefault("n_samples", self.n_samples)
+            return self._do_engine.query_batch(model, targets, evidence, **kwargs)
+        kwargs.pop("do", None)
         if self.recognition_net is None and self._fallback is not None:
             return self._fallback.query_batch(model, targets, evidence, **kwargs)
         return self._infer(model, targets, evidence)

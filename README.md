@@ -126,7 +126,7 @@ cd NeuralBayesianNetworks
 python3 -m venv .venv && source .venv/bin/activate
 pip install -U pip
 pip install -e ".[dev,all]"
-pytest -m "not slow"             # fast test suite
+pytest -n auto                   # fast test suite (the default selection)
 ```
 
 ## Quick start
@@ -279,8 +279,11 @@ paper-scale benchmark are in [`notebooks/`](notebooks).
 
 ```bash
 pip install -e ".[dev,all]"
-pytest -m "not slow"                  # fast suite
-pytest                                # everything (slow tests download bnlearn networks)
+pytest -n auto                        # fast gate (default: not slow/subprocess/network/perf/cuda)
+pytest -n auto -m "slow or not slow"  # everything runnable here (network tests download bnlearn networks)
+pytest -m "slow or subprocess"        # benchmark-harness lane: real cell workers, the CLI
+pytest -m mps                         # Metal tests (macOS); -m cuda / -m multi_gpu on NVIDIA hosts
+pytest -p no:xdist -m perf tests/perf # wall-clock assertions, on a quiet machine
 ruff check nbn/ tests/ scripts/ && mypy nbn/core nbn/mechanisms
 ```
 
@@ -288,7 +291,11 @@ Repository layout:
 
     nbn/                 the library: core/, mechanisms/, inference/, learning/, sampling/, update/
     nbn/bench/           benchmark suite: runner, baseline adapters, configs, bnlearn data
-    tests/               unit and integration tests
+    tests/unit/          library tests (core, mechanisms, inference, learning, update)
+    tests/integration/   library end-to-end examples
+    tests/bench/         nbn.bench tests (bench/integration/: runner, CLI, bnlearn)
+    tests/perf/          wall-clock assertions (-m perf)
+    tests/data/          fixtures, incl. vendored bnlearn .bif networks
     notebooks/           Colab notebooks for the paper-scale benchmarks
     scripts/             run_all_benchmarks.sh and other helpers
     docs/                benchmark guide, design notes and audits

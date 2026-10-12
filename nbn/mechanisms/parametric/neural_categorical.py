@@ -150,7 +150,7 @@ class NeuralCategoricalMechanism(Mechanism):
             # data, so the bitwise epochs=0 contract still holds.
             self._root_logits = nn.Parameter(log_freq.to(device))
             if consolidate:
-                online_laplace.consolidate(self, x, None)
+                online_laplace.consolidate(self, x, None, weights=w_vec)
             return {"n_classes": k, "warm_started": False}
 
         parents = ensure_2d(parents).to(device=device)
@@ -195,7 +195,7 @@ class NeuralCategoricalMechanism(Mechanism):
         # sequential per-sample backward passes — pure overhead for fit-only
         # workloads that never call update().
         if consolidate:
-            online_laplace.consolidate(self, x, parents)
+            online_laplace.consolidate(self, x, parents, weights=w_vec)
         return {"n_classes": k, "d_pa": d_pa, "warm_started": warm}
 
     # ------------------------------------------------------------------
@@ -246,7 +246,13 @@ class NeuralCategoricalMechanism(Mechanism):
 
     def _logits_from_parents(self, parents: torch.Tensor) -> torch.Tensor:
         if self.embeddings is not None:
-            parts = [self.embeddings[i](parents[:, i].long()) for i in range(parents.shape[1])]
+            # Index the *last* (parent) axis: ``parents[:, i]`` picked the
+            # sample axis of a [B, S, D_pa] particle block, which crashed or
+            # embedded the wrong values.
+            parts = [
+                self.embeddings[i](parents[..., i].long())
+                for i in range(parents.shape[-1])
+            ]
             inp = torch.cat(parts, dim=-1)
         else:
             inp = parents.float()

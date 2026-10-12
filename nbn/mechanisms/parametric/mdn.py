@@ -14,12 +14,17 @@ from nbn.learning.weighting import (
     weighted_moments,
 )
 from nbn.learning.warm_start import check_branch, check_shapes
-from nbn.mechanisms.base import Mechanism
+from nbn.mechanisms.base import (
+    Mechanism,
+    _ensure_optional_buffers,
+    _sync_optional_buffers,
+)
 from nbn.update import online_laplace
 # _sanitise_parents was promoted to nbn.utils.batching (v0.14) so the flow
 # mechanism can share the identical guard; re-exported via this import for the
 # existing ``from nbn.mechanisms.parametric.mdn import _sanitise_parents`` callers/tests.
 from nbn.utils.batching import _sanitise_parents, ensure_2d, flatten_samples  # noqa: F401
+from nbn.utils.device import to_device_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +101,18 @@ class MDNMechanism(Mechanism):
         # None for root nodes (no parents).
         self.register_buffer('_pa_mean', None)
         self.register_buffer('_pa_std', None)
+        # Child standardisation statistics ([D_x] each), non-root only.  The
+        # MLP predicts mixture locations/scales in standardised units and
+        # _params_from_parents maps them back (loc = m + s*loc_z,
+        # scale = s*scale_z), so log_prob carries the -log(s) Jacobian through
+        # Normal's own normaliser and sample() returns raw values.  Without
+        # it the MLP had to emit raw locations, and _log_scale_clamp capped
+        # every component at ~1097 *raw* units: a target with a spread of a
+        # few thousand was misfit (NLL 15.0 against LinearGaussian's 9.4).
+        # None (identity) until fit_local runs, so a hand-built MDN
+        # (nbn.bench.synthetic) keeps its raw-unit parameterisation.
+        self.register_buffer('_x_mean', None)
+        self.register_buffer('_x_std', None)
         # Bug C (follow-up to Bug B / PR #90): deep-chain LW sampling at
         # n≥100 can produce particles at 700σ+ after standardization.  MLP
         # log_scale outputs at that scale overflow float32 → scale=Inf →
@@ -105,9 +122,11 @@ class MDNMechanism(Mechanism):
         # normal training, while 50σ is already wildly OOD — predictions
         # there are noise regardless.  Tunable via _pa_clamp.
         self._pa_clamp: float = 50.0
-        # Issue #95: bounds log_scale output before exp() — exp(7) ≈ 1100,
-        # physically meaningful but prevents float32 overflow on pathological
-        # input combinations that slip past _pa_clamp.  Tunable via _log_scale_clamp.
+        # Issue #95: bounds log_scale output before exp() — exp(7) ≈ 1100
+        # standard deviations of the child (the clamp acts in standardised
+        # units once _x_std is set), physically meaningful but prevents
+        # float32 overflow on pathological input combinations that slip past
+        # _pa_clamp.  Tunable via _log_scale_clamp.
         self._log_scale_clamp: float = 7.0
         # Online-EWC state for incremental update (theta* and diagonal Fisher),
         # flat concatenations over parameters().  Buffers so .to()/state_dict/
@@ -119,6 +138,18 @@ class MDNMechanism(Mechanism):
     # ------------------------------------------------------------------
     # Fitting
     # ------------------------------------------------------------------
+
+    # Buffers added after this mechanism's first release; ``None`` is the
+    # identity map the older format used.  See nbn/mechanisms/base.py.
+    _OPTIONAL_BUFFERS = ("_x_mean", "_x_std")
+
+    def __setstate__(self, state) -> None:
+        super().__setstate__(state)
+        _ensure_optional_buffers(self, self._OPTIONAL_BUFFERS)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs) -> None:
+        _sync_optional_buffers(self, state_dict, prefix, self._OPTIONAL_BUFFERS)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def fit_local(
         self,
@@ -132,17 +163,20 @@ class MDNMechanism(Mechanism):
         warm_start: bool = False,
         **kwargs,
     ) -> dict:
-        x = ensure_2d(x)  # [N, D_x]
-        n, d_x = x.shape
-        device = x.device
-        w_vec = validate_weights(weights, n, where="MDNMechanism.fit_local", device=device)
-        k = self.num_components
-
         is_root = parents is None or parents.shape[-1] == 0
         # Validate *before* mutating anything: _d_x/output_dim used to be
         # assigned above the branch, so a rejected warm start would have left
         # the mechanism describing a shape its parameters do not have.
         warm = bool(warm_start) and self.is_fitted
+        # Train in the parameters' dtype (the default dtype for a fresh
+        # build).  float64 data used to reach a float32 MLP and crash with
+        # "mat1 and mat2 must have the same dtype".
+        x = ensure_2d(x).to(self._param_dtype() if warm else torch.get_default_dtype())
+        n, d_x = x.shape
+        device = x.device
+        w_vec = validate_weights(weights, n, where="MDNMechanism.fit_local", device=device)
+        k = self.num_components
+
         if warm:
             where = "MDNMechanism.fit_local"
             check_branch(where, was_root=self._d_pa == 0, is_root=is_root)
@@ -155,6 +189,11 @@ class MDNMechanism(Mechanism):
 
         if is_root:
             self._d_pa = 0
+            # The root branch is parameterised in raw units (closed-form
+            # moments); drop any child standardisation a previous non-root
+            # fit left behind so it cannot be mistaken for this fit's.
+            self._x_mean = None
+            self._x_std = None
             # Learnable root parameters
             # A root MDN is initialised analytically from the data moments and
             # never enters the training loop below, so weighting has to be
@@ -169,15 +208,30 @@ class MDNMechanism(Mechanism):
             # deterministic; the values only move when the weights do, which
             # is when they should.
             loc0, scale0 = weighted_moments(x, w_vec, unbiased=True)
+            # One unweighted row has an undefined (NaN) unbiased std, and
+            # clamp_min passes NaN through: fall back to the population value
+            # (0) so the floor below applies.
+            scale0 = scale0.nan_to_num(0.0)
             self._root_logits = nn.Parameter(torch.zeros(k, device=device))
             self._root_loc = nn.Parameter(loc0.unsqueeze(0).expand(k, -1).clone())
             self._root_log_scale = nn.Parameter(
                 torch.log(scale0.clamp_min(1e-3)).unsqueeze(0).expand(k, -1).clone()
             )
         else:
-            parents = ensure_2d(parents).to(device=device, dtype=x.dtype)
+            parents = to_device_dtype(ensure_2d(parents), device, x.dtype)
             d_pa = parents.shape[1]
             self._d_pa = d_pa
+            # Child standardisation (see __init__).  Population moments: the
+            # scale only fixes the units the MLP works in (the Jacobian keeps
+            # log_prob exact for any choice), and the population form is
+            # replication-exact and well defined for a single row or a total
+            # weight <= 1.  A constant child gets s = 1.  Frozen under
+            # warm_start for the same reason as _pa_mean/_pa_std below.
+            if not warm:
+                x_m, x_s = weighted_moments(x, w_vec)
+                x_s = x_s.nan_to_num(0.0)
+                self._x_mean = x_m.detach()
+                self._x_std = torch.where(x_s > 0, x_s, torch.ones_like(x_s)).detach()
             # Compute parent standardization statistics from training data.
             # Extreme parent values (e.g. 3.3M in continuous_nongauss deep
             # chains) cause log_scale overflow in the MLP forward pass:
@@ -199,7 +253,9 @@ class MDNMechanism(Mechanism):
             if not warm:
                 pa_m, pa_s = weighted_moments(parents, w_vec, unbiased=True)
                 pa_mean = pa_m.unsqueeze(0)
-                pa_std = pa_s.unsqueeze(0).clamp_min(1e-3)
+                # nan_to_num: one unweighted row has a NaN unbiased std, which
+                # clamp_min would pass straight into every forward call.
+                pa_std = pa_s.nan_to_num(0.0).unsqueeze(0).clamp_min(1e-3)
                 self._pa_mean = pa_mean.detach()
                 self._pa_std = pa_std.detach()
             # Do NOT pre-standardize here: _params_from_parents applies
@@ -239,7 +295,7 @@ class MDNMechanism(Mechanism):
         # sequential per-sample backward passes — pure overhead for fit-only
         # workloads that never call update().
         if consolidate:
-            online_laplace.consolidate(self, x, parents)
+            online_laplace.consolidate(self, x, parents, weights=w_vec)
         # ``warm_started`` is True only where parameters were actually carried
         # over — never on the closed-form root branch, which recomputes.
         return {
@@ -283,9 +339,9 @@ class MDNMechanism(Mechanism):
                 "statistics, so update() folds new data onto the correct "
                 "prior — but the new data itself is taken at face value."
             )
-        x = ensure_2d(x)
+        x = ensure_2d(x).to(self._param_dtype())
         if parents is not None:
-            parents = ensure_2d(parents).to(device=x.device, dtype=x.dtype)
+            parents = to_device_dtype(ensure_2d(parents), x.device, x.dtype)
         return online_laplace.ewc_update(
             self, x, parents,
             epochs=epochs, lr=lr, batch_size=batch_size,
@@ -296,6 +352,16 @@ class MDNMechanism(Mechanism):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _param_dtype(self) -> torch.dtype:
+        """dtype of the fitted parameters (default dtype before any fit).
+
+        Inputs are cast to it on every entry point: the MLP's matmul does not
+        type-promote, so float64 data against float32 weights crashed.
+        """
+        for p in self.parameters():
+            return p.dtype
+        return torch.get_default_dtype()
 
     def _params_from_parents(
         self, parents: torch.Tensor | None, shape: Tuple[int, ...]
@@ -323,7 +389,9 @@ class MDNMechanism(Mechanism):
         # the upstream NaN's root-cause origin in deep
         # ``continuous_nongauss`` ancestral chains is tracked in
         # v0.7 issue #24.
-        parents = _sanitise_parents(parents, mech_name="MDN._params_from_parents")
+        parents = _sanitise_parents(
+            parents.to(self._param_dtype()), mech_name="MDN._params_from_parents",
+        )
         # Standardize to training distribution — prevents log_scale overflow
         # from extreme parent values (Bug B fix; see fit_local comment).
         if self._pa_mean is not None:
@@ -337,7 +405,15 @@ class MDNMechanism(Mechanism):
         loc = rest[..., :d_x]
         log_scale = rest[..., d_x:]
         log_scale = log_scale.clamp(max=self._log_scale_clamp)  # issue #95
-        scale = torch.exp(log_scale).clamp_min(self.min_scale)
+        scale = torch.exp(log_scale)
+        if self._x_mean is not None:
+            # Standardised -> raw units.  An affine map of a Gaussian is a
+            # Gaussian, so the mixture in raw units is exact and Normal's
+            # log(scale) term carries the -log(s) Jacobian.
+            loc = self._x_mean + self._x_std * loc
+            scale = self._x_std * scale
+        # min_scale stays a floor in raw units, as documented.
+        scale = scale.clamp_min(self.min_scale)
         return logits, loc, scale
 
     def _log_prob_2d(self, x: torch.Tensor, parents: torch.Tensor | None) -> torch.Tensor:
@@ -370,7 +446,7 @@ class MDNMechanism(Mechanism):
 
     def forward(self, parents: torch.Tensor | None) -> MixtureSameFamily:
         if parents is not None:
-            parents = ensure_2d(parents)
+            parents = ensure_2d(parents).to(self._param_dtype())
             b = parents.shape[0]
         else:
             b = 1
@@ -421,7 +497,7 @@ class MDNMechanism(Mechanism):
             flat, _, _ = flatten_samples(parents)
             pa_flat = flat
 
-        x_flat = x.reshape(b * s, d_x)
+        x_flat = x.reshape(b * s, d_x).to(self._param_dtype())
         lp = self._log_prob_2d(x_flat, pa_flat).reshape(b, s)
         if squeeze_s:
             lp = lp.squeeze(1)

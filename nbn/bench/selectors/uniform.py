@@ -22,8 +22,10 @@ class UniformRandomSelector:
 
     For each of the ``n_queries`` requested queries, picks ONE target node
     and up to ``n_evidence`` evidence nodes from the problem's node set
-    (uniformly at random, without replacement within a single query), then
-    uses one row from ``problem.test_data`` as the evidence values.
+    (uniformly at random, without replacement within a single query, drawn
+    afresh for every query), then uses one row from ``problem.test_data`` as
+    the evidence values. A cell's accuracy is therefore an average over many
+    targets, not over evidence rows of a single node (D8).
 
     All returned queries have ``kind="marginal"``.
 
@@ -98,17 +100,20 @@ class UniformRandomSelector:
         if take <= 0:
             return []
 
-        # Deterministic generator — seed * 1000 + 7 matches v0.12 convention
-        # in _build_query_batch so behaviour is unchanged when both use the
-        # same seed.
-        gen = torch.Generator(device="cpu").manual_seed(seed * 1000 + 7)
-        perm = torch.randperm(n_nodes, generator=gen).tolist()
+        # D8: a fresh (target, evidence set) per query. The v0.12 convention
+        # drew ONE permutation per cell, so every query of a seed shared one
+        # target and accuracy came from a single node per seed. One generator
+        # per cell keeps the whole list deterministic given ``seed``.
+        from nbn.bench.core.seeding import derive_seed
 
-        target = nodes[perm[0]]
-        evidence_nodes = [nodes[perm[i]] for i in range(1, 1 + effective_n_ev)]
+        gen = torch.Generator(device="cpu").manual_seed(
+            derive_seed("uniform-selector", seed))
 
         queries: list[Query] = []
         for row_idx in range(take):
+            perm = torch.randperm(n_nodes, generator=gen).tolist()
+            target = nodes[perm[0]]
+            evidence_nodes = [nodes[perm[i]] for i in range(1, 1 + effective_n_ev)]
             ev: dict[str, torch.Tensor] = {
                 v: test_values[v][row_idx].reshape(()).float()
                 for v in evidence_nodes
