@@ -24,6 +24,7 @@ from nbn.update import online_laplace
 # mechanism can share the identical guard; re-exported via this import for the
 # existing ``from nbn.mechanisms.parametric.mdn import _sanitise_parents`` callers/tests.
 from nbn.utils.batching import _sanitise_parents, ensure_2d, flatten_samples  # noqa: F401
+from nbn.utils.device import to_device_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +218,7 @@ class MDNMechanism(Mechanism):
                 torch.log(scale0.clamp_min(1e-3)).unsqueeze(0).expand(k, -1).clone()
             )
         else:
-            parents = ensure_2d(parents).to(device=device, dtype=x.dtype)
+            parents = to_device_dtype(ensure_2d(parents), device, x.dtype)
             d_pa = parents.shape[1]
             self._d_pa = d_pa
             # Child standardisation (see __init__).  Population moments: the
@@ -340,7 +341,7 @@ class MDNMechanism(Mechanism):
             )
         x = ensure_2d(x).to(self._param_dtype())
         if parents is not None:
-            parents = ensure_2d(parents).to(device=x.device, dtype=x.dtype)
+            parents = to_device_dtype(ensure_2d(parents), x.device, x.dtype)
         return online_laplace.ewc_update(
             self, x, parents,
             epochs=epochs, lr=lr, batch_size=batch_size,

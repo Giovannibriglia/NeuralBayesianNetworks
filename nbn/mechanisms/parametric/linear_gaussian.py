@@ -11,6 +11,7 @@ from nbn.utils.device import linalg_device
 from nbn.mechanisms.base import Mechanism
 from nbn.update import recursive_gaussian
 from nbn.utils.batching import ensure_2d, flatten_samples
+from nbn.utils.device import to_device_dtype
 
 
 class LinearGaussianMechanism(Mechanism):
@@ -107,7 +108,7 @@ class LinearGaussianMechanism(Mechanism):
             log_s = torch.log(std)
             self._input_dim = 0
         else:
-            parents = ensure_2d(parents).to(device=device, dtype=x.dtype)
+            parents = to_device_dtype(ensure_2d(parents), device, x.dtype)
             d_pa = parents.shape[1]
             self._input_dim = d_pa
             w, b = self._solve_standardised(x, parents, w_vec)

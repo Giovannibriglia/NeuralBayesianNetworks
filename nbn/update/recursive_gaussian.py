@@ -44,6 +44,7 @@ from dataclasses import dataclass
 import torch
 
 from nbn.utils.device import accum_dtype, linalg_device
+from nbn.utils.device import to_device_dtype
 
 
 @dataclass
@@ -68,7 +69,7 @@ def design_matrix(parents, x):
     ones = torch.ones(n, 1, device=device, dtype=dtype)
     if parents is None or parents.numel() == 0 or parents.shape[-1] == 0:
         return ones
-    pa = parents.reshape(n, -1).to(device=device, dtype=dtype)
+    pa = to_device_dtype(parents.reshape(n, -1), device, dtype)
     return torch.cat([pa, ones], dim=1)
 
 
@@ -151,7 +152,7 @@ def batch_statistics(parents, x, weights=None):
     if weights is None:
         w = torch.ones(x2.shape[0], 1, dtype=acc, device=x2.device)
     else:
-        w = weights.reshape(-1, 1).to(device=x2.device, dtype=acc)
+        w = to_device_dtype(weights.reshape(-1, 1), x2.device, acc)
     N = w.sum()
     n = N.clamp_min(torch.finfo(acc).tiny)
     mz = (w * zd).sum(0) / n

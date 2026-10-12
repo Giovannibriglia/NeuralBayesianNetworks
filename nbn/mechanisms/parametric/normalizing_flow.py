@@ -19,6 +19,7 @@ from nbn.mechanisms.base import (
     _sync_optional_buffers,
 )
 from nbn.utils.batching import _sanitise_parents, ensure_2d, flatten_samples
+from nbn.utils.device import to_device_dtype
 
 
 class _FlowDistribution(Distribution):
@@ -207,7 +208,7 @@ class NormalizingFlowMechanism(Mechanism):
         if parents is None or parents.shape[-1] == 0:
             d_pa = 0
         else:
-            parents = ensure_2d(parents).to(device=device, dtype=x.dtype)
+            parents = to_device_dtype(ensure_2d(parents), device, x.dtype)
             d_pa = parents.shape[1]
 
         # Validate before mutating self.d_x/output_dim, so a rejected warm
