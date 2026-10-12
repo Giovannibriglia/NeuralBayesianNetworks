@@ -405,7 +405,7 @@ class TensorVariableElimination(InferenceEngine):
             budget = cap if budget is None else min(budget, cap)
         return budget
 
-    def _plan_cost(
+    def _cached_plan_cost(
         self,
         model,
         target,
@@ -465,7 +465,7 @@ class TensorVariableElimination(InferenceEngine):
         ``max(batch_free, c * per_row)`` elements — what the MPS element cap
         is checked against.  Memory is priced by ``_peak_model``.
         """
-        return self._plan_cost(model, target, evidence_keys, do_keys, order).tensor
+        return self._cached_plan_cost(model, target, evidence_keys, do_keys, order).tensor
 
     def _peak_model(
         self,
@@ -490,7 +490,7 @@ class TensorVariableElimination(InferenceEngine):
         plan_target = _plan_target(target, set(ev) | do_set)
         if plan_target is None:
             return None  # every target clamped: a point mass, nothing eliminated
-        cost = self._plan_cost(model, plan_target, ev, do, order)
+        cost = self._cached_plan_cost(model, plan_target, ev, do, order)
         names = (target,) if isinstance(target, str) else tuple(target)
         embed = 0
         if not isinstance(target, str):
@@ -863,14 +863,17 @@ class TensorVariableElimination(InferenceEngine):
                     chunk_budget = self._chunk_budget_bytes(device, budget)
                     if peak_b > chunk_budget:
                         # Alive next to every chunk: the full batch's index
-                        # tensors (chunks get views), the finished chunks' rows
-                        # and, at the end, their concatenation.
-                        rows_budget = (chunk_budget - pm.index_bytes(B)
+                        # tensors (chunks index views of them, so the chunks
+                        # are priced without), the finished chunks' rows and,
+                        # at the end, their concatenation.
+                        rows_budget = (chunk_budget
+                                       - _LIVESET_SAFETY * pm.index_bytes(B)
                                        - 2 * pm.output_bytes(B))
                         # At least one row per chunk: a row that fits the
                         # stable budget is always attempted.
                         rows = max(1, _max_chunk_rows(
-                            peak_b, pm.bytes(1, heap_rows=B), B, rows_budget))
+                            pm.bytes(B, index=False),
+                            pm.bytes(1, heap_rows=B, index=False), B, rows_budget))
                         if rows < chunk:
                             chunk = rows
                             reason = (f"the {chunk_budget / 1024 ** 3:.2f} GiB chunk "
@@ -1196,7 +1199,7 @@ class _PeakModel(NamedTuple):
     out_per_row: int = 0            # elements of one row of the answer
     device_type: str = "cpu"        # selects allocator rounding / heap classes
 
-    def bytes(self, B: int, *, heap_rows: int | None = None) -> int:
+    def bytes(self, B: int, *, heap_rows: int | None = None, index: bool = True) -> int:
         """Upper bound of the bytes a ``B``-row call allocates.
 
         The live set is a maximum of terms affine in ``B``, scaled by
@@ -1206,13 +1209,14 @@ class _PeakModel(NamedTuple):
         ``heap_rows`` rows (default ``B``).  The reserve is a step function
         of the row count, so ``_max_chunk_rows`` prices every chunk with the
         reserve of the full batch (``heap_rows=B``): the estimate is then
-        convex in the chunk size and its chord an upper bound.
+        convex in the chunk size and its chord an upper bound.  ``index=False``
+        leaves out the index tensors (chunks index views of the batch's).
         """
         final = (self.cost.final[0], self.cost.final[1] + self.embed_per_row)
         elems = max(a + B * r for a, r in (*self.cost.steps, final))
         if self.cold:
             elems += self.cost.tables
-        raw = elems * self.dtype_bytes + _INDEX_BYTES * self.n_index * B
+        raw = elems * self.dtype_bytes + (self.index_bytes(B) if index else 0)
         rounding = _ALLOC_ROUNDING_BYTES.get(self.device_type, _ALLOC_ROUNDING_DEFAULT)
         slack = rounding * (self.cost.tensors + self.n_index)
         rows = B if heap_rows is None else heap_rows

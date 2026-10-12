@@ -175,7 +175,7 @@ def cases() -> tuple[dict[str, Callable], list[Case]]:
     out.append(Case("wide30 cold", "wide30-d3-k4", ["V12"], w30_ev, B=16, cold=True))
     out.append(Case("wide30 chunked", "wide30-d3-k4", ["V12"], w30_ev, B=64, budget_frac=0.3))
     out.append(Case("naive-bayes chunked", "naive-bayes-40", ["Y"],
-                    [f"X{i}" for i in range(40)], B=131072, budget_frac=0.4))
+                    [f"X{i}" for i in range(40)], B=131072, budget_frac=0.6))
     return models, out
 
 

@@ -78,14 +78,26 @@ Peaks are measured during warm calls, relative to the allocation level just
 before the call. `tests/perf/test_ve_memory_validation.py` runs the cases
 under 1 GiB on every available device.
 
-Ratios are estimate / measured, given as min / median / max.
+Ratios are estimate / measured, given as min / median / max. The two
+budget-forced chunking cases are excluded here and listed below.
 
 | device | what is measured | new model | old 3x rule |
 |---|---|---|---|
-| CPU (exact: `torch.profiler` allocation events) | 35 cases | **1.10 / 1.10 / 1.66** | 0.00 / 1.09 / 1.24 (on master's own peaks) |
-| MPS, heap level (`driver_allocated_memory` growth) | 28 cases | **1.05 / 1.53 / 2.87** | 0.00 / 0.33 / 2.91 |
+| CPU (exact: `torch.profiler` allocation events) | 33 cases | **1.10 / 1.10 / 1.64** | 0.00 / 1.09 / 1.24 (on master's own peaks, 29 cases) |
+| MPS, heap level (`driver_allocated_memory` growth) | 27 cases | **1.05 / 1.59 / 2.87** | 0.00 / 0.38 / 2.12 |
 | MPS, heap level, element cap lifted (single buffers >= 1 GiB, exact heaps) | 3 cases, 2 to 3 GiB | **1.17 / 1.26 / 1.46** | 0.82 / 1.00 / 1.07 |
 | CUDA | not measured here; see the PR's "CUDA validation requested" | | |
+
+Chunking under a forced budget. The engine was given `memory_budget` equal to
+a fraction of the estimate, and the measured peak stays below the budget:
+
+| case | budget | CPU peak (exact) | MPS heap-level growth |
+|---|---|---|---|
+| `wide30`, B=64 | 0.3x the estimate | 760 MiB <= 845 MiB | 1054 MiB <= 1164 MiB |
+| naive Bayes, B=131072 | 0.6x the estimate | 30 MiB <= 81 MiB | 48 MiB <= 105 MiB |
+
+On master, the naive-Bayes case was priced at 0, so it was never chunked and
+used 86 MiB against a budget of 0.
 
 Notes:
 
@@ -96,8 +108,7 @@ Notes:
 - **The old rule under-estimated.** It priced naive Bayes at 0 bytes (nothing
   is eliminated) and the HMM at 0.17x its peak. It also under-estimated the
   4x12 grid at B=1 (0.92), and the MPS footprint whenever a plan used a 1 GiB
-  heap. At B=131072, the naive-Bayes chunked run used 86 MiB against a budget
-  of 0.
+  heap.
 - **MPS** has no peak counter. The polled tensor-level reading
   (`current_allocated_memory` after every op) is a lower bound only: it cannot
   see temporaries freed inside an op, and the estimate is 1.44 or more times

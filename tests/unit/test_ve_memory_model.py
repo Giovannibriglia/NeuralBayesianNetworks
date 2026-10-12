@@ -225,3 +225,27 @@ def test_factor_dtype_follows_the_parameters(models):
     assert tensor_ve._factor_dtype_bytes(model) == 4
     m64 = torch.nn.Linear(2, 2).double()
     assert tensor_ve._factor_dtype_bytes(m64) == 8
+
+
+def test_chunks_do_not_count_the_batch_index_twice(models, monkeypatch):
+    """Chunks index views of the batch's int64 evidence, so chunk sizing
+    reserves those tensors once and prices the chunks without them.  An
+    index-heavy batch (naive Bayes, 30 observed children) under a budget of
+    0.6x its estimate must still get large chunks, not degenerate into many
+    small calls.  (Counting the index twice, combined with the MPS heap
+    reserve, made the validation sweep's 131072-row case run 1-row chunks.)"""
+    from unittest import mock
+
+    _, targets, ev_nodes, _, B = _CASES["naive-bayes"]
+    model = models["naive-bayes"]
+    ev = _evidence(model, ev_nodes, B)
+    eng = TensorVariableElimination()
+    eng.query_batch(model, targets, ev)  # warm
+    pm = eng._peak_model(model, targets[0], list(ev), ())
+    budget = int(0.6 * pm.bytes(B))
+    eng = TensorVariableElimination(memory_budget=budget, memory_safety=1.0)
+    eng.query_batch(model, targets, ev)  # warm
+    with mock.patch.object(eng, "_query_batch_chunked",
+                           wraps=eng._query_batch_chunked) as spy:
+        eng.query_batch(model, targets, ev)
+    assert spy.called and spy.call_args.kwargs["chunk"] > B // 8
