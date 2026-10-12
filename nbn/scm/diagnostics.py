@@ -13,6 +13,7 @@ Test                              Null hypothesis
 :func:`residual_dependence_test`  the noises of two nodes are independent
 :func:`context_invariance_test`   ``C ⊥ X | pa(X)`` for a dataset/policy id ``C``
 :func:`noise_independence_test`   the abducted noise is independent of the parents
+:func:`calibration_by_bins_test`  the fitted CDF is calibrated in every parent region
 ================================  ============================================
 
 Discrete tests use a parametric bootstrap: every replicate is refitted on a
@@ -237,9 +238,11 @@ def noise_independence_test(
     the parents (the residual-independence check of additive-noise model
     fitting, Peters, Janzing & Schölkopf, *Elements of Causal Inference*,
     §4.2.1).  Use data that were **not** used to fit the mechanism: fitting
-    and testing on the same rows can hide or create dependence.  A pass is
-    what upgrades a :class:`PITBandSet` from a marginal to a per-parent
-    statement.  At most ``max_rows`` rows are used (HSIC memory is quadratic).
+    and testing on the same rows can hide or create dependence.  A rejection
+    shows the per-parent reading of a :class:`PITBandSet` is unsafe; a pass
+    only fails to detect a violation (it does not prove independence).  At
+    most ``max_rows`` rows are used (HSIC memory is quadratic).  ``generator``
+    (a CPU generator) makes the subsample and the permutations reproducible.
     """
     data = _on_model_device(model, data)
     mech = _structural(model, node)
@@ -248,14 +251,50 @@ def noise_independence_test(
         raise ValueError(f"'{node}' has no parents: nothing to be independent of.")
     noise = mech.abduct(data[node], parents, 1)[0]
     n = noise.shape[0]
+    if generator is not None and generator.device.type != "cpu":
+        raise ValueError("noise_independence_test needs a CPU generator.")
     if n > max_rows:
         keep = torch.randperm(n, generator=generator)[:max_rows].to(noise.device)
         noise, parents = noise[keep], parents[keep]
-    statistic, p_value = _hsic_permutation(noise, parents, n_permutations)
+    statistic, p_value = _hsic_permutation(noise, parents, n_permutations, generator)
     return DiagnosticResult(
         "noise_independence", statistic, p_value,
         null=f"the noise of '{node}' is independent of its parents",
         details={"method": "hsic", "permutations": n_permutations, "rows": int(noise.shape[0])},
+    )
+
+
+@torch.no_grad()
+def calibration_by_bins_test(
+    model, data: Mapping[str, torch.Tensor], node: str, n_bins: int = 4,
+) -> DiagnosticResult:
+    """Is the fitted CDF equally calibrated in every region of the parent space?
+
+    Splits held-out rows into ``n_bins`` equal-count bins of the predicted
+    median ``F_hat^{-1}(1/2 | pa)`` and compares the distributions of the
+    probability integral transform ``F_hat(x | pa)`` between bins (pairwise
+    two-sample KS, Bonferroni).  A pooled calibration check can hide a model
+    that is well calibrated on average and badly calibrated in one region;
+    checking per bin of the inputs is the standard remedy (Kochenderfer et al.,
+    *Algorithms for Validation*, §2.5.3, pp. 48–49).  Like any test, a pass
+    does not prove calibration everywhere.
+    """
+    data = _on_model_device(model, data)
+    mech = _structural(model, node)
+    if not hasattr(mech, "cdf") or not hasattr(mech, "quantile"):
+        raise TypeError(f"'{node}' needs a mechanism with cdf and quantile.")
+    parents = model.parent_values(data, node)
+    if parents is None:
+        raise ValueError(f"'{node}' has no parents: there is nothing to bin.")
+    pit = mech.cdf(data[node], parents)
+    median = mech.quantile(0.5, parents)
+    order = torch.argsort(median)
+    groups = [pit[chunk] for chunk in torch.chunk(order, n_bins)]
+    statistic, p_value, n_pairs = _pairwise_ks(groups)
+    return DiagnosticResult(
+        "calibration_by_bins", statistic, p_value,
+        null=f"the PIT of '{node}' has the same law in every bin of the predicted median",
+        details={"method": "pairwise KS, Bonferroni", "bins": n_bins, "pairs": n_pairs},
     )
 
 
@@ -421,7 +460,8 @@ def _pearson(a: torch.Tensor, b: torch.Tensor) -> tuple[float, float]:
     return float(rho), float(normal_two_sided_p(z))
 
 
-def _hsic_permutation(a: torch.Tensor, b: torch.Tensor, n_permutations: int) -> tuple[float, float]:
+def _hsic_permutation(a: torch.Tensor, b: torch.Tensor, n_permutations: int,
+                      generator: torch.Generator | None = None) -> tuple[float, float]:
     a = a.reshape(a.shape[0], -1).to(torch.float32)
     b = to_device_dtype(b.reshape(b.shape[0], -1), a.device, torch.float32)
     n = a.shape[0]
@@ -437,7 +477,7 @@ def _hsic_permutation(a: torch.Tensor, b: torch.Tensor, n_permutations: int) -> 
     observed = float((k_a * k_b).sum() / n**2)
     exceed = 0
     for _ in range(n_permutations):
-        perm = torch.randperm(n, device=a.device)
+        perm = torch.randperm(n, generator=generator).to(a.device)  # CPU generator: reproducible
         exceed += int((k_a * k_b[perm][:, perm]).sum() / n**2 >= observed)
     return observed, (1 + exceed) / (1 + n_permutations)
 

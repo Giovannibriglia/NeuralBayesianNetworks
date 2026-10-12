@@ -2,43 +2,64 @@
 
 Neural mechanisms fit ``P(X | pa)`` only approximately.  The tools here put a
 finite-sample statement on top of *any* fitted 1-D continuous structural
-mechanism that exposes ``cdf`` and ``quantile`` (:class:`AdditiveNoiseMechanism`,
-:class:`FlowNoiseMechanism`), using held-out *calibration* data that were not
-used to fit the mechanism.  Each result says exactly which guarantee it has.
+mechanism with an exact ``cdf`` and ``quantile`` (:class:`AdditiveNoiseMechanism`,
+:class:`FlowNoiseMechanism`), using held-out *calibration* rows that were not
+used to fit it.  Every result records which mechanism it was calibrated for
+and refuses to be used with another (or a refitted) one.
+
+Rows must be independent and identically distributed (exchangeable for the
+conformal part).  Transitions from one episode are not: pass ``groups``
+(episode ids) and only one randomly chosen row per group is kept.
 
 :func:`pit_band_set` — a band on conditional probabilities
-    The probability integral transform ``W = F_hat(X | pa)`` of held-out rows
-    is i.i.d. with some CDF ``G``.  The Dvoretzky–Kiefer–Wolfowitz inequality
-    with Massart's constant bounds ``G`` uniformly: ``sup_t |G_hat(t) - G(t)|
-    <= eps`` with probability ``>= 1 - delta``, ``eps = sqrt(log(2/delta) /
-    (2 n))`` (Massart, Ann. Probab. 18(3), 1990).  If ``W`` is independent of
-    the parents — the fitted model's noise is independent of its inputs, which
-    :func:`nbn.scm.noise_independence_test` checks — then
-    ``P(X <= x | pa) = G(F_hat(x | pa))`` for every ``pa``, so the band bounds
-    every conditional probability at once (guarantee ``"pac_under_model"``).
-    The band also *recalibrates*: when the fit is perfect ``G`` is the
-    identity; otherwise ``G_hat`` corrects it.
+    Apply the fitted CDF to each held-out row: ``W = F_hat(X | pa)`` (the
+    probability integral transform; the CDF must be continuous and strictly
+    increasing, as it is for flows and Gaussian / mixture noise).  The ``W``
+    are i.i.d. with some CDF ``G``.  The Dvoretzky–Kiefer–Wolfowitz
+    inequality with Massart's constant gives ``sup_t |G_hat(t) - G(t)| <= eps``
+    with probability ``>= 1 - delta``, ``eps = sqrt(log(2/delta) / (2 n))``
+    (Massart, Ann. Probab. 18(3), 1990).
+
+    * Unconditionally, this bounds the *marginal* law of ``W``: the
+      probability of the parent-dependent regions ``{F_hat(X | pa) <= t}``.
+    * **If** ``W`` is independent of the parents (the fitted model is
+      correctly calibrated in every region of the parent space), then
+      ``P(X <= x | pa) = G(F_hat(x | pa))`` for every ``pa``, and the band
+      bounds every conditional probability at once.  This is an assumption
+      (``guarantee="pac_if_pit_independent"``): :func:`nbn.scm.noise_independence_test`
+      and :func:`nbn.scm.calibration_by_bins_test` can only *detect* a
+      violation, and should be run on a separate split.
+
+    The band also recalibrates: ``G_hat`` corrects a miscalibrated fit.
 
 :func:`conformal_intervals` — prediction intervals
-    Split conformal prediction: intervals for ``X | pa`` whose coverage is at
-    least ``1 - alpha`` *on average over* ``pa`` (marginal, not conditional),
-    in finite samples, for exchangeable calibration and test rows, whatever
-    the model (Lei, G'Sell, Rinaldo, Tibshirani & Wasserman, *Distribution-Free
-    Predictive Inference for Regression*, JASA 113(523), 2018).  ``method="cqr"``
-    conformalises the mechanism's own conditional quantiles, so the intervals
-    adapt to the parents (Romano, Patterson & Candès, *Conformalized Quantile
-    Regression*, NeurIPS 2019); ``method="residual"`` uses ``|x - median|``.
+    Split conformal prediction: intervals for ``X | pa`` that cover a new
+    exchangeable row with probability ``>= 1 - alpha`` *on average over the
+    parents* (marginal, not conditional), in finite samples, whatever the
+    model (Lei, G'Sell, Rinaldo, Tibshirani & Wasserman, JASA 113(523), 2018).
+    ``method="cqr"`` conformalises the mechanism's own conditional quantiles,
+    so the intervals adapt to the parents (Romano, Patterson & Candès,
+    *Conformalized Quantile Regression*, NeurIPS 2019); ``method="residual"``
+    uses ``|x - median|``.  For a discrete-noise counterpart see
+    :func:`nbn.scm.cdf_band_set` (additive noise, band on the noise CDF).
 """
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Mapping
 
 import torch
 
 from nbn.scm.mechanisms import StructuralMechanism
 from nbn.utils.device import to_device
+
+Guarantee = Literal["pac_if_pit_independent", "marginal"]
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
 
 
 def _mechanism(model, node: str) -> StructuralMechanism:
@@ -51,32 +72,95 @@ def _mechanism(model, node: str) -> StructuralMechanism:
     return mech
 
 
-@torch.no_grad()
-def pit_values(model, data: Mapping[str, torch.Tensor], node: str) -> torch.Tensor:
-    """``F_hat(x | pa)`` for every row, ``[N]`` (the probability integral transform)."""
+def _fingerprint(mechanism) -> tuple:
+    """Identity plus the version counters of every parameter and buffer.
+
+    Any optimiser step, refit or ``load_state_dict`` changes a version, so a
+    calibration result can tell that its mechanism is no longer the one it
+    was calibrated for.
+    """
+    tensors = list(mechanism.parameters()) + [b for b in mechanism.buffers() if b is not None]
+    return (id(mechanism), tuple(t._version for t in tensors))
+
+
+def _calibration_rows(
+    model, data: Mapping[str, torch.Tensor], node: str,
+    groups: torch.Tensor | None, generator: torch.Generator | None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Finite ``(x [N], parents [N, D_pa] | None)`` on the model's device, one row per group if asked."""
     data = to_device(dict(data), model.device)
-    return _mechanism(model, node).cdf(data[node], model.parent_values(data, node))
+    x = data[node]
+    parents = model.parent_values(data, node)
+    if groups is not None:
+        keep = _one_row_per_group(groups.reshape(-1).cpu(), generator).to(x.device)
+        x = x[keep]
+        parents = None if parents is None else parents[keep]
+    finite = torch.isfinite(x.reshape(x.shape[0], -1)).all(-1)
+    if parents is not None:
+        finite &= torch.isfinite(parents).all(-1)
+    if not bool(finite.all()):
+        raise ValueError(
+            f"{int((~finite).sum())} calibration rows of '{node}' contain NaN or inf; "
+            "drop them before calibrating."
+        )
+    return x, parents
+
+
+def _one_row_per_group(groups: torch.Tensor, generator: torch.Generator | None) -> torch.Tensor:
+    """Indices of one uniformly chosen row per distinct group id (sorted)."""
+    n = groups.numel()
+    order = torch.randperm(n, generator=generator)
+    _, group_of = torch.unique(groups[order], return_inverse=True)
+    # The first row of each group in a random order is a uniform choice within the group.
+    first = torch.full((int(group_of.max()) + 1,), n, dtype=torch.long)
+    first = first.scatter_reduce(0, group_of, torch.arange(n), reduce="amin")
+    return order[first].sort().values
+
+
+def _check_bound(stored: tuple, mechanism) -> None:
+    if stored != _fingerprint(mechanism):
+        raise ValueError(
+            "This calibration result belongs to another mechanism, or the mechanism was "
+            "modified (refitted, warm-started, loaded) after calibration; calibrate again."
+        )
+
+
+# ---------------------------------------------------------------------------
+# PIT band
+# ---------------------------------------------------------------------------
+
+
+@torch.no_grad()
+def pit_values(model, data: Mapping[str, torch.Tensor], node: str,
+               groups: torch.Tensor | None = None,
+               generator: torch.Generator | None = None) -> torch.Tensor:
+    """``F_hat(x | pa)`` for every (kept) row, ``[N]``: the probability integral transform."""
+    x, parents = _calibration_rows(model, data, node, groups, generator)
+    return _mechanism(model, node).cdf(x, parents)
 
 
 @dataclass(kw_only=True)
 class PITBandSet:
-    """A uniform band on the calibration map ``G`` of a fitted continuous mechanism.
+    """A uniform band on the calibration map ``G`` of one fitted continuous mechanism.
 
-    ``P(X <= x | pa)`` lies in ``[G_hat(F_hat(x | pa)) - eps, G_hat(F_hat(x | pa)) + eps]``
-    for every ``x`` and ``pa`` at once, with probability ``>= level``, provided
-    the calibration rows were not used for fitting and the PIT is independent
-    of the parents (``guarantee="pac_under_model"``).
+    ``cdf_bounds`` returns ``[G_hat(F_hat(x | pa)) - eps, G_hat(F_hat(x | pa)) + eps]``.
+    With probability ``>= level`` the band contains ``G`` everywhere; it bounds
+    ``P(X <= x | pa)`` for every ``pa`` *if* the PIT is independent of the
+    parents (see the module docstring).
     """
 
+    node: str
     sorted_pit: torch.Tensor  # [n] held-out PIT values, ascending
     epsilon: float
     level: float
-    guarantee: str = "pac_under_model"
+    guarantee: Guarantee = "pac_if_pit_independent"
+    _bound_to: tuple = field(default=(), repr=False)
 
     def calibrated(self, cdf_values: torch.Tensor) -> torch.Tensor:
-        """``G_hat(F_hat)``: the empirical CDF of the held-out PIT at ``cdf_values``."""
+        """``G_hat(F_hat)``: the empirical CDF of the held-out PIT (NaN stays NaN)."""
         pit = self.sorted_pit.to(cdf_values)
-        return torch.searchsorted(pit, cdf_values.contiguous(), right=True).to(cdf_values.dtype) / pit.numel()
+        g = torch.searchsorted(pit, cdf_values.contiguous(), right=True).to(cdf_values.dtype) / pit.numel()
+        return torch.where(torch.isnan(cdf_values), cdf_values, g)
 
     def bounds_from_cdf(self, cdf_values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Bounds on ``P(X <= x | pa)`` given ``F_hat(x | pa)`` (any shape)."""
@@ -85,6 +169,7 @@ class PITBandSet:
 
     def cdf_bounds(self, mechanism, x: torch.Tensor, parents: torch.Tensor | None):
         """Bounds on ``P(X <= x | pa)`` for a batch of rows, ``[B]`` each."""
+        _check_bound(self._bound_to, mechanism)
         with torch.no_grad():
             return self.bounds_from_cdf(mechanism.cdf(x, parents))
 
@@ -97,19 +182,27 @@ class PITBandSet:
 
 
 def pit_band_set(model, calibration_data: Mapping[str, torch.Tensor], node: str,
-                 delta: float = 0.05) -> PITBandSet:
+                 delta: float = 0.05, groups: torch.Tensor | None = None,
+                 generator: torch.Generator | None = None) -> PITBandSet:
     """DKW–Massart band on the PIT of held-out ``calibration_data`` (not the fit data)."""
     if not 0.0 < delta < 1.0:
         raise ValueError(f"delta must lie in (0, 1), got {delta}.")
-    pit = pit_values(model, calibration_data, node)
+    pit = pit_values(model, calibration_data, node, groups, generator)
     n = pit.numel()
     if n == 0:
         raise ValueError("pit_band_set needs at least one calibration row.")
     return PITBandSet(
+        node=node,
         sorted_pit=pit.sort().values,
         epsilon=math.sqrt(math.log(2.0 / delta) / (2.0 * n)),
         level=1.0 - delta,
+        _bound_to=_fingerprint(_mechanism(model, node)),
     )
+
+
+# ---------------------------------------------------------------------------
+# Conformal intervals
+# ---------------------------------------------------------------------------
 
 
 @dataclass(kw_only=True)
@@ -122,14 +215,17 @@ class ConformalIntervals:
     ``inf`` when there are too few calibration rows for the requested level.
     """
 
+    node: str
     method: Literal["cqr", "residual"]
     alpha: float
     correction: float
     n_calibration: int
     level: float
-    guarantee: str = "marginal"
+    guarantee: Guarantee = "marginal"
+    _bound_to: tuple = field(default=(), repr=False)
 
     def interval(self, mechanism, parents: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
+        _check_bound(self._bound_to, mechanism)
         with torch.no_grad():
             lo, hi = _base_interval(mechanism, parents, self.method, self.alpha)
         return lo - self.correction, hi + self.correction
@@ -137,29 +233,32 @@ class ConformalIntervals:
 
 def conformal_intervals(model, calibration_data: Mapping[str, torch.Tensor], node: str,
                         alpha: float = 0.1,
-                        method: Literal["cqr", "residual"] = "cqr") -> ConformalIntervals:
+                        method: Literal["cqr", "residual"] = "cqr",
+                        groups: torch.Tensor | None = None,
+                        generator: torch.Generator | None = None) -> ConformalIntervals:
     """Calibrate intervals of level ``1 - alpha`` on held-out ``calibration_data``.
 
     Scores: ``max(q_lo - x, x - q_hi)`` for ``"cqr"`` (the mechanism's
     ``alpha/2`` and ``1 - alpha/2`` conditional quantiles), ``|x - median|`` for
     ``"residual"``.  The correction is the ``ceil((n + 1)(1 - alpha))``-th
-    smallest score, which gives finite-sample marginal coverage ``>= 1 - alpha``.
+    smallest score — the ``ceil((n+1)(1-alpha))/n`` empirical quantile — which
+    gives finite-sample marginal coverage ``>= 1 - alpha``.
     """
     if not 0.0 < alpha < 1.0:
         raise ValueError(f"alpha must lie in (0, 1), got {alpha}.")
     if method not in ("cqr", "residual"):
         raise ValueError(f"method must be 'cqr' or 'residual', got {method!r}.")
-    data = to_device(dict(calibration_data), model.device)
     mech = _mechanism(model, node)
+    x, parents = _calibration_rows(model, calibration_data, node, groups, generator)
     with torch.no_grad():
-        x = data[node].reshape(-1).to(torch.float32)
-        lo, hi = _base_interval(mech, model.parent_values(data, node), method, alpha)
+        lo, hi = _base_interval(mech, parents, method, alpha)
+        x = x.reshape(-1).to(lo.dtype)
         scores = torch.maximum(lo - x, x - hi)
     n = scores.numel()
     rank = math.ceil((n + 1) * (1.0 - alpha))
     correction = math.inf if rank > n else float(scores.sort().values[rank - 1])
-    return ConformalIntervals(method=method, alpha=alpha, correction=correction,
-                              n_calibration=n, level=1.0 - alpha)
+    return ConformalIntervals(node=node, method=method, alpha=alpha, correction=correction,
+                              n_calibration=n, level=1.0 - alpha, _bound_to=_fingerprint(mech))
 
 
 def _base_interval(mechanism, parents, method: str, alpha: float):

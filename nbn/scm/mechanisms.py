@@ -528,12 +528,12 @@ class AdditiveNoiseMechanism(StructuralMechanism):
         """``g(pa)``: ``[B, D_x]`` (or ``[B, S, D_x]``); ``[1, D_x]`` for ``None``."""
         if not self.is_fitted:
             raise RuntimeError(f"{type(self).__name__}: call fit_local first.")
-        device = self._pa_mean.device
+        device, dtype = self._pa_mean.device, self._pa_mean.dtype  # follows .to(dtype)
         if parents is None:
-            return self.net(torch.zeros(1, 0, device=device))
+            return self.net(torch.zeros(1, 0, device=device, dtype=dtype))
         if parents.shape[-1] == 0:
-            return self.net(torch.zeros(*parents.shape[:-1], 0, device=device))
-        z = (to_device_dtype(parents, device, torch.float32) - self._pa_mean) / self._pa_std
+            return self.net(torch.zeros(*parents.shape[:-1], 0, device=device, dtype=dtype))
+        z = (to_device_dtype(parents, device, dtype) - self._pa_mean) / self._pa_std
         return self.net(z)
 
     def structural(self, parents: torch.Tensor | None, noise: torch.Tensor) -> torch.Tensor:
@@ -563,8 +563,10 @@ class AdditiveNoiseMechanism(StructuralMechanism):
         """Conditional ``p``-quantile ``g(pa) + F_U^{-1}(p)``, shape ``[B]`` (1-D children only)."""
         self._require_scalar("quantile")
         loc = self.location(parents)[:, 0]
-        p_t = torch.as_tensor(p, dtype=loc.dtype, device=loc.device).reshape(-1).expand_as(loc)
-        return loc + self.noise.icdf(p_t.clamp(1e-12, 1 - 1e-12))
+        p_t = torch.as_tensor(p, dtype=loc.dtype, device=loc.device).reshape(-1)
+        loc, p_t = torch.broadcast_tensors(loc, p_t)
+        eps = torch.finfo(loc.dtype).eps  # finite quantiles at 0 and 1
+        return loc + self.noise.icdf(p_t.clamp(eps, 1.0 - eps))
 
     def _require_scalar(self, what: str) -> None:
         if self.output_dim != 1:

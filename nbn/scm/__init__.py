@@ -28,6 +28,7 @@ from nbn.scm.calibration import (
 )
 from nbn.scm.diagnostics import (
     DiagnosticResult,
+    calibration_by_bins_test,
     context_invariance_test,
     freshness_test,
     noise_independence_test,
@@ -61,6 +62,7 @@ __all__ = [
     "noise_sharing_test",
     "noise_tying_test",
     "noise_independence_test",
+    "calibration_by_bins_test",
     "freshness_test",
     "residual_dependence_test",
     "context_invariance_test",
