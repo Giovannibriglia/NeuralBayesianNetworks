@@ -21,7 +21,7 @@
   bounds over all compatible SCMs (:func:`counterfactual_bounds`,
   :func:`counterfactual_bounds_from_sets`) and :func:`conformal_sets`.
 
-See ``docs/scm-design-draft.md``.
+User guide: https://nbn.readthedocs.io/en/latest/user_guide/scm.html
 """
 from nbn.scm._stats import benjamini_hochberg
 from nbn.scm.calibration import (

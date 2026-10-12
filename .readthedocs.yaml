@@ -1,0 +1,27 @@
+# Read the Docs build of the documentation site (https://nbn.readthedocs.io).
+# The same build runs in CI (the ``docs`` job in .github/workflows/ci.yml).
+version: 2
+
+build:
+  os: ubuntu-24.04
+  tools:
+    python: "3.12"
+  jobs:
+    post_checkout:
+      # setuptools-scm reads the version from the tags; the clone is shallow.
+      - git fetch --unshallow --tags || true
+    pre_install:
+      # The CPU build of PyTorch is enough to import NBN for the API pages
+      # and much smaller than the default CUDA build.
+      - pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+python:
+  install:
+    - method: pip
+      path: .
+      extra_requirements:
+        - docs
+
+sphinx:
+  configuration: docs/conf.py
+  fail_on_warning: true

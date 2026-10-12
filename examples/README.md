@@ -20,8 +20,9 @@ read on GitHub without running anything.
 
 ## Structural causal models and probability sets
 
-For `nbn.scm` and `nbn.uncertainty` (design note:
-[`docs/scm-design-draft.md`](../docs/scm-design-draft.md)).
+For `nbn.scm` and `nbn.uncertainty` (user guide:
+[structural causal models](https://nbn.readthedocs.io/en/latest/user_guide/scm.html),
+[probability sets](https://nbn.readthedocs.io/en/latest/user_guide/probability_sets.html)).
 
 | Notebook | What you learn |
 |---|---|

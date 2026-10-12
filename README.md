@@ -4,9 +4,13 @@
 [![PyPI](https://img.shields.io/pypi/v/nbn.svg)](https://pypi.org/project/nbn/)
 [![Python](https://img.shields.io/pypi/pyversions/nbn.svg)](https://pypi.org/project/nbn/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Documentation](https://readthedocs.org/projects/nbn/badge/?version=latest)](https://nbn.readthedocs.io/en/latest/)
 
 **PyTorch-native Bayesian networks with neural conditional distributions and
 GPU-batched inference.**
+
+**Documentation:** <https://nbn.readthedocs.io> (user guide, example
+notebooks, API reference).
 
 NBN represents a Bayesian network over a known DAG as an `nn.Module`. Each node
 holds a learnable conditional distribution P(X | parents(X)), called a
@@ -58,7 +62,8 @@ pip install "nbn[all]"           # + benchmark suite and every baseline library
 | `bench` | the `nbn-bench` runner, pgmpy, pomegranate, pandas, plotting |
 | `mcmc` | the Pyro baseline for the benchmark suite |
 | `all` | everything a benchmark run needs |
-| `dev` | tests, linters and docs toolchain (from a checkout) |
+| `dev` | tests, linters and type checker (from a checkout) |
+| `docs` | Sphinx toolchain for the documentation site (from a checkout) |
 
 Using a virtual environment is recommended.
 
@@ -281,6 +286,9 @@ the figures and how to reproduce the published numbers are documented in
 
 ## Development
 
+[`CONTRIBUTING.md`](CONTRIBUTING.md) covers the development setup, the test
+lanes, the device rules and the pull-request flow.
+
 ```bash
 pip install -e ".[dev,all]"
 pytest -n auto                        # fast gate (default: not slow/subprocess/network/perf/cuda)
@@ -303,7 +311,7 @@ Repository layout:
     tests/data/          fixtures, incl. vendored bnlearn .bif networks
     examples/            executed Jupyter notebooks: one per feature, then SCMs and probability sets
     scripts/             run_all_benchmarks.sh and other helpers
-    docs/                benchmark guide, oracle methodology, SCM design notes
+    docs/                Sphinx documentation site (https://nbn.readthedocs.io), incl. the benchmark guides
 
 Releases are cut by pushing a `v*` tag; `.github/workflows/publish.yml` builds
 and uploads to PyPI. Known limitations and the roadmap are tracked in the

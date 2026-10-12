@@ -157,6 +157,7 @@ class NeuralBayesianNetwork(nn.Module):
     autograd-compatible per-node neural mechanisms.
 
     Design goals (mirroring GPyTorch):
+
     * Every CPD is a ``Mechanism`` (``nn.Module`` subclass).
     * ``mechanism.forward(parents)`` returns a ``torch.distributions.Distribution``.
     * The whole network is itself an ``nn.Module``, so ``.to(device)``,
@@ -197,8 +198,8 @@ class NeuralBayesianNetwork(nn.Module):
       model's parameters are fresh leaves and backward through it reaches
       neither the original model nor the caller's intervention value.
 
-    **When you need gradients through an intervention, use
-    ``model.sample(n, do=...)``**, which applies the intervention against the
+    **When you need gradients through an intervention**, use
+    ``model.sample(n, do=...)``, which applies the intervention against the
     live parameters.  ``intervene()`` is for building a mutilated model to
     query, not for differentiating through one.
 
@@ -210,9 +211,10 @@ class NeuralBayesianNetwork(nn.Module):
     ...     [("A", "C"), ("B", "C"), ("C", "D")],
     ...     variables={"A": ("discrete", 2), "B": ("discrete", 3),
     ...                "C": ("discrete", 4), "D": ("continuous", 1)},
+    ...     device="cuda",
     ... )
     >>> model.set_mechanism("A", CategoricalTableMechanism())
-    >>> model.fit(data, device="cuda")
+    >>> model.fit(data)
     >>> probs = model.query(["C"], evidence={"A": torch.tensor([0])})
     """
 

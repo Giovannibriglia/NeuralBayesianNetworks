@@ -23,6 +23,7 @@ Scope (v1): discrete / lg / mdn heads with scalar parents; flow keeps the
 Gaussian surrogate (P3 / #185-L1).
 
 References:
+
 - Le, Baydin & Wood (2017) Inference Compilation (sequential/parent-conditioned
   proposals trained on the model joint — the pattern this proposal follows)
 - Walecki et al. (2018) Universal Marginalizer Importance Sampling

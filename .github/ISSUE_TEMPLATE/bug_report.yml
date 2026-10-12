@@ -1,0 +1,54 @@
+name: Bug report
+description: Something in NBN gives a wrong result, crashes or behaves unexpectedly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. A short script that reproduces the problem is the
+        most useful thing you can give us. Please check the
+        [open issues](https://github.com/Giovannibriglia/NeuralBayesianNetworks/issues) first.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: |
+        A self-contained script that shows the problem, as small as you can make
+        it (simulated data is fine). Include the full error message and traceback.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Paste the output of:
+        `python -c "import nbn, torch, platform; from nbn.utils.device import accelerator_summary; print(nbn.__version__, torch.__version__, platform.platform(), accelerator_summary())"`
+        With the `bench` extra, `nbn-bench check-env` prints more.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: device
+    attributes:
+      label: Device the problem shows up on
+      multiple: true
+      options:
+        - CPU
+        - CUDA
+        - several CUDA GPUs
+        - Apple MPS
+        - not device-specific
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Does it happen on another device or an older NBN version? Any workaround?
