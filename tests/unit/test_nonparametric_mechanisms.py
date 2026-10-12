@@ -2,7 +2,7 @@
 
 Covers, for each estimator:
 1. ``fit_local`` returns a dict and flips ``is_fitted`` to True.
-2. Shape contracts: ``log_prob`` -> ``[B]`` (or ``[B, S]``); ``sample`` -> ``[B, n, D_x]``.
+2. Shape contracts: in test_mechanism_conformance.py (every mechanism).
 3. ``log_prob`` is finite on the training data and on fresh samples.
 4. Normalisation: continuous children integrate to ~1 over a grid; discrete
    children produce per-parent rows that sum to 1.
@@ -77,16 +77,6 @@ class TestConditionalKDE:
         assert isinstance(info, dict)
         assert mech.is_fitted
 
-    def test_log_prob_shape(self):
-        mech, x, pa, _ = self._fitted()
-        lp = mech.log_prob(x[:5], pa[:5])
-        assert lp.shape == (5,)
-
-    def test_sample_shape(self):
-        mech, x, pa, _ = self._fitted()
-        s = mech.sample(pa[:4], n=10)
-        assert s.shape == (4, 10, 1)
-
     def test_log_prob_finite(self):
         mech, x, pa, _ = self._fitted()
         assert torch.isfinite(mech.log_prob(x, pa)).all()
@@ -133,14 +123,6 @@ class TestKNNContinuous:
         assert isinstance(info, dict)
         assert mech.is_fitted
 
-    def test_log_prob_shape(self):
-        mech, x, pa, _ = self._fitted()
-        assert mech.log_prob(x[:5], pa[:5]).shape == (5,)
-
-    def test_sample_shape(self):
-        mech, x, pa, _ = self._fitted()
-        assert mech.sample(pa[:4], n=10).shape == (4, 10, 1)
-
     def test_log_prob_finite(self):
         mech, x, pa, _ = self._fitted()
         assert torch.isfinite(mech.log_prob(x, pa)).all()
@@ -176,14 +158,6 @@ class TestKNNDiscrete:
     def test_is_discrete_flag(self):
         mech, *_ = self._fitted()
         assert mech.is_discrete is True
-
-    def test_log_prob_shape(self):
-        mech, x, pa, _ = self._fitted()
-        assert mech.log_prob(x[:5], pa[:5]).shape == (5,)
-
-    def test_sample_shape(self):
-        mech, x, pa, _ = self._fitted()
-        assert mech.sample(pa[:4], n=10).shape == (4, 10, 1)
 
     def test_probs_sum_to_one(self):
         mech, x, pa, _ = self._fitted()
@@ -230,14 +204,6 @@ class TestFlexCode:
         mech, *_, info = fitted
         assert isinstance(info, dict)
         assert mech.is_fitted
-
-    def test_log_prob_shape(self, fitted):
-        mech, x, pa, _ = fitted
-        assert mech.log_prob(x[:5], pa[:5]).shape == (5,)
-
-    def test_sample_shape(self, fitted):
-        mech, x, pa, _ = fitted
-        assert mech.sample(pa[:4], n=10).shape == (4, 10, 1)
 
     def test_log_prob_finite(self, fitted):
         mech, x, pa, _ = fitted
@@ -291,14 +257,6 @@ class TestSmoothedEmpiricalCategorical:
         mech, *_ = self._fitted()
         probs = mech.cpt
         assert torch.allclose(probs.sum(-1), torch.ones(probs.shape[0]), atol=1e-5)
-
-    def test_log_prob_shape(self):
-        mech, x, pa, _ = self._fitted()
-        assert mech.log_prob(x[:5], pa[:5]).shape == (5,)
-
-    def test_sample_shape(self):
-        mech, x, pa, _ = self._fitted()
-        assert mech.sample(pa[:4], n=10).shape == (4, 10, 1)
 
     def test_alpha_zero_allowed(self):
         # alpha=0 is the unsmoothed MLE; should still fit without error.
