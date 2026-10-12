@@ -307,7 +307,7 @@ def calibration_by_bins_test(
     if not 2 <= n_bins <= x.shape[0]:
         raise ValueError(f"n_bins must lie in [2, {x.shape[0]}] (number of rows), got {n_bins}.")
     pit = pit_values(model, data, node, generator=generator)
-    if hasattr(mech, "probs"):  # discrete: predicted mean class index
+    if getattr(mech, "is_discrete", False):  # predicted mean class index
         probs = mech.probs(parents, x.shape[0])
         key = (probs * torch.arange(probs.shape[-1], device=probs.device, dtype=probs.dtype)).sum(-1)
     else:

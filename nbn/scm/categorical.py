@@ -26,15 +26,25 @@ Bounds over all compatible models (:func:`counterfactual_bounds`): with
 ``p = P(x | pa)`` and ``q = P(. | pa')`` for ``pa' != pa``, the set of
 counterfactual rows ``P(X_{pa'} = . | X = x, pa)`` that some SCM attains is
 exactly ``{r : sum r = 1, max(0, (p + q_k - 1) / p) <= r_k <= min(p, q_k) / p}``
-(any coupling of the two marginals is realised by a response-function noise).
 For two outcomes these are the probability-of-necessity bounds, sharp under
 exogeneity (Pearl, *Causality*, 2nd ed., Thm 9.2.11 and Cor. 9.2.12, p. 290);
 in MDPs, Lally, Kazemi & Paoletti, *Robust Counterfactual Inference in Markov
-Decision Processes* (AAMAS 2026, arXiv:2502.13731).  For ``pa' = pa`` the same
-noise gives the same outcome: the answer is the point ``X = x``.
+Decision Processes* (AAMAS 2026, arXiv:2502.13731).  For ``K > 2`` outcomes
+the attainability of every row is our argument: a response-function noise
+(Bareinboim, *Causal AI*, pp. 311–313) can realise any coupling ``pi`` of the
+two marginals, the row is ``pi(x, .) / p``, and any first row ``r`` with
+``0 <= p r <= q`` and ``sum r = 1`` completes to a coupling (the leftover
+marginals both have mass ``1 - p``).  For ``pa' = pa`` the answer is the point
+``X = x`` (consistency; Bareinboim, *Causal AI*, Lemma 5.3.1, p. 268).
+
+Float note: probabilities below the dtype's resolution (NBN tables floor
+unseen cells at ``1e-12``) cannot be told apart from their neighbours in the
+CDF; monotone abduction then refuses the row instead of returning a wrong
+class.  Use float64 kernels (CPU/CUDA) or table smoothing (``alpha > 0``).
 """
 from __future__ import annotations
 
+import copy
 from typing import Any, Literal
 
 import torch
@@ -43,11 +53,14 @@ from torch.distributions import Gumbel
 
 from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
 from nbn.mechanisms.parametric.neural_categorical import NeuralCategoricalMechanism
+from nbn.scm._stats import require_cpu_generator
 from nbn.scm.mechanisms import StructuralMechanism
+from nbn.uncertainty.sets import tighten_box_to_simplex
 from nbn.utils.batching import ensure_2d
 from nbn.utils.device import to_device_dtype
 
 Coupling = Literal["gumbel_max", "monotone"]
+_MARGIN_ULPS = 8  # monotone abduction keeps this many float eps away from the CDF jumps
 _COUPLINGS = ("gumbel_max", "monotone")
 
 
@@ -93,19 +106,25 @@ def counterfactual_bounds_from_sets(
     Both bounds of :func:`counterfactual_bounds` are monotone (the lower one
     increasing in ``p`` and ``q_k``, the upper one decreasing in ``p`` and
     increasing in ``q_k``), so the hull is attained at ``p = p_lower`` and
-    ``q_k`` at its interval ends.  With ``P(x | pa) = 0`` allowed the
-    observation is impossible under some kernel and the row is ``[0, 1]``.
+    ``q_k`` at its interval ends (after the ``q`` box is tightened to the
+    simplex, so each end is attained by a distribution in the set).  If
+    ``P(x | pa) = 0`` is allowed, the row is the limit ``p -> 0``: upper
+    ``1[q_upper > 0]``, lower ``1[q_lower >= 1]``.
 
     This is a sound, per-entry interval row for an interval MDP: it contains
-    every counterfactual row of every kernel in the set.
+    every counterfactual row of every kernel in the set, and each end is
+    attained when the set is a product of per-row boxes (``pa' != pa``).
+    (The hull over a confidence set is our construction; the bounds per
+    kernel are the attributed ones above.)
     """
+    q_lower, q_upper = tighten_box_to_simplex(q_lower, q_upper)
     p_x = _observed_probability(p_observed_lower, x_observed, allow_zero=True)
     safe = p_x.clamp_min(torch.finfo(p_x.dtype).tiny)
     lower = ((safe + q_lower - 1.0) / safe).clamp(0.0, 1.0)
     upper = (q_upper / safe).clamp(0.0, 1.0)
     impossible = (p_x <= 0).expand_as(lower)
-    lower = torch.where(impossible, torch.zeros_like(lower), lower)
-    upper = torch.where(impossible, torch.ones_like(upper), upper)
+    lower = torch.where(impossible, (q_lower >= 1.0).to(lower.dtype), lower)
+    upper = torch.where(impossible, (q_upper > 0.0).to(upper.dtype), upper)
     return _point_where_same(lower, upper, x_observed, same_parents)
 
 
@@ -170,6 +189,14 @@ class _CategoricalStructural(StructuralMechanism):
         self.coupling = coupling
         self.noise = CouplingNoise(coupling, self._k() if self._k() > 0 else 1)
 
+    def with_coupling(self, coupling: Coupling) -> _CategoricalStructural:
+        """A copy with the same fitted kernel and another declared coupling."""
+        clone = copy.deepcopy(self)
+        clone._init_coupling(coupling)
+        clone.noise.n_classes = clone._k()
+        clone.noise.to(self._kernel_device())
+        return clone
+
     def fit_local(self, *args: Any, **kwargs: Any) -> dict:
         metrics = super().fit_local(*args, **kwargs)  # type: ignore[safe-super]
         self.noise.n_classes = self._k()  # K may be set by the fit (tables)
@@ -181,7 +208,11 @@ class _CategoricalStructural(StructuralMechanism):
     # ------------------------------------------------------------------
 
     def probs(self, parents: torch.Tensor | None, batch: int | None = None) -> torch.Tensor:
-        """``P(. | pa)`` as ``[B, K]`` (``batch`` rows for a root)."""
+        """``P(. | pa)`` as ``[B, K]`` (``batch`` rows for a root).
+
+        Parents are passed to the kernel as float32 (the neural kernel's
+        network runs in float32; a float64 *neural* kernel is not supported).
+        """
         if parents is not None and parents.shape[-1] > 0:
             parents = to_device_dtype(ensure_2d(parents), self._kernel_device(), torch.float32)
             if parents.dim() != 2:
@@ -192,26 +223,17 @@ class _CategoricalStructural(StructuralMechanism):
         return probs
 
     def class_index(self, x: torch.Tensor) -> torch.Tensor:
-        """Class indices ``[B]`` of values ``x`` (``[B]`` or ``[B, 1]``); unknown values raise."""
+        """Class indices ``[B]`` of labels ``x`` (``[B]`` or ``[B, 1]``, values ``0 .. K-1``)."""
         x = x.reshape(-1).to(self._kernel_device())
-        values = self._values()
-        if values is None:
-            idx = x.long()
-            ok = (idx.to(x.dtype) == x) & (idx >= 0) & (idx < self._k())
-        else:
-            values = values.to(device=x.device, dtype=x.dtype)
-            match = x.unsqueeze(-1) == values
-            ok = match.any(-1)
-            idx = match.to(torch.long).argmax(-1)
-        if not bool(ok.all()):
-            raise ValueError("x contains values that are not classes of this mechanism.")
+        idx = x.long()
+        if not bool(((idx.to(x.dtype) == x) & (idx >= 0) & (idx < self._k())).all()):
+            raise ValueError(f"x contains values that are not classes 0..{self._k() - 1} of this mechanism.")
         return idx
 
-    def class_value(self, idx: torch.Tensor) -> torch.Tensor:
-        """Values ``[B, 1]`` (float) of class indices ``idx``."""
-        values = self._values()
-        out = idx.to(torch.float32) if values is None else values.to(idx.device, torch.float32)[idx]
-        return out.reshape(-1, 1)
+    @staticmethod
+    def class_value(idx: torch.Tensor) -> torch.Tensor:
+        """Labels ``[B, 1]`` (float, as NBN stores discrete values) of class indices ``idx``."""
+        return idx.to(torch.float32).reshape(-1, 1)
 
     # ------------------------------------------------------------------
     # Structural interface
@@ -237,13 +259,19 @@ class _CategoricalStructural(StructuralMechanism):
                 raise ValueError(f"gumbel_max noise must be [B, K={probs.shape[-1]}].")
             idx = (_safe_log(probs) + noise).argmax(-1)
         else:
+            if noise.shape[-1] != 1:
+                raise ValueError("monotone noise must be [B, 1] uniforms.")
             cdf = probs.cumsum(-1)
-            idx = torch.searchsorted(cdf.contiguous(), noise[:, :1].contiguous()).reshape(-1)
+            idx = torch.searchsorted(cdf.contiguous(), noise.contiguous()).reshape(-1)
             idx = idx.clamp_max(probs.shape[-1] - 1)  # rounding: F(K - 1) may be 1 - eps
         return self.class_value(idx)
 
+    @torch.no_grad()
     def abduct(self, x: torch.Tensor, parents: torch.Tensor | None, n_samples: int = 1) -> torch.Tensor:
-        """Exact posterior draws of the noise given ``X = x``: ``[n_samples, B, D_u]``."""
+        """Exact posterior draws of the noise given ``X = x``: ``[n_samples, B, D_u]``.
+
+        Every draw reproduces ``x`` through :meth:`structural` (also in float32).
+        """
         idx = self.class_index(x)
         probs = self.probs(parents, idx.shape[0])
         p_x = probs.gather(-1, idx.unsqueeze(-1))  # [B, 1]
@@ -253,9 +281,20 @@ class _CategoricalStructural(StructuralMechanism):
             return _gumbel_posterior(probs, idx, n_samples)
         cdf = probs.cumsum(-1)
         high = cdf.gather(-1, idx.unsqueeze(-1))
-        low = high - p_x
-        v = torch.rand(n_samples, *low.shape, device=low.device, dtype=low.dtype)
-        return low + v * (high - low)  # Uniform(F(x-1), F(x)]
+        prev = torch.where(idx.unsqueeze(-1) > 0, cdf.gather(-1, (idx - 1).clamp_min(0).unsqueeze(-1)),
+                           torch.zeros_like(high))
+        # Keep draws a few ulps inside (F(x-1), F(x)]: structural() recomputes the CDF,
+        # possibly on another batch size, and float32 results can differ by ~1 ulp.
+        margin = _MARGIN_ULPS * torch.finfo(probs.dtype).eps
+        if bool((high - prev <= 2 * margin).any()):
+            raise ValueError(
+                f"an observed class has probability below the {probs.dtype} resolution of the CDF "
+                f"(<= {2 * margin:.1e}; e.g. a table cell floored at 1e-12): the monotone coupling "
+                "cannot represent it reliably. Use a float64 kernel, table smoothing (alpha > 0) "
+                "or coupling='gumbel_max'."
+            )
+        v = torch.rand(n_samples, *high.shape, device=high.device, dtype=high.dtype)
+        return prev + margin + v * (high - prev - 2 * margin)  # ~Uniform(F(x-1), F(x)]
 
     # ------------------------------------------------------------------
     # CDF, randomized PIT, counterfactual bounds
@@ -267,6 +306,7 @@ class _CategoricalStructural(StructuralMechanism):
         cdf = self.probs(parents, idx.shape[0]).cumsum(-1)
         return cdf.gather(-1, idx.unsqueeze(-1)).squeeze(-1).clamp(0.0, 1.0)
 
+    @torch.no_grad()
     def randomized_pit(self, x: torch.Tensor, parents: torch.Tensor | None,
                        generator: torch.Generator | None = None) -> torch.Tensor:
         """``W = F(x - 1 | pa) + V P(x | pa)``, ``V ~ U(0, 1)``: exactly Uniform(0, 1) under a correct kernel.
@@ -275,6 +315,7 @@ class _CategoricalStructural(StructuralMechanism):
         residuals* (J. Comput. Graph. Stat. 5(3):236–244, 1996).  ``generator``
         must be a CPU generator (the uniforms are drawn on the CPU).
         """
+        require_cpu_generator(generator, "randomized_pit")
         idx = self.class_index(x)
         probs = self.probs(parents, idx.shape[0])
         high = probs.cumsum(-1).gather(-1, idx.unsqueeze(-1)).squeeze(-1)
@@ -300,15 +341,6 @@ class _CategoricalStructural(StructuralMechanism):
         for t in list(self.parameters()) + list(self.buffers()):
             return t.device
         return torch.device("cpu")
-
-    def _values(self) -> torch.Tensor | None:
-        values = getattr(self, "_class_values", None)
-        if values is None:
-            return None
-        values = values.reshape(-1)
-        if torch.equal(values.to(torch.long).cpu(), torch.arange(values.numel())):
-            return None  # plain 0..K-1 labels
-        return values
 
     def _k(self) -> int:
         return int(self.n_classes)
@@ -369,9 +401,12 @@ def _gumbel_posterior(probs: torch.Tensor, idx: torch.Tensor, n_samples: int) ->
 
 
 def _same_rows(parents, counterfactual_parents, b: int, device) -> torch.Tensor:
-    if parents is None or counterfactual_parents is None or parents.shape[-1] == 0:
-        same = parents is None and counterfactual_parents is None
-        return torch.full((b,), bool(same), dtype=torch.bool, device=device)
-    pa = ensure_2d(parents).to(device)
-    cf = ensure_2d(counterfactual_parents).to(device, pa.dtype)
-    return (pa.expand(b, -1) == cf.expand(b, -1)).all(-1)
+    """``[B]`` True where ``pa' = pa`` (roots, or empty parent vectors, always match)."""
+    empty = [t is None or t.shape[-1] == 0 for t in (parents, counterfactual_parents)]
+    if all(empty):
+        return torch.ones(b, dtype=torch.bool, device=device)
+    if any(empty):
+        raise ValueError("parents and counterfactual_parents must both be given (or both be None).")
+    pa, cf = ensure_2d(parents).to(device), ensure_2d(counterfactual_parents).to(device)
+    dtype = torch.promote_types(pa.dtype, cf.dtype)
+    return (pa.to(dtype).expand(b, -1) == cf.to(dtype).expand(b, -1)).all(-1)

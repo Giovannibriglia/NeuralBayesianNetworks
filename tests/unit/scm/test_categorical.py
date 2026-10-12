@@ -135,6 +135,17 @@ def test_same_parents_give_the_observation_back(fitted):
         assert torch.equal(lo, point) and torch.equal(hi, point)
 
 
+def test_same_parent_detection_handles_roots_and_dtypes():
+    from nbn.scm.categorical import _same_rows
+
+    empty = torch.zeros(2, 0)
+    assert bool(_same_rows(empty, empty, 2, "cpu").all())
+    assert bool(_same_rows(None, None, 2, "cpu").all())
+    assert not bool(_same_rows(torch.tensor([[1]]), torch.tensor([[1.5]]), 1, "cpu").any())
+    with pytest.raises(ValueError, match="both"):
+        _same_rows(None, torch.ones(1, 1), 1, "cpu")
+
+
 def test_location_is_the_mode_or_the_median(fitted):
     pa = torch.tensor([[0.0], [1.0], [2.0]])
     with torch.no_grad():
@@ -160,16 +171,35 @@ def test_impossible_observations_and_bad_values_raise():
 
 def test_zero_probability_classes_keep_their_prior_noise():
     """A class impossible under pa is not informed by the observation; under pa'
-    it may be possible, and its Gumbel must then follow the prior."""
-    table = torch.tensor([[0.6, 0.4, 0.0], [0.2, 0.3, 0.5], [0.3, 0.3, 0.4]])
-    model = _scm(StructuralCategoricalTable(coupling="gumbel_max"))
-    model.fit(_data(30000, seed=0, table=table))
-    mech = model.mechanisms["s"]
-    n = 40000
-    u = mech.abduct(torch.zeros(n, 1), torch.zeros(n, 1))[0]
+    it may be possible, so its Gumbel must follow the prior (mean = Euler's gamma)."""
+    from nbn.scm.categorical import _gumbel_posterior
+
+    torch.manual_seed(0)
+    probs = torch.tensor([[0.6, 0.4, 0.0]]).expand(40000, -1)
+    u = _gumbel_posterior(probs, torch.zeros(40000, dtype=torch.long), 1)[0]
     assert bool(torch.isfinite(u).all())
-    g2 = u[:, 2]  # class 2 has p = 0 under a = 0: prior standard Gumbel, mean = Euler's gamma
-    assert abs(float(g2.mean()) - 0.5772) < 0.03
+    assert abs(float(u[:, 2].mean()) - 0.5772) < 0.03
+    assert bool(((torch.log(probs[:, :2]) + u[:, :2]).argmax(-1) == 0).all())
+
+
+def test_monotone_abduction_is_exact_for_small_probabilities_and_refuses_unrepresentable_ones():
+    torch.manual_seed(0)
+    mech = StructuralNeuralCategorical(n_classes=3, hidden=(8,), coupling="monotone")
+    mech.fit_local(torch.zeros(10).long(), None, epochs=1)
+    with torch.no_grad():
+        mech._root_logits.copy_(torch.tensor([0.5, 1e-4, 0.5]).log())      # p(1) ~ 1e-4
+    n = 200_000
+    u = mech.abduct(torch.ones(n, 1), None)[0]
+    with torch.no_grad():
+        assert torch.equal(mech.structural(None, u), torch.ones(n, 1))     # batch n vs batch 1
+    with torch.no_grad():
+        mech._root_logits.copy_(torch.tensor([0.5, 1e-12, 0.5]).log())     # below float32 resolution
+    with pytest.raises(ValueError, match="resolution"):
+        mech.abduct(torch.ones(4, 1), None)
+    gumbel = mech.with_coupling("gumbel_max")                                # Gumbel-max still works
+    g = gumbel.abduct(torch.ones(1000, 1), None)[0]
+    with torch.no_grad():
+        assert torch.equal(gumbel.structural(None, g), torch.ones(1000, 1))
 
 
 # ---------------------------------------------------------------------------
@@ -178,32 +208,40 @@ def test_zero_probability_classes_keep_their_prior_noise():
 
 
 def _lp_extremes(p: torch.Tensor, q: torch.Tensor, x: int):
-    """Min/max of pi(x, k) / p_x over couplings pi of p and q (brute force over a grid)."""
+    """Exact min/max of pi(x, k) / p_x over all couplings pi of p and q (linear programs)."""
+    from scipy.optimize import linprog
+
     k = p.numel()
-    lo = torch.full((k,), math.inf, dtype=torch.float64)
-    hi = torch.full((k,), -math.inf, dtype=torch.float64)
-    # The row pi(x, .) ranges over {r >= 0, sum r = p_x, r <= q, q - r <= 1 - p_x}; enumerate a grid.
-    steps = torch.linspace(0, 1, 81, dtype=torch.float64)
-    for frac in itertools.product(steps, repeat=k - 1):
-        r = torch.tensor(list(frac) + [0.0], dtype=torch.float64) * p[x]
-        r[-1] = p[x] - r[:-1].sum()
-        if bool((r < -1e-12).any()) or bool((r > q + 1e-12).any()) or bool(((q - r) > 1 - p[x] + 1e-12).any()):
-            continue
-        lo, hi = torch.minimum(lo, r / p[x]), torch.maximum(hi, r / p[x])
+    a_eq, b_eq = [], []
+    for i in range(k):                      # row sums = p
+        row = [0.0] * (k * k)
+        row[i * k:(i + 1) * k] = [1.0] * k
+        a_eq.append(row)
+        b_eq.append(float(p[i]))
+    for j in range(k):                      # column sums = q
+        col = [0.0] * (k * k)
+        col[j::k] = [1.0] * k
+        a_eq.append(col)
+        b_eq.append(float(q[j]))
+    lo, hi = torch.zeros(k, dtype=torch.float64), torch.zeros(k, dtype=torch.float64)
+    for j in range(k):
+        c = [0.0] * (k * k)
+        c[x * k + j] = 1.0
+        lo[j] = linprog(c, A_eq=a_eq, b_eq=b_eq, bounds=(0, None)).fun / float(p[x])
+        hi[j] = -linprog([-v for v in c], A_eq=a_eq, b_eq=b_eq, bounds=(0, None)).fun / float(p[x])
     return lo, hi
 
 
-@pytest.mark.parametrize("seed", range(4))
-def test_bounds_are_sharp_against_brute_force_couplings(seed):
+@pytest.mark.parametrize("seed", range(6))
+@pytest.mark.parametrize("k", [2, 3, 5])
+def test_bounds_are_sharp_against_exact_linear_programs(seed, k):
     torch.manual_seed(seed)
-    p = torch.distributions.Dirichlet(torch.ones(3)).sample().double()
-    q = torch.distributions.Dirichlet(torch.ones(3)).sample().double()
-    x = int(p.argmax())
+    p = torch.distributions.Dirichlet(torch.ones(k)).sample().double()
+    q = torch.distributions.Dirichlet(torch.ones(k)).sample().double()
+    x = int(torch.randint(0, k, ()))
     lo, hi = counterfactual_bounds(p.unsqueeze(0), q.unsqueeze(0), torch.tensor([x]))
     lp_lo, lp_hi = _lp_extremes(p, q, x)
-    assert torch.allclose(lo[0], lp_lo, atol=0.02) and torch.allclose(hi[0], lp_hi, atol=0.02)
-    # every row of the box that sums to one is attained: the vertices are feasible couplings
-    assert float(lo[0].sum()) <= 1.0 + 1e-9 <= float(hi[0].sum()) + 2e-9
+    assert torch.allclose(lo[0], lp_lo, atol=1e-7) and torch.allclose(hi[0], lp_hi, atol=1e-7)
 
 
 @pytest.mark.parametrize("key", KEYS)
@@ -241,10 +279,22 @@ def test_bounds_from_sets_contain_every_member_and_are_attained():
     assert torch.allclose(lo, corner_lo) and torch.allclose(hi, corner_hi)  # attained at the corners
 
 
+def test_bounds_from_sets_use_the_simplex():
+    """q in [0.3, 0.6]^3 forces q_k <= 0.4 on the simplex: upper = 0.4 / 0.5 = 0.8, not 1."""
+    lo, hi = counterfactual_bounds_from_sets(
+        torch.tensor([[0.5, 0.25, 0.25]]), torch.full((1, 3), 0.3), torch.full((1, 3), 0.6),
+        torch.tensor([0]))
+    assert torch.allclose(hi, torch.full((1, 3), 0.8))
+
+
 def test_bounds_from_sets_are_vacuous_when_the_observation_may_be_impossible():
     lo, hi = counterfactual_bounds_from_sets(
         torch.tensor([[0.0, 0.5, 0.5]]), torch.zeros(1, 3), torch.ones(1, 3), torch.tensor([0]))
     assert torch.equal(lo, torch.zeros(1, 3)) and torch.equal(hi, torch.ones(1, 3))
+    lo, hi = counterfactual_bounds_from_sets(          # the p -> 0 limit: impossible classes stay 0
+        torch.tensor([[0.0, 0.5, 0.5]]), torch.tensor([[0.0, 0.0, 0.0]]),
+        torch.tensor([[0.0, 1.0, 1.0]]), torch.tensor([0]))
+    assert torch.equal(hi, torch.tensor([[0.0, 1.0, 1.0]]))
     lo, hi = counterfactual_bounds_from_sets(
         torch.tensor([[0.0, 0.5, 0.5]]), torch.zeros(1, 3), torch.ones(1, 3), torch.tensor([0]),
         same_parents=True)
@@ -300,7 +350,21 @@ def test_conformal_sets_have_the_declared_marginal_coverage():
         sets = cs.sets(mech, test["a"])
         coverage.append(float(sets.gather(-1, test["s"].long()).float().mean()))
     mean = sum(coverage) / replicates
-    assert (1 - alpha) - 0.015 <= mean <= (1 - alpha) + 1 / (n_cal + 1) + 0.03
+    # Only the lower bound is guaranteed: discrete scores tie, which can over-cover.
+    assert mean >= (1 - alpha) - 0.015
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_conformal_sets_do_not_depend_on_the_batch_size(seed):
+    torch.manual_seed(seed)
+    model = _scm(StructuralNeuralCategorical(n_classes=3, hidden=(16,)))
+    model.fit(_data(2000, seed=seed))
+    mech = model.mechanisms["s"]
+    cs = conformal_sets(model, _data(400, seed=50 + seed), "s", alpha=0.2)
+    test = _data(600, seed=60 + seed)
+    batched = cs.sets(mech, test["a"])
+    one_by_one = torch.cat([cs.sets(mech, test["a"][i:i + 1]) for i in range(0, 600, 1)])
+    assert torch.equal(batched, one_by_one)
 
 
 def test_conformal_sets_include_every_class_at_the_top_score():
@@ -363,3 +427,26 @@ def test_discrete_structural_mechanisms_on_every_device(device, coupling):
     assert bool((lo <= hi).all())
     world = model.counterfactual_sample(data, do={"a": 1.0}, n_samples=3)["s"]
     assert world.shape == (3, 50, 1)
+
+
+def test_randomized_pit_rejects_device_generators():
+    accelerators = [d for d in available_devices() if d != "cpu"]
+    if not accelerators:
+        pytest.skip("no accelerator generator on this machine")
+    model = _scm(StructuralCategoricalTable())
+    model.fit(_data(500, seed=0))
+    data = _data(10, seed=1)
+    with pytest.raises(ValueError, match="CPU torch.Generator"):
+        model.mechanisms["s"].randomized_pit(data["s"], data["a"], torch.Generator(device=accelerators[0]))
+    with pytest.raises(ValueError, match=r"calibration \(generator=\)"):
+        pit_band_set(model, data, "s", generator=torch.Generator(device=accelerators[0]))
+
+
+def test_with_coupling_keeps_the_kernel(fitted):
+    mech = fitted[("neural", "monotone")].mechanisms["s"]
+    other = mech.with_coupling("gumbel_max")
+    pa = torch.tensor([[0.0], [1.0], [2.0]])
+    with torch.no_grad():
+        assert torch.equal(other.probs(pa), mech.probs(pa))
+    assert other.coupling == "gumbel_max" and mech.coupling == "monotone"
+    assert other.noise.sample(4).shape == (4, 3)

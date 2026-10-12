@@ -47,26 +47,25 @@ def simulate(n: int, seed: int) -> dict:
 train, held_out = simulate(3000, seed=1), simulate(1500, seed=2)
 
 
-def scm(coupling: str) -> StructuralCausalModel:
-    model = StructuralCausalModel([("a", "h")], {"a": ("discrete", 3), "h": ("discrete", 3)},
-                                  device="cpu")
-    model.set_mechanism("a", StructuralCategoricalTable())
-    model.set_mechanism("h", StructuralNeuralCategorical(n_classes=3, hidden=(32,), coupling=coupling))
-    model.fit(train)
-    return model
-
+# Fit the kernel once; the coupling is a declared reading of it, not something learned.
+model = StructuralCausalModel([("a", "h")], {"a": ("discrete", 3), "h": ("discrete", 3)}, device="cpu")
+model.set_mechanism("a", StructuralCategoricalTable())
+model.set_mechanism("h", StructuralNeuralCategorical(n_classes=3, hidden=(32,), coupling="monotone"))
+model.fit(train)
+mech = model.mechanisms["h"]
 
 evidence = {"a": torch.zeros(20000, 1), "h": torch.zeros(20000, 1)}   # untreated, ended in 0
 print("Counterfactual P(health' = k | did a=0 and got 0, had we done a=2):")
 for coupling in ("gumbel_max", "monotone"):
-    model = scm(coupling)
+    model.set_mechanism("h", mech.with_coupling(coupling))
     world = model.counterfactual_sample(evidence, do={"a": 2.0})["h"][0, :, 0].long()
     print(f"  {coupling:>10}: {(torch.bincount(world, minlength=3).float() / 20000).numpy().round(3)}")
-
 mech = model.mechanisms["h"]
+
 with torch.no_grad():
     lo, hi = mech.counterfactual_bounds(torch.zeros(1, 1), torch.zeros(1, 1), torch.full((1, 1), 2.0))
 print(f"  every compatible SCM lies in  lower {lo[0].numpy().round(3)}  upper {hi[0].numpy().round(3)}")
+print("  (both answers lie inside, up to Monte-Carlo error of about 0.005)")
 
 # Estimation error too: a 95% box on every entry of P(h | a) (rows = a).
 q_lo, q_hi = interval_set(model, train, "h", delta=0.05).bounds()

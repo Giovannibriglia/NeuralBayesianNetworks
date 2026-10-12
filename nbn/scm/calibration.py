@@ -121,7 +121,7 @@ def _calibration_rows(
     groups: torch.Tensor | None, generator: torch.Generator | None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Finite ``(x [N], parents [N, D_pa] | None)`` on the model's device, one row per group if asked."""
-    require_cpu_generator(generator, "calibration with groups=")
+    require_cpu_generator(generator, "calibration (generator=)")
     data = to_device(dict(data), model.device)
     x = data[node]
     parents = model.parent_values(data, node)
@@ -183,7 +183,7 @@ def pit_values(model, data: Mapping[str, torch.Tensor], node: str,
     """
     x, parents = _calibration_rows(model, data, node, groups, generator)
     mech = _mechanism(model, node, need=("cdf",))
-    if hasattr(mech, "randomized_pit"):  # discrete child: W is exactly U(0, 1) under a correct kernel
+    if getattr(mech, "is_discrete", False):  # W is exactly U(0, 1) under a correct kernel
         return mech.randomized_pit(x, parents, generator)
     return mech.cdf(x, parents)
 
@@ -330,6 +330,12 @@ class ConformalSets:
     contains a new exchangeable row's class with probability ``>= level``
     *marginally*.  ``threshold`` is ``inf`` (every class) when there are too
     few calibration rows for the requested level.
+
+    Discrete scores tie (e.g. every row whose class is ranked last scores 1),
+    so coverage can exceed ``level`` by more than ``1/(n+1)``: only the lower
+    bound is guaranteed.  Membership uses ``score <= threshold + 1e-6`` so
+    that float noise between batch sizes cannot drop a class (a negligible
+    extra over-coverage).
     """
 
     node: str
@@ -344,7 +350,7 @@ class ConformalSets:
         _check_bound(self._bound_to, mechanism)
         with torch.no_grad():
             probs = mechanism.probs(parents, batch)
-            return _cumulative_scores(probs) <= self.threshold
+            return _cumulative_scores(probs) <= self.threshold + _SCORE_TOL
 
 
 def conformal_sets(model, calibration_data: Mapping[str, torch.Tensor], node: str,
@@ -370,6 +376,9 @@ def conformal_sets(model, calibration_data: Mapping[str, torch.Tensor], node: st
     threshold = math.inf if rank > n else float(scores.sort().values[rank - 1])
     return ConformalSets(node=node, alpha=alpha, threshold=threshold, n_calibration=n,
                          level=1.0 - alpha, _bound_to=_fingerprint(mech))
+
+
+_SCORE_TOL = 1e-6  # float32 scores of the same cell differ by ~1 ulp between batch sizes
 
 
 def _cumulative_scores(probs: torch.Tensor) -> torch.Tensor:
