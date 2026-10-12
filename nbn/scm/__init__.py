@@ -15,16 +15,29 @@
   mechanism: :func:`pit_band_set` (DKW band on the probability integral
   transform), :func:`conformal_intervals` (split / quantile-regression
   conformal), :func:`noise_independence_test`.
+* Discrete structural mechanisms from a categorical kernel —
+  :class:`StructuralNeuralCategorical`, :class:`StructuralCategoricalTable`
+  (declared ``coupling``: Gumbel-max or monotone), sharp counterfactual
+  bounds over all compatible SCMs (:func:`counterfactual_bounds`,
+  :func:`counterfactual_bounds_from_sets`) and :func:`conformal_sets`.
 
 See ``docs/scm-design-draft.md``.
 """
 from nbn.scm._stats import benjamini_hochberg
 from nbn.scm.calibration import (
     ConformalIntervals,
+    ConformalSets,
     PITBandSet,
     conformal_intervals,
+    conformal_sets,
     pit_band_set,
     pit_values,
+)
+from nbn.scm.categorical import (
+    StructuralCategoricalTable,
+    StructuralNeuralCategorical,
+    counterfactual_bounds,
+    counterfactual_bounds_from_sets,
 )
 from nbn.scm.diagnostics import (
     DiagnosticResult,
@@ -76,4 +89,10 @@ __all__ = [
     "PITBandSet",
     "conformal_intervals",
     "ConformalIntervals",
+    "StructuralNeuralCategorical",
+    "StructuralCategoricalTable",
+    "counterfactual_bounds",
+    "counterfactual_bounds_from_sets",
+    "conformal_sets",
+    "ConformalSets",
 ]

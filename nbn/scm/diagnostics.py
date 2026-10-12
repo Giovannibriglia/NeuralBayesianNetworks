@@ -267,10 +267,12 @@ def noise_independence_test(
 def calibration_by_bins_test(
     model, data: Mapping[str, torch.Tensor], node: str, n_bins: int = 4,
     reference: Literal["uniform", "other_bins"] = "uniform",
+    generator: torch.Generator | None = None,
 ) -> DiagnosticResult:
     """Is the fitted CDF calibrated in every region of the inputs?
 
-    Sorts held-out rows by the predicted median ``F_hat^{-1}(1/2 | pa)``,
+    Sorts held-out rows by the predicted median ``F_hat^{-1}(1/2 | pa)``
+    (continuous children) or mean class index (discrete children),
     splits them into ``n_bins`` equal-count bins and looks at the probability
     integral transform ``W = F_hat(x | pa)`` in each bin:
 
@@ -289,19 +291,28 @@ def calibration_by_bins_test(
     a 1-D projection of the parents: with several parents it only sees
     miscalibration that varies along that projection.  A pass does not prove
     calibration.  Use rows not used for fitting.
+
+    Discrete children (structural categorical mechanisms) use the randomized
+    PIT (drawn with the CPU ``generator``) and bins of the predicted mean class
+    index.
     """
-    from nbn.scm.calibration import _calibration_rows, _mechanism
+    from nbn.scm.calibration import _calibration_rows, _mechanism, pit_values
 
     if reference not in ("uniform", "other_bins"):
         raise ValueError(f"reference must be 'uniform' or 'other_bins', got {reference!r}.")
-    mech = _mechanism(model, node)
+    mech = _mechanism(model, node, need=("cdf",))
     x, parents = _calibration_rows(model, data, node, None, None)
     if parents is None:
         raise ValueError(f"'{node}' has no parents: there is nothing to bin.")
     if not 2 <= n_bins <= x.shape[0]:
         raise ValueError(f"n_bins must lie in [2, {x.shape[0]}] (number of rows), got {n_bins}.")
-    pit = mech.cdf(x, parents)
-    order = torch.argsort(mech.quantile(0.5, parents))
+    pit = pit_values(model, data, node, generator=generator)
+    if hasattr(mech, "probs"):  # discrete: predicted mean class index
+        probs = mech.probs(parents, x.shape[0])
+        key = (probs * torch.arange(probs.shape[-1], device=probs.device, dtype=probs.dtype)).sum(-1)
+    else:
+        key = mech.quantile(0.5, parents)
+    order = torch.argsort(key)
     bins = [pit[chunk] for chunk in torch.tensor_split(order, n_bins)]
     if reference == "uniform":
         results = [ks_uniform(b) for b in bins]

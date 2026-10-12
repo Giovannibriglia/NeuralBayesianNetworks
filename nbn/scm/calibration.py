@@ -33,6 +33,20 @@ conformal part).  Transitions from one episode are not: pass ``groups``
 
     The band also recalibrates: ``G_hat`` corrects a miscalibrated fit.
 
+:func:`pit_band_set` for discrete children
+    Uses the randomized PIT ``W = F_hat(x - 1 | pa) + V p_hat(x | pa)``
+    (Dunn & Smyth, J. Comput. Graph. Stat. 5(3), 1996).  Since
+    ``{X <= k} = {W <= F_hat(k | pa)}``, the same band bounds
+    ``P(X <= k | pa)`` under the same assumption; class order is the index
+    order (meaningful for ordered classes).
+
+:func:`conformal_sets` — prediction sets for discrete children
+    Split conformal with the cumulative (adaptive) score: sort classes by
+    decreasing ``p_hat`` and add the probabilities up to and including the
+    observed class (Romano, Sesia & Candès, *Classification with Valid and
+    Adaptive Coverage*, NeurIPS 2020; Kochenderfer et al., *Algorithms for
+    Validation*, Ex. 12.4, p. 342).  Marginal coverage ``>= 1 - alpha``.
+
 :func:`conformal_intervals` — prediction intervals
     Split conformal prediction: intervals for ``X | pa`` that cover a new
     exchangeable row with probability ``>= 1 - alpha`` *on average over the
@@ -65,12 +79,14 @@ Guarantee = Literal["pac_if_pit_independent", "marginal"]
 # ---------------------------------------------------------------------------
 
 
-def _mechanism(model, node: str) -> StructuralMechanism:
+def _mechanism(model, node: str, need: tuple[str, ...] = ("cdf", "quantile")) -> StructuralMechanism:
     mech = model.mechanisms[node] if node in model.mechanisms else None  # noqa: SIM401
-    if not (isinstance(mech, StructuralMechanism) and hasattr(mech, "cdf") and hasattr(mech, "quantile")):
+    if not (isinstance(mech, StructuralMechanism) and all(hasattr(mech, n) for n in need)):
         raise TypeError(
-            f"'{node}' needs a fitted continuous structural mechanism with cdf/quantile "
-            f"(AdditiveNoiseMechanism or FlowNoiseMechanism), got {type(mech).__name__}."
+            f"'{node}' needs a fitted structural mechanism with {'/'.join(need)} "
+            f"(AdditiveNoiseMechanism, FlowNoiseMechanism or, for discrete children where "
+            f"applicable, StructuralNeuralCategorical / StructuralCategoricalTable); "
+            f"got {type(mech).__name__}."
         )
     return mech
 
@@ -159,9 +175,17 @@ def _check_bound(stored: str, mechanism) -> None:
 def pit_values(model, data: Mapping[str, torch.Tensor], node: str,
                groups: torch.Tensor | None = None,
                generator: torch.Generator | None = None) -> torch.Tensor:
-    """``F_hat(x | pa)`` for every (kept) row, ``[N]``: the probability integral transform."""
+    """The probability integral transform of every (kept) row, ``[N]``.
+
+    ``F_hat(x | pa)`` for continuous children; for discrete children the
+    randomized version ``F_hat(x - 1 | pa) + V p_hat(x | pa)``, ``V ~ U(0, 1)``
+    (drawn with ``generator``), which is exactly uniform under a correct kernel.
+    """
     x, parents = _calibration_rows(model, data, node, groups, generator)
-    return _mechanism(model, node).cdf(x, parents)
+    mech = _mechanism(model, node, need=("cdf",))
+    if hasattr(mech, "randomized_pit"):  # discrete child: W is exactly U(0, 1) under a correct kernel
+        return mech.randomized_pit(x, parents, generator)
+    return mech.cdf(x, parents)
 
 
 @dataclass(kw_only=True)
@@ -221,7 +245,7 @@ def pit_band_set(model, calibration_data: Mapping[str, torch.Tensor], node: str,
         sorted_pit=pit.sort().values,
         epsilon=math.sqrt(math.log(2.0 / delta) / (2.0 * n)),
         level=1.0 - delta,
-        _bound_to=_fingerprint(_mechanism(model, node)),
+        _bound_to=_fingerprint(_mechanism(model, node, need=("cdf",))),
     )
 
 
@@ -291,3 +315,66 @@ def _base_interval(mechanism, parents, method: str, alpha: float):
         return mechanism.quantile(alpha / 2.0, parents), mechanism.quantile(1.0 - alpha / 2.0, parents)
     median = mechanism.quantile(0.5, parents)
     return median, median
+
+
+# ---------------------------------------------------------------------------
+# Conformal prediction sets (discrete children)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(kw_only=True)
+class ConformalSets:
+    """Split-conformal prediction sets for one discrete node (cumulative score).
+
+    ``sets(mechanism, parents)`` returns a ``[B, K]`` boolean mask; the set
+    contains a new exchangeable row's class with probability ``>= level``
+    *marginally*.  ``threshold`` is ``inf`` (every class) when there are too
+    few calibration rows for the requested level.
+    """
+
+    node: str
+    alpha: float
+    threshold: float
+    n_calibration: int
+    level: float
+    guarantee: Guarantee = "marginal"
+    _bound_to: str = field(default="", repr=False)
+
+    def sets(self, mechanism, parents: torch.Tensor | None, batch: int | None = None) -> torch.Tensor:
+        _check_bound(self._bound_to, mechanism)
+        with torch.no_grad():
+            probs = mechanism.probs(parents, batch)
+            return _cumulative_scores(probs) <= self.threshold
+
+
+def conformal_sets(model, calibration_data: Mapping[str, torch.Tensor], node: str,
+                   alpha: float = 0.1, groups: torch.Tensor | None = None,
+                   generator: torch.Generator | None = None) -> ConformalSets:
+    """Calibrate prediction sets of level ``1 - alpha`` for a discrete node on held-out rows.
+
+    Score of a row: the total probability of the classes ranked (by
+    decreasing ``p_hat``) up to and including the observed one.  Threshold:
+    the ``ceil((n + 1)(1 - alpha))``-th smallest score.  A new row's set is
+    every class whose score is at most the threshold.
+    """
+    if not 0.0 < alpha < 1.0:
+        raise ValueError(f"alpha must lie in (0, 1), got {alpha}.")
+    mech = _mechanism(model, node, need=("probs", "class_index"))
+    x, parents = _calibration_rows(model, calibration_data, node, groups, generator)
+    with torch.no_grad():
+        idx = mech.class_index(x)
+        scores = _cumulative_scores(mech.probs(parents, idx.shape[0]))
+        scores = scores.gather(-1, idx.unsqueeze(-1)).squeeze(-1)
+    n = scores.numel()
+    rank = math.ceil((n + 1) * (1.0 - alpha))
+    threshold = math.inf if rank > n else float(scores.sort().values[rank - 1])
+    return ConformalSets(node=node, alpha=alpha, threshold=threshold, n_calibration=n,
+                         level=1.0 - alpha, _bound_to=_fingerprint(mech))
+
+
+def _cumulative_scores(probs: torch.Tensor) -> torch.Tensor:
+    """``s[b, k]`` = mass of the classes ranked at or above ``k`` (decreasing probability)."""
+    order = torch.argsort(probs, dim=-1, descending=True, stable=True)
+    cumulative = probs.gather(-1, order).cumsum(-1)
+    cumulative = cumulative / cumulative[..., -1:]  # the last class scores exactly 1 (no float drift)
+    return torch.empty_like(probs).scatter_(-1, order, cumulative)
