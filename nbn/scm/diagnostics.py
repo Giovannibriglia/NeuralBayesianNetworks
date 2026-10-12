@@ -12,6 +12,7 @@ Test                              Null hypothesis
 :func:`freshness_test`            the noise at ``t`` and ``t + 1`` is independent
 :func:`residual_dependence_test`  the noises of two nodes are independent
 :func:`context_invariance_test`   ``C ⊥ X | pa(X)`` for a dataset/policy id ``C``
+:func:`noise_independence_test`   the abducted noise is independent of the parents
 ================================  ============================================
 
 Discrete tests use a parametric bootstrap: every replicate is refitted on a
@@ -218,6 +219,44 @@ def residual_dependence_test(
                                 null="the two residuals are independent",
                                 details={"method": "hsic", "permutations": n_permutations})
     raise ValueError(f"Unknown method '{method}'.")
+
+
+@torch.no_grad()
+def noise_independence_test(
+    model,
+    data: Mapping[str, torch.Tensor],
+    node: str,
+    n_permutations: int = 200,
+    max_rows: int = 2000,
+    generator: torch.Generator | None = None,
+) -> DiagnosticResult:
+    """Is the abducted noise of ``node`` independent of its parents?
+
+    The structural form ``X := f(pa, U)`` assumes ``U ⊥ pa``.  This test
+    abducts the noise of every row and runs an HSIC permutation test against
+    the parents (the residual-independence check of additive-noise model
+    fitting, Peters, Janzing & Schölkopf, *Elements of Causal Inference*,
+    §4.2.1).  Use data that were **not** used to fit the mechanism: fitting
+    and testing on the same rows can hide or create dependence.  A pass is
+    what upgrades a :class:`PITBandSet` from a marginal to a per-parent
+    statement.  At most ``max_rows`` rows are used (HSIC memory is quadratic).
+    """
+    data = _on_model_device(model, data)
+    mech = _structural(model, node)
+    parents = model.parent_values(data, node)
+    if parents is None:
+        raise ValueError(f"'{node}' has no parents: nothing to be independent of.")
+    noise = mech.abduct(data[node], parents, 1)[0]
+    n = noise.shape[0]
+    if n > max_rows:
+        keep = torch.randperm(n, generator=generator)[:max_rows].to(noise.device)
+        noise, parents = noise[keep], parents[keep]
+    statistic, p_value = _hsic_permutation(noise, parents, n_permutations)
+    return DiagnosticResult(
+        "noise_independence", statistic, p_value,
+        null=f"the noise of '{node}' is independent of its parents",
+        details={"method": "hsic", "permutations": n_permutations, "rows": int(noise.shape[0])},
+    )
 
 
 # ===========================================================================

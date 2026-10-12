@@ -10,20 +10,34 @@
 * Structural probability sets — :func:`noise_parameter_set` (a polytope on a
   shared discrete noise law) and :func:`cdf_band_set` (a band on a continuous
   noise CDF).
+* Neural mechanisms — :class:`FlowNoiseMechanism` (``x = T(u; pa)``, exact
+  abduction) and calibrated uncertainty for any continuous structural
+  mechanism: :func:`pit_band_set` (DKW band on the probability integral
+  transform), :func:`conformal_intervals` (split / quantile-regression
+  conformal), :func:`noise_independence_test`.
 
 See ``docs/scm-design-draft.md``.
 """
 from nbn.scm._stats import benjamini_hochberg
+from nbn.scm.calibration import (
+    ConformalIntervals,
+    PITBandSet,
+    conformal_intervals,
+    pit_band_set,
+    pit_values,
+)
 from nbn.scm.diagnostics import (
     DiagnosticResult,
     context_invariance_test,
     freshness_test,
+    noise_independence_test,
     noise_sharing_test,
     noise_tying_test,
     residual_dependence_test,
     residuals,
 )
 from nbn.scm.episodes import transitions_from_episodes
+from nbn.scm.flow import FlowNoiseMechanism, StandardNormalNoise
 from nbn.scm.mechanisms import (
     AdditiveNoiseMechanism,
     DiscreteAdditiveNoiseMechanism,
@@ -38,12 +52,15 @@ __all__ = [
     "StructuralMechanism",
     "DiscreteAdditiveNoiseMechanism",
     "AdditiveNoiseMechanism",
+    "FlowNoiseMechanism",
+    "StandardNormalNoise",
     "OffsetNoise",
     "GaussianNoise",
     "GaussianMixtureNoise",
     "DiagnosticResult",
     "noise_sharing_test",
     "noise_tying_test",
+    "noise_independence_test",
     "freshness_test",
     "residual_dependence_test",
     "context_invariance_test",
@@ -52,4 +69,9 @@ __all__ = [
     "transitions_from_episodes",
     "noise_parameter_set",
     "cdf_band_set",
+    "pit_values",
+    "pit_band_set",
+    "PITBandSet",
+    "conformal_intervals",
+    "ConformalIntervals",
 ]

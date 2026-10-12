@@ -554,6 +554,24 @@ class AdditiveNoiseMechanism(StructuralMechanism):
     def forward(self, parents: torch.Tensor | None) -> Distribution:
         return self.noise.distribution(self.location(parents))
 
+    def cdf(self, x: torch.Tensor, parents: torch.Tensor | None) -> torch.Tensor:
+        """``P(X <= x | pa) = F_U(x - g(pa))``, shape ``[B]`` (1-D children only)."""
+        self._require_scalar("cdf")
+        return self.noise.cdf(self.residual(x, parents)[:, 0])
+
+    def quantile(self, p: torch.Tensor | float, parents: torch.Tensor | None) -> torch.Tensor:
+        """Conditional ``p``-quantile ``g(pa) + F_U^{-1}(p)``, shape ``[B]`` (1-D children only)."""
+        self._require_scalar("quantile")
+        loc = self.location(parents)[:, 0]
+        p_t = torch.as_tensor(p, dtype=loc.dtype, device=loc.device).reshape(-1).expand_as(loc)
+        return loc + self.noise.icdf(p_t.clamp(1e-12, 1 - 1e-12))
+
+    def _require_scalar(self, what: str) -> None:
+        if self.output_dim != 1:
+            raise ValueError(
+                f"{type(self).__name__}.{what} needs a 1-D child (got {self.output_dim} dims)."
+            )
+
     def log_prob(self, x: torch.Tensor, parents: torch.Tensor | None) -> torch.Tensor:
         """``log p(x | pa)`` for ``x`` ``[B]``, ``[B, D]`` or ``[B, S, D]``; returns ``[B]`` / ``[B, S]``."""
         x = ensure_2d(x).to(torch.float32)

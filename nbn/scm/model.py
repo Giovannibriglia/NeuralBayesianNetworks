@@ -115,7 +115,8 @@ class StructuralCausalModel(NeuralBayesianNetwork):
             return GaussianNoise(dim)
         raise TypeError(
             "tie_noise needs mechanisms of one family: all "
-            "DiscreteAdditiveNoiseMechanism or all AdditiveNoiseMechanism."
+            "DiscreteAdditiveNoiseMechanism or all AdditiveNoiseMechanism "
+            "(flow mechanisms already share the fixed N(0, I) noise law)."
         )
 
     # ------------------------------------------------------------------
