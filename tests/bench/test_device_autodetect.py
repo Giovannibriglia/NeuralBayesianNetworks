@@ -42,13 +42,6 @@ def _expected_auto(adapter_cls) -> str:
     return _EXPECTED_AUTO
 
 
-@pytest.fixture
-def no_accelerator(monkeypatch):
-    """Simulate a host with neither CUDA nor MPS."""
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
-
-
 # 1. resolve_device() itself: table test in tests/unit/test_resolve_device.py.
 
 # ---------------------------------------------------------------------------
