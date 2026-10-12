@@ -20,7 +20,7 @@ the *submodules the adapters actually import* (``probes``), which are
 imported too, and scikit-learn carries its own pin here.
 
 The requirement table below is the single in-code source of truth and is
-pinned to ``pyproject.toml`` by ``tests/unit/test_env_check.py`` (installed
+pinned to ``pyproject.toml`` by ``tests/bench/test_env_check.py`` (installed
 package metadata cannot be trusted for this: an editable install keeps the
 metadata of whenever it was last re-installed).
 """

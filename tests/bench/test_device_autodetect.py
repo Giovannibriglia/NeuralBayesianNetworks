@@ -263,7 +263,7 @@ class TestSmokeConfigsDoNotPinDevice:
 
         import yaml
 
-        repo_root = Path(__file__).resolve().parents[3]
+        repo_root = Path(__file__).resolve().parents[2]
         cfg = yaml.safe_load((repo_root / rel_path).read_text())
         pinned = [b for b in cfg["baselines"] if "device" in b]
         assert pinned == [], (

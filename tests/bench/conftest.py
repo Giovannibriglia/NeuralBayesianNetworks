@@ -1,4 +1,4 @@
-"""Shared fixtures for the v0.13 runner tests.
+"""Shared fixtures for the benchmark-harness tests (``nbn.bench``).
 
 These tests launch real subprocesses that import torch, and the per-cell
 memory guard sizes its ``RLIMIT_AS`` cap from *ambient* free memory
@@ -26,5 +26,5 @@ _TEST_CELL_MEMORY_CAP_BYTES = 12 * 1024**3
 
 @pytest.fixture(autouse=True)
 def pinned_cell_memory_cap(monkeypatch):
-    """Make the per-cell memory cap deterministic for every v013 test."""
+    """Make the per-cell memory cap deterministic for every bench test."""
     monkeypatch.setenv(MEMORY_LIMIT_ENV_VAR, str(_TEST_CELL_MEMORY_CAP_BYTES))

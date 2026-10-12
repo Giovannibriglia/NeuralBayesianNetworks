@@ -29,7 +29,7 @@ ALLOWLIST = {
 
 
 def test_no_insertion_order_indexing_in_benchmarking() -> None:
-    repo = pathlib.Path(__file__).resolve().parents[2]
+    repo = pathlib.Path(__file__).resolve().parents[3]
     bench_dir = repo / "nbn" / "bench"
     violations: list[str] = []
     for py_file in bench_dir.rglob("*.py"):

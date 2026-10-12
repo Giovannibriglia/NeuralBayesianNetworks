@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-_CONFIGS = Path(__file__).resolve().parents[3] / "nbn" / "bench" / "configs"
+_CONFIGS = Path(__file__).resolve().parents[2] / "nbn" / "bench" / "configs"
 
 
 def test_config_names_are_unique():

@@ -5,7 +5,7 @@ same input — so batched-vs-sequential equivalence is checked at
 atol=1e-5 (allowing tiny numerical differences between the [B, n] and
 [1, n] message-passing paths).
 
-Mirrors tests/unit/test_nbn_query_batch.py's structure: equivalence,
+Mirrors tests/bench/test_nbn_query_batch.py's structure: equivalence,
 engine-path spy, B=1 / empty / heterogeneous-fallback edge cases,
 all-None evidence, per-row independence.
 
