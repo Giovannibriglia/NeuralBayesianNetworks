@@ -477,3 +477,17 @@ def test_tying_test_accepts_members_with_different_offset_ranges():
     from nbn.scm import noise_tying_test
 
     assert noise_tying_test(model, data, ["y", "z"], n_boot=50).p_value > 0.01
+
+
+@pytest.mark.parametrize("device", ACCELERATOR_PARAMS)
+def test_linear_location_fitted_on_an_accelerator_is_correct(device):
+    """The ridge solve moves data to the CPU in float64; a fused MPS→CPU float64
+    cast returned garbage on torch 2.14 (weights of 1e-24, inf or nan)."""
+    for seed in range(3):
+        gen = torch.Generator().manual_seed(seed)
+        x = torch.randn(2000, 1, generator=gen)
+        y = 1.5 * x + 0.5 + 0.3 * torch.randn(2000, 1, generator=gen)
+        model = _continuous_scm(device=device)
+        model.fit({"x": x, "y": y})
+        net = model.mechanisms["y"].net
+        assert abs(float(net.weight) - 1.5) < 0.05 and abs(float(net.bias) - 0.5) < 0.05
