@@ -149,19 +149,6 @@ class TestProtocolConformance:
         )
         assert adapter.n_samples == 20
 
-    def test_device_default_auto_detects(self):
-        """Default device (None) auto-detects: cuda-if-available-else-cpu.
-
-        Behavior change (device-autodetect fix, 2026-06-04): the default
-        was "cpu"; it now resolves via resolve_device() so the adapter uses
-        the GPU when one is present. Pin device="cpu" in config to force CPU.
-        """
-        from nbn.bench.core._device import resolve_device
-
-        adapter = PyroAdapter(mechanism="empirical", inference_method="importance")
-        want = resolve_device(None)                     # cuda > mps > cpu ...
-        assert adapter.device == ("cpu" if want == "mps" else want)  # ... minus mps
-
     def test_device_auto_resolves_at_init(self):
         """device='auto' must be replaced with a concrete device at __init__ time."""
         adapter = PyroAdapter(

@@ -21,17 +21,6 @@ from tests.conftest import available_accelerators, available_devices
 DEVICES = available_devices()
 
 
-def test_resolve_device_auto():
-    d = resolve_device("auto")
-    assert d.type in {"cpu", "cuda", "mps"}
-
-
-def test_resolve_device_explicit():
-    assert resolve_device("cpu").type == "cpu"
-    assert resolve_device(None).type == "cpu"
-    assert resolve_device(torch.device("cpu")).type == "cpu"
-
-
 def test_to_device_recursive():
     d = torch.device("cpu")
     obj = {"a": torch.zeros(3), "b": [torch.ones(2), torch.zeros(1)]}

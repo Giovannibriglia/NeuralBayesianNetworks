@@ -5,7 +5,7 @@ baseline silently ran on CPU because ``--device auto`` was collapsed to
 ``None`` at the CLI and then to ``"cpu"`` at ``build_adapter``.
 
 Layers under test:
-  1. ``resolve_device()`` — the single shared resolution helper.
+  1. ``resolve_device()`` — the shared helper (table: tests/unit/test_resolve_device.py).
   2. Per-adapter resolution — each adapter owns its translation (β).
   3. CLI argument parsing — ``"auto"`` is the default and passes through.
   4. ``CellResult.device`` — the new self-documenting column.
@@ -49,45 +49,7 @@ def no_accelerator(monkeypatch):
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
 
 
-# ---------------------------------------------------------------------------
-# 1. resolve_device() unit tests
-# ---------------------------------------------------------------------------
-
-class TestResolveDevice:
-    def test_none_resolves_to_cuda_when_available(self, monkeypatch):
-        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-        assert resolve_device(None) == "cuda"
-
-    def test_none_resolves_to_cpu_when_unavailable(self, no_accelerator):
-        assert resolve_device(None) == "cpu"
-
-    def test_auto_resolves_to_cuda_when_available(self, monkeypatch):
-        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-        assert resolve_device("auto") == "cuda"
-
-    def test_auto_resolves_to_cpu_when_unavailable(self, no_accelerator):
-        assert resolve_device("auto") == "cpu"
-
-    def test_auto_resolves_to_mps_when_only_mps(self, monkeypatch):
-        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-        monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
-        assert resolve_device("auto") == "mps"
-        assert resolve_device(None) == "mps"
-
-    def test_cpu_passes_through(self, monkeypatch):
-        # Even with CUDA "available", an explicit "cpu" is honoured.
-        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-        assert resolve_device("cpu") == "cpu"
-
-    def test_cuda_passes_through(self, monkeypatch):
-        # No availability validation here — that's deferred to alloc time.
-        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-        assert resolve_device("cuda") == "cuda"
-
-    def test_cuda_indexed_passes_through(self):
-        assert resolve_device("cuda:0") == "cuda:0"
-        assert resolve_device("cuda:1") == "cuda:1"
-
+# 1. resolve_device() itself: table test in tests/unit/test_resolve_device.py.
 
 # ---------------------------------------------------------------------------
 # 2. Per-adapter device resolution (design choice β: per-adapter ownership)
