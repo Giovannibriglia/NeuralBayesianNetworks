@@ -154,31 +154,63 @@ def test_a_rejected_optimiser_step_reverts_exactly(kind):
         )
 
 
-def test_bare_state_dict_aliases_the_parameters_and_fails_to_revert():
-    """The trap the copy exists to avoid, pinned so the docs stay grounded.
-
-    If a future torch release makes ``state_dict()`` copy, this test fails and
-    the guidance can be relaxed deliberately rather than drifting.
-    """
-    mech, x, pa = _fitted("linear_gaussian")
-    before = mech._weight.detach().clone()
-
-    naive = mech.state_dict()  # NOT copied -- aliases the live parameters
-    assert any(
-        v.data_ptr() == p.data_ptr()
-        for v in naive.values()
-        for p in mech.parameters()
-    ), "state_dict no longer aliases parameters; the deepcopy advice can be revisited"
-
+def _sgd_step(mech, x, pa):
     opt = torch.optim.SGD(mech.parameters(), lr=0.5)
     opt.zero_grad()
     (-mech.log_prob(x, pa).mean()).backward()
     opt.step()
-    mech.load_state_dict(naive)
 
-    assert not torch.equal(mech._weight.detach(), before), (
-        "the bare snapshot reverted correctly -- if torch changed, update the docs"
-    )
+
+#: How an uncopied ``state_dict()`` fares across each kind of update:
+#: (fitted kind, key to watch, update, does the naive snapshot track the live
+#: tensor?).  ``True`` is the trap -- reverting from it restores the
+#: already-updated values.
+_TRAPS = {
+    # The original trap (PR #258): optimisers update parameters in place.
+    "optimiser_step": ("linear_gaussian", "_weight",
+                       lambda m, x, pa: _sgd_step(m, x, pa), True),
+    # warm_start=True widens it: the fit mutates the same tensors in place,
+    # so the snapshot is clobbered by the very call it was taken to undo.
+    "warm_fit": ("mdn", "net.0.weight",
+                 lambda m, x, pa: m.fit_local(x, pa, epochs=5, consolidate=False,
+                                              warm_start=True), True),
+    # Why that hazard is new: a cold refit allocates new tensors, so the
+    # same uncopied snapshot happened to survive it.
+    "cold_refit": ("mdn", "net.0.weight",
+                   lambda m, x, pa: m.fit_local(x, pa, epochs=5, consolidate=False,
+                                                warm_start=False), False),
+}
+
+
+@pytest.mark.parametrize("update", sorted(_TRAPS))
+def test_an_uncopied_state_dict_is_not_a_snapshot(update):
+    """The trap the deepcopy exists to avoid, pinned so the docs stay grounded.
+
+    If a future torch release makes ``state_dict()`` copy, the in-place cases
+    fail and the guidance in ``Mechanism``'s docstring can be relaxed
+    deliberately rather than drifting.  The copied snapshot reverts exactly in
+    every case.
+    """
+    kind, key, apply_update, tracks_live = _TRAPS[update]
+    mech, x, pa = _fitted(kind, epochs=5)
+
+    naive = mech.state_dict()                 # NOT copied
+    correct = copy.deepcopy(mech.state_dict())
+    assert any(v.data_ptr() == p.data_ptr()
+               for v in naive.values() for p in mech.parameters()), (
+        "state_dict no longer aliases parameters; the deepcopy advice can be revisited")
+
+    apply_update(mech, x, pa)
+    live = mech.state_dict()[key]
+    assert not torch.equal(correct[key], live), "the update did not change the parameters"
+    assert torch.equal(naive[key], live) is tracks_live, (
+        "the uncopied snapshot " + ("did not track" if tracks_live else "tracked")
+        + " the live parameters -- if torch changed, update the docs")
+
+    mech.load_state_dict(correct)            # the supported idiom reverts exactly
+    for k, v in correct.items():
+        if v is not None:
+            assert torch.equal(mech.state_dict()[k], v), k
 
 
 # --------------------------------------------------------------------------
