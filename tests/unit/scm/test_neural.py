@@ -84,7 +84,7 @@ def test_flow_cdf_and_quantile_are_inverse(fitted_flow):
 def test_flow_tracks_a_noise_scale_that_varies_with_the_parent(fitted_flow):
     mech = fitted_flow.mechanisms["y"]
     pa = torch.tensor([[0.0], [2.0]])
-    width = mech.quantile(0.9, pa) - mech.quantile(0.1, pa)
+    width = (mech.quantile(0.9, pa) - mech.quantile(0.1, pa)).detach()
     true_width = 2 * 1.2816 * (0.2 + 0.5 * pa[:, 0].abs())
     # A short raw fit is not exact (that is what calibration is for): require
     # the right order of magnitude and, above all, the right shape.
@@ -109,7 +109,7 @@ def test_root_flow_and_multivariate_flow():
     y = 2.0 + 0.5 * torch.randn(1000, 1)
     root.fit_local(y, None, epochs=60)
     assert root.quantile(0.5, None).shape == (1,)
-    assert abs(float(root.quantile(0.5, None)) - 2.0) < 0.15
+    assert abs(float(root.quantile(0.5, None).detach()) - 2.0) < 0.15
     two_d = FlowNoiseMechanism(d_x=2, num_transforms=2, hidden=(16,))
     pa = torch.randn(500, 1)
     x = torch.cat([pa, -pa], 1) + 0.3 * torch.randn(500, 2)
@@ -442,7 +442,7 @@ def test_extreme_quantiles_are_finite(fitted_flow, dtype):
     additive.fit(_homo(300, seed=0))
     mech = additive.mechanisms["y"].to(dtype)
     pa = torch.zeros(2, 1, dtype=dtype)
-    q = mech.quantile(torch.tensor([0.0, 1.0], dtype=dtype), pa)
+    q = mech.quantile(torch.tensor([0.0, 1.0], dtype=dtype), pa).detach()
     assert q.dtype == dtype and bool(torch.isfinite(q).all()) and float(q[0]) < float(q[1])
     root = additive.mechanisms["x"].to(dtype)          # root: a vector p broadcasts against loc
     assert root.quantile(torch.tensor([0.1, 0.5, 0.9], dtype=dtype), None).shape == (3,)
