@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://nbn.readthedocs.io
+    about: The user guide, the example notebooks and the API reference.
+  - name: Contributing guide
+    url: https://github.com/Giovannibriglia/NeuralBayesianNetworks/blob/master/CONTRIBUTING.md
+    about: Development setup, tests, device rules and the pull-request flow.

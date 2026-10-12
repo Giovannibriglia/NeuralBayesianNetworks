@@ -19,6 +19,7 @@ class InferenceEngine(ABC):
     ``torch.save(model)`` after a query — starts those memos empty (R14b).
 
     All engines must implement:
+
     * ``query(model, targets, evidence)`` — single query, returns a
       ``torch.distributions.Distribution`` or a tensor of probabilities.
     * ``query_batch(model, targets, evidence)`` — batched query returning

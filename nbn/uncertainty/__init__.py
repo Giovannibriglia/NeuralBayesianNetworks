@@ -9,7 +9,7 @@ Builders (from data, for a discrete node's table ``P(X | pa)``):
   (discrete or continuous models).
 
 Structural sets that pool shared noise live in :mod:`nbn.scm`.
-See ``docs/scm-design-draft.md``.
+User guide: https://nbn.readthedocs.io/en/latest/user_guide/probability_sets.html
 """
 from nbn.uncertainty.binomial import anytime_delta, binomial_interval, kl_bernoulli, union_bound
 from nbn.uncertainty.builders import (

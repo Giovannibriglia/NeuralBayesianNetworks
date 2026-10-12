@@ -34,7 +34,7 @@ from nbn.learning.weighting import validate_weights, weighted_moments, weighted_
 
 
 class OffsetNoise(nn.Module):
-    """Categorical noise over the integer offsets ``-max_offset .. max_offset``."""
+    """Categorical noise over the integer offsets from ``-max_offset`` to ``max_offset``."""
 
     def __init__(self, max_offset: int) -> None:
         super().__init__()

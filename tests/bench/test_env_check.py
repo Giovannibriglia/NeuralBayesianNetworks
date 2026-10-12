@@ -34,7 +34,7 @@ def _pyproject_requirements() -> dict[str, tuple[str, str]]:
     from packaging.requirements import Requirement as PReq
     for extra, items in [("core", data["project"]["dependencies"])] + list(
             data["project"]["optional-dependencies"].items()):
-        if extra in {"dev", "all", "examples"}:
+        if extra in {"dev", "docs", "all", "examples"}:
             continue
         for item in items:
             r = PReq(item)
