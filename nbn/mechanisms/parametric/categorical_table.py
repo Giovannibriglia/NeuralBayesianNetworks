@@ -11,6 +11,7 @@ from nbn.learning.weighting import validate_weights
 from nbn.utils.device import accum_dtype
 from nbn.mechanisms.base import Mechanism
 from nbn.utils.batching import ensure_2d, flatten_samples
+from nbn.utils.device import to_device_dtype
 
 _CARDINALITY_WARN_THRESHOLD = 1_000_000
 
@@ -369,12 +370,12 @@ class CategoricalTableMechanism(Mechanism):
             row_idx = self._parent_to_row_idx(flat)  # [B*n]
             logits_flat = self._logits[row_idx]  # [B*n, K]
             idx = Categorical(logits=logits_flat).sample()  # [B*n]
-            vals = self._class_values.to(device=idx.device, dtype=torch.float)
+            vals = to_device_dtype(self._class_values, idx.device, torch.float)
             out = vals[idx].reshape(b, n, 1)
             return out
 
         idx = Categorical(logits=logits.unsqueeze(1).expand(-1, n, -1).reshape(b * n, -1)).sample()
-        vals = self._class_values.to(device=idx.device, dtype=torch.float)
+        vals = to_device_dtype(self._class_values, idx.device, torch.float)
         return vals[idx].reshape(b, n, 1)
 
     def log_prob(

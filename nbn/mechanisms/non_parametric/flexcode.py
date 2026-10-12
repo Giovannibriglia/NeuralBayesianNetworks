@@ -41,6 +41,7 @@ from nbn.learning.weighting import (
 from nbn.mechanisms.base import Mechanism
 from nbn.mechanisms.parametric.mdn import _build_mlp
 from nbn.utils.batching import _sanitise_parents, ensure_2d, flatten_samples
+from nbn.utils.device import to_device_dtype
 
 
 def _may_have_duplicate_rows(rows: torch.Tensor) -> bool:
@@ -57,7 +58,7 @@ def _may_have_duplicate_rows(rows: torch.Tensor) -> bool:
     if d == 1:
         return torch.unique(rows[:, 0]).numel() < m
     g = torch.Generator(device="cpu").manual_seed(0x5F3759DF)
-    direction = torch.randn(d, generator=g).to(device=rows.device, dtype=rows.dtype)
+    direction = to_device_dtype(torch.randn(d, generator=g), rows.device, rows.dtype)
     return torch.unique(rows @ direction).numel() < m
 
 
@@ -497,7 +498,7 @@ class FlexCodeMechanism(Mechanism):
         b, s, _ = x.shape
         m = b * s
         coef, norm = self._coef_and_normaliser(parents, b, s)  # [m, J], [m]
-        y = x.reshape(m, 1).to(device=self._y_min.device, dtype=self._y_min.dtype)
+        y = to_device_dtype(x.reshape(m, 1), self._y_min.device, self._y_min.dtype)
         z = self._scale_to_z(y, clamp=False).squeeze(-1)     # [m]
         # The series is only a density on the support [0, 1] it was
         # normalised over.  z used to be clamped into it, so every y off the

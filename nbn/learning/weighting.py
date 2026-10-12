@@ -41,6 +41,7 @@ from __future__ import annotations
 import torch
 
 from nbn.utils.device import accum_dtype
+from nbn.utils.device import to_device_dtype
 
 #: Guards ``0/0`` if a caller slips an all-zero vector past validation.
 _MIN_TOTAL_WEIGHT = 1e-12
@@ -81,7 +82,7 @@ def validate_weights(
             f"{n_rows} rows; weights are per-sample and must align with them."
         )
     target = w.device if device is None else torch.device(device)
-    w = w.to(device=target, dtype=accum_dtype(target))
+    w = to_device_dtype(w, target, accum_dtype(target))
     if not torch.isfinite(w).all():
         raise ValueError(f"{where}: weights contains NaN or infinite values.")
     if (w < 0).any():
@@ -112,7 +113,7 @@ def weighted_mean(
         return values.mean()
     v = values.reshape(-1)
     acc = accum_dtype(v.device)
-    w = weights.reshape(-1).to(device=v.device, dtype=acc)
+    w = to_device_dtype(weights.reshape(-1), v.device, acc)
     num = (w * v.to(acc)).sum()
     den = w.sum().clamp_min(_MIN_TOTAL_WEIGHT)
     return (num / den).to(values.dtype)
@@ -155,7 +156,7 @@ def weighted_moments(
         return t.mean(0), t.std(0, unbiased=unbiased)
     acc = accum_dtype(t.device)
     td = t.to(acc)
-    wd = weights.reshape(-1, 1).to(device=t.device, dtype=acc)
+    wd = to_device_dtype(weights.reshape(-1, 1), t.device, acc)
     tot = wd.sum().clamp_min(_MIN_TOTAL_WEIGHT)
     mean = (wd * td).sum(0) / tot
     if not unbiased:
@@ -219,7 +220,7 @@ def weighted_quantile(
     if weights is None:
         return torch.quantile(t, q.to(t.dtype), dim=0)
     td = t.to(acc)
-    w = weights.reshape(-1).to(device=t.device, dtype=acc)
+    w = to_device_dtype(weights.reshape(-1), t.device, acc)
     if not bool((w == w.round()).all()):
         # Reliability weights: only relative sizes matter (see docstring).
         w = w * (effective_sample_size(w) / w.sum().clamp_min(_MIN_TOTAL_WEIGHT))

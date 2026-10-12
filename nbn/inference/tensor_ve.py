@@ -35,6 +35,7 @@ from nbn.inference._memory import (
 from nbn.inference._validation import check_discrete_values
 from nbn.inference._pruning import relevant_subnetwork, requisite_nodes
 from nbn.inference.base import InferenceEngine
+from nbn.utils.device import to_device_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -715,7 +716,7 @@ class TensorVariableElimination(InferenceEngine):
         # Validate before the cast to long, which would truncate 1.5 to 1.
         check_discrete_values(model, raw, do_keys=do)
         ev_norm: Dict[str, torch.Tensor] = {
-            k: t.to(device=device, dtype=torch.long) for k, t in raw.items()
+            k: to_device_dtype(t, device, torch.long) for k, t in raw.items()
         }
         # Broadcast any [1] evidence to [B]
         ev_norm = {k: (v.expand(B) if v.shape[0] == 1 else v) for k, v in ev_norm.items()}

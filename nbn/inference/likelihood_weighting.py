@@ -9,6 +9,7 @@ from nbn.inference._validation import check_discrete_values
 from nbn.inference.base import InferenceEngine
 from nbn.inference.state import get_inference_state
 from nbn.utils.batching import ensure_2d
+from nbn.utils.device import to_device_dtype
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +152,7 @@ class LikelihoodWeightingEngine(InferenceEngine):
         fixed: List[torch.Tensor | None] = [None] * len(state.topo_order)
         for node, val in {**do, **evidence}.items():
             idx = state.node_to_idx[node]
-            v = ensure_2d(val.to(device=device, dtype=dtype))  # [B, D]
+            v = ensure_2d(to_device_dtype(val, device, dtype))  # [B, D]
             fixed[idx] = v.unsqueeze(1).expand(b, s, -1)  # [B, S, D]
 
         for i, node in enumerate(state.topo_order):

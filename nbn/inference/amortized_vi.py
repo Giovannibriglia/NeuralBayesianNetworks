@@ -57,6 +57,7 @@ from nbn.inference.base import InferenceEngine
 from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
 from nbn.inference.recognition_net import RecognitionNetwork
 from nbn.sampling.ancestral import ancestral_sample
+from nbn.utils.device import to_device_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -433,8 +434,7 @@ class AmortizedVIEngine(InferenceEngine):
                     v = test[nd]
                     if v.dim() >= 2:
                         v = v[..., 0]
-                    ev[nd] = v.reshape(-1)[rows].reshape(-1, 1).to(
-                        device=dev, dtype=torch.float32)
+                    ev[nd] = to_device_dtype(v.reshape(-1)[rows].reshape(-1, 1), dev, torch.float32)
                 patterns.append({"evidence": ev, "target": tgt, "n_latent": len(latent)})
             return patterns
         except Exception as exc:  # pragma: no cover - diagnostic safety
@@ -597,7 +597,7 @@ class AmortizedVIEngine(InferenceEngine):
             v = samples[node]
             if v.dim() >= 2:
                 v = v[..., 0]
-            cols.append(v.reshape(-1).to(device=dev, dtype=torch.float32))
+            cols.append(to_device_dtype(v.reshape(-1), dev, torch.float32))
         return torch.stack(cols, dim=1)
 
     # ------------------------------------------------------------------
@@ -779,7 +779,7 @@ class AmortizedVIEngine(InferenceEngine):
                 test = ancestral_sample(model, n=n_eval, device=str(dev))
                 obs = net.node_order[: max(1, n_nodes // 2)]
                 evidence = {
-                    nd: test[nd].reshape(-1, 1).to(device=dev, dtype=torch.float32)
+                    nd: to_device_dtype(test[nd].reshape(-1, 1), dev, torch.float32)
                     for nd in obs
                 }
                 log_pe = self._log_marginal_discrete(model, net, evidence, dev)  # [B]
@@ -829,7 +829,7 @@ class AmortizedVIEngine(InferenceEngine):
             if v is None:
                 continue
             t = v if isinstance(v, torch.Tensor) else torch.as_tensor(v)
-            t = t.to(device=dev, dtype=torch.float32)
+            t = to_device_dtype(t, dev, torch.float32)
             if t.dim() == 0:
                 t = t.reshape(1)
             if t.dim() == 1:

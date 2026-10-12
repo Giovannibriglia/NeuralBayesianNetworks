@@ -54,6 +54,7 @@ from torch import nn
 from torch.func import functional_call, grad, vmap
 
 from nbn.utils.batching import assume_finite_parents
+from nbn.utils.device import to_device_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +122,7 @@ def _estimate_fisher(
                 parents = parents.index_select(0, idx)
             n, w = m, None
         else:
-            w = w.to(device=device, dtype=params[0].dtype if params else torch.float32)
+            w = to_device_dtype(w, device, params[0].dtype if params else torch.float32)
     if n > sample_cap:
         idx = torch.randperm(n, device=device)[:sample_cap]
         x = x.index_select(0, idx)
