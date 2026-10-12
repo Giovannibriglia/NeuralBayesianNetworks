@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 import torch
 
+from nbn.utils.device import to_device_dtype
+
 
 @dataclass
 class MetricResult:
@@ -158,6 +160,17 @@ def log_likelihood(log_probs: torch.Tensor) -> MetricResult:
 # / the adapters. ``true_cpts``/``learned_cpts``/``weights`` are aligned lists,
 # one entry per discrete node; entry i is [n_configs_i, K_i] / [n_configs_i].
 
+def _cpu64(t: torch.Tensor) -> torch.Tensor:
+    """``t`` detached, on the CPU, in float64.
+
+    Metrics reduce to Python floats, so they are computed on the CPU in full
+    precision.  Moving before casting matters: MPS has no float64, so
+    ``mps_tensor.double()`` raises (and a fused cross-device cast can garble
+    values; see :func:`nbn.utils.device.to_device_dtype`).
+    """
+    return to_device_dtype(t.detach(), "cpu", torch.float64)
+
+
 def frequency_weights(counts: torch.Tensor) -> torch.Tensor:
     """Normalize parent-config counts to weights that sum to 1.
 
@@ -167,7 +180,7 @@ def frequency_weights(counts: torch.Tensor) -> torch.Tensor:
     case (no samples) — with any real sample every row carries a count, so the
     clamp never bites and the weights sum to exactly 1.
     """
-    counts = counts.to(torch.float64)
+    counts = _cpu64(counts)
     return counts / counts.sum().clamp_min(1.0)
 
 
@@ -180,8 +193,8 @@ def _kl_rows_unclamped(p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
     not a clamped finite number (that is the whole point of the companion KL,
     and the signal pgmpy MLE hard zeros will produce in a later PR).
     """
-    p = p.to(torch.float64)
-    q = q.to(torch.float64)
+    p = _cpu64(p)
+    q = _cpu64(q)
     log_p = torch.log(p.clamp_min(1e-12))          # safe log(p); masked where p==0
     log_q = torch.log(q)                            # UNCLAMPED: q==0 -> -inf -> +inf KL
     per_class = p * (log_p - log_q)
@@ -200,10 +213,8 @@ def _weighted_node_reduce(
     even if its row is ``+inf`` (a 0*inf would otherwise NaN). A config with
     POSITIVE weight whose row is ``+inf`` correctly propagates ``+inf``.
     """
-    weights = weights.to(torch.float64)
-    contrib = torch.where(
-        weights > 0, weights * rows.to(torch.float64), torch.zeros_like(rows, dtype=torch.float64)
-    )
+    weights, rows = _cpu64(weights), _cpu64(rows)
+    contrib = torch.where(weights > 0, weights * rows, torch.zeros_like(rows))
     return contrib.sum()
 
 
@@ -288,8 +299,8 @@ def _pit_ks_single(predictive_samples: torch.Tensor, y: torch.Tensor) -> float:
     is ``max_i |sorted(PIT) - i/N|`` (one-sample KS vs the uniform grid). 0 is
     perfectly calibrated; larger is worse.
     """
-    samples = predictive_samples.detach().double()
-    yv = y.detach().double().reshape(-1, 1)
+    samples = _cpu64(predictive_samples)
+    yv = _cpu64(y).reshape(-1, 1)
     pit = (samples <= yv).double().mean(dim=1)          # [N]
     pit_sorted = torch.sort(pit).values
     n = pit_sorted.shape[0]
@@ -308,8 +319,8 @@ def _sd_ratio_single(
     is clamped at 1e-12 purely as a divide-by-zero numerical guard (a degenerate
     point-mass true conditional) — NOT a distributional smoothing clamp.
     """
-    pred_std = predictive_samples.detach().double().std(dim=1)
-    true_std = oracle_samples.detach().double().std(dim=1).clamp_min(1e-12)
+    pred_std = _cpu64(predictive_samples).std(dim=1)
+    true_std = _cpu64(oracle_samples).std(dim=1).clamp_min(1e-12)
     return float((pred_std / true_std).mean())
 
 
@@ -424,8 +435,8 @@ def ks_distance(x: torch.Tensor, y: torch.Tensor) -> MetricResult:
     empirical CDFs), but its sampling noise depends on both sizes, so the
     benchmark compares samples at equal counts (see ``AccuracyAndTiming``).
     """
-    xs = torch.sort(x.reshape(-1).double().cpu()).values
-    ys = torch.sort(y.reshape(-1).double().cpu()).values
+    xs = torch.sort(_cpu64(x).reshape(-1)).values
+    ys = torch.sort(_cpu64(y).reshape(-1)).values
     if xs.numel() == 0 or ys.numel() == 0:
         return MetricResult("ks_distance", float("nan"))
     grid = torch.cat([xs, ys])

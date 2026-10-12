@@ -46,3 +46,20 @@ def test_weights_on_an_accelerator_with_cpu_data(device):
 def test_same_device_cast_is_a_plain_cast():
     x = torch.arange(5)
     assert to_device_dtype(x, "cpu", torch.float32).dtype == torch.float32
+
+
+@pytest.mark.parametrize("device", [d for d in available_devices() if d != "cpu"] or
+                         [pytest.param("cpu", marks=pytest.mark.skip(reason="no accelerator"))])
+def test_bench_metrics_accept_accelerator_tensors(device):
+    """Metric helpers move to the CPU before casting to float64 (MPS has no float64)."""
+    import nbn.bench.metrics as metrics
+
+    torch.manual_seed(0)
+    x, y = torch.rand(50), torch.rand(50)
+    on = {"x": x.to(device), "y": y.to(device)}
+    assert metrics.ks_distance(on["x"], on["y"]).value == metrics.ks_distance(x, y).value
+    w = metrics.frequency_weights(torch.tensor([3.0, 4.0], device=device))
+    assert torch.allclose(w, torch.tensor([3 / 7, 4 / 7], dtype=torch.float64))
+    s, t = torch.rand(20, 8), torch.rand(20)
+    assert metrics._pit_ks_single(s.to(device), t.to(device)) == pytest.approx(metrics._pit_ks_single(s, t))
+    assert metrics._sd_ratio_single(s.to(device), s.to(device)) == pytest.approx(1.0)
