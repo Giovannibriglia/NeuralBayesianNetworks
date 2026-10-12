@@ -306,14 +306,15 @@ class DiscreteAdditiveNoiseMechanism(StructuralMechanism):
             return log_table[0]
         return log_table.reshape(*self._parent_cards, self._n_classes)
 
-    def tabulate_working_bytes(self, parent_cards: list[int] | None = None) -> int:
+    def tabulate_working_bytes(self, parent_cards: list[int] | None = None) -> list[int]:
         """The offset transfer map, the child law per location, the
-        probability table and its clamped copy (four bytes per element)."""
+        probability table and its clamped copy."""
         with torch.no_grad():
-            g_k_m = self.transfer().numel()
-            g_k = self.child_law().numel()
+            transfer, law = self.transfer(), self.child_law()
         rows = math.prod(self._parent_cards or [1])
-        return 4 * (g_k_m + g_k + 2 * rows * self._n_classes)
+        es = law.element_size()
+        return [transfer.numel() * transfer.element_size(), law.numel() * es,
+                rows * self._n_classes * es, rows * self._n_classes * es]
 
     # ------------------------------------------------------------------
     # Helpers

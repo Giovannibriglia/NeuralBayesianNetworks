@@ -15,10 +15,13 @@ Two layers:
   directly on CPU and pinned row-identical to the single-pass result.
 
 #178 review: the chunk size used to come from two peak evaluations
-(``_max_chunk_rows(peak_at_B, peak_at_1, B, budget)``, the chord through
-them).  Allocator heaps make the peak a step function of the row count, so it
-is now a search over the peak model itself; these tests pin the same
-decisions on the same affine peaks.
+(``_max_chunk_rows(peak_at_B, peak_at_1, B, budget)``: first the per-row
+share of the full-batch peak, later the chord through the two).  The peak is
+now the replay of the elimination through the device's allocator — a step
+function of the row count, not convex in it — so the chunk size is a binary
+search over the peak model itself, and the chunks run in a loop that
+re-sizes each one against live headroom.  These tests pin the same decisions
+on the same affine peaks.
 """
 from __future__ import annotations
 

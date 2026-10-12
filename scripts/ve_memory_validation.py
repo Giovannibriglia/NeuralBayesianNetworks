@@ -129,6 +129,33 @@ def seven_parent_neural():
     return m
 
 
+# Review #301 round 2: barley, UniformRandomSelector(n_evidence=12) seed 0,
+# query 2 — mixed 10-512 MiB buffers that fragment MPS heaps.
+BARLEY_Q2_TARGET = "dg25"
+BARLEY_Q2_EVIDENCE = ["sort", "ngtilg", "frspdag", "tkvs", "nopt", "mod_nmin",
+                      "dgv5980", "nmin", "markgrm", "ksort", "udb", "forfrugt"]
+# Query 7 of the same selection: 187,600 elements per row at its largest, so
+# the MPS element cap chunks a B=1024 batch into 715-row pieces.
+BARLEY_Q7_TARGET = "potnmin"
+BARLEY_Q7_EVIDENCE = ["nopt", "aks_vgt", "saamng", "pesticid", "saakern", "komm",
+                      "nedbarea", "protein", "dgv1059", "antplnt", "sorttkv", "aar_mod"]
+
+
+def barley():
+    """bnlearn barley with tables fitted on 200 forward samples (seed 0).
+    Needs the network once (cached in ~/.cache/nbn/bnlearn)."""
+    from nbn.bench.core.config import BaselineSpec, build_adapter
+    from nbn.bench.problems.bnlearn import BnlearnConfig, BnlearnProblemSource
+
+    cfg = BnlearnConfig(networks=["barley"], seeds=[0], n_train=200, n_test=20,
+                        n_reference=20)
+    problem = next(BnlearnProblemSource().iter_problems(cfg))
+    adapter = build_adapter(BaselineSpec(library="nbn", mechanism="cat",
+                                         param_method="mle", inference_method="ve"))
+    adapter.fit(problem)
+    return adapter.model
+
+
 @dataclass
 class Case:
     name: str
@@ -162,6 +189,7 @@ def cases() -> tuple[dict[str, Callable], list[Case]]:
         "naive-bayes-y32-x16": lambda: naive_bayes(16, card_y=32, card_x=2),
         "hmm-60": lambda: hmm(60),
         "neuralcat-7-parents": seven_parent_neural,
+        "barley": barley,
     }
     w30_ev = [f"V{i}" for i in range(24, 30)]
     scatter36 = [f"V{i}" for i in range(0, 36, 3) if i != 18]
@@ -204,6 +232,12 @@ def cases() -> tuple[dict[str, Callable], list[Case]]:
                         B=4096, ev_kind="float", budget_frac=frac))
     out.append(Case("neuralcat 7 parents cold", "neuralcat-7-parents", ["C"], ["P0"], B=2,
                     cold=True))
+    for B in (64, 256, 384, 512, 700, 704):
+        out.append(Case("barley q2", "barley", [BARLEY_Q2_TARGET], BARLEY_Q2_EVIDENCE,
+                        B=B, big=B >= 384))
+    for B in (64, 256, 384, 512, 700, 715):
+        out.append(Case("barley q7", "barley", [BARLEY_Q7_TARGET], BARLEY_Q7_EVIDENCE,
+                        B=B, big=B >= 256))
     out.append(Case("naive-bayes Y32 x16 binary", "naive-bayes-y32-x16", ["Y"],
                     [f"X{i}" for i in range(16)], B=2_801_664, big=True))
     out.append(Case("wide30 no-ev", "wide30-d3-k4", ["V29"], [], B=64))

@@ -90,6 +90,8 @@ def _concat(tapes: Sequence[tuple]) -> tuple:
     """Concatenate frozen tapes, re-basing the free -> alloc references."""
     a, r, es, sign, ref = [], [], [], [], []
     for t in tapes:
+        if not t:
+            continue
         off = len(ref)
         a += t[0]
         r += t[1]
@@ -107,51 +109,82 @@ def _round_up(x: np.ndarray, q: int) -> np.ndarray:
     return np.ceil(x / q) * q
 
 
-def _mps_charge(s: np.ndarray) -> np.ndarray:
-    """Bytes each MPS buffer of size ``s`` costs: its share of its heap."""
-    out = np.zeros_like(s)
-    for lo, hi, q, heap in ((0, _MiB, 256, 8 * _MiB),
-                            (_MiB, 10 * _MiB, 16 * _KiB, 32 * _MiB),
-                            (10 * _MiB, 512 * _MiB, 4 * _MiB, _GiB)):
-        m = (s > lo) & (s <= hi)
-        s1 = _round_up(s[m], q)
-        out[m] = heap / np.floor(heap / s1)
-    big = s > 512 * _MiB
-    out[big] = _round_up(s[big], 16 * _MiB)
-    return out
+class _Policy(NamedTuple):
+    """How a caching allocator rounds, pools and grows (``_segment_peak``)."""
+
+    round: object      # request bytes -> block bytes
+    pool: object       # block bytes -> pool key
+    segment: object    # (block bytes, pool key) -> new segment bytes
+    split: object      # (rest bytes, pool key) -> keep the rest as a free block
 
 
-def _mps_heap_reserve(largest: float) -> int:
-    """One partly filled heap per pooled size class a buffer reaches."""
-    return sum(heap for above, heap in ((0, 8 * _MiB), (_MiB, 32 * _MiB),
-                                         (10 * _MiB, _GiB)) if largest > above)
+def _cuda_round(s: float) -> int:
+    return max(512, math.ceil(s / 512) * 512)
 
 
-_CUDA_SMALL, _CUDA_MIN_BLOCK = _MiB, 512
+def _cuda_segment(req: int, pool) -> int:
+    if pool == "small":
+        return 2 * _MiB
+    return 20 * _MiB if req < 10 * _MiB else math.ceil(req / (2 * _MiB)) * 2 * _MiB
+
+
+_CUDA = _Policy(
+    round=_cuda_round,
+    pool=lambda req: "small" if req <= _MiB else "large",
+    segment=_cuda_segment,
+    split=lambda rest, pool: rest >= 512 if pool == "small" else rest > _MiB,
+)
+
+
+def _mps_round(s: float) -> int:
+    """MPS buffer sizes (measured): 256 B granules up to 1 MiB, then a 64th
+    of the next power of two (16 KiB at least)."""
+    if s <= _MiB:
+        return max(256, math.ceil(s / 256) * 256)
+    q = max(16 * _KiB, (1 << math.ceil(math.log2(s))) // 64)
+    return math.ceil(s / q) * q
+
+
+def _mps_pool(req: int):
+    if req <= _MiB:
+        return "small"
+    if req <= 10 * _MiB:
+        return "medium"
+    return "large" if req <= 512 * _MiB else ("own", req)
+
+
+_MPS = _Policy(
+    round=_mps_round,
+    pool=_mps_pool,
+    segment=lambda req, pool: {"small": 8 * _MiB, "medium": 32 * _MiB,
+                               "large": _GiB}.get(pool, req),  # type: ignore[arg-type]
+    split=lambda rest, pool: rest >= 256,
+)
 
 
 class _Segment:
-    __slots__ = ("small", "blocks", "offs")
+    __slots__ = ("pool", "blocks", "offs")
 
-    def __init__(self, small: bool) -> None:
-        self.small = small
+    def __init__(self, pool) -> None:
+        self.pool = pool
         self.blocks: dict[int, list] = {}   # offset -> [size, is_free]
         self.offs: list[int] = []           # sorted offsets
 
 
-def _cuda_reserved_peak(sizes: Sequence[float], sign: Sequence[int],
-                        ref: Sequence[int]) -> float:
-    """Peak reserved bytes of ``CUDACachingAllocator`` replaying the tape.
+def _segment_peak(sizes: Sequence[float], sign: Sequence[int], ref: Sequence[int],
+                  policy: _Policy) -> float:
+    """Peak bytes of segments (CUDA) / heaps (MPS) held while replaying the tape.
 
-    Default configuration (no ``max_split_size``, no garbage collection): a
-    request rounded up to 512 B takes the smallest cached free block of its
-    pool (<= 1 MiB: small pool, else large) that fits, splitting it when the
-    rest is >= 512 B (small) or > 1 MiB (large); without one, a new segment
-    of 2 MiB (small), 20 MiB (< 10 MiB) or the request rounded up to 2 MiB.
-    Freed blocks merge with free neighbours in their segment and stay cached:
-    reserved memory never shrinks during the call.
+    A request takes the smallest free block of its pool that fits (splitting
+    off the rest), else a new segment; a freed block merges with free
+    neighbours in its segment and stays there — reserved memory never shrinks
+    during the call.  This is ``CUDACachingAllocator`` in its default
+    configuration (``_CUDA``), and the behaviour measured for Metal heaps
+    under PyTorch's MPS allocator (``_MPS``): freed buffers return their
+    space to the heap, holes coalesce, and a request no hole fits opens a new
+    heap even when the heap's total free space would suffice.
     """
-    pools: dict[bool, list] = {True: [], False: []}   # sorted (size, seg, off)
+    pools: dict = {}                       # pool key -> sorted (size, seg, off)
     segs: list[_Segment] = []
     owner: dict[int, tuple[int, int]] = {}
     reserved = peak = 0
@@ -161,33 +194,32 @@ def _cuda_reserved_peak(sizes: Sequence[float], sign: Sequence[int],
         if off not in sg.blocks:
             bisect.insort(sg.offs, off)
         sg.blocks[off] = [size, True]
-        bisect.insort(pools[sg.small], (size, seg, off))
+        bisect.insort(pools.setdefault(sg.pool, []), (size, seg, off))
 
     def take_free(seg: int, off: int) -> int:
         sg = segs[seg]
         size = sg.blocks[off][0]
-        pools[sg.small].remove((size, seg, off))
+        pools[sg.pool].remove((size, seg, off))
         return size
 
     for i, s in enumerate(sizes):
         if sign[i] > 0:
-            req = max(_CUDA_MIN_BLOCK, math.ceil(s / _CUDA_MIN_BLOCK) * _CUDA_MIN_BLOCK)
-            small = req <= _CUDA_SMALL
-            pool = pools[small]
-            j = bisect.bisect_left(pool, (req, -1, -1))
-            if j < len(pool):
-                size, seg, off = pool.pop(j)
+            req = policy.round(s)
+            key = policy.pool(req)
+            free = pools.setdefault(key, [])
+            j = bisect.bisect_left(free, (req, -1, -1))
+            if j < len(free):
+                size, seg, off = free.pop(j)
             else:
-                size = (2 * _MiB if small else 20 * _MiB if req < 10 * _MiB
-                        else math.ceil(req / (2 * _MiB)) * 2 * _MiB)
+                size = policy.segment(req, key)
                 seg, off = len(segs), 0
-                segs.append(_Segment(small))
+                segs.append(_Segment(key))
                 segs[seg].offs.append(0)
                 reserved += size
                 peak = max(peak, reserved)
             sg = segs[seg]
             rest = size - req
-            if (rest >= _CUDA_MIN_BLOCK) if small else (rest > _CUDA_SMALL):
+            if rest > 0 and policy.split(rest, key):
                 put_free(seg, off + req, rest)
                 size = req
             sg.blocks[off] = [size, False]
@@ -197,7 +229,6 @@ def _cuda_reserved_peak(sizes: Sequence[float], sign: Sequence[int],
             sg = segs[seg]
             size = sg.blocks[off][0]
             k = bisect.bisect_left(sg.offs, off)
-            # Merge with the free neighbours in the same segment.
             if k + 1 < len(sg.offs):
                 nxt = sg.offs[k + 1]
                 if sg.blocks[nxt][1]:
@@ -215,23 +246,58 @@ def _cuda_reserved_peak(sizes: Sequence[float], sign: Sequence[int],
     return float(peak)
 
 
-def _device_peak(tape: tuple, B: int, dtype_bytes: int, device_type: str) -> float:
-    """Peak bytes the device holds for ``tape`` at ``B`` rows (see module doc)."""
+def _cuda_reserved_peak(sizes: Sequence[float], sign: Sequence[int],
+                        ref: Sequence[int]) -> float:
+    """Peak reserved bytes of ``CUDACachingAllocator`` (``_segment_peak``).
+
+    Default configuration (no ``max_split_size``, no garbage collection): a
+    request rounded up to 512 B takes the smallest cached free block of its
+    pool (<= 1 MiB: small pool, else large) that fits, splitting it when the
+    rest is >= 512 B (small) or > 1 MiB (large); without one, a new segment
+    of 2 MiB (small), 20 MiB (< 10 MiB) or the request rounded up to 2 MiB.
+    """
+    return _segment_peak(sizes, sign, ref, _CUDA)
+
+
+def _mps_heap_peak(sizes: Sequence[float], sign: Sequence[int],
+                   ref: Sequence[int], *, credit_frees: bool = False) -> float:
+    """Peak bytes of Metal heaps the MPS allocator holds (``_segment_peak``).
+
+    Heap classes measured on Apple unified memory (torch 2.14): 8 MiB heaps
+    for buffers <= 1 MiB, 32 MiB up to 10 MiB, 1 GiB up to 512 MiB, an own
+    heap beyond; buffer sizes per ``_mps_round``.
+
+    Frees are not credited (``credit_frees=False``, the default): MPS runs
+    asynchronously, and a buffer freed while the GPU still has queued work
+    on it cannot be reused until that work completes — barley q2 at B=64
+    grew the driver by 73 MiB without synchronisation and by 33 MiB with a
+    ``synchronize()`` after every op (#301 review A).  When the GPU catches
+    up is not known in advance, so every allocation is priced as new.
+    """
+    if not credit_frees:
+        keep = [i for i, g in enumerate(sign) if g > 0]
+        sizes, sign, ref = [sizes[i] for i in keep], [1] * len(keep), list(range(len(keep)))
+    return _segment_peak(sizes, sign, ref, _MPS)
+
+
+def _replay(tape: tuple, B: int, dtype_bytes: int, device_type: str) -> tuple[float, float]:
+    """``(peak, end)`` bytes the device holds replaying ``tape`` at ``B`` rows.
+
+    CPU: the running sum of live bytes (64 B aligned) — ``end`` is what is
+    still allocated afterwards.  MPS / CUDA: the peak of the simulated heaps
+    / segments, which are never released during the call (``end == peak``).
+    """
     a, r, es, sign, ref = (np.asarray(x) for x in tape)
     if a.size == 0:
-        return 0.0
+        return 0.0, 0.0
     es = np.where(es == _FACTOR, dtype_bytes, es)
     sizes = (a + B * r).astype(np.float64) * es
-    if device_type == "cuda":
-        return _cuda_reserved_peak(sizes.tolist(), sign.tolist(), ref.tolist())
-    if device_type == "mps":
-        charge = _mps_charge(sizes)
-        extra = _mps_heap_reserve(float(sizes.max()))
-    else:
-        charge = _round_up(sizes, 64)
-        extra = 0
-    running = np.cumsum(sign * charge)
-    return float(running[sign > 0].max()) + extra
+    if device_type in ("cuda", "mps"):
+        sim = _cuda_reserved_peak if device_type == "cuda" else _mps_heap_peak
+        peak = sim(sizes.tolist(), sign.tolist(), ref.tolist())
+        return peak, peak
+    running = np.cumsum(sign * _round_up(sizes, 64))
+    return float(running[sign > 0].max()), float(running[-1])
 
 
 # --------------------------------------------------------------------------- #
@@ -257,6 +323,16 @@ class _PlanCost(NamedTuple):
 
     tensor: tuple[int, int]   # (batch_free, per_row) elements of the largest tensor
     tape: tuple               # ``_Tape.frozen()`` of the elimination and the answer
+    memo: dict                # (B, dtype, device, embed) -> replayed peak
+
+    def peak(self, B: int, dtype_bytes: int, device_type: str, embed: tuple = ()) -> float:
+        """Peak bytes of the plan (and a joint answer's embedding) at ``B``
+        rows, memoised: repeated queries of one shape replay it once."""
+        key = (B, dtype_bytes, device_type, embed)
+        if key not in self.memo:
+            tape = _concat([self.tape, embed]) if embed else self.tape
+            self.memo[key] = _replay(tape, B, dtype_bytes, device_type)[0]
+        return self.memo[key]
 
 
 class _Factor(NamedTuple):
@@ -327,12 +403,14 @@ def _plan_cost(
         """``torch.logsumexp`` (``logsumexp_out_impl``) over ``var``."""
         scope = prod.scope - {var}
         a, r = _elems(scope, prod.has_b, prod.cards)
-        maxes = tape.alloc(a, r)                     # amax
-        absed = tape.alloc(a, r)                     # maxes.abs()
-        mask = tape.alloc(a, r, _BOOL)               # ... == inf
+        maxes = tape.alloc(a, r)               # amax
+        absed = tape.alloc(a, r)               # maxes.abs()
+        mask = tape.alloc(a, r, _BOOL)         # ... == inf
         tape.free(absed)
         tape.free(mask)
-        temp = alloc(prod.scope, prod.has_b, prod.cards)   # self - maxes (exp_ in place)
+        ta, tr = _elems(prod.scope, prod.has_b, prod.cards)
+        biggest[0], biggest[1] = max(biggest[0], ta), max(biggest[1], tr)
+        temp = tape.alloc(ta, tr)              # self - maxes, exp_ in place
         result = alloc(scope, prod.has_b, prod.cards)      # sum, log_, add_ in place
         tape.free(temp)
         tape.free(maxes)
@@ -363,7 +441,7 @@ def _plan_cost(
         tape.alloc(0, out)                           # reshape(B, -1) copy
     biggest[1] = max(biggest[1], out)
     tape.alloc(0, out)                               # softmax
-    return _PlanCost(tensor=(biggest[0], biggest[1]), tape=tape.frozen())
+    return _PlanCost(tensor=(biggest[0], biggest[1]), tape=tape.frozen(), memo={})
 
 
 # --------------------------------------------------------------------------- #
@@ -447,9 +525,11 @@ def embed_tape(target_cards: Sequence[int], clamped: Sequence[bool]) -> tuple:
 def tables_tape(model) -> tuple:
     """Tabulating every CPT on a cold cache (``_extract_factors``).
 
-    Per node: the mechanism's working memory (``tabulate_working_bytes``,
-    released at the end), its output logits (unless ``tabulate`` returns a
-    view of stored ones), then the log-softmaxed CPT the cache keeps.
+    Per node: the mechanism's working memory (``tabulate_working_bytes``:
+    its buffers, booked one by one so a device prices each in its own size
+    class; all alive at once, released at the end), its output logits
+    (unless ``tabulate`` returns a view of stored ones), then the
+    log-softmaxed CPT the cache keeps.
     """
     tape = _Tape()
     for node in model.dag.topological_order():
@@ -458,9 +538,12 @@ def tables_tape(model) -> tuple:
         mech = model.mechanisms[node]
         size = math.prod(cards) * mech.n_classes
         view = getattr(mech, "tabulate_returns_view", False)
-        work = tape.alloc(int(mech.tabulate_working_bytes(cards)), 0, 1)
+        work = mech.tabulate_working_bytes(cards)
+        buffers = [work] if isinstance(work, (int, float)) else list(work)
+        tokens = [tape.alloc(int(b), 0, 1) for b in buffers if b > 0]
         logits = None if view else tape.alloc(size, 0)
-        tape.free(work)
+        for tok in tokens:
+            tape.free(tok)
         tape.alloc(size, 0)
         if logits is not None:
             tape.free(logits)
@@ -492,13 +575,38 @@ class _PeakModel:
         self._memo: dict[int, int] = {}
 
     def bytes(self, B: int) -> int:
-        """Upper bound of the bytes a ``B``-row call makes the device hold."""
+        """Upper bound of the bytes a ``B``-row call makes the device hold.
+
+        Three phases: the evidence (materialised / copied tensors, alive
+        throughout, and the validation temporaries), the tabulation on a cold
+        cache (its CPTs stay resident), and the plan (memoised on the plan
+        cost, so a repeated query shape replays only its small evidence
+        tapes).  On CPU live bytes add exactly; on MPS / CUDA each phase's
+        simulated heaps / segments are added, as separate pools — an upper
+        bound of sharing them.
+        """
         if B not in self._memo:
-            tapes = [t for t in (self.prelude, self.transient, self.tables,
-                                 self.cost.tape, self.embed) if t]
-            peak = _device_peak(_concat(tapes), B, self.dtype_bytes, self.device_type)
-            self._memo[B] = math.ceil(peak * _LIVESET_SAFETY)
+            dt, dev = self.dtype_bytes, self.device_type
+            plan = self.cost.peak(B, dt, dev, self.embed)
+            tab_peak, tab_end = _replay(self.tables, B, dt, dev) if self.tables else (0.0, 0.0)
+            if dev in ("cuda", "mps"):
+                evidence = _replay(_concat([self.prelude, self.transient]), B, dt, dev)[0] \
+                    if self.prelude or self.transient else 0.0
+                total = evidence + tab_peak + plan
+            else:
+                held = _replay(self.prelude, B, dt, dev)[1] if self.prelude else 0.0
+                trans = _replay(self.transient, B, dt, dev)[0] if self.transient else 0.0
+                total = held + max(trans, tab_peak, tab_end + plan)
+            self._memo[B] = math.ceil(total * _LIVESET_SAFETY)
         return self._memo[B]
+
+    def tables_bytes(self, *, resident: bool = False) -> int:
+        """Upper bound of tabulating every CPT (0 on a warm cache); with
+        ``resident``, of the CPTs the cache keeps afterwards."""
+        if not self.tables:
+            return 0
+        peak, end = _replay(self.tables, 1, self.dtype_bytes, self.device_type)
+        return math.ceil(_LIVESET_SAFETY * (end if resident else peak))
 
     def output_bytes(self, B: int) -> int:
         """Bytes of the ``B``-row answer."""

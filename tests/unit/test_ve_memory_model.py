@@ -27,7 +27,7 @@ from nbn.inference import tensor_ve
 from nbn.inference._ve_memory import (
     _PeakModel,
     _cuda_reserved_peak,
-    _mps_charge,
+    _mps_heap_peak,
     _plan_cost,
     _Scope,
 )
@@ -280,24 +280,63 @@ def test_tabulate_working_bytes_bounds_tabulate(mech):
     cards = [4] * 6
     table = 4 ** 7 * 4
     measured = _cpu_peak(lambda: m.tabulate(cards).detach())
-    assert measured - table <= m.tabulate_working_bytes(cards), (
-        measured, m.tabulate_working_bytes(cards))
+    work = m.tabulate_working_bytes(cards)
+    total = work if isinstance(work, int) else sum(work)
+    assert measured - table <= total, (measured, total)
+    # Booked buffer by buffer (#301 review E): none of them is the whole sum.
+    assert isinstance(work, list) and max(work) < total
 
 
 # --------------------------------------------------------------------------- #
 # Allocators: MPS heaps (review 1) and CUDA's caching allocator
 # --------------------------------------------------------------------------- #
 
-def test_mps_buffers_are_charged_their_heap_share():
-    """MPS packs 10 MiB..512 MiB buffers into 1 GiB heaps: a 342 MiB buffer
-    fits twice, so twelve of them took 6 GiB (measured).  Regression (review
-    1): the model charged them 12 x 342 MiB plus one heap."""
-    import numpy as np
+def _replay(sim, ops):
+    """Run ``sim`` on ``[('+', name, MiB) | ('-', name)]``."""
+    sizes, sign, ref, where = [], [], [], {}
+    for op in ops:
+        if op[0] == "+":
+            where[op[1]] = len(sizes)
+            sizes.append(op[2] * MiB)
+            sign.append(1)
+            ref.append(len(ref))
+        else:
+            j = where.pop(op[1])
+            sizes.append(sizes[j])
+            sign.append(-1)
+            ref.append(j)
+    return sim(sizes, sign, ref) / MiB
 
-    charge = _mps_charge(np.array([342 * MiB] * 12, dtype=float))
-    assert charge.sum() >= 6144 * MiB
-    assert _mps_charge(np.array([600.0 * MiB]))[0] == 608 * MiB    # exact, 16 MiB
-    assert _mps_charge(np.array([5.0 * MiB]))[0] == 32 * MiB / 6    # 32 MiB heaps
+
+def test_mps_frees_are_not_credited_within_a_call():
+    """#301 review A: MPS runs asynchronously; a buffer freed while queued
+    GPU work still uses it is not reusable yet (barley q2, B=64: 73 MiB of
+    driver growth unsynchronised, 33 MiB with a sync after every op).  The
+    estimate therefore prices every allocation as new: two 600 MiB buffers
+    allocated one after the other's free take two heaps."""
+    ops = [("+", "a", 600), ("-", "a"), ("+", "b", 600)]
+    assert _replay(_mps_heap_peak, ops) == 2 * 608
+    assert _replay(lambda *a: _mps_heap_peak(*a, credit_frees=True), ops) == 608
+
+
+def test_mps_heaps_follow_the_measured_allocator():
+    """Metal heaps under PyTorch's MPS allocator, as measured with a sync
+    after every op (#301 review A): freed buffers return their space to the
+    heap and holes coalesce, but a request no single hole fits opens a new
+    heap."""
+    mps = lambda *a: _mps_heap_peak(*a, credit_frees=True)  # noqa: E731  (synced)
+    assert _replay(mps, [("+", f"x{i}", 342) for i in range(12)]) == 6144
+    # Reviewer's repro: the old per-buffer charge gave 0.931 of this.
+    assert _replay(mps, [("+", "a", 330), ("+", "b", 12), ("+", "c", 400),
+                         ("+", "d", 330), ("-", "a"), ("+", "e", 470)]) == 2048
+    # 400 live, 400 freed, 224 free at the end: 500 needs a new heap ...
+    assert _replay(mps, [("+", "a", 400), ("+", "b", 400), ("-", "a"),
+                         ("+", "c", 500)]) == 2048
+    # ... but the freed 400 serves a 200 and a 190 (split), with no new heap.
+    assert _replay(mps, [("+", "f", 500), ("+", "c", 400), ("-", "c"),
+                         ("+", "a", 200), ("+", "b", 190)]) == 1024
+    assert _replay(mps, [("+", "a", 600)]) == 608          # own heap
+    assert _replay(mps, [("+", f"x{i}", 9.5) for i in range(4)]) == 64
 
 
 def test_mps_estimate_covers_the_reviewers_naive_bayes():
@@ -310,7 +349,7 @@ def test_mps_estimate_covers_the_reviewers_naive_bayes():
     cost = _plan_cost([], scopes, evidence_keys=tuple(f"X{i}" for i in range(16)),
                       targets=("Y",), target_cards={"Y": 32}, joint=False)
     pm = _PeakModel(cost, device_type="mps")
-    assert pm.bytes(2_801_664) >= 8192 * MiB
+    assert pm.bytes(2_801_664) >= 1.05 * 8192 * MiB
 
 
 def test_cuda_simulation_holds_freed_segments_it_cannot_reuse():
@@ -345,6 +384,9 @@ def test_cuda_estimate_covers_the_measured_reserved_growth():
     pm = eng._peak_model(model, "V12", ev, B=B)
     pm.device_type = "cuda"
     assert pm.bytes(B) >= 1.05 * 778_043_392
+    # Same tape on MPS: the heap model must also cover what CPU measures.
+    pm.device_type, pm._memo = "mps", {}
+    assert pm.bytes(B) >= 644 * MiB
 
 
 def test_factor_dtype_follows_the_parameters(models):
@@ -352,3 +394,85 @@ def test_factor_dtype_follows_the_parameters(models):
     assert tensor_ve._factor_dtype_bytes(model) == 4
     m64 = torch.nn.Linear(2, 2).double()
     assert tensor_ve._factor_dtype_bytes(m64) == 8
+
+
+# --------------------------------------------------------------------------- #
+# Review round 2: cold cache + tight budget (B), per-call overhead (D), MPS
+# tabulation buffers (E)
+# --------------------------------------------------------------------------- #
+
+def _naive_bayes_with_big_irrelevant_cpt():
+    """Y with 30 observed children plus a node with six 8-state parents that
+    no query about Y touches: its 8^7 CPT is tabulated on a cold cache."""
+    cards = {"Y": 4, **{f"X{i}": 3 for i in range(30)},
+             **{f"P{i}": 8 for i in range(6)}, "Z": 8}
+    edges = [("Y", f"X{i}") for i in range(30)] + [(f"P{i}", "Z") for i in range(6)]
+    return _fit(edges, cards)
+
+
+@pytest.mark.parametrize("B", [4096, 65536])
+@pytest.mark.parametrize("where", [0.25, 0.5, 0.9])
+def test_cold_cache_tight_budget_chunks_without_recursion(B, where):
+    """Regression (#301 review B): with a cold cache and a budget between the
+    cold one-row and full-batch estimates, chunks were sized warm but
+    re-entered the guard cold, re-chunked one row at a time 170-180 levels
+    deep, and the batch was refused (HybridRouter then silently used LW).
+    Now the CPTs are tabulated first and the chunks run in a loop."""
+    model = _naive_bayes_with_big_irrelevant_cpt()
+    ev = _evidence(model, [f"X{i}" for i in range(30)], B)
+    probe = TensorVariableElimination()
+    lo = probe.estimate_peak_bytes(model, "Y", {k: v[:1] for k, v in ev.items()}, B=1)
+    hi = probe.estimate_peak_bytes(model, "Y", ev, B=B)
+    budget = int(lo + where * (hi - lo))
+    eng = TensorVariableElimination(memory_budget=budget, memory_safety=1.0)
+    depth = [0, 0]
+    real = eng.query_batch
+
+    def counting(*a, **k):
+        depth[0] += 1
+        depth[1] = max(depth[1], depth[0])
+        try:
+            return real(*a, **k)
+        finally:
+            depth[0] -= 1
+
+    with mock.patch.object(eng, "query_batch", side_effect=counting):
+        measured = _cpu_peak(lambda: eng.query_batch(model, ["Y"], ev))
+    assert depth[1] <= 2, f"recursion depth {depth[1]}"
+    assert measured <= budget, (measured, budget)
+
+
+def test_plan_replay_is_memoised_across_calls(models):
+    """#301 review D: a repeated query shape replays only its evidence tapes;
+    the plan's replay is cached on the plan cost."""
+    from nbn.inference import _ve_memory
+
+    model = models["wide"]
+    row = {f"V{i}": torch.tensor(1) for i in range(17, 22)}
+    eng = TensorVariableElimination()
+    eng.query(model, ["V8"], row)
+    calls = []
+    real = _ve_memory._replay
+
+    def spy(tape, *a, **k):
+        calls.append(len(tape[0]))
+        return real(tape, *a, **k)
+
+    plan_len = len(eng._cached_plan_cost(model, "V8", tuple(sorted(row)), (),
+                                         "min_fill").tape[0])
+    with mock.patch.object(_ve_memory, "_replay", side_effect=spy):
+        eng.query(model, ["V8"], row)
+    assert plan_len not in calls
+
+
+def test_mps_tabulation_buffers_are_priced_one_by_one():
+    """#301 review E: ~20 MiB of neural-categorical activations booked as one
+    buffer put it in the 1 GiB heap class (1.16 GiB estimated against 34 MiB
+    of measured driver growth)."""
+    from nbn.mechanisms import NeuralCategoricalMechanism
+
+    model = _seven_parent(NeuralCategoricalMechanism(n_classes=4))
+    eng = TensorVariableElimination()
+    pm = eng._peak_model(model, "C", {"P0": torch.tensor([1, 2])}, B=2)
+    pm.device_type = "mps"
+    assert pm.bytes(2) < 256 * MiB
