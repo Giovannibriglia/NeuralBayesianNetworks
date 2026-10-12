@@ -1,32 +1,50 @@
-# Examples: structural causal models and probability sets
+# Examples
 
-Five Jupyter notebooks for `nbn.scm` and `nbn.uncertainty`
-(design note: [`docs/scm-design-draft.md`](../docs/scm-design-draft.md)).
-Each one simulates its own data from a known ground truth, so you can compare
-what is learned with the truth.  The outputs and plots are stored in the
-notebooks, so they read on GitHub without running anything.
+Executed Jupyter notebooks, one per NBN feature.  Each one simulates its own
+data from a known ground truth, so what NBN learns or infers is compared with
+the exact answer.  The outputs and plots are stored in the notebooks, so they
+read on GitHub without running anything.
+
+## The core library
 
 | Notebook | What you learn |
 |---|---|
-| [`01_discrete_noise_and_probability_sets.ipynb`](01_discrete_noise_and_probability_sets.ipynb) | Recover a discrete noise law with `DiscreteAdditiveNoiseMechanism`, query with `do=`, and compare three probability sets with a 90% guarantee (per-entry intervals, L1 balls, shared-noise polytope), including a coverage check over 100 datasets. |
-| [`02_confounding_and_noise_diagnostics.ipynb`](02_confounding_and_noise_diagnostics.ipynb) | Detect a confounded logger with `context_invariance_test`, and test noise sharing, tying and freshness with Benjamini–Hochberg, and how to read a rejection. |
-| [`03_continuous_noise_and_counterfactuals.ipynb`](03_continuous_noise_and_counterfactuals.ipynb) | Fit an MLP location with mixture noise (`AdditiveNoiseMechanism`), compare it with Gaussian noise, bound `P(a < X <= b \| pa)` with a DKW band, and compute counterfactuals by exact abduction. |
-| [`04_mdp_trajectories_factored_sets.ipynb`](04_mdp_trajectories_factored_sets.ipynb) | Turn episodes into transitions, fit one mechanism per next-state variable, and build trajectory-valid probability sets for a factored transition kernel, with the budget split across variables. |
-| [`05_discrete_counterfactuals.ipynb`](05_discrete_counterfactuals.ipynb) | Two declared couplings (Gumbel-max, monotone) giving different counterfactuals from one kernel, sharp bounds over every compatible SCM and over a confidence box, and calibration with a randomized-PIT band and conformal sets. |
+| [`01_parameter_learning.ipynb`](01_parameter_learning.ipynb) | Every mechanism family on a hybrid network with known densities: `auto_mechanisms`, `KL(true \|\| learned)` per node and against the training-set size (3 seeds), weighted fitting (`weights=`) to undo a biased sample, fixed mechanisms, and `TrainHistory` with warm starts. |
+| [`02_inference.ipynb`](02_inference.ipynb) | Exact variable elimination, likelihood weighting (error against particles, effective sample size), `HybridRouter`, the amortized engines (`AmortizedISEngine`, `AmortizedVIEngine` and its quality gate), evidence on a continuous node, a continuous target (W1 to the truth), `map_query` and joint queries. |
+| [`03_interventions.ipynb`](03_interventions.ipynb) | `P(y \| x)` against `P(y \| do(x))` on two confounded networks learned from observational data, a dose-response curve with one intervention per row in `query_batch`, `intervene()` and the mutilated graph, and `do=` on every engine. |
+| [`04_sampling.ipynb`](04_sampling.ipynb) | `sample` / `ancestral_sample` against the true marginals and joint, `return_log_prob`, clamped evidence with `return_log_weight` (posterior estimate and effective sample size), and samples under `do=`. |
+| [`05_updating.ipynb`](05_updating.ipynb) | `update()` with streaming batches against refitting (same exact KL, constant cost per batch), the update path of each mechanism (Dirichlet counts, recursive least squares, online EWC; `UpdateHistory`), atomic rollback of a failed update, and tracking a change of regime with `forgetting=`. |
+| [`06_mechanism_gallery.ipynb`](06_mechanism_gallery.ipynb) | The six continuous mechanisms on a bimodal, a heteroscedastic and a skewed conditional density: fitted against true densities, held-out log-likelihood and fit time. |
+| [`07_batching_devices_persistence.ipynb`](07_batching_devices_persistence.ipynb) | `query_batch` against a loop of `query` (timing from 1 to 4096 queries), device selection and `model.to()`, a `save` / `load` round trip with identical answers, and `from_bif` on the Asia network shipped in `tests/data/bnlearn/`. |
+| [`08_autograd.ipynb`](08_autograd.ipynb) | Gradients through the network: learn an upstream calibration through `log_prob`, optimise a `do=` value through `sample`, the sensitivity of a downstream answer to a CPD parameter (autograd against finite differences and the exact value), and why `query` is not differentiable. |
+
+## Structural causal models and probability sets
+
+For `nbn.scm` and `nbn.uncertainty` (design note:
+[`docs/scm-design-draft.md`](../docs/scm-design-draft.md)).
+
+| Notebook | What you learn |
+|---|---|
+| [`09_discrete_noise_and_probability_sets.ipynb`](09_discrete_noise_and_probability_sets.ipynb) | Recover a discrete noise law with `DiscreteAdditiveNoiseMechanism`, query with `do=`, and compare three probability sets with a 90% guarantee (per-entry intervals, L1 balls, shared-noise polytope), including a coverage check over 100 datasets. |
+| [`10_confounding_and_noise_diagnostics.ipynb`](10_confounding_and_noise_diagnostics.ipynb) | Detect a confounded logger with `context_invariance_test`, and test noise sharing, tying and freshness with Benjamini–Hochberg, and how to read a rejection. |
+| [`11_continuous_noise_and_counterfactuals.ipynb`](11_continuous_noise_and_counterfactuals.ipynb) | Fit an MLP location with mixture noise (`AdditiveNoiseMechanism`), compare it with Gaussian noise, bound `P(a < X <= b \| pa)` with a DKW band, and compute counterfactuals by exact abduction. |
+| [`12_mdp_trajectories_factored_sets.ipynb`](12_mdp_trajectories_factored_sets.ipynb) | Turn episodes into transitions, fit one mechanism per next-state variable, and build trajectory-valid probability sets for a factored transition kernel, with the budget split across variables. |
+| [`13_discrete_counterfactuals.ipynb`](13_discrete_counterfactuals.ipynb) | Two declared couplings (Gumbel-max, monotone) giving different counterfactuals from one kernel, sharp bounds over every compatible SCM and over a confidence box, and calibration with a randomized-PIT band and conformal sets. |
 
 ## Running them
 
 ```bash
-pip install "nbn[examples]"        # matplotlib + JupyterLab; or "nbn[all]"
+pip install "nbn[examples]"        # matplotlib, JupyterLab and zuko; or "nbn[all]"
 jupyter lab examples/
 ```
 
 From a checkout: `pip install -e ".[examples]"` (or `uv run --extra examples jupyter lab examples/`).
-Each notebook runs in a few seconds on a laptop CPU.  The device is chosen
-automatically (CUDA, then Apple MPS, then the CPU); set
+Section 4 of notebook 07 (`from_bif`) also needs `pgmpy` (`pip install pgmpy`,
+or the `bench` extra).  Each notebook runs in under 30 s on a laptop CPU.
+The device is chosen automatically (CUDA, then Apple MPS, then the CPU); set
 `NBN_EXAMPLES_DEVICE=cpu` to force the CPU.  The stored outputs were made on
 the CPU; on an accelerator, results that depend on random draws or neural
-training can differ in the last digits.
+training can differ in the last digits, and timings differ.
 
 ## In CI
 

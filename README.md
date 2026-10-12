@@ -175,11 +175,15 @@ print(model.log_prob(data).mean())
 
 To choose a mechanism per node instead of `auto_mechanisms()`, call
 `model.set_mechanism("SoilMoisture", LinearGaussianMechanism())` (all
-mechanisms import from `nbn`) before `fit`. More
-end-to-end examples (continuous, hybrid, neural, interventional) are in
-[`tests/integration/`](tests/integration). Executed notebooks with plots for
-structural causal models and probability sets (`nbn.scm`, `nbn.uncertainty`)
-are in [`examples/`](examples).
+mechanisms import from `nbn`) before `fit`.
+
+**Examples.** [`examples/`](examples) has one executed notebook with plots per
+feature, each checked against a known ground truth: parameter learning,
+inference engines, interventions, sampling, incremental updates, a gallery of
+the continuous mechanisms, batching / devices / persistence, and autograd
+(01–08), then structural causal models and probability sets (`nbn.scm`,
+`nbn.uncertainty`; 09–13). More end-to-end examples are in
+[`tests/integration/`](tests/integration).
 
 ## Core concepts
 
@@ -298,7 +302,7 @@ Repository layout:
     tests/bench/         nbn.bench tests (bench/integration/: runner, CLI, bnlearn)
     tests/perf/          wall-clock assertions (-m perf)
     tests/data/          fixtures, incl. vendored bnlearn .bif networks
-    examples/            executed Jupyter notebooks: SCMs, probability sets, counterfactuals
+    examples/            executed Jupyter notebooks: one per feature, then SCMs and probability sets
     scripts/             run_all_benchmarks.sh and other helpers
     docs/                benchmark guide, design notes and audits
 
