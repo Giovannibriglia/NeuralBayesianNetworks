@@ -1,7 +1,4 @@
-"""Posterior dataclass returned by BaselineAdapter.query().
-
-Reference: docs/v0.13-benchmark-redesign.md §4.1
-"""
+"""Posterior dataclass returned by BaselineAdapter.query()."""
 from __future__ import annotations
 
 from dataclasses import dataclass

@@ -6,8 +6,7 @@ actually contribute to the answer of a probabilistic query.
 
 Used by ``TensorVariableElimination`` to restrict elimination to relevant
 variables only, avoiding the eliminate-everything pathology that crashed
-barley with 612 GB allocations (see the investigation in
-``docs/v0.13-nbn-cat-ve-investigation.md``).
+barley with 612 GB allocations (#127, Bug 2).
 
 A node ``n`` is in the relevant set iff it is m-connected to the target
 given the evidence: barren nodes (no descendant in target/evidence) and
@@ -21,7 +20,6 @@ Public API
 
 Reference: Shachter (1998) "Bayes-Ball: The Rational Pastime";
 Geiger-Verma-Pearl (1990).
-Design: ``docs/v0.13-bug2-subnetwork-pruning.md``.
 Tracker: #127 (Bug 2).
 """
 from __future__ import annotations

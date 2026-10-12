@@ -8,9 +8,6 @@ construct mechanism-family distributions so the proposal reuses the same
 
 Stage (a) heads: ``cat`` / ``neuralcat`` (Categorical) and ``mdn``
 (MixtureSameFamily).  Stage (b) adds ``lg`` (Normal) and ``flow``.
-
-See docs/v0.14-batched-inference-engines-research.md (Engine A section)
-for the research context.
 """
 from __future__ import annotations
 

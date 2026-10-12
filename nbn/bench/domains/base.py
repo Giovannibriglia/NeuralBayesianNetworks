@@ -92,8 +92,6 @@ class BenchmarkProblem:
         parquet.  For synthetic problems: ``str(n_nodes)`` (e.g. ``"10"``).
         For bnlearn problems: network name (e.g. ``"asia"``).  Populated by
         problem sources; falls back to ``name`` when empty.
-
-    Reference: docs/v0.13-benchmark-redesign.md §4.1, §6.2
     """
 
     name: str

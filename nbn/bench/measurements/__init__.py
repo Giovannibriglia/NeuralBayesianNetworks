@@ -9,8 +9,6 @@ Currently shipped:
     ParamLearningMeasurement — held-out joint log-likelihood scoring for
         parameter-learning mode (#109).  Used by the ``param-learning``
         command.
-
-Reference: docs/v0.13-benchmark-redesign.md §3, §4.1
 """
 from nbn.bench.measurements.accuracy_timing import AccuracyAndTiming
 from nbn.bench.measurements.param_learning import ParamLearningMeasurement

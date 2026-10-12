@@ -2,8 +2,6 @@
 
 Covers HeaviestQueryByRole's query construction. Adapter / oracle
 None-handling lands in Stages 2-3.
-
-Reference: docs/phase3-design-draft.md §2, §8.
 """
 from __future__ import annotations
 

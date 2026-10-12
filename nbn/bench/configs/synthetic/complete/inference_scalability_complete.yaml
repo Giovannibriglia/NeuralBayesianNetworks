@@ -48,15 +48,13 @@
 #
 # Measures query-time vs n_nodes per (baseline, family, evidence_mode) using
 # the HeaviestQueryByRole selector. Timeouts and OOMs at large n are expected
-# outcomes recorded as status, not failures (design doc §7.2).
+# outcomes recorded as status, not failures.
 #
 # WARNING: full grid is ~14-30h wall-clock worst case. NOT run in CI.
 #
-# Design: docs/phase3-design-draft.md §7.1.
-#
-# Note: the design doc writes the third family as "continuous_non_lg"; the
-# canonical family string in this codebase is "continuous_nongauss" (matches
-# inference_scalability.yaml and the v0.13 parquet schema).
+# Note: the canonical string for the third family is "continuous_nongauss"
+# (not "continuous_non_lg"; matches inference_scalability.yaml and the v0.13
+# parquet schema).
 # Training minibatch for every nbn baseline below (extra_kwargs.batch_size).
 # Defined once here as a YAML anchor and referenced as *BATCH_SIZE_FIT.
 BATCH_SIZE_FIT: &BATCH_SIZE_FIT 1024

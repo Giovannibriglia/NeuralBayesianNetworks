@@ -50,7 +50,6 @@
 # (munin*, link at 724-1041 nodes) will have many timeout rows; that's
 # expected outcome, recorded as status, not failure.
 #
-# Design: docs/phase4-design-draft.md §3, §6.
 # Training minibatch for every nbn baseline below (extra_kwargs.batch_size).
 # Defined once here as a YAML anchor and referenced as *BATCH_SIZE_FIT.
 BATCH_SIZE_FIT: &BATCH_SIZE_FIT 1024

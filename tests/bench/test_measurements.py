@@ -18,8 +18,6 @@ Adapter coverage:
 
 Pyro is excluded from the fast behavioral gate (requires GPU-optional
 setup; its adapter-level tests cover it sufficiently).
-
-Reference: docs/v0.13-benchmark-redesign.md §3, §4.1
 """
 from __future__ import annotations
 
@@ -267,8 +265,7 @@ class TestCellResultSchema:
         Note: query_time_s varies per row (one timer per adapter.query call).
         fit_time_s and metrics_time_s are recorded identically across all N
         rows for a given (cell, baseline) — they are per-cell costs, repeated
-        for query-row joinability in the parquet. This matches the v0.13
-        schema documented in docs/v0.13-benchmark-redesign.md §3.1.
+        for query-row joinability in the parquet (v0.13 schema).
         """
         problem, queries = _get_discrete_problem_and_queries()
         m = AccuracyAndTiming()
@@ -507,8 +504,7 @@ class TestAccuracyAndTimingBehavioral:
         Note: query_time_s varies per row (one timer per adapter.query call).
         fit_time_s and metrics_time_s are recorded identically across all N
         rows for a given (cell, baseline) — they are per-cell costs, repeated
-        for query-row joinability in the parquet. This matches the v0.13
-        schema documented in docs/v0.13-benchmark-redesign.md §3.1.
+        for query-row joinability in the parquet (v0.13 schema).
         """
         problem, queries = discrete_data
         adapter = NBNAdapter(mechanism="cat", engine="lw")

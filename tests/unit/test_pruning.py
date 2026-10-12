@@ -3,8 +3,6 @@
 Bayes-ball algorithm verification: each test specifies a known DAG +
 target + evidence, asserts the returned relevant set matches the
 m-connected (requisite probability node) set computed by hand.
-
-Reference: docs/v0.13-bug2-subnetwork-pruning.md §6.1
 """
 from __future__ import annotations
 
@@ -27,7 +25,7 @@ def _dag(edges: list[tuple[str, str]]) -> nx.DiGraph:
 
 
 class TestRelevantSubnetwork:
-    """Cases from design doc §6.1."""
+    """Hand-checked Bayes-ball cases."""
 
     def test_target_only(self):
         """Query with no evidence: ancestors are relevant; barren

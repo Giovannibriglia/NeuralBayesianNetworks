@@ -2,8 +2,6 @@
 # batch_speed benchmark — paper-scale batched-queries sweep (#148).
 # =============================================================================
 #
-# Design: docs/v0.14-batched-queries-design.md §5 (LOCKED 2026-06-07).
-#
 #   - Synthetic only, n=100 per family (§5.1), 5 seeds (§5.5)
 #   - n_batch_queries: 10240 evidence-value variants per query position,
 #     uniform across baselines (§5.3)

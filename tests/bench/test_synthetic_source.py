@@ -6,8 +6,6 @@ Three test classes:
     matching config, correct field population (no model training — fast).
   - TestSyntheticProblemSourceBehavioral: end-to-end generation with real
     make_synthetic_bn (marked @pytest.mark.slow).
-
-Reference: docs/v0.13-benchmark-redesign.md §2.1, §4.1
 """
 from __future__ import annotations
 

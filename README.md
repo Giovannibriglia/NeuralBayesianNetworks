@@ -253,9 +253,8 @@ Apple-Silicon macOS runner, where the device-parametrised tests use a real
 ## Benchmark highlights
 
 These numbers come from the paper-data run at tag `v0.6c-d` (RTX 4070 Laptop
-GPU, 5 seeds, networks of 10–1000 nodes). The full tables and the list of
-cells that did not finish are in
-[`docs/v0.6c-d/run_summary.md`](docs/v0.6c-d/run_summary.md).
+GPU, 5 seeds, networks of 10–1000 nodes). To reproduce them, see
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 | Setting | NBN | Best external baseline | Result |
 |---|---|---|---|
@@ -304,7 +303,7 @@ Repository layout:
     tests/data/          fixtures, incl. vendored bnlearn .bif networks
     examples/            executed Jupyter notebooks: one per feature, then SCMs and probability sets
     scripts/             run_all_benchmarks.sh and other helpers
-    docs/                benchmark guide, design notes and audits
+    docs/                benchmark guide, oracle methodology, SCM design notes
 
 Releases are cut by pushing a `v*` tag; `.github/workflows/publish.yml` builds
 and uploads to PyPI. Known limitations and the roadmap are tracked in the

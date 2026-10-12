@@ -31,7 +31,6 @@ KEY BUG FIX PRESERVED (v0.5b / issue #31):
 The old adapter at nbn/bench/baselines/pomegranate_adapter.py is
 untouched and continues to serve the v0.12 runner.
 
-Reference: docs/v0.13-benchmark-redesign.md §4.1
 Old (functional) adapter: nbn/bench/baselines/pomegranate_adapter.py
 """
 from __future__ import annotations
@@ -311,7 +310,7 @@ class PomegranateAdapter:
         ``predict_proba`` API.
 
         Assumes all queries share (targets, frozenset(evidence_keys)) —
-        the selector contract per design doc §1.2.  Heterogeneous batches
+        the selector contract.  Heterogeneous batches
         (different targets or evidence keys, or mixed concrete/None
         evidence values) fall back to the sequential default helper.
 
@@ -320,7 +319,6 @@ class PomegranateAdapter:
         the per-variable output list at the target's column ([B, K]).
 
         Mirrors NBNAdapter.query_batch's contract checks and edge cases.
-        See docs/v0.14-batched-queries-design.md §3.2.
         """
         if not queries:
             return []

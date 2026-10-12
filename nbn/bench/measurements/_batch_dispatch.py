@@ -12,7 +12,7 @@ Dispatch rule:
     adapters without query_batch (legacy test fixtures) fall back to
     looping ``query()``.
 
-Failure semantics (design doc §4.2, §4.4): the batch is atomic. A raise
+Failure semantics: the batch is atomic. A raise
 from query_batch marks all B queries with the classified status. The
 per-query time for a failed batched call is NaN (§4.7); a failed B=1
 call keeps the measured elapsed time — the pre-batching convention.
@@ -23,8 +23,6 @@ per-query granularity at B=1). Groups that never start are returned for
 per-group timeout-row emission — one row-set per group, not per query,
 per the §4.3 sentinel principle (sentinels mark "didn't complete", not
 one row per planned evidence value).
-
-Reference: docs/v0.14-batched-queries-design.md §1.6, §4.
 """
 from __future__ import annotations
 

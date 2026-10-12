@@ -39,8 +39,6 @@ References:
 - Ranganath, Gerrish & Blei (2014) Black Box Variational Inference
 - Titsias & Lázaro-Gredilla (2015) Local Expectation Gradients
 - Cremer, Li & Duvenaud (2018) Inference Suboptimality in VAEs
-
-See docs/v0.14-batched-inference-engines-research.md (Engine B section).
 """
 from __future__ import annotations
 

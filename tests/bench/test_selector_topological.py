@@ -2,8 +2,6 @@
 
 Covers NodeRoles + compute_node_roles + _TargetAllocator. Steps 2-4
 tested in later stages.
-
-Reference: docs/phase2-design-draft.md §4.4 test surface.
 """
 from __future__ import annotations
 

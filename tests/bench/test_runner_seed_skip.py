@@ -11,7 +11,7 @@ Two layers:
     the loop-level orchestration (gating, skip emission, registry threading) is
     exercised without spawning real cell subprocesses.
 
-Reference: docs/v0.14-batched-queries-design.md; PR #189 (reporting side).
+Reference: PR #189 (reporting side).
 """
 from __future__ import annotations
 

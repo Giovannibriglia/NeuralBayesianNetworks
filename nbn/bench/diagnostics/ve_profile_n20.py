@@ -18,12 +18,14 @@ Run:
     python -m nbn.bench.diagnostics.ve_profile_n20
 
 Output:
-    docs/v0.6b/profiler_trace.json   (raw findings)
-    stdout                           (human-readable summary)
+    ./ve_profile_n20_trace.json   (raw findings, in the current directory;
+                                   override with NBN_VE_PROFILE_OUT=<path>)
+    stdout                        (human-readable summary)
 """
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import tracemalloc
 import traceback
@@ -548,9 +550,10 @@ def main() -> None:
         "torch_profile": profile,
     }
 
-    out_dir = pathlib.Path("docs/v0.6b")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "profiler_trace.json"
+    out_path = pathlib.Path(
+        os.environ.get("NBN_VE_PROFILE_OUT", "ve_profile_n20_trace.json")
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(findings, indent=2, default=str))
 
     # Human-readable summary

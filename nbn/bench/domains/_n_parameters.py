@@ -13,8 +13,8 @@ parameterized by mean+variance, not an enumerated table, so it has no CPT cells.
 A discrete table that is conditioned on a continuous parent likewise contributes
 0 (its parent product includes a 0-cardinality factor) -- only fully-discrete
 tables are counted. Networks with no discrete CPTs therefore have
-``n_parameters == 0``; the paper figure script (docs/v0.13-paper-figures.md
-§5.4b) log-skips scaling plots for such uninformative axes.
+``n_parameters == 0``, so the count is not an informative scaling axis for
+them.
 
 Used by the paper figures for the cardinality-aware scaling axis. Issue: #133.
 """

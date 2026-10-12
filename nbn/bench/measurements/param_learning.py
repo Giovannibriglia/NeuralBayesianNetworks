@@ -39,7 +39,7 @@ reused in-process.
 PL rows only — this measurement is constructed solely by the ``param-learning``
 CLI command and never touches the inference path.
 
-Reference: docs/v0.13-benchmark-redesign.md §3; issue #109.
+Reference: issue #109.
 """
 from __future__ import annotations
 

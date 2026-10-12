@@ -10,8 +10,7 @@ Stage (b) appends lg / flow / hybrid coverage.
 
 Engine B is amortized variational inference: a *bounded* approximation
 (ELBO ≤ log p(evidence)), not asymptotically exact — so marginals match
-VE within a wider tolerance than Engine A.  See
-docs/v0.14-batched-inference-engines-research.md (Engine B section).
+VE within a wider tolerance than Engine A.
 """
 from __future__ import annotations
 

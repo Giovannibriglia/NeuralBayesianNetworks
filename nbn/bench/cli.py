@@ -8,7 +8,7 @@ The benchmark → figures workflow is two-phase, both under this one CLI:
 ``inference`` runs the benchmark and writes the JSONL + parquet (the
 canonical run artifact); ``plot`` reads that parquet and renders the paper
 figures + LaTeX tables on demand into a chosen output dir
-(docs/v0.13-paper-figures.md). ``param-learning`` runs the parameter-learning
+(docs/BENCHMARKS.md, "Plot the results"). ``param-learning`` runs the parameter-learning
 benchmark the same way (configs with ``metrics: log_likelihood``).
 """
 from __future__ import annotations
@@ -69,7 +69,8 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Read a benchmark parquet (the output of `nbn-bench inference`) and "
             "produce grouped-bar figures + LaTeX tables in the all/common "
-            "views (docs/v0.18-bar-reporting-all-common.md)."
+            "views: 'all' aggregates each method over the seeds it solved, "
+            "'common' over the seeds solved by every shown method."
         ),
     )
     plot.add_argument("parquet", nargs="+",
@@ -118,7 +119,9 @@ def _build_parser() -> argparse.ArgumentParser:
     paper.add_argument("--aggregation", choices=["iqm_iqr", "mean_std"],
                        default="iqm_iqr", help="Aggregation statistic (default: iqm_iqr).")
     paper.add_argument("--view", choices=["all", "common"], default="all",
-                       help="Seed view (docs/v0.18-bar-reporting-all-common.md); default all.")
+                       help="Seed view: 'all' = each method over the seeds it solved, "
+                            "'common' = over the seeds every shown method solved; "
+                            "default all.")
     paper.add_argument("--exclude", nargs="+", metavar="GLOB", default=[],
                        help="Baseline globs left out of every figure, table and "
                             "selection, e.g. 'nbn-flow-*' 'nbn-*-ais'.")
@@ -201,7 +204,7 @@ def _suppress_library_warnings() -> None:
 def _run_cells(cfg) -> None:
     """Drive the cell loop.
 
-    v0.14 fit-once query-many (#174, design doc §3.2/§6): a single
+    v0.14 fit-once query-many (#174): a single
     ``Runner().run(cfg)`` pass drives the whole config. The batch_sizes
     sweep is no longer an outer loop here — the runner resolves a
     per-baseline batch_sizes list (``cfg.batch_sizes`` for swept baselines,

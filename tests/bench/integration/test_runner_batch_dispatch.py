@@ -4,8 +4,6 @@ Exercises the measurement-level group dispatch (the runner path that
 cell_worker drives): amortized per-query timing, batch_size stamping,
 atomic batch failure statuses, per-group timeout sentinels, and the
 n_batch_queries=1 identity path.
-
-Reference: docs/v0.14-batched-queries-design.md §1.6, §4, §7.
 """
 from __future__ import annotations
 

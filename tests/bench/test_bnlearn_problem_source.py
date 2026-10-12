@@ -3,8 +3,6 @@
 Network-touching tests are marked ``slow`` (they fetch from bnlearn.com on
 first run, then use the ~/.cache/nbn/bnlearn/ cache). Offline tests (unknown
 network, not-implemented kind) run on the fast gate.
-
-Reference: docs/phase4-design-draft.md §2.1, §4, §7, §8.
 """
 from __future__ import annotations
 
@@ -38,9 +36,9 @@ class TestBnlearnValidation:
     def test_registry_kind_counts(self):
         """24 discrete + 4 gaussian + 3 clg = 31 networks.
 
-        Note: design doc §3 *summary* says "22 discrete … 29 networks", but
-        its own §3.1 *table* lists 24 discrete networks (the count used here
-        and in the relay's registry). The summary line is a doc typo.
+        Note: the original design summary said "22 discrete … 29 networks",
+        but its own network table listed 24 discrete networks (the count used
+        here and in the relay's registry); the summary was a typo.
         """
         kinds = {}
         for meta in _NETWORKS.values():

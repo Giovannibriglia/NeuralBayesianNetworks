@@ -10,8 +10,7 @@ Stage (b) appends lg / flow / hybrid coverage.
 
 Engine A is self-normalized importance sampling with a learned proposal:
 asymptotically correct like LW, so posteriors match VE within Monte
-Carlo tolerance and tighten as N → ∞.  See
-docs/v0.14-batched-inference-engines-research.md (Engine A section).
+Carlo tolerance and tighten as N → ∞.
 """
 from __future__ import annotations
 
