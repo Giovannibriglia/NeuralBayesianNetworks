@@ -59,18 +59,18 @@ print("Counterfactual P(health' = k | did a=0 and got 0, had we done a=2):")
 for coupling in ("gumbel_max", "monotone"):
     model.set_mechanism("h", mech.with_coupling(coupling))
     world = model.counterfactual_sample(evidence, do={"a": 2.0})["h"][0, :, 0].long()
-    print(f"  {coupling:>10}: {(torch.bincount(world, minlength=3).float() / 20000).numpy().round(3)}")
+    print(f"  {coupling:>10}: {(torch.bincount(world, minlength=3).float() / 20000).cpu().numpy().round(3)}")
 mech = model.mechanisms["h"]
 
 with torch.no_grad():
     lo, hi = mech.counterfactual_bounds(torch.zeros(1, 1), torch.zeros(1, 1), torch.full((1, 1), 2.0))
-print(f"  every compatible SCM lies in  lower {lo[0].numpy().round(3)}  upper {hi[0].numpy().round(3)}")
+print(f"  every compatible SCM lies in  lower {lo[0].cpu().numpy().round(3)}  upper {hi[0].cpu().numpy().round(3)}")
 print("  (both answers lie inside, up to Monte-Carlo error of about 0.005)")
 
 # Estimation error too: a 95% box on every entry of P(h | a) (rows = a).
 q_lo, q_hi = interval_set(model, train, "h", delta=0.05).bounds()
 lo_s, hi_s = counterfactual_bounds_from_sets(q_lo[0:1], q_lo[2:3], q_hi[2:3], torch.tensor([0]))
-print(f"  ... and every kernel in a 95% box: lower {lo_s[0].numpy().round(3)}  upper {hi_s[0].numpy().round(3)}")
+print(f"  ... and every kernel in a 95% box: lower {lo_s[0].cpu().numpy().round(3)}  upper {hi_s[0].cpu().numpy().round(3)}")
 
 # Calibration of the fitted kernel on held-out rows.
 gen = torch.Generator().manual_seed(0)
