@@ -182,7 +182,8 @@ def freshness_test(
     tests zero correlation (Fisher z).  A persistent noise or confounder shows
     up as lag-1 correlation.  Linear dependence only.
     """
-    r, e, t = (v.reshape(-1).to(torch.float64).cpu() for v in (residual, episode, time))
+    # Move, then cast: MPS has no float64 (see nbn.utils.device.to_device_dtype).
+    r, e, t = (to_device_dtype(v.reshape(-1), "cpu", torch.float64) for v in (residual, episode, time))
     order = torch.argsort(e * (t.max() + 1) + t)
     r, e, t = r[order], e[order], t[order]
     consecutive = (e[1:] == e[:-1]) & (t[1:] == t[:-1] + 1)

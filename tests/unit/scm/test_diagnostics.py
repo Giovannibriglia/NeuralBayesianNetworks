@@ -16,6 +16,7 @@ from nbn.scm import (
     residual_dependence_test,
     residuals,
 )
+from tests.conftest import available_devices
 from tests.unit.scm.simulators import confounded_regimes, rehab_iid, rehab_model
 
 
@@ -140,6 +141,14 @@ def test_freshness_ignores_row_order_and_episode_boundaries():
     perm = torch.randperm(u.numel())
     result = freshness_test(u[perm], e[perm], t[perm])
     assert result.details["pairs"] == 200 * 19
+
+
+@pytest.mark.parametrize("device", [d for d in available_devices() if d != "cpu"] or
+                         [pytest.param("cpu", marks=pytest.mark.skip(reason="no accelerator"))])
+def test_freshness_accepts_accelerator_tensors(device):
+    u, e, t = _ar_noise(0.4)
+    on_device = freshness_test(u.to(device), e.to(device), t.to(device))
+    assert on_device.p_value == pytest.approx(freshness_test(u, e, t).p_value)
 
 
 def test_residual_dependence_pearson_and_hsic():
