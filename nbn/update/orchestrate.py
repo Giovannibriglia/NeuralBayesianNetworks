@@ -18,6 +18,7 @@ import torch
 from nbn.update.base import UpdateHistory
 from nbn.utils.batching import pack_parents
 from nbn.utils.device import to_device
+from nbn.utils.grad import release_grads
 
 if TYPE_CHECKING:
     from nbn.core.network import NeuralBayesianNetwork
@@ -90,6 +91,10 @@ def update(
         for saved in backups.values():
             _restore(saved)
         raise
+    finally:
+        # Gradient-based update paths (online Laplace) must not leave their
+        # last step's gradients on the parameters (#305).
+        release_grads(model)
 
     if history.skipped:
         logger.info(

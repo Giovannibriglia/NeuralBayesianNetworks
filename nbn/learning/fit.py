@@ -10,6 +10,7 @@ import torch
 from nbn.learning.weighting import select, validate_weights, weighted_mean
 from nbn.utils.batching import pack_parents
 from nbn.utils.device import to_device
+from nbn.utils.grad import release_grads
 
 if TYPE_CHECKING:
     from nbn.core.network import NeuralBayesianNetwork
@@ -322,6 +323,8 @@ def fit(
     else:
         raise ValueError(f"Unknown method '{method}'. Use 'local' or 'joint'.")
 
+    # Training gradients must not outlive fit (#305).
+    release_grads(model)
     history.wall_clock_s = time.perf_counter() - t0
     return history
 

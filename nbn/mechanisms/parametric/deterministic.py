@@ -62,6 +62,31 @@ class _DeltaDistribution(Distribution):
         return _delta_log_prob(x, self._value)
 
 
+def _check_value(value, cardinality: int | None) -> torch.Tensor:
+    """Return ``value`` as a ``[D_x]`` or ``[B, D_x]`` tensor, or raise.
+
+    A 0-d value (``torch.tensor(1.0)``, a Python scalar) is read as ``[1]``:
+    the constructor used to accept it and ``sample`` then failed with an
+    ``IndexError`` (#304).  A discrete node has one dimension, so its value
+    must end in ``D_x = 1``.  ``reshape`` keeps any autograd graph.
+    """
+    value = value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
+    if value.dim() == 0:
+        value = value.reshape(1)
+    if value.dim() > 2:
+        raise ValueError(
+            f"DeterministicMechanism value must have shape [D_x] or [B, D_x]; "
+            f"got {tuple(value.shape)}."
+        )
+    if cardinality is not None and value.shape[-1] != 1:
+        raise ValueError(
+            f"A discrete DeterministicMechanism (cardinality={cardinality}) "
+            f"takes one value per row, shape [1] or [B, 1]; got "
+            f"{tuple(value.shape)}."
+        )
+    return value
+
+
 class DeterministicMechanism(Mechanism):
     """Deterministic CPD: delta distribution at a fixed value.
 
@@ -71,7 +96,8 @@ class DeterministicMechanism(Mechanism):
     Parameters
     ----------
     value:
-        Fixed output value, shape ``[D_x]`` or ``[B, D_x]``.
+        Fixed output value, shape ``[D_x]`` or ``[B, D_x]``.  A scalar or a
+        0-d tensor is read as ``[1]``; other shapes raise ``ValueError``.
     cardinality:
         Number of states when the intervened node is *discrete*.  Supplying it
         makes the mechanism advertise itself as discrete and gives it the
@@ -92,6 +118,7 @@ class DeterministicMechanism(Mechanism):
         self, value: torch.Tensor, cardinality: int | None = None
     ) -> None:
         super().__init__()
+        value = _check_value(value, cardinality)
         self.register_buffer("_fixed_value", value)
         self._n_classes = int(cardinality) if cardinality is not None else 0
         # Instance-level override of the class attribute (same pattern as
