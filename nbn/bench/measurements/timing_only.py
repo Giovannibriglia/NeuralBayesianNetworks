@@ -7,8 +7,6 @@ worst-case and accuracy is not meaningful.  Records only ``query_time_s``;
 Output shape: one ``CellResult`` per query with ``metric="query_time_s"``
 and ``value=query_time_s``, plus one ``fit_time_s`` and one
 ``metrics_time_s`` row per ``measure()`` pass (cell x batch_size).
-
-Reference: docs/v0.13-benchmark-redesign.md §2.2, §3, §4.1
 """
 from __future__ import annotations
 
@@ -43,8 +41,8 @@ class TimingOnly:
     Note: query_time_s varies per row (one timer per adapter.query call).
     fit_time_s and metrics_time_s are recorded identically across all N
     rows for a given (cell, baseline) as *columns* — they are per-cell
-    costs, repeated for query-row joinability in the parquet (v0.13 schema,
-    docs/v0.13-benchmark-redesign.md §3.1). They are deliberately NOT
+    costs, repeated for query-row joinability in the parquet (v0.13
+    schema). They are deliberately NOT
     repeated as one metric *row* per query: on a paper-scale sweep that
     tripled the JSONL for no information.
     """
@@ -102,7 +100,7 @@ class TimingOnly:
         call).  fit_time_s and metrics_time_s are recorded identically
         across all N rows for a given (cell, baseline) as columns — they
         are per-cell costs, repeated for query-row joinability in the
-        parquet (docs/v0.13-benchmark-redesign.md §3.1) — but emitted as
+        parquet (v0.13 schema) — but emitted as
         metric rows only once per pass.
         """
         if query_roles is None:

@@ -9,8 +9,6 @@ time on bnlearn networks with rare states (barley: 7/48 nodes).
 
 Scope: cardinality fix + Laplace smoothing of unobserved classes. A full
 configurable Dirichlet prior is deferred to Bug 1b.
-
-See docs/v0.13-nbn-cat-ve-investigation.md.
 """
 from __future__ import annotations
 

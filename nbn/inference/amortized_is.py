@@ -28,17 +28,6 @@ References:
   proposals trained on the model joint — the pattern this proposal follows)
 - Walecki et al. (2018) Universal Marginalizer Importance Sampling
 - Paige & Wood (2016) Inference Networks for SMC
-
-See docs/v0.14-batched-inference-engines-research.md for the research
-context.
-
-References:
-- Le, Baydin & Wood (2017) Inference Compilation
-- Walecki et al. (2018) Universal Marginalizer Importance Sampling
-- Paige & Wood (2016) Inference Networks for SMC
-
-See docs/v0.14-batched-inference-engines-research.md for the research
-context.
 """
 from __future__ import annotations
 

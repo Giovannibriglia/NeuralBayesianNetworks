@@ -20,8 +20,6 @@ the behaviour change from the old adapter's marg.mean(0) return.
 
 Behavioral tests use n_samples=20 (reduced from default 50) so each
 importance sampler run completes in well under a second for 3-node BNs.
-
-Reference: docs/v0.13-benchmark-redesign.md §4.1
 """
 from __future__ import annotations
 
@@ -493,8 +491,7 @@ class TestRegressions:
         135x KeyError('Erk') on sachs in the bnlearn_paper run.  These are
         NODE names, not state values.
 
-        Reference: issue #127 (Bug 5),
-        docs/v0.13-nbn-cat-ve-investigation.md.
+        Reference: issue #127 (Bug 5).
         """
         pytest.importorskip("pyro")
         from nbn.bench.problems.bnlearn import (

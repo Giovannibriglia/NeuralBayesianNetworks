@@ -7,8 +7,6 @@ random target + evidence assignment over the test data.
 This is the placeholder selector used by all v0.13 Phase 1 benchmarks.
 ``TopologicalAllocator`` (Phase 2, #74) will replace it for paper runs
 and expose ``query_role`` values beyond ``"random"``.
-
-Reference: docs/v0.13-benchmark-redesign.md §4.1, §7.1
 """
 from __future__ import annotations
 
@@ -61,8 +59,8 @@ class UniformRandomSelector:
 
     def __init__(self, n_evidence: int = 3, n_batch_queries: int = 1) -> None:
         self.n_evidence = n_evidence
-        # v0.14 (#148): evidence-value variants per query position,
-        # design doc §1.1, §2.4. 1 = existing single-variant behavior.
+        # v0.14 (#148): evidence-value variants per query position.
+        # 1 = existing single-variant behavior.
         self.n_batch_queries = int(n_batch_queries)
 
     def select(
@@ -130,7 +128,7 @@ class UniformRandomSelector:
         *,
         batch_size: int = 1,
     ) -> list[list[Query]]:
-        """Grouped form of ``select()`` (v0.14, #148; design doc §1.3, §2.3).
+        """Grouped form of ``select()`` (v0.14, #148).
 
         Expands each selected query position into ``self.n_batch_queries``
         evidence-value variants sampled from ``problem.train_data``,

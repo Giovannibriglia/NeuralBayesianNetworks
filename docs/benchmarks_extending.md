@@ -4,8 +4,6 @@ The v0.13 benchmark runner uses a composition-based architecture.
 To add a new test domain, baseline, or measurement, subclass the
 appropriate protocol interface and register the new component.
 
-Reference: docs/v0.13-benchmark-redesign.md
-
 ## Adding a new problem source
 
 Implement `nbn.bench.core.ProblemSource` and add it to the dispatch

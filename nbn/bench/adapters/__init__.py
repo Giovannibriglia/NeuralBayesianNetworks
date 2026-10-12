@@ -8,8 +8,6 @@ Status (Phase 1b-i + 1b-ii + 1b-iii): NBNAdapter, PgmpyAdapter,
 PomegranateAdapter, PyroAdapter shipped. gpytorch deferred pending
 issue #96 (architectural mismatch in query path). Remaining phases
 (1b-iv through 1b-vi) pending.
-
-Reference: docs/v0.13-benchmark-redesign.md §4.1
 """
 
 from nbn.bench.adapters.nbn_adapter import NBNAdapter

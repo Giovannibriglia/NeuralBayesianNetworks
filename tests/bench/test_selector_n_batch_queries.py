@@ -9,8 +9,6 @@ TopologicalAllocator, HeaviestQueryByRole):
   3. Last-chunk handling — N=100, B=64 → lengths [64, 36] per position
   4. Sampling with replacement when n_train < N
   5. Determinism — same seed → identical query sequence
-
-Reference: docs/v0.14-batched-queries-design.md §1.3, §2.
 """
 from __future__ import annotations
 

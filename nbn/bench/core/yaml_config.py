@@ -7,7 +7,8 @@ Public surface
 --------------
 ``load_runner_config(path, *, device_override=None) -> RunnerConfig``
 
-Schema reference: docs/v0.13-benchmark-redesign.md §1c
+Schema: each shipped smoke config starts with the full schema as a
+comment; ``docs/BENCHMARKS.md`` (Configuration) lists the main fields.
 
 Design decisions
 ----------------
@@ -51,7 +52,7 @@ _TOP_LEVEL_KEYS = frozenset({
     "n_queries_per_cell",
     "per_cell_timeout_s",
     "fit_timeout_s",
-    # v0.14 batched queries (#148, design doc §1.7, §5.3-5.4)
+    # v0.14 batched queries (#148)
     "batch_sizes",
     "n_batch_queries",
 })
@@ -127,7 +128,7 @@ def load_runner_config(
         raise ValueError(
             f"Config {str(path)!r} has version={version!r}; "
             f"this runner requires version in {sorted(_ACCEPTED_VERSIONS)}. "
-            f"See docs/v0.13-benchmark-redesign.md §1c for the new schema."
+            f"See docs/BENCHMARKS.md (Configuration) for the schema."
         )
 
     # ── unknown top-level keys ───────────────────────────────────────────────
@@ -215,7 +216,7 @@ def load_runner_config(
 
     def _build_selector(stype: str, block: dict[str, Any]):
         # n_batch_queries (v0.14, #148): evidence-value variants per query
-        # position, design doc §1.1, §2.4. Default = top-level value
+        # position. Default = top-level value
         # (itself defaulting to 1 = existing behavior).
         n_batch_queries = int(block.get("n_batch_queries", top_level_nbq))
         if stype == "uniform_random":

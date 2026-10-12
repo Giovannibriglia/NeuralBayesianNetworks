@@ -215,8 +215,6 @@ class TestFailureModes:
     empirical verification of the PR's architectural claim: an exception,
     a hang, or an uncatchable kill in a cell is contained — the parent
     records a status and survives.
-
-    See docs/v0.13-runner-subprocess-isolation.md §6.2.
     """
 
     @staticmethod

@@ -1,5 +1,4 @@
-"""Batch-speed rendering under the all/common bar layout
-(docs/v0.18-bar-reporting-all-common.md).
+"""Batch-speed rendering under the all/common bar layout.
 
 A ``batch_sizes`` sweep parquet is detected per family (``sweep_axis ==
 "batch_size"``) and renders ``query_time_vs_batch_size.{pdf,tex}`` in both

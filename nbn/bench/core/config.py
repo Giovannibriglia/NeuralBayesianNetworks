@@ -8,8 +8,6 @@ object consumed by ``Runner.run()``.
 ``build_adapter(spec)`` dispatches a BaselineSpec to the appropriate v0.13
 stateful adapter instance (NBNAdapter, PgmpyAdapter, PomegranateAdapter,
 PyroAdapter).
-
-Reference: docs/v0.13-benchmark-redesign.md §3, §4.1, §6
 """
 from __future__ import annotations
 
@@ -103,8 +101,6 @@ class RunnerConfig:
         block the full run.
     jsonl_path:
         Path to the JSONL output file (streaming, line-buffered).
-
-    Reference: docs/v0.13-benchmark-redesign.md §3, §4.1, §6
     """
 
     benchmark: str
@@ -118,7 +114,7 @@ class RunnerConfig:
     per_cell_timeout_s: float
     fit_timeout_s: float = 1000.0  # fit() safety budget (seconds)
     jsonl_path: Path = field(default_factory=lambda: Path("output.jsonl"))
-    # Batched-queries speed benchmark (v0.14, #148, design doc §1.7/§5.6):
+    # Batched-queries speed benchmark (v0.14, #148):
     # when set, the CLI iterates these batch_size values — baselines whose
     # adapters support batching (and are not YAML-pinned) run once per
     # value; pinned / non-batchable baselines run once on the first pass.

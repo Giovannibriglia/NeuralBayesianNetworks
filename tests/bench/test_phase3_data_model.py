@@ -8,8 +8,6 @@ Covers:
 - evidence_mode propagation Query → Measurement → CellResult.
 
 Adapter None-handling lands in Stage 3.
-
-Reference: docs/phase3-design-draft.md §3, §5.
 """
 from __future__ import annotations
 

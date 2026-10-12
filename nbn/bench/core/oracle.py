@@ -8,8 +8,6 @@ These helpers are *core* capabilities shared by ``AccuracyAndTiming`` and
 potentially by audit scripts, diagnostics, and future measurements.  Placing
 them in ``nbn/bench/core/`` rather than inside the measurement package
 ensures they remain accessible without importing the full measurement stack.
-
-Reference: docs/v0.13-benchmark-redesign.md §4.1, §5.2
 """
 from __future__ import annotations
 

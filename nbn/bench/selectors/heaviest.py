@@ -54,8 +54,8 @@ class HeaviestQueryByRole:
         self.max_retry = (
             max_retry if max_retry is not None else self._DEFAULT_MAX_RETRY
         )
-        # v0.14 (#148): evidence-value variants per query position,
-        # design doc §1.1, §2.4. 1 = existing single-variant behavior.
+        # v0.14 (#148): evidence-value variants per query position.
+        # 1 = existing single-variant behavior.
         self.n_batch_queries = int(n_batch_queries)
         self._kind_evidence_allocator = _KindEvidenceAllocator()
         self._value_allocator = _ValueAllocator(max_retry=self.max_retry)
@@ -184,7 +184,7 @@ class HeaviestQueryByRole:
         *,
         batch_size: int = 1,
     ) -> list[list[Query]]:
-        """Grouped form of ``select()`` (v0.14, #148; design doc §1.3, §2.3).
+        """Grouped form of ``select()`` (v0.14, #148).
 
         Expands each selected query position into ``self.n_batch_queries``
         evidence-value variants sampled from ``problem.train_data``,

@@ -2,8 +2,6 @@
 
 Streaming, line-buffered, crash-resilient JSONL.  NaN serialised as
 JSON null (valid JSON; ``pd.read_json`` re-hydrates null → NaN).
-
-Reference: docs/v0.13-benchmark-redesign.md §6
 """
 from __future__ import annotations
 

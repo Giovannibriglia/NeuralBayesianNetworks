@@ -1,7 +1,7 @@
 """Integration tests for the batch_speed benchmark sweep (PR 5, #148).
 
 Drives the CLI's sweep dispatch (`_run_cells`) end-to-end on the speed
-smoke config and asserts the design-doc contract:
+smoke config and asserts the contract:
 
   - swept baselines (nbn-cat-ve) produce rows at every batch_sizes value
   - pinned baselines (pgmpy-mle-ve, batch_size: 1) run exactly once
@@ -9,8 +9,6 @@ smoke config and asserts the design-doc contract:
   - no errors / timeouts on the tiny fixture
   - n_batch_queries plumbing: K positions × 16 variants per
     (baseline, batch_size) combination
-
-Reference: docs/v0.14-batched-queries-design.md §1.7, §5.4-5.6, §7.
 """
 from __future__ import annotations
 

@@ -41,7 +41,6 @@
 # Gaussian (pgmpy-lg-predict, nbn-lg-lw), CLG (nbn-hybrid-router), and pyro
 # (all). Inapplicable (baseline, family) cells emit not_supported rows.
 #
-# Design: docs/phase4-design-draft.md §6, §10 Stage 4.
 # Wall-clock budget: ~5 min on CPU.
 version: "v0.13"
 benchmark: bnlearn

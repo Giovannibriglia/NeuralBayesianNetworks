@@ -15,7 +15,7 @@ Two layers are exercised:
   * Measurement emission — ``AccuracyAndTiming`` / ``TimingOnly`` stamp each
     emitted ``CellResult`` with the per-query values.
 
-Reference: PR #124, #109, #74; docs/v0.13-benchmark-redesign.md §3, §6.
+Reference: PR #124, #109, #74.
 """
 from __future__ import annotations
 

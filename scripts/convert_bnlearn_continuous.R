@@ -9,8 +9,6 @@
 # Re-run this only when bnlearn updates a network. Requires R with the
 # `bnlearn` and `jsonlite` packages.
 #
-# Schema reference: docs/phase4-design-draft.md §5.
-#
 # Node-class handling (verified against the actual bn.fit objects):
 #   - bn.fit.gnode  (pure Gaussian): $coefficients named vector
 #                   ["(Intercept)", <parents>], $sd scalar.
@@ -25,7 +23,7 @@
 #                   the compact schema — parallel arrays (intercepts/
 #                   coefficients/sds) indexed by config id, plus dlevels for
 #                   Python-side decoding. Far smaller than an explicit per-
-#                   config list (mehra wd has K=66960). See design doc §5.2.
+#                   config list (mehra wd has K=66960).
 
 suppressPackageStartupMessages({
   library(bnlearn)
@@ -101,7 +99,7 @@ extract_cgnode <- function(node, fit) {
   # matrix + a per-config sd vector. We keep that compact layout: parallel
   # arrays indexed by a flat config id. The config id decodes to discrete-
   # parent states with the first discrete parent varying fastest, which is
-  # bnlearn's encoding (verified on mehra t2m). See design doc §5.2.
+  # bnlearn's encoding (verified on mehra t2m).
   coefs <- fit$coefficients          # [coef_name x config] matrix
   dparent_names <- fit$parents[fit$dparents]
   gparent_names <- fit$parents[fit$gparents]

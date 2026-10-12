@@ -6,11 +6,10 @@ classifies the result. A SIGKILLed subprocess produces an `oom`
 status row; a timeout-killed subprocess produces a `timeout` row;
 an exception in the subprocess produces an `error` row.
 
-This module is imported but NOT YET wired into the runner. Stage 2
-replaces Runner.run()'s in-process measurement call with a call to
-run_cell_in_subprocess().
-
-See docs/v0.13-runner-subprocess-isolation.md §3-4.
+``Runner.run()`` launches one subprocess per (problem, baseline, seed)
+cell, so a crash, hang or OS kill loses at most that cell. The worker
+writes to a temp JSONL that the parent appends to the main file only
+after the child exits; any SIGKILL is classified as ``oom``.
 """
 from __future__ import annotations
 

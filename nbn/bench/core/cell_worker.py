@@ -4,11 +4,9 @@ Runs one (problem, baseline_spec, seed) cell. Reads pickled input from
 argv[1], writes JSONL results to argv[2] with per-row flush so partial
 data survives mid-cell death.
 
-This module is imported but NOT YET wired into the runner. Stage 2 of
-the Bug 4 PR series replaces the in-process measurement call with a
-subprocess invocation of this module.
-
-See docs/v0.13-runner-subprocess-isolation.md §4.2.
+Launched by :func:`nbn.bench.core.cell_runner.run_cell_in_subprocess`;
+the per-row flush is what lets the parent recover the complete rows of a
+cell that was killed (timeout or OOM) mid-run.
 """
 from __future__ import annotations
 
@@ -179,7 +177,7 @@ def _run_cell(ctx: dict) -> list[dict]:
     classification), measurement with the Phase 3 per-query soft timeout —
     running inside a subprocess.
 
-    v0.14 fit-once query-many (#174, design doc §5.2): the cell is
+    v0.14 fit-once query-many (#174): the cell is
     sweep-aware. It fits the adapter ONCE, then loops
     ``measurement.measure()`` over ``ctx["batch_sizes"]`` (a list[int]),
     emitting per-value rows. Length 1 (the default the runner passes for
@@ -192,8 +190,6 @@ def _run_cell(ctx: dict) -> list[dict]:
 
     Returns a list of plain dicts (``dataclasses.asdict`` of each
     ``CellResult``). The parent reconstructs ``CellResult`` objects.
-
-    See docs/v0.13-runner-subprocess-isolation.md §5.
     """
     import dataclasses
     from time import perf_counter
@@ -218,7 +214,7 @@ def _run_cell(ctx: dict) -> list[dict]:
     per_cell_timeout_s = ctx["per_cell_timeout_s"]
     fit_budget_s = ctx["fit_budget_s"]
     default_role = ctx["default_role"]
-    # v0.14 fit-once query-many (#174, design doc §5.2): the batch_sizes
+    # v0.14 fit-once query-many (#174): the batch_sizes
     # this cell sweeps. Length 1 = no sweep (identity with pre-#174
     # behavior); length N = swept (fit once, then loop measure() over the
     # list). The runner derives it per-baseline (cfg.batch_sizes for swept
