@@ -1,39 +1,33 @@
-"""Regression tests for Pass-10 priority-1 — Gate B / Gate C
-consolidation into the BaselineApplicability registry.
+"""The baseline applicability registry, pinned as one table.
 
-Pins three properties:
+``nbn.bench.core.applicability`` decides which baseline runs on which family
+(``is_applicable``) and whether a cell may emit accuracy rows
+(``accuracy_supported``).  Both are pinned here against a full
+label x family snapshot, compared in one assertion so a change shows up as a
+single readable diff rather than a few hundred parametrised failures.
 
-1. **Post-consolidation gate matches pre-consolidation matrix**:
-   parametrized over (label, family) cartesian product, asserts
-   ``is_applicable`` returns the expected boolean per the snapshot
-   table.
-
-2. **Pre-consolidation Gate B coverage preserved**: every
-   (family, legacy_adapter) pair that USED to live in the deleted
-   ``_NOT_APPLICABLE`` set is still rejected by the registry on every
-   label that translates to that adapter.  Anchors the proof from
-   /tmp/dual_gate_proof.py (Phase 1) as a permanent regression.
-
-3. **Gate C → accuracy_supported translation**: the 2
-   (family, label) pairs that used to live in ``_ACCURACY_NOT_APPLICABLE``
-   now report ``accuracy_supported(label, family) == False`` via the
-   registry accessor.  Other (label, family) pairs report True.
-
-Also covers:
-- Bucket-1 hybrid additions (nbn-mdn / nbn-mdn-lw / nbn-flow / nbn-flow-lw).
-- Unknown-label fallback returns False from both accessors.
+History: this table replaced two gate sets (``_NOT_APPLICABLE`` and
+``_ACCURACY_NOT_APPLICABLE``) in Pass 10; every pair those gates rejected is
+a ``False`` row below.  gpytorch's labels stay registered with no family and
+``accuracy_supported=False`` until a BN-inference adapter exists (#96) --
+SVGPs return the prior marginal regardless of evidence.
 """
 from __future__ import annotations
 
 import pytest
 
 from nbn.bench.core.applicability import (
-    BaselineApplicability, BASELINE_FAMILY_APPLICABILITY as _BASELINE_APPLICABILITY,
-    accuracy_supported, is_applicable, known_labels,
+    BASELINE_FAMILY_APPLICABILITY,
+    BaselineApplicability,
+    accuracy_supported,
+    is_applicable,
+    known_labels,
 )
 
-
 FAMILIES = ("discrete", "continuous_lg", "continuous_nongauss", "hybrid")
+
+#: Labels whose registry entry has ``accuracy_supported=False`` (#96).
+_ACCURACY_UNSUPPORTED = {"gpytorch-gp", "gpytorch-gp-predict"}
 
 
 _EXPECTED_APPLICABILITY: dict[tuple[str, str], bool] = {
@@ -249,143 +243,46 @@ _EXPECTED_APPLICABILITY: dict[tuple[str, str], bool] = {
 }
 
 
-_FROZEN_GATE_B_PAIRS: list[tuple[str, str]] = [
-    ("discrete", "gpytorch"),
-    ("continuous_lg", "pomegranate"),
-    ("continuous_nongauss", "pomegranate"),
-    ("continuous_lg", "nbn_ve"),
-    ("continuous_nongauss", "nbn_ve"),
-    ("continuous_nongauss", "pgmpy"),
-    ("hybrid", "gpytorch"),
-    ("hybrid", "pomegranate"),
-    ("hybrid", "pgmpy"),
-    ("hybrid", "nbn_ve"),
-]
-
-
-_ADAPTER_TO_LABELS: dict[str, list[str]] = {
-    "gpytorch":    ["gpytorch-gp", "gpytorch-gp-predict"],
-    "pomegranate": ["pomegranate-discrete", "pomegranate-discrete-lbp",
-                    "pomegranate-discrete-ve"],
-    "nbn_ve":      ["nbn-cat-ve", "nbn-neuralcat-ve"],
-    "pgmpy":       ["pgmpy-mle", "pgmpy-bayes", "pgmpy-lg",
-                    "pgmpy-mle-ve", "pgmpy-bayes-ve", "pgmpy-lg-predict"],
-}
-
-
-# Gate C pairs were (continuous_lg/nongauss, gpytorch-gp/gp-predict).
-# gpytorch-gp and gpytorch-gp-predict are now gated out of all families
-# (issue #96), so is_applicable returns False — the Gate C
-# accuracy_supported precondition is no longer meaningful.  The snapshot
-# table above covers the False applicability; the Gate C test is removed.
-_FROZEN_GATE_C_PAIRS: list[tuple[str, str]] = []
-
-
-@pytest.mark.parametrize(
-    ("label", "family"),
-    sorted(_EXPECTED_APPLICABILITY.keys()),
-    ids=lambda lf: f"{lf}",
-)
-def test_is_applicable_matches_post_consolidation_snapshot(
-    label: str, family: str,
-) -> None:
-    """Cartesian product (label, family) — snapshot test."""
-    expected = _EXPECTED_APPLICABILITY[(label, family)]
-    assert is_applicable(label, family) is expected, (
-        f"is_applicable({label!r}, {family!r}) returned "
-        f"{is_applicable(label, family)}, expected {expected}"
+def test_registry_matches_the_snapshot():
+    """Every (label, family): is_applicable and accuracy_supported, one diff."""
+    labels = set(known_labels())
+    snap_labels = {label for label, _ in _EXPECTED_APPLICABILITY}
+    assert labels == snap_labels, (
+        f"registry vs snapshot labels: missing {labels - snap_labels}, "
+        f"extra {snap_labels - labels}"
     )
+    expected_pairs = {(lab, fam) for lab in labels for fam in FAMILIES}
+    assert set(_EXPECTED_APPLICABILITY) == expected_pairs
+
+    want = {
+        k: (v, v and k[0] not in _ACCURACY_UNSUPPORTED)
+        for k, v in _EXPECTED_APPLICABILITY.items()
+    }
+    got = {k: (is_applicable(*k), accuracy_supported(*k)) for k in want}
+    diff = {k: (got[k], want[k]) for k in want if got[k] != want[k]}
+    assert not diff, f"(got, want) per (label, family): {diff}"
 
 
-def test_snapshot_covers_every_known_label() -> None:
-    """The snapshot must cover every label in the registry × every family."""
-    snapshot_labels = {label for (label, _) in _EXPECTED_APPLICABILITY}
-    registry_labels = set(known_labels())
-    missing = registry_labels - snapshot_labels
-    extra = snapshot_labels - registry_labels
-    assert not missing, f"snapshot missing labels: {missing}"
-    assert not extra, f"snapshot has labels not in registry: {extra}"
-    snapshot_pairs = set(_EXPECTED_APPLICABILITY.keys())
-    expected_pairs = {(lab, fam) for lab in registry_labels for fam in FAMILIES}
-    assert snapshot_pairs == expected_pairs, (
-        f"snapshot pair coverage mismatch; "
-        f"missing: {expected_pairs - snapshot_pairs}, "
-        f"extra: {snapshot_pairs - expected_pairs}"
-    )
+def test_entry_level_accuracy_flag():
+    """Only gpytorch carries accuracy_supported=False on the entry itself."""
+    flagged = {lab for lab, e in BASELINE_FAMILY_APPLICABILITY.items()
+               if not e.accuracy_supported}
+    assert flagged == _ACCURACY_UNSUPPORTED
+    for lab in _ACCURACY_UNSUPPORTED:
+        assert BASELINE_FAMILY_APPLICABILITY[lab].families == frozenset()
 
 
-@pytest.mark.parametrize(
-    ("family", "adapter", "label"),
-    [
-        (family, adapter, label)
-        for (family, adapter) in _FROZEN_GATE_B_PAIRS
-        for label in _ADAPTER_TO_LABELS[adapter]
-    ],
-)
-def test_frozen_gate_b_pairs_still_rejected(
-    family: str, adapter: str, label: str,
-) -> None:
-    """Pre-consolidation Gate B coverage anchor."""
-    assert not is_applicable(label, family), (
-        f"Gate-B regression: (family={family!r}, adapter={adapter!r}) "
-        f"used to be in _NOT_APPLICABLE; label {label!r} translates "
-        f"to that adapter and must still be rejected by the registry."
-    )
+@pytest.mark.parametrize("label,family", [
+    ("foo-bar-baz", "discrete"), ("nbn-cat-typo", "continuous_lg"),
+    ("nbn-cat-typo", "hybrid"),
+])
+def test_unknown_label_is_rejected_by_both_accessors(label, family):
+    assert is_applicable(label, family) is False
+    assert accuracy_supported(label, family) is False
 
 
-@pytest.mark.parametrize(
-    ("family", "label"),
-    _FROZEN_GATE_C_PAIRS,
-)
-def test_frozen_gate_c_pairs_have_accuracy_unsupported(
-    family: str, label: str,
-) -> None:
-    """Pre-consolidation Gate C → accuracy_supported translation."""
-    assert is_applicable(label, family), (
-        f"precondition: ({label!r}, {family!r}) should be applicable "
-        f"per the registry; if not, the test is vacuous."
-    )
-    assert not accuracy_supported(label, family), (
-        f"accuracy_supported({label!r}, {family!r}) returned True; "
-        f"this pair was in _ACCURACY_NOT_APPLICABLE pre-consolidation "
-        f"and must remain accuracy-unsupported."
-    )
-
-
-def test_accuracy_supported_default_true_for_non_gpytorch() -> None:
-    """Every non-gpytorch (label, family) pair where the label is
-    applicable must report accuracy_supported=True."""
-    for label in known_labels():
-        if label.startswith("gpytorch-"):
-            continue
-        entry = _BASELINE_APPLICABILITY[label]
-        for family in entry.families:
-            assert accuracy_supported(label, family) is True, (
-                f"non-gpytorch label {label!r} on family {family!r} "
-                f"unexpectedly reports accuracy_supported=False"
-            )
-
-
-def test_unknown_label_returns_false_from_both_accessors() -> None:
-    """Unknown-label fallback contract."""
-    assert is_applicable("foo-bar-baz", "discrete") is False
-    assert is_applicable("nbn-cat-typo", "continuous_lg") is False
-    assert accuracy_supported("foo-bar-baz", "discrete") is False
-    assert accuracy_supported("nbn-cat-typo", "hybrid") is False
-
-
-def test_accuracy_supported_false_for_label_not_applicable_to_family() -> None:
-    """Defensive contract: accuracy_supported is False for
-    (label, family) pairs the label doesn't apply to."""
-    assert accuracy_supported("nbn-cat", "continuous_lg") is False
-    assert accuracy_supported("nbn-cat", "hybrid") is False
-    assert accuracy_supported("gpytorch-gp", "discrete") is False
-    assert accuracy_supported("gpytorch-gp", "hybrid") is False
-
-
-def test_baseline_applicability_dataclass_is_frozen() -> None:
-    """BaselineApplicability instances must be frozen."""
-    entry = _BASELINE_APPLICABILITY["nbn-cat"]
+def test_baseline_applicability_dataclass_is_frozen():
+    entry = BASELINE_FAMILY_APPLICABILITY["nbn-cat"]
     assert isinstance(entry, BaselineApplicability)
     with pytest.raises((AttributeError, TypeError)):
         entry.families = frozenset({"hybrid"})  # type: ignore[misc]

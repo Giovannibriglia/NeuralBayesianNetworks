@@ -238,13 +238,6 @@ class TestCompactDatetime:
         assert dt[:8].isdigit()
         assert dt[9:].isdigit()
 
-    def test_two_calls_differ_or_same_second(self):
-        a = _compact_datetime()
-        b = _compact_datetime()
-        # Within the same second they may be equal; they should never differ
-        # in format.
-        assert len(a) == len(b) == 15
-
 
 # ---------------------------------------------------------------------------
 # TestMakeResultsDir
