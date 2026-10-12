@@ -101,7 +101,7 @@ def test_counterfactual_accepts_one_do_value_per_unit():
     per_unit = torch.tensor([0.0, 1.0, 2.0])
     world = model.counterfactual_sample({k: v[:3] for k, v in data.items()}, do={"x": per_unit})
     assert torch.equal(world["x"][0, :, 0], per_unit)
-    slope = float(model.mechanisms["y"].net.weight)
+    slope = float(model.mechanisms["y"].net.weight.detach())
     expected = data["y"][:3, 0] + slope * (per_unit - data["x"][:3, 0])
     assert torch.allclose(world["y"][0, :, 0], expected, atol=1e-5)
 
@@ -119,7 +119,7 @@ def test_mlp_respects_the_epoch_budget_and_tied_history_is_post_refit():
     history = model.fit(data, epochs=0)  # zero epochs: the MLPs must stay at initialisation
     for node in ("y", "z"):
         lp = model.mechanisms[node].log_prob(data[node], data["x"]).mean()
-        assert history.node_log_likelihoods[node][-1] == pytest.approx(float(lp), rel=1e-5)
+        assert history.node_log_likelihoods[node][-1] == pytest.approx(float(lp.detach()), rel=1e-5)
 
 
 def test_tying_a_fitted_mechanism_is_refused():
@@ -490,4 +490,4 @@ def test_linear_location_fitted_on_an_accelerator_is_correct(device):
         model = _continuous_scm(device=device)
         model.fit({"x": x, "y": y})
         net = model.mechanisms["y"].net
-        assert abs(float(net.weight) - 1.5) < 0.05 and abs(float(net.bias) - 0.5) < 0.05
+        assert abs(float(net.weight.detach()) - 1.5) < 0.05 and abs(float(net.bias.detach()) - 0.5) < 0.05

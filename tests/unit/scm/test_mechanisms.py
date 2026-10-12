@@ -118,9 +118,9 @@ def test_linear_location_recovers_the_equation():
     model = _continuous_model(AdditiveNoiseMechanism("linear"))
     model.fit(data)
     mech = model.mechanisms["y"]
-    assert float(mech.net.weight) == pytest.approx(1.5, abs=0.03)
-    assert float(mech.net.bias) == pytest.approx(0.5, abs=0.03)
-    assert float(mech.noise.scale) == pytest.approx(0.3, abs=0.02)
+    assert float(mech.net.weight.detach()) == pytest.approx(1.5, abs=0.03)
+    assert float(mech.net.bias.detach()) == pytest.approx(0.5, abs=0.03)
+    assert float(mech.noise.scale.detach()) == pytest.approx(0.3, abs=0.02)
 
 
 def test_mlp_location_fits_a_nonlinear_mechanism():
@@ -130,8 +130,8 @@ def test_mlp_location_fits_a_nonlinear_mechanism():
     mlp = _continuous_model(AdditiveNoiseMechanism("mlp", epochs=150, batch_size=512))
     linear.fit(data)
     mlp.fit(data)
-    assert float(mlp.mechanisms["y"].noise.scale) == pytest.approx(0.3, abs=0.05)
-    assert float(mlp.log_prob(data).mean()) > float(linear.log_prob(data).mean()) + 0.3
+    assert float(mlp.mechanisms["y"].noise.scale.detach()) == pytest.approx(0.3, abs=0.05)
+    assert float(mlp.log_prob(data).mean().detach()) > float(linear.log_prob(data).mean().detach()) + 0.3
 
 
 def test_mixture_noise_beats_gaussian_on_bimodal_residuals():
@@ -140,7 +140,7 @@ def test_mixture_noise_beats_gaussian_on_bimodal_residuals():
     mix = _continuous_model(AdditiveNoiseMechanism("linear", "mixture", n_components=2))
     gauss.fit(data)
     mix.fit(data)
-    assert float(mix.log_prob(data).mean()) > float(gauss.log_prob(data).mean()) + 0.2
+    assert float(mix.log_prob(data).mean().detach()) > float(gauss.log_prob(data).mean().detach()) + 0.2
 
 
 def test_continuous_abduction_inverts_the_equation():
