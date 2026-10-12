@@ -4,8 +4,6 @@ Moved from ``nbn/bench/_baseline_registry.py`` (v0.12).  The data
 constant is renamed ``BASELINE_FAMILY_APPLICABILITY`` (no leading
 underscore); all function signatures are preserved so call sites only
 need to update their import path.
-
-Reference: docs/v0.13-benchmark-redesign.md §1c
 """
 from __future__ import annotations
 

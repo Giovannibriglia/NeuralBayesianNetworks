@@ -1,11 +1,11 @@
-"""Fit-once query-many worker contract (#174, design doc §5).
+"""Fit-once query-many worker contract (#174).
 
 These tests drive ``cell_worker._run_cell`` in-process with a fake
 adapter (``build_adapter`` monkeypatched) and the real ``TimingOnly``
 measurement, so the fit-count spy is observable and the per-batch
 sweep loop is exercised end-to-end without the subprocess boundary.
 
-Asserts the design-doc contract:
+Asserts the worker contract:
   1. fit runs exactly ONCE per cell regardless of how many batch_sizes
      follow (the optimization);
   2. each batch_size produces rows stamped with its value;
@@ -14,8 +14,6 @@ Asserts the design-doc contract:
   5. a missing / length-1 batch_sizes is identity behavior;
   6. fit_timeout_s covers the single fit, not fit × N;
   7. per_cell_timeout_s is applied fresh per batch_size pass (#1).
-
-Reference: docs/v0.14-fit-once-query-many-design.md §4, §5, §6.
 """
 from __future__ import annotations
 

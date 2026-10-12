@@ -11,8 +11,6 @@ test_protocol_conformance.py.
 
 The dtype=torch.long bug fix (v0.5b / issue #31) is verified by a
 dedicated structural test in TestBehavioral.
-
-Reference: docs/v0.13-benchmark-redesign.md §4.1
 """
 from __future__ import annotations
 

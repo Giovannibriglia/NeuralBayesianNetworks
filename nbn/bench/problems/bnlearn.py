@@ -7,8 +7,6 @@ ground-truth reference pool so the existing oracle
 (``nbn.bench.core.oracle.filter_ground_truth``) scores them with no
 oracle changes. Gaussian and CLG networks (from the bundled JSON files
 committed in Stage 1) land in Stage 3.
-
-See docs/phase4-design-draft.md for the full design.
 """
 from __future__ import annotations
 
@@ -359,7 +357,7 @@ def _decode_config_index(
     """Decode a flat CLG config index → discrete-parent state assignment.
 
     First discrete parent varies fastest — bnlearn's native ``expand.grid``
-    encoding (design doc §5.2). Inverse of the encoding used in
+    encoding. Inverse of the encoding used in
     ``_BnlearnContinuousModel._sample_clg_node``.
     """
     cfg: dict[str, str] = {}
@@ -722,7 +720,7 @@ class BnlearnProblemSource:
             else:
                 variables[node] = ("continuous", None)
 
-        # family: pure Gaussian -> continuous_gauss; mixed -> clg (design doc §9).
+        # family: pure Gaussian -> continuous_gauss; mixed -> clg.
         family = "continuous_gauss" if kind == "gaussian" else "clg"
         model = _BnlearnContinuousModel(data, variables)  # shared across seeds
 

@@ -1,16 +1,13 @@
 """Shared n_batch_queries expansion + chunking for selectors (v0.14, #148).
 
-Implements design doc §2.1-§2.3: for each query position a selector picks,
-produce ``n_batch_queries`` evidence-value variants by sampling rows from
-``problem.train_data``, then chunk the variants by ``batch_size`` into
-inner lists. Every selector's ``select_groups`` delegates here — the
+For each query position a selector picks, produce ``n_batch_queries``
+evidence-value variants by sampling rows from ``problem.train_data``, then
+chunk the variants by ``batch_size`` into inner lists. Every selector's ``select_groups`` delegates here — the
 position-selection logic stays in each selector's existing ``select()``.
 
 At ``n_batch_queries=1`` the original Query objects pass through untouched
 (each wrapped in a length-1 inner list) — identity behavior for all
 existing benchmarks.
-
-Reference: docs/v0.14-batched-queries-design.md §2.
 """
 from __future__ import annotations
 
@@ -33,7 +30,7 @@ def make_query_groups(
     For each query position (one entry of ``base_queries``):
       1. Sample ``n_batch_queries`` rows from ``problem.train_data``
          (without replacement when n_train >= N, with replacement
-         otherwise — design doc §2.2)
+         otherwise)
       2. Build one Query variant per sampled row: same targets / kind /
          role metadata, evidence values read off the sampled row for the
          same evidence keys. ``None`` (empty-mode) evidence values are
@@ -63,7 +60,7 @@ def make_query_groups(
     if n_train == 0:
         raise ValueError(
             "make_query_groups requires problem.train_data to sample "
-            "evidence-value variants (design doc §2.1)."
+            "evidence-value variants."
         )
 
     groups: list[list[Query]] = []

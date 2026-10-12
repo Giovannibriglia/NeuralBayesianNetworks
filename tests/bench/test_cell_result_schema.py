@@ -1,7 +1,4 @@
-"""Schema tests for v3 CellResult dataclass.
-
-Reference: docs/v0.13-benchmark-redesign.md §6
-"""
+"""Schema tests for v3 CellResult dataclass."""
 from __future__ import annotations
 
 import pytest

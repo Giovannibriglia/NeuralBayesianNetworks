@@ -7,8 +7,6 @@ opts into.  These tests verify only that the default helper is a
 faithful passthrough on a recording mock — batched-vs-sequential
 equivalence on the real adapters (including pgmpy through this helper)
 lives in test_query_batch_contract.py.
-
-Reference: docs/v0.14-batched-queries-design.md §1.2, §3.3, §7.1.
 """
 from __future__ import annotations
 

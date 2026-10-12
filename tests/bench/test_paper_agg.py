@@ -1,5 +1,5 @@
 """Unit tests for the seed-level ``all`` / ``common`` aggregation
-(``nbn/bench/_paper_agg.py``, docs/v0.18-bar-reporting-all-common.md)."""
+(``nbn/bench/_paper_agg.py``)."""
 from __future__ import annotations
 
 import math

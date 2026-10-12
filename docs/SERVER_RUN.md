@@ -198,8 +198,7 @@ device-specific issue.
 
 - **pyro is CPU-forced** via `device: cpu` in the YAML baseline entry.
   This is intentional: the Importance sampler's Python-bound loop makes
-  GPU ~10× slower at benchmark scale (measured; see
-  `docs/audits/v0.12-pyro-gpu-investigation.md`).
+  GPU ~10× slower at benchmark scale (measured).
 
 - **pyro timeouts at large n**: on CPU, pyro-empirical-importance takes
   ~95 s at n=10 and scales linearly with n. Cells at n ≥ 100 on

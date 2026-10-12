@@ -7,7 +7,7 @@ Implements four-step query construction:
   Step 4 — Value assignment      (_ValueAllocator)
 
 ``TopologicalAllocator`` is the public ``QuerySelector`` that orchestrates
-all four steps. See docs/phase2-design-draft.md for the full design.
+all four steps.
 """
 from __future__ import annotations
 
@@ -468,8 +468,8 @@ class TopologicalAllocator:
         self.max_retry = (
             max_retry if max_retry is not None else self._DEFAULT_MAX_RETRY
         )
-        # v0.14 (#148): evidence-value variants per query position,
-        # design doc §1.1, §2.4. 1 = existing single-variant behavior.
+        # v0.14 (#148): evidence-value variants per query position.
+        # 1 = existing single-variant behavior.
         self.n_batch_queries = int(n_batch_queries)
 
         self._target_allocator = _TargetAllocator()
@@ -578,7 +578,7 @@ class TopologicalAllocator:
         *,
         batch_size: int = 1,
     ) -> list[list[Query]]:
-        """Grouped form of ``select()`` (v0.14, #148; design doc §1.3, §2.3).
+        """Grouped form of ``select()`` (v0.14, #148).
 
         Expands each selected query position into ``self.n_batch_queries``
         evidence-value variants sampled from ``problem.train_data``,

@@ -2,8 +2,7 @@
 # batch_speed smoke — fast end-to-end check of the batch_sizes sweep (#148).
 # =============================================================================
 #
-# Tiny fixture for CI / local gating of the sweep dispatch path
-# (docs/v0.14-batched-queries-design.md §1.7, §5.6):
+# Tiny fixture for CI / local gating of the sweep dispatch path:
 #   - one 8-node discrete problem, 1 seed
 #   - n_batch_queries: 16 (NOT 10240 — keeps every cell sub-second)
 #   - batch_sizes [1, 4]: nbn-cat-ve runs at both values (swept);

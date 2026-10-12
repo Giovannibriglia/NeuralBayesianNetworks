@@ -12,8 +12,6 @@ Key responsibilities beyond the thin-wrap contract:
   2. Store the pool in ``GroundTruth.samples`` (``problem.ground_truth``).
   3. Store the true model on ``problem.true_model`` for oracle sampling.
   4. Populate ``problem.family`` and ``problem.problem_id`` for the v3 schema.
-
-Reference: docs/v0.13-benchmark-redesign.md §2.1, §4.1, §5.2
 """
 from __future__ import annotations
 

@@ -15,7 +15,7 @@ Layers, fastest first:
   * the HEADLINE grouped==ungrouped guarantee + cache cleanup through the REAL
     runner and REAL subprocesses.
 
-Reference: docs/v0.14-fit-once-query-many-design.md; issue #191.
+Reference: issue #191.
 """
 from __future__ import annotations
 

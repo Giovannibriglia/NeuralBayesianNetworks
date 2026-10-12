@@ -5,8 +5,8 @@ Public entry point: :func:`run_plot`, invoked by ``nbn-bench plot``
 
 Every figure is a **grouped bar plot** over the benchmark's discrete x grid
 (``n_nodes``, ``n_train``, ``batch_size`` or bnlearn ``network``); every
-figure and table comes in two views (``docs/v0.18-bar-reporting-all-common.md``,
-aggregation in :mod:`nbn.bench._paper_agg`):
+figure and table comes in two views (aggregation in :mod:`nbn.bench._paper_agg`;
+user-facing description in ``docs/BENCHMARKS.md``, "Plot the results"):
 
   all/      each method over the seeds it solved; ``f/n`` (failed / run) annotated when f>0
   common/   each method over the seeds solved by every shown method at that x

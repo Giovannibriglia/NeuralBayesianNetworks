@@ -44,8 +44,6 @@
 # "can't allocate memory" RuntimeError on hosts where the giant alloc
 # is refused fast, or a SIGKILL -> oom on hosts that overcommit) and
 # the runner continues to the next cell.
-#
-# Reference: docs/v0.13-runner-subprocess-isolation.md §6.3.
 version: "v0.13"
 benchmark: bnlearn
 config_name: bug4_torture_smoke

@@ -43,7 +43,6 @@
 # small grid so the parquet shape can be verified quickly. The paper-scale
 # grid lives in scalability_paper.yaml.
 #
-# Design: docs/phase3-design-draft.md §7.1.
 # Wall-clock budget: ~5-10 min on CPU.
 version: "v0.13"
 benchmark: synthetic

@@ -34,7 +34,7 @@ documented for the paper methodology section (issue #138).
 All tests are ``@pytest.mark.slow``:
     pytest -m slow tests/bench/integration/test_bnlearn_sanity.py -v
 
-Reference: docs/v0.13-paper-figures.md §7, issue #47.
+Reference: issue #47.
 """
 from __future__ import annotations
 

@@ -8,8 +8,6 @@ comparison happens in the end-to-end smoke.
 
 These fit real models, so — like the behavioral tests in the per-adapter
 suites — they are marked ``slow`` and excluded from the fast gate.
-
-Reference: docs/phase3-design-draft.md §4.
 """
 from __future__ import annotations
 

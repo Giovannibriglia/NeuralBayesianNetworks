@@ -16,8 +16,6 @@ Covers:
                        pyro-empirical-importance
     Continuous_nongauss: nbn-mdn-lw, nbn-flow-lw
     Hybrid:            nbn-hybrid-router, pyro-empirical-importance
-
-Reference: docs/v0.13-benchmark-redesign.md §3, §4.1, §6
 """
 from __future__ import annotations
 

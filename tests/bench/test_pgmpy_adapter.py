@@ -18,8 +18,6 @@ For pgmpy-lg-predict the test verifies:
   - Posterior.samples has shape (n_samples,) and is finite
   - Sample mean is close to the adapter's own analytical posterior mean
     (self-consistency sanity check; tolerance 0.5)
-
-Reference: docs/v0.13-benchmark-redesign.md §4.1
 """
 from __future__ import annotations
 

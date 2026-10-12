@@ -1,7 +1,4 @@
-"""v0.13 parquet schema (v3) data classes.
-
-Reference: docs/v0.13-benchmark-redesign.md §6
-"""
+"""v0.13 parquet schema (v3) data classes."""
 
 from __future__ import annotations
 
@@ -22,8 +19,6 @@ class CellResult:
     - Inference mode: `query` is a posterior query p(target | evidence).
     - Parameter learning mode: `query` is a per-CPD scoring call.
       fit_time_s is the fitter time (not gated by timeout).
-
-    Reference: docs/v0.13-benchmark-redesign.md §3, §6
     """
 
     # Identity columns
@@ -88,7 +83,7 @@ class CellResult:
     # Batched-queries (v0.14, #148): the number of queries the adapter
     # processed in the library call that produced this row. 1 for all
     # pre-batching rows and for sequential dispatch; B when the row came
-    # from a query_batch call of B queries (design doc §1.4, §1.6).
+    # from a query_batch call of B queries.
     # Additive — existing data reads as null → 1 on the consumer side.
     batch_size: int = 1
 

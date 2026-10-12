@@ -49,7 +49,6 @@ inference_method: importance → label "pyro-empirical-importance".
 The old adapter at nbn/bench/baselines/pyro_adapter.py is untouched
 and continues to serve the v0.12 runner.
 
-Reference: docs/v0.13-benchmark-redesign.md §4.1
 Old (functional) adapter: nbn/bench/baselines/pyro_adapter.py
 """
 from __future__ import annotations
@@ -448,8 +447,8 @@ class PyroAdapter:
         return Posterior(samples=marg.cpu())
 
     def query_batch(self, queries: list[Query]) -> list[Posterior]:
-        """Sequential default (PR 1, #148). Pyro stays sequential
-        (design doc §3.3); no override planned."""
+        """Sequential default (PR 1, #148). Pyro stays sequential; no
+        override planned."""
         return default_query_batch(self, queries)
 
     # -------------------------------------------------------------------------

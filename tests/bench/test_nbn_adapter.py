@@ -8,8 +8,6 @@ test_protocol_conformance.py.
   - TestProtocolConformance: name / pre-fit state / constructor validation
   - TestBehavioral: end-to-end fit + query on small synthetic BNs
     (marked @pytest.mark.slow — excluded from the fast gate)
-
-Reference: docs/v0.13-benchmark-redesign.md §4.1
 """
 from __future__ import annotations
 

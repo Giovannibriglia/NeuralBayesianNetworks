@@ -23,7 +23,6 @@ primary query() path.
 The old adapter at nbn/bench/baselines/pgmpy_adapter.py is untouched
 and continues to serve the v0.12 runner.
 
-Reference: docs/v0.13-benchmark-redesign.md §4.1
 Old (functional) adapter: nbn/bench/baselines/pgmpy_adapter.py
 """
 from __future__ import annotations
@@ -636,8 +635,8 @@ class PgmpyAdapter:
         return post_mean.reshape(1).float(), post_std.reshape(1).float()
 
     def query_batch(self, queries: list[Query]) -> list[Posterior]:
-        """Sequential default (PR 1, #148). Pgmpy stays sequential
-        (design doc §3.3); no override planned."""
+        """Sequential default (PR 1, #148). Pgmpy stays sequential; no
+        override planned."""
         return default_query_batch(self, queries)
 
     # -------------------------------------------------------------------------

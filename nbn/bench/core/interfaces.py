@@ -2,8 +2,6 @@
 
 Composition-based: a Benchmark is the product of a ProblemSource,
 a QuerySelector, a Measurement, and a set of BaselineAdapters.
-
-Reference: docs/v0.13-benchmark-redesign.md §4.1
 """
 from __future__ import annotations
 
@@ -76,7 +74,6 @@ class QuerySelector(Protocol):
         identity behavior for existing benchmarks.
 
         Deterministic given seed.
-        See docs/v0.14-batched-queries-design.md §1.3, §2.3.
         """
         ...
 
@@ -225,7 +222,6 @@ class BaselineAdapter(Protocol):
         Failure semantics: this method does NOT promise atomic
         semantics. A failure partway through MUST raise;
         partial-success returns are not supported.
-        See docs/v0.14-batched-queries-design.md §1.2, §4.4.
         """
         ...
 
@@ -257,7 +253,5 @@ def default_query_batch(
 
     Posteriors are returned in input order. A failure partway through
     raises (no partial-success returns) — see the protocol docstring.
-
-    See docs/v0.14-batched-queries-design.md §1.2, §3.3.
     """
     return [adapter.query(q) for q in queries]

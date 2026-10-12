@@ -6,8 +6,6 @@ nbn/bench/problems/, nbn/bench/selectors/,
 nbn/bench/measurements/, and nbn/bench/adapters/.
 
 Phase 1c status: cutover from v0.12 complete.
-
-Reference: docs/v0.13-benchmark-redesign.md
 """
 
 from nbn.bench.core.applicability import (
