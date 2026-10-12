@@ -566,3 +566,20 @@ def test_device_generators_are_rejected_clearly():
         pit_band_set(model, _homo(50, seed=1), "y", groups=torch.arange(50), generator=gen)
     with pytest.raises(ValueError, match="CPU torch.Generator"):
         noise_independence_test(model, _homo(50, seed=1), "y", generator=gen)
+
+
+def test_flow_noise_follows_map_location_and_stays_out_of_the_state_dict():
+    import copy
+    import io
+
+    flow = FlowNoiseMechanism(num_transforms=2, hidden=(16,))
+    pa = torch.randn(200, 1)
+    flow.fit_local(pa + 0.3 * torch.randn(200, 1), pa, epochs=2)
+    assert not any("_anchor" in k for k in flow.state_dict())
+    assert copy.deepcopy(flow).double().noise.sample(2).dtype == torch.float64
+    for device in available_devices():
+        buf = io.BytesIO()
+        torch.save(flow.to(device), buf)
+        buf.seek(0)
+        loaded = torch.load(buf, map_location="cpu", weights_only=False)
+        assert loaded.noise.sample(2).device.type == "cpu"

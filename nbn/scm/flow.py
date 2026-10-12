@@ -45,20 +45,23 @@ from nbn.utils.device import to_device_dtype
 
 
 class StandardNormalNoise(nn.Module):
-    """The fixed noise law ``N(0, I)`` of a flow mechanism (no parameters, no buffers).
+    """The fixed noise law ``N(0, I)`` of a flow mechanism (no parameters).
 
-    ``sample`` draws on the owning mechanism's device and dtype, which the
-    mechanism keeps in sync after a fit and after ``.to(...)``.
+    ``sample`` draws on the device and dtype of a zero-size, non-persistent
+    anchor buffer, which moves with the mechanism (``.to(...)``, ``.double()``,
+    ``torch.load(map_location=...)``) and is not part of the ``state_dict``.
     """
 
     def __init__(self, dim: int = 1) -> None:
         super().__init__()
         self.dim = int(dim)
-        self.device = torch.device("cpu")
-        self.dtype = torch.get_default_dtype()
+        self.register_buffer("_anchor", torch.empty(0), persistent=False)
 
     def sample(self, n: int) -> torch.Tensor:
-        return torch.randn(n, self.dim, device=self.device, dtype=self.dtype)
+        anchor = self._buffers.get("_anchor")  # absent in pickles made before it existed
+        if anchor is None:
+            return torch.randn(n, self.dim)
+        return torch.randn(n, self.dim, device=anchor.device, dtype=anchor.dtype)
 
     def cdf(self, u: torch.Tensor) -> torch.Tensor:
         return Normal(torch.zeros((), dtype=u.dtype, device=u.device), 1.0).cdf(u)
@@ -86,19 +89,10 @@ class FlowNoiseMechanism(NormalizingFlowMechanism, StructuralMechanism):
 
     def fit_local(self, *args: Any, **kwargs: Any) -> dict:
         metrics = super().fit_local(*args, **kwargs)
-        self._sync_noise()  # the fit infers d_x (and the device) from the data
+        # The fit infers d_x and the device from the data: keep the noise law in step.
+        self.noise.dim = int(self.d_x)
+        self.noise.to(device=self._param_device(), dtype=self._param_dtype())
         return metrics
-
-    def _apply(self, *args: Any, **kwargs: Any):
-        out = super()._apply(*args, **kwargs)  # .to(), .cuda(), .double(), ...
-        self._sync_noise()
-        return out
-
-    def _sync_noise(self) -> None:
-        noise = self.__dict__.get("_modules", {}).get("noise")
-        if noise is not None:
-            noise.dim = int(getattr(self, "d_x", noise.dim))
-            noise.device, noise.dtype = self._param_device(), self._param_dtype()
 
     # ------------------------------------------------------------------
     # Structural interface
