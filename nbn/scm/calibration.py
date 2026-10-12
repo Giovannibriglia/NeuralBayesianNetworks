@@ -5,7 +5,8 @@ finite-sample statement on top of *any* fitted 1-D continuous structural
 mechanism with an exact ``cdf`` and ``quantile`` (:class:`AdditiveNoiseMechanism`,
 :class:`FlowNoiseMechanism`), using held-out *calibration* rows that were not
 used to fit it.  Every result records which mechanism it was calibrated for
-and refuses to be used with another (or a refitted) one.
+and refuses to be used with another (or a refitted or edited) one; a
+pickled or copied model keeps its calibration.
 
 Rows must be independent and identically distributed (exchangeable for the
 conformal part).  Transitions from one episode are not: pass ``groups``
@@ -45,14 +46,16 @@ conformal part).  Transitions from one episode are not: pass ``groups``
 """
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass, field
 from typing import Literal, Mapping
 
 import torch
 
+from nbn.scm._stats import require_cpu_generator
 from nbn.scm.mechanisms import StructuralMechanism
-from nbn.utils.device import to_device
+from nbn.utils.device import to_device, to_device_dtype
 
 Guarantee = Literal["pac_if_pit_independent", "marginal"]
 
@@ -72,15 +75,29 @@ def _mechanism(model, node: str) -> StructuralMechanism:
     return mech
 
 
-def _fingerprint(mechanism) -> tuple:
-    """Identity plus the version counters of every parameter and buffer.
+def _fingerprint(mechanism) -> str:
+    """A digest of what the mechanism computes: its class, its scalar settings and its weights.
 
-    Any optimiser step, refit or ``load_state_dict`` changes a version, so a
-    calibration result can tell that its mechanism is no longer the one it
-    was calibrated for.
+    Two mechanisms with the same digest give the same answers, so a pickled or
+    copied model keeps its calibration, while a refit, ``load_state_dict``,
+    in-place edit, swapped noise law or changed setting (e.g. ``min_scale``)
+    does not.  Values are hashed in float64 on the CPU, so moving the model
+    between devices or float32 <-> float64 keeps the digest.
     """
-    tensors = list(mechanism.parameters()) + [b for b in mechanism.buffers() if b is not None]
-    return (id(mechanism), tuple(t._version for t in tensors))
+    digest = hashlib.sha256()
+    for name, module in mechanism.named_modules():
+        digest.update(f"{name}:{type(module).__module__}.{type(module).__qualname__};".encode())
+        for key, value in sorted(vars(module).items()):
+            if key != "training" and isinstance(value, (bool, int, float, str, type(None))):
+                digest.update(f"{key}={value!r};".encode())
+    for key, tensor in mechanism.state_dict().items():
+        if not isinstance(tensor, torch.Tensor):
+            continue
+        t = tensor.detach()
+        t = to_device_dtype(t, "cpu", torch.float64) if t.is_floating_point() else t.cpu()
+        digest.update(f"{key}:{tuple(t.shape)};".encode())
+        digest.update(t.contiguous().numpy().tobytes())
+    return digest.hexdigest()
 
 
 def _calibration_rows(
@@ -88,10 +105,18 @@ def _calibration_rows(
     groups: torch.Tensor | None, generator: torch.Generator | None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Finite ``(x [N], parents [N, D_pa] | None)`` on the model's device, one row per group if asked."""
+    require_cpu_generator(generator, "calibration with groups=")
     data = to_device(dict(data), model.device)
     x = data[node]
     parents = model.parent_values(data, node)
+    if x.shape[0] == 0:
+        raise ValueError(f"no calibration rows for '{node}'.")
     if groups is not None:
+        if groups.numel() != x.shape[0]:
+            raise ValueError(
+                f"groups has {groups.numel()} entries for {x.shape[0]} calibration rows; "
+                "pass one episode id per row."
+            )
         keep = _one_row_per_group(groups.reshape(-1).cpu(), generator).to(x.device)
         x = x[keep]
         parents = None if parents is None else parents[keep]
@@ -117,7 +142,7 @@ def _one_row_per_group(groups: torch.Tensor, generator: torch.Generator | None) 
     return order[first].sort().values
 
 
-def _check_bound(stored: tuple, mechanism) -> None:
+def _check_bound(stored: str, mechanism) -> None:
     if stored != _fingerprint(mechanism):
         raise ValueError(
             "This calibration result belongs to another mechanism, or the mechanism was "
@@ -154,7 +179,7 @@ class PITBandSet:
     epsilon: float
     level: float
     guarantee: Guarantee = "pac_if_pit_independent"
-    _bound_to: tuple = field(default=(), repr=False)
+    _bound_to: str = field(default="", repr=False)
 
     def calibrated(self, cdf_values: torch.Tensor) -> torch.Tensor:
         """``G_hat(F_hat)``: the empirical CDF of the held-out PIT (NaN stays NaN)."""
@@ -222,7 +247,7 @@ class ConformalIntervals:
     n_calibration: int
     level: float
     guarantee: Guarantee = "marginal"
-    _bound_to: tuple = field(default=(), repr=False)
+    _bound_to: str = field(default="", repr=False)
 
     def interval(self, mechanism, parents: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
         _check_bound(self._bound_to, mechanism)

@@ -541,7 +541,7 @@ class AdditiveNoiseMechanism(StructuralMechanism):
 
     def residual(self, x: torch.Tensor, parents: torch.Tensor | None) -> torch.Tensor:
         """Exact noise ``u = x - g(pa)``, ``[B, D]`` (``[B, S, D]`` for 3-D ``x``)."""
-        x = ensure_2d(x).to(torch.float32)
+        x = self._as_own(x)
         if x.dim() == 3 and parents is not None and parents.dim() == 2:
             parents = parents.unsqueeze(1).expand(-1, x.shape[1], -1)
         return x - self.location(parents)
@@ -576,10 +576,17 @@ class AdditiveNoiseMechanism(StructuralMechanism):
 
     def log_prob(self, x: torch.Tensor, parents: torch.Tensor | None) -> torch.Tensor:
         """``log p(x | pa)`` for ``x`` ``[B]``, ``[B, D]`` or ``[B, S, D]``; returns ``[B]`` / ``[B, S]``."""
-        x = ensure_2d(x).to(torch.float32)
+        x = self._as_own(x)
         if x.dim() == 3 and parents is not None and parents.dim() == 2:
             parents = parents.unsqueeze(1).expand(-1, x.shape[1], -1)
         return self.forward(parents).log_prob(x)
+
+    def _as_own(self, x: torch.Tensor) -> torch.Tensor:
+        """``x`` as 2-D (or 3-D) on the mechanism's device and in its dtype (float32 before a fit)."""
+        x = ensure_2d(x)
+        if self._pa_mean is None:
+            return x.to(torch.float32)
+        return to_device_dtype(x, self._pa_mean.device, self._pa_mean.dtype)
 
     @staticmethod
     def _parents_or_empty(parents: torch.Tensor | None, x: torch.Tensor) -> torch.Tensor:

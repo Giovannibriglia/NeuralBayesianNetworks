@@ -25,8 +25,10 @@ transform is Durkan et al., *Neural Spline Flows* (NeurIPS 2019,
 arXiv:1906.04032).
 
 The structural methods take 2-D tensors only (``x`` ``[B, D]``, parents
-``[B, D_pa]`` or ``[1, D_pa]``), reject non-finite inputs instead of
-sanitising them, and compute in the flow's dtype (float64 inputs are cast).
+``[B, D_pa]`` or ``[1, D_pa]``), reject non-finite inputs (the plain
+``log_prob`` / ``forward`` path keeps NBN's sanitising), and move inputs to the
+flow's device and dtype.  Their outputs carry gradients with respect to the
+flow's weights; wrap calls in ``torch.no_grad()`` when only values are needed.
 """
 from __future__ import annotations
 
@@ -39,17 +41,24 @@ from torch.distributions import Normal
 from nbn.mechanisms.parametric.normalizing_flow import NormalizingFlowMechanism
 from nbn.scm.mechanisms import StructuralMechanism
 from nbn.utils.batching import ensure_2d
+from nbn.utils.device import to_device_dtype
 
 
 class StandardNormalNoise(nn.Module):
-    """The fixed noise law ``N(0, I)`` of a flow mechanism (no parameters, no buffers)."""
+    """The fixed noise law ``N(0, I)`` of a flow mechanism (no parameters, no buffers).
+
+    ``sample`` draws on the owning mechanism's device and dtype, which the
+    mechanism keeps in sync after a fit and after ``.to(...)``.
+    """
 
     def __init__(self, dim: int = 1) -> None:
         super().__init__()
         self.dim = int(dim)
+        self.device = torch.device("cpu")
+        self.dtype = torch.get_default_dtype()
 
-    def sample(self, n: int, device: torch.device | str = "cpu") -> torch.Tensor:
-        return torch.randn(n, self.dim, device=device)
+    def sample(self, n: int) -> torch.Tensor:
+        return torch.randn(n, self.dim, device=self.device, dtype=self.dtype)
 
     def cdf(self, u: torch.Tensor) -> torch.Tensor:
         return Normal(torch.zeros((), dtype=u.dtype, device=u.device), 1.0).cdf(u)
@@ -77,8 +86,19 @@ class FlowNoiseMechanism(NormalizingFlowMechanism, StructuralMechanism):
 
     def fit_local(self, *args: Any, **kwargs: Any) -> dict:
         metrics = super().fit_local(*args, **kwargs)
-        self.noise.dim = int(self.d_x)  # the fit infers d_x from the data
+        self._sync_noise()  # the fit infers d_x (and the device) from the data
         return metrics
+
+    def _apply(self, *args: Any, **kwargs: Any):
+        out = super()._apply(*args, **kwargs)  # .to(), .cuda(), .double(), ...
+        self._sync_noise()
+        return out
+
+    def _sync_noise(self) -> None:
+        noise = self.__dict__.get("_modules", {}).get("noise")
+        if noise is not None:
+            noise.dim = int(getattr(self, "d_x", noise.dim))
+            noise.device, noise.dtype = self._param_device(), self._param_dtype()
 
     # ------------------------------------------------------------------
     # Structural interface
@@ -93,7 +113,7 @@ class FlowNoiseMechanism(NormalizingFlowMechanism, StructuralMechanism):
         """``x = T(u; pa)`` for ``u`` of shape ``[B, D]``."""
         noise = self._finite_2d(noise, "noise")
         ctx = self._context(parents, noise.shape[0])
-        z = self.forward(ctx)._flow_dist.transform.inv(noise.to(self._param_dtype()))
+        z = self.forward(ctx)._flow_dist.transform.inv(noise)
         return self._unstd_x(z)
 
     def location(self, parents: torch.Tensor | None) -> torch.Tensor:
@@ -155,11 +175,12 @@ class FlowNoiseMechanism(NormalizingFlowMechanism, StructuralMechanism):
             raise ValueError(f"parents have {parents.shape[0]} rows for {batch} values.")
         return parents
 
-    @staticmethod
-    def _finite_2d(t: torch.Tensor, what: str) -> torch.Tensor:
+    def _finite_2d(self, t: torch.Tensor, what: str) -> torch.Tensor:
+        """``t`` as ``[B, D]`` on the flow's device and dtype; NaN/inf rejected."""
         t = ensure_2d(t)
         if t.dim() > 2:
             raise ValueError(f"{what} must be [B, D]; got {tuple(t.shape)}.")
+        t = to_device_dtype(t, self._param_device(), self._param_dtype())
         if not bool(torch.isfinite(t).all()):
             raise ValueError(f"{what} contains NaN or inf; abduction needs finite values.")
         return t

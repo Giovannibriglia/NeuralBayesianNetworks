@@ -52,6 +52,22 @@ def ks_two_sample(a: torch.Tensor, b: torch.Tensor) -> tuple[float, float]:
     return d, kolmogorov_sf((root + 0.12 + 0.11 / root) * d)
 
 
+def ks_uniform(w: torch.Tensor) -> tuple[float, float]:
+    """One-sample KS statistic of ``w`` against Uniform(0, 1) and its asymptotic p-value."""
+    w = w.reshape(-1).detach().cpu().double().sort().values
+    n = w.numel()
+    i = torch.arange(1, n + 1, dtype=torch.float64)
+    d = float(torch.maximum(i / n - w, w - (i - 1) / n).max())
+    root = math.sqrt(n)
+    return d, kolmogorov_sf((root + 0.12 + 0.11 / root) * d)
+
+
+def require_cpu_generator(generator: torch.Generator | None, where: str) -> None:
+    """Index sampling here runs on the CPU; a device generator would fail deep inside torch."""
+    if generator is not None and generator.device.type != "cpu":
+        raise ValueError(f"{where} needs a CPU torch.Generator (got one on {generator.device}).")
+
+
 def benjamini_hochberg(p_values: torch.Tensor, alpha: float = 0.05) -> torch.Tensor:
     """Boolean mask of hypotheses rejected at false-discovery rate ``alpha``."""
     p = torch.as_tensor(p_values, dtype=torch.float64).reshape(-1)

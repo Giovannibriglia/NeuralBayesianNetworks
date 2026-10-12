@@ -54,7 +54,7 @@ def test_tied_continuous_nodes_pool_their_residuals():
     model.tie_noise(["y", "z"])
     model.fit(data)
     assert model.mechanisms["y"].noise is model.mechanisms["z"].noise
-    assert float(model.mechanisms["y"].noise.scale) == pytest.approx(0.5, abs=0.02)
+    assert float(model.mechanisms["y"].noise.scale.detach()) == pytest.approx(0.5, abs=0.02)
 
 
 def test_tie_noise_rejects_bad_requests():
@@ -86,7 +86,7 @@ def test_linear_counterfactual_is_exact():
     model.set_mechanism("x", AdditiveNoiseMechanism("linear"))
     model.set_mechanism("y", AdditiveNoiseMechanism("linear"))
     model.fit({"x": x, "y": y})
-    slope = float(model.mechanisms["y"].net.weight)
+    slope = float(model.mechanisms["y"].net.weight.detach())
     world = model.counterfactual_sample({"x": x[:10], "y": y[:10]}, do={"x": 2.0})
     expected = y[:10] + slope * (2.0 - x[:10])
     assert world["y"].shape == (1, 10, 1)

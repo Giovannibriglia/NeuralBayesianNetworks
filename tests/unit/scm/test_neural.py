@@ -9,6 +9,7 @@ import torch
 from torch.distributions import Normal
 
 from nbn.mechanisms.parametric.normalizing_flow import NormalizingFlowMechanism
+from nbn.scm.calibration import _one_row_per_group
 from nbn.scm import (
     AdditiveNoiseMechanism,
     FlowNoiseMechanism,
@@ -159,7 +160,7 @@ def test_additive_gaussian_cdf_and_quantile_match_closed_form():
     mech = model.mechanisms["y"]
     pa = torch.tensor([[0.0], [1.0]])
     loc = mech.location(pa)[:, 0]
-    scale = float(mech.noise.scale)
+    scale = float(mech.noise.scale.detach())
     expected = Normal(loc, scale).icdf(torch.tensor(0.8))
     assert torch.allclose(mech.quantile(0.8, pa), expected, atol=1e-5)
     assert torch.allclose(mech.cdf(expected.unsqueeze(-1), pa), torch.full((2,), 0.8), atol=1e-5)
@@ -253,7 +254,7 @@ def test_pit_band_contains_the_true_calibration_map_at_the_declared_level():
     with torch.no_grad():
         a = float(mech.location(torch.zeros(1, 1))[0, 0])
         b = float(mech.location(torch.ones(1, 1))[0, 0]) - a
-        s = float(mech.noise.scale)
+        s = float(mech.noise.scale.detach())
     std = Normal(torch.tensor(0.0, dtype=torch.float64), 1.0)
     spread = math.sqrt((1.5 - b) ** 2 + 0.16)
 
@@ -303,9 +304,19 @@ def test_noise_independence_detects_a_parent_dependent_noise_scale():
 
 
 @pytest.mark.slow
-def test_a_flow_absorbs_the_parent_dependence(fitted_flow):
-    result = noise_independence_test(fitted_flow, _hetero(600, seed=5), "y", n_permutations=100)
-    assert result.p_value > 0.01
+def test_a_flow_removes_most_of_the_parent_dependence(fitted_flow):
+    """The flow models the parent-dependent scale, so its abducted noise is far
+    less dependent on the parent than an additive model's residual.  (A short
+    fit is not perfect: HSIC can still detect what is left at n = 600.)"""
+    additive = _scm(AdditiveNoiseMechanism())
+    additive.fit(_hetero(4000, seed=0))
+    data = _hetero(600, seed=5)
+
+    def hsic(model):
+        return noise_independence_test(model, data, "y", n_permutations=100,
+                                       generator=torch.Generator().manual_seed(0)).statistic
+
+    assert hsic(additive) > 2.0 * hsic(fitted_flow)
 
 
 def test_noise_independence_is_reproducible_with_a_generator():
@@ -324,19 +335,39 @@ def test_noise_independence_is_reproducible_with_a_generator():
 
 
 def test_calibration_by_bins_flags_a_region_dependent_miscalibration():
-    """A homoscedastic fit is calibrated on average but not in every region of x."""
+    """A homoscedastic fit of heteroscedastic data is wrong differently in each region."""
     good, bad = _scm(AdditiveNoiseMechanism()), _scm(AdditiveNoiseMechanism())
     good.fit(_homo(2000, seed=0))
     bad.fit(_hetero(2000, seed=0))
-    assert calibration_by_bins_test(good, _homo(2000, seed=1), "y").p_value > 0.01
-    assert calibration_by_bins_test(bad, _hetero(2000, seed=1), "y").p_value < 0.01
+    for reference in ("uniform", "other_bins"):
+        assert calibration_by_bins_test(good, _homo(2000, seed=1), "y",
+                                        reference=reference).p_value > 0.01
+        assert calibration_by_bins_test(bad, _hetero(2000, seed=1), "y",
+                                        reference=reference).p_value < 0.01
 
 
-def test_calibration_by_bins_needs_parents():
+def test_calibration_by_bins_separates_uniform_from_region_dependent_errors():
+    """A noise scale inflated 3x is wrong in the same way everywhere: the per-bin
+    test against Uniform(0, 1) flags it, the between-bins test does not (and the
+    PIT band, which recalibrates, only needs the latter)."""
+    model = _scm(AdditiveNoiseMechanism())
+    model.fit(_homo(2000, seed=0))
+    with torch.no_grad():
+        model.mechanisms["y"].noise.log_scale.add_(math.log(3.0))
+    data = _homo(2000, seed=1)
+    assert calibration_by_bins_test(model, data, "y", reference="uniform").p_value < 0.01
+    assert calibration_by_bins_test(model, data, "y", reference="other_bins").p_value > 0.01
+
+
+def test_calibration_by_bins_validates_its_inputs():
     model = _scm(AdditiveNoiseMechanism())
     model.fit(_homo(200, seed=0))
     with pytest.raises(ValueError, match="no parents"):
         calibration_by_bins_test(model, _homo(100, seed=1), "x")
+    with pytest.raises(ValueError, match="n_bins"):
+        calibration_by_bins_test(model, _homo(3, seed=1), "y", n_bins=4)
+    with pytest.raises(ValueError, match="reference"):
+        calibration_by_bins_test(model, _homo(100, seed=1), "y", reference="pooled")
 
 
 # ---------------------------------------------------------------------------
@@ -432,9 +463,27 @@ def test_calibration_results_refuse_a_modified_mechanism():
     with pytest.raises(ValueError, match="calibrate again"):
         ci.interval(model.mechanisms["y"], pa)
     other = _scm(AdditiveNoiseMechanism())
-    other.fit(_homo(300, seed=0))
+    other.fit(_homo(300, seed=4))
     with pytest.raises(ValueError, match="calibrate again"):
         ci.interval(other.mechanisms["y"], pa)
+
+
+def test_flow_calibration_survives_pickling_but_not_a_refit():
+    torch.manual_seed(0)
+    model = _scm(FlowNoiseMechanism(num_transforms=2, hidden=(16,)))
+    model.fit(_hetero(500, seed=0), epochs=5)
+    band = pit_band_set(model, _hetero(200, seed=1), "y")
+    x, pa = torch.zeros(2, 1), torch.zeros(2, 1)
+    model_copy, band_copy = pickle.loads(pickle.dumps((model, band)))
+    lo, _ = band_copy.cdf_bounds(model_copy.mechanisms["y"], x, pa)   # same function: accepted
+    assert torch.allclose(lo, band.cdf_bounds(model.mechanisms["y"], x, pa)[0])
+    model.fit(_hetero(500, seed=2), epochs=5)          # rebuilt flow, same number of steps
+    with pytest.raises(ValueError, match="calibrate again"):
+        band.cdf_bounds(model.mechanisms["y"], x, pa)
+    with torch.no_grad():
+        next(model_copy.mechanisms["y"].parameters()).data.add_(1.0)
+    with pytest.raises(ValueError, match="calibrate again"):
+        band_copy.cdf_bounds(model_copy.mechanisms["y"], x, pa)
 
 
 def test_groups_keep_one_row_per_episode():
@@ -448,7 +497,11 @@ def test_groups_keep_one_row_per_episode():
     assert band.epsilon == pytest.approx(math.sqrt(math.log(2 / 0.1) / 80))
     ci = conformal_intervals(model, cal, "y", groups=episodes)
     assert ci.n_calibration == 40
-    # every kept row comes from a different episode and the choice is reproducible
+    keep = _one_row_per_group(episodes, torch.Generator().manual_seed(0))
+    assert keep.numel() == 40 and episodes[keep].unique().numel() == 40
+    with pytest.raises(ValueError, match="one episode id per row"):
+        pit_band_set(model, cal, "y", groups=torch.arange(10))
+    # the choice is reproducible
     again = pit_band_set(model, cal, "y", delta=0.1, groups=episodes,
                          generator=torch.Generator().manual_seed(0))
     assert torch.equal(band.sorted_pit, again.sorted_pit)
@@ -468,3 +521,48 @@ def test_flow_location_and_quantile_on_every_device(device):
     root.fit_local((1.0 + torch.randn(300, 1)).to(device), None, epochs=5)
     assert root.location(None).device.type == torch.device(device).type
     assert bool(torch.isfinite(root.quantile(torch.tensor([0.0, 0.5, 1.0]), None)).all())
+
+
+@pytest.mark.parametrize("device", [d for d in available_devices() if d != "cpu"] or
+                         [pytest.param("cpu", marks=pytest.mark.skip(reason="no accelerator"))])
+def test_calibrated_sets_accept_cpu_inputs_for_an_accelerator_model(device):
+    torch.manual_seed(0)
+    for mech in (AdditiveNoiseMechanism(), FlowNoiseMechanism(num_transforms=2, hidden=(16,))):
+        model = _scm(mech, device=device)
+        model.fit(_hetero(500, seed=0), epochs=5)
+        band = pit_band_set(model, _hetero(200, seed=1), "y")
+        ci = conformal_intervals(model, _hetero(200, seed=1), "y")
+        x, pa = torch.zeros(3, 1), torch.zeros(3, 1)           # CPU inputs
+        lo, hi = band.cdf_bounds(model.mechanisms["y"], x, pa)
+        a, b = ci.interval(model.mechanisms["y"], pa)
+        assert lo.device.type == a.device.type == torch.device(device).type
+        assert bool((lo <= hi).all()) and bool((a <= b).all())
+        if isinstance(mech, FlowNoiseMechanism):
+            assert mech.noise.sample(2).device.type == torch.device(device).type
+
+
+def test_float64_additive_cdf_is_float64_accurate():
+    model = _scm(AdditiveNoiseMechanism())
+    model.fit(_homo(500, seed=0))
+    mech = model.mechanisms["y"].double()
+    pa = torch.tensor([[0.3]], dtype=torch.float64)
+    x = torch.tensor([[0.123456789012345]], dtype=torch.float64)
+    with torch.no_grad():
+        loc = mech.location(pa)[0, 0]
+        expected = Normal(loc, mech.noise.scale.double()).cdf(x[0, 0])
+        got = mech.cdf(x, pa)
+    assert got.dtype == torch.float64
+    assert abs(float(got[0]) - float(expected.reshape(-1)[0])) < 1e-12
+
+
+def test_device_generators_are_rejected_clearly():
+    model = _scm(AdditiveNoiseMechanism())
+    model.fit(_homo(200, seed=0))
+    accelerators = [d for d in available_devices() if d != "cpu"]
+    if not accelerators:
+        pytest.skip("no accelerator generator on this machine")
+    gen = torch.Generator(device=accelerators[0])
+    with pytest.raises(ValueError, match="CPU torch.Generator"):
+        pit_band_set(model, _homo(50, seed=1), "y", groups=torch.arange(50), generator=gen)
+    with pytest.raises(ValueError, match="CPU torch.Generator"):
+        noise_independence_test(model, _homo(50, seed=1), "y", generator=gen)

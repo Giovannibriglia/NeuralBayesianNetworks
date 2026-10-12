@@ -118,7 +118,7 @@ def test_linear_location_recovers_the_equation():
     model = _continuous_model(AdditiveNoiseMechanism("linear"))
     model.fit(data)
     mech = model.mechanisms["y"]
-    assert float(mech.net.weight) == pytest.approx(1.5, abs=0.03)
+    assert float(mech.net.weight.detach()) == pytest.approx(1.5, abs=0.03)
     assert float(mech.net.bias) == pytest.approx(0.5, abs=0.03)
     assert float(mech.noise.scale) == pytest.approx(0.3, abs=0.02)
 

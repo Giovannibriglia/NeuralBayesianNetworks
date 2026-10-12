@@ -101,7 +101,7 @@ def test_counterfactual_accepts_one_do_value_per_unit():
     per_unit = torch.tensor([0.0, 1.0, 2.0])
     world = model.counterfactual_sample({k: v[:3] for k, v in data.items()}, do={"x": per_unit})
     assert torch.equal(world["x"][0, :, 0], per_unit)
-    slope = float(model.mechanisms["y"].net.weight)
+    slope = float(model.mechanisms["y"].net.weight.detach())
     expected = data["y"][:3, 0] + slope * (per_unit - data["x"][:3, 0])
     assert torch.allclose(world["y"][0, :, 0], expected, atol=1e-5)
 
