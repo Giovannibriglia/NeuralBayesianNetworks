@@ -52,11 +52,18 @@ bench = [
 neural = ["zuko>=1.2,<2.0"]
 gp = ["gpytorch>=1.11"]
 mcmc = ["pyro-ppl>=1.9"]
-# Everything a paper-grade benchmark run needs, in one extra. The runner
-# records a baseline whose library is absent as ``not_supported`` rather than
-# failing, so partial installs produce quiet, wrong runs; ``nbn-bench
-# check-env`` (and the run commands themselves) verify this set.
-all = ["nbn[bench,neural,gp,mcmc]"]
+# What the notebooks in examples/ need on top of the core: plots and Jupyter.
+examples = [
+    "matplotlib>=3.7",
+    "jupyterlab>=4.0",
+    "ipykernel>=6.0",
+]
+# Everything a paper-grade benchmark run needs, in one extra, plus what the
+# example notebooks need. The runner records a baseline whose library is
+# absent as ``not_supported`` rather than failing, so partial installs produce
+# quiet, wrong runs; ``nbn-bench check-env`` (and the run commands themselves)
+# verify the benchmark part of this set.
+all = ["nbn[bench,neural,gp,mcmc,examples]"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
@@ -69,6 +76,7 @@ dev = [
     "nbsphinx>=0.9",
     "myst-parser>=2.0",
     "ipykernel>=6.0",
+    "nbmake>=1.5",  # pytest --nbmake examples/ (the notebooks job in ci.yml)
 ]
 
 [project.urls]
