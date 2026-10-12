@@ -1,8 +1,11 @@
 """Tests for v0.13 PomegranateAdapter.
 
-Three test classes:
-  - TestProtocolConformance: isinstance checks + name/pre-fit state
-  - TestApplicability: is_applicable() per family
+Adapter-specific tests; the contracts shared by every adapter (Protocol
+conformance, registry applicability, query-before-fit, epochs=, CPT
+extraction layout) live in test_adapter_contract.py and
+test_protocol_conformance.py.
+
+  - TestProtocolConformance: name / pre-fit state / constructor validation
   - TestBehavioral: end-to-end fit + query on a small discrete BN
     (marked @pytest.mark.slow — excluded from the fast gate)
 
@@ -76,10 +79,6 @@ def _make_small_continuous_problem(
 class TestProtocolConformance:
     """PomegranateAdapter satisfies the v0.13 BaselineAdapter protocol."""
 
-    def test_pomegranate_adapter_satisfies_protocol(self):
-        adapter = PomegranateAdapter()
-        assert isinstance(adapter, BaselineAdapter)
-
     def test_name_is_correct(self):
         assert PomegranateAdapter().name == "pomegranate-discrete-lbp"
 
@@ -90,29 +89,6 @@ class TestProtocolConformance:
         assert adapter._node_to_idx == {}
         assert adapter._cards == {}
         assert adapter._topo == []
-
-    def test_kwargs_silently_accepted(self):
-        """Constructor accepts **kwargs for runner API compatibility."""
-        adapter = PomegranateAdapter(some_future_kwarg=42)
-        assert adapter.name == "pomegranate-discrete-lbp"
-
-
-class TestApplicability:
-    """is_applicable() returns correct results per family."""
-
-    def test_applicable_to_discrete(self):
-        adapter = PomegranateAdapter()
-        assert adapter.is_applicable(_make_small_discrete_problem()) is True
-
-    def test_not_applicable_to_continuous(self):
-        adapter = PomegranateAdapter()
-        assert adapter.is_applicable(_make_small_continuous_problem()) is False
-
-    def test_unknown_name_returns_false(self):
-        adapter = PomegranateAdapter()
-        adapter.name = "pomegranate-not-in-registry"  # type: ignore[misc]
-        assert adapter.is_applicable(_make_small_discrete_problem()) is False
-
 
 @pytest.mark.slow
 class TestBehavioral:
@@ -201,20 +177,6 @@ class TestBehavioral:
         problem = _make_small_continuous_problem()
         with pytest.raises(ValueError, match="discrete-only"):
             adapter.fit(problem)
-
-    def test_query_before_fit_raises_runtime_error(self):
-        adapter = PomegranateAdapter()
-        q = Query(targets=("X0",), evidence={}, kind="marginal")
-        with pytest.raises(RuntimeError, match="not fitted"):
-            adapter.query(q)
-
-    def test_epochs_kwarg_accepted(self):
-        """fit() silently accepts epochs kwarg (runner API compatibility)."""
-        adapter = PomegranateAdapter()
-        problem = _make_small_discrete_problem(n_samples=200, seed=1)
-        adapter.fit(problem, epochs=5)   # should not raise
-        assert adapter.model is not None
-
 
 def test_unseen_parent_config_gets_uniform_row_not_nan_218():
     """#218 / #198: a parent configuration absent from training was stored as

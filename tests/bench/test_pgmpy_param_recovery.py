@@ -262,19 +262,6 @@ def test_lg_recovery_not_applicable():
 
 # ---- determinism ------------------------------------------------------------
 
-@pytest.mark.slow
-@pytest.mark.parametrize("param_method", ["mle", "bayes"])
-def test_extract_is_deterministic(param_method):
-    prob = _bn_problem(seed=5)
-    adapter = PgmpyAdapter(param_method=param_method, inference_method="ve")
-    adapter.fit(prob)
-    a = adapter.extract_learned_cpts()
-    b = adapter.extract_learned_cpts()
-    assert set(a) == set(b)
-    for node in a:
-        assert torch.equal(a[node], b[node]), node
-
-
 # ---- bad state name -> loud error -------------------------------------------
 
 def test_non_integer_state_raises():

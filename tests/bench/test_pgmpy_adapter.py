@@ -1,8 +1,11 @@
 """Tests for v0.13 PgmpyAdapter.
 
-Three test classes:
-  - TestProtocolConformance: isinstance checks + name/pre-fit state
-  - TestApplicability: is_applicable() per family
+Adapter-specific tests; the contracts shared by every adapter (Protocol
+conformance, registry applicability, query-before-fit, epochs=, CPT
+extraction layout) live in test_adapter_contract.py and
+test_protocol_conformance.py.
+
+  - TestProtocolConformance: name / pre-fit state / constructor validation
   - TestBehavioral: end-to-end fit + query on small synthetic BNs
     (marked @pytest.mark.slow — excluded from the fast gate)
 
@@ -89,10 +92,6 @@ def _make_small_continuous_lg_problem(
 class TestProtocolConformance:
     """PgmpyAdapter satisfies the v0.13 BaselineAdapter protocol."""
 
-    def test_pgmpy_adapter_satisfies_protocol(self):
-        adapter = PgmpyAdapter(param_method="mle", inference_method="ve")
-        assert isinstance(adapter, BaselineAdapter)
-
     def test_name_derived_from_args(self):
         assert PgmpyAdapter(param_method="mle",   inference_method="ve").name     == "pgmpy-mle-ve"
         assert PgmpyAdapter(param_method="bayes",  inference_method="ve").name    == "pgmpy-bayes-ve"
@@ -148,35 +147,6 @@ class TestImportErrorMessage:
         from nbn.bench.adapters.pgmpy_adapter import _pgmpy_import_error
         msg = str(_pgmpy_import_error(ImportError("boom")))
         assert "pgmpy>=1.0" not in msg and "check-env" in msg and "boom" in msg
-
-
-class TestApplicability:
-    """is_applicable() returns correct results per (adapter, family)."""
-
-    def test_mle_ve_applicable_to_discrete(self):
-        adapter = PgmpyAdapter(param_method="mle", inference_method="ve")
-        assert adapter.is_applicable(_make_small_discrete_problem()) is True
-
-    def test_bayes_ve_applicable_to_discrete(self):
-        adapter = PgmpyAdapter(param_method="bayes", inference_method="ve")
-        assert adapter.is_applicable(_make_small_discrete_problem()) is True
-
-    def test_lg_predict_applicable_to_continuous(self):
-        adapter = PgmpyAdapter(param_method="lg", inference_method="predict")
-        assert adapter.is_applicable(_make_small_continuous_lg_problem()) is True
-
-    def test_mle_ve_not_applicable_to_continuous(self):
-        adapter = PgmpyAdapter(param_method="mle", inference_method="ve")
-        assert adapter.is_applicable(_make_small_continuous_lg_problem()) is False
-
-    def test_lg_predict_not_applicable_to_discrete(self):
-        adapter = PgmpyAdapter(param_method="lg", inference_method="predict")
-        assert adapter.is_applicable(_make_small_discrete_problem()) is False
-
-    def test_unknown_name_returns_false(self):
-        adapter = PgmpyAdapter(param_method="mle", inference_method="ve")
-        adapter.name = "pgmpy-not-in-registry"
-        assert adapter.is_applicable(_make_small_discrete_problem()) is False
 
 
 @pytest.mark.slow
@@ -305,26 +275,6 @@ class TestBehavioral:
         assert posterior.samples is not None
         assert posterior.samples.shape == (512,)
         assert torch.isfinite(posterior.samples).all()
-
-    def test_query_before_fit_raises_runtime_error_mle(self):
-        adapter = PgmpyAdapter(param_method="mle", inference_method="ve")
-        q = Query(targets=("X0",), evidence={}, kind="marginal")
-        with pytest.raises(RuntimeError, match="not fitted"):
-            adapter.query(q)
-
-    def test_query_before_fit_raises_runtime_error_lg(self):
-        adapter = PgmpyAdapter(param_method="lg", inference_method="predict")
-        q = Query(targets=("X0",), evidence={}, kind="marginal")
-        with pytest.raises(RuntimeError, match="not fitted"):
-            adapter.query(q)
-
-    def test_epochs_kwarg_accepted(self):
-        """fit() silently accepts epochs kwarg (runner API compatibility)."""
-        adapter = PgmpyAdapter(param_method="mle", inference_method="ve")
-        problem = _make_small_discrete_problem(n_samples=200, seed=1)
-        adapter.fit(problem, epochs=5)   # should not raise
-        assert adapter._model is not None
-
 
 class TestLinearGaussianScoring:
     """Parameter-learning scoring of the linear-Gaussian model: held-out

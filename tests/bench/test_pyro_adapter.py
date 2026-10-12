@@ -1,8 +1,11 @@
 """Tests for v0.13 PyroAdapter.
 
-Three test classes:
-  - TestProtocolConformance: isinstance checks + name/pre-fit state
-  - TestApplicability: is_applicable() per family
+Adapter-specific tests; the contracts shared by every adapter (Protocol
+conformance, registry applicability, query-before-fit, epochs=, CPT
+extraction layout) live in test_adapter_contract.py and
+test_protocol_conformance.py.
+
+  - TestProtocolConformance: name / pre-fit state / constructor validation
   - TestBehavioral: end-to-end fit + query on small synthetic BNs
     (marked @pytest.mark.slow — excluded from the fast gate)
 
@@ -113,10 +116,6 @@ def _make_small_hybrid_problem(
 class TestProtocolConformance:
     """PyroAdapter satisfies the v0.13 BaselineAdapter protocol."""
 
-    def test_pyro_adapter_satisfies_protocol(self):
-        adapter = PyroAdapter(mechanism="empirical", inference_method="importance")
-        assert isinstance(adapter, BaselineAdapter)
-
     def test_name_derived_from_args(self):
         adapter = PyroAdapter(mechanism="empirical", inference_method="importance")
         assert adapter.name == "pyro-empirical-importance"
@@ -170,36 +169,6 @@ class TestProtocolConformance:
         )
         assert adapter.device in {"cpu", "cuda", "mps"}
         assert adapter.device != "auto"
-
-    def test_kwargs_silently_accepted(self):
-        """Constructor accepts **kwargs for runner API compatibility."""
-        adapter = PyroAdapter(
-            mechanism="empirical", inference_method="importance",
-            some_future_kwarg=True,
-        )
-        assert adapter.name == "pyro-empirical-importance"
-
-
-class TestApplicability:
-    """is_applicable() returns correct results per family."""
-
-    def test_applicable_to_discrete(self):
-        adapter = PyroAdapter(mechanism="empirical", inference_method="importance")
-        assert adapter.is_applicable(_make_small_discrete_problem()) is True
-
-    def test_applicable_to_continuous_lg(self):
-        adapter = PyroAdapter(mechanism="empirical", inference_method="importance")
-        assert adapter.is_applicable(_make_small_continuous_problem()) is True
-
-    def test_applicable_to_hybrid(self):
-        adapter = PyroAdapter(mechanism="empirical", inference_method="importance")
-        assert adapter.is_applicable(_make_small_hybrid_problem()) is True
-
-    def test_unknown_name_returns_false(self):
-        adapter = PyroAdapter(mechanism="empirical", inference_method="importance")
-        adapter.name = "pyro-not-in-registry"
-        assert adapter.is_applicable(_make_small_discrete_problem()) is False
-
 
 @pytest.mark.slow
 class TestBehavioral:
@@ -389,22 +358,6 @@ class TestBehavioral:
         )
 
     # -- Pre-fit guard --------------------------------------------------------
-
-    def test_query_before_fit_raises_runtime_error(self):
-        adapter = PyroAdapter(mechanism="empirical", inference_method="importance")
-        q = Query(targets=("X0",), evidence={}, kind="marginal")
-        with pytest.raises(RuntimeError, match="not fitted"):
-            adapter.query(q)
-
-    def test_epochs_kwarg_accepted(self):
-        """fit() silently accepts epochs kwarg (runner API compatibility)."""
-        adapter = PyroAdapter(
-            mechanism="empirical", inference_method="importance", n_samples=20,
-        )
-        problem = _make_small_discrete_problem(n_samples=200, seed=1)
-        adapter.fit(problem, epochs=5)   # should not raise
-        assert adapter._fitted
-
 
 # ---------------------------------------------------------------------------
 # Regression tests — ported from tests/integration/test_adapters_smoke.py

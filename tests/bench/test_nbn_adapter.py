@@ -1,8 +1,11 @@
 """Tests for v0.13 NBNAdapter.
 
-Three test classes:
-  - TestProtocolConformance: isinstance checks + name/pre-fit state
-  - TestApplicability: is_applicable() per family
+Adapter-specific tests; the contracts shared by every adapter (Protocol
+conformance, registry applicability, query-before-fit, epochs=, CPT
+extraction layout) live in test_adapter_contract.py and
+test_protocol_conformance.py.
+
+  - TestProtocolConformance: name / pre-fit state / constructor validation
   - TestBehavioral: end-to-end fit + query on small synthetic BNs
     (marked @pytest.mark.slow — excluded from the fast gate)
 
@@ -83,10 +86,6 @@ def _make_small_continuous_problem(n_samples: int = 200, seed: int = 0) -> Bench
 class TestProtocolConformance:
     """NBNAdapter satisfies the v0.13 BaselineAdapter protocol."""
 
-    def test_nbn_adapter_satisfies_protocol(self):
-        adapter = NBNAdapter(mechanism="cat", engine="lw")
-        assert isinstance(adapter, BaselineAdapter)
-
     def test_name_derived_from_mechanism_engine(self):
         assert NBNAdapter(mechanism="cat",       engine="lw").name     == "nbn-cat-lw"
         assert NBNAdapter(mechanism="cat",       engine="ve").name     == "nbn-cat-ve"
@@ -110,42 +109,6 @@ class TestProtocolConformance:
     def test_invalid_engine_raises(self):
         with pytest.raises(ValueError, match="Unknown engine"):
             NBNAdapter(mechanism="cat", engine="bogus")
-
-
-class TestApplicability:
-    """is_applicable() returns correct results per (adapter, family)."""
-
-    def test_cat_lw_applicable_to_discrete(self):
-        adapter = NBNAdapter(mechanism="cat", engine="lw")
-        problem = _make_small_discrete_problem()
-        assert adapter.is_applicable(problem) is True
-
-    def test_cat_ve_applicable_to_discrete(self):
-        adapter = NBNAdapter(mechanism="cat", engine="ve")
-        problem = _make_small_discrete_problem()
-        assert adapter.is_applicable(problem) is True
-
-    def test_mdn_lw_not_applicable_to_discrete(self):
-        adapter = NBNAdapter(mechanism="mdn", engine="lw")
-        problem = _make_small_discrete_problem()
-        assert adapter.is_applicable(problem) is False
-
-    def test_mdn_lw_applicable_to_continuous(self):
-        adapter = NBNAdapter(mechanism="mdn", engine="lw")
-        problem = _make_small_continuous_problem()
-        assert adapter.is_applicable(problem) is True
-
-    def test_cat_lw_not_applicable_to_continuous(self):
-        adapter = NBNAdapter(mechanism="cat", engine="lw")
-        problem = _make_small_continuous_problem()
-        assert adapter.is_applicable(problem) is False
-
-    def test_unknown_name_returns_false(self):
-        # Manually set a name not in the registry
-        adapter = NBNAdapter(mechanism="cat", engine="lw")
-        adapter.name = "nbn-not-in-registry"
-        problem = _make_small_discrete_problem()
-        assert adapter.is_applicable(problem) is False
 
 
 @pytest.mark.slow
@@ -211,20 +174,6 @@ class TestBehavioral:
         assert posterior.samples.ndim == 1
         assert posterior.samples.shape[0] > 0
         assert torch.isfinite(posterior.samples).all()
-
-    def test_query_before_fit_raises_runtime_error(self):
-        adapter = NBNAdapter(mechanism="cat", engine="lw")
-        q = Query(targets=("X0",), evidence={}, kind="marginal")
-        with pytest.raises(RuntimeError, match="not fitted"):
-            adapter.query(q)
-
-    def test_epochs_kwarg_accepted(self):
-        """fit() accepts epochs as a kwarg without crashing."""
-        adapter = NBNAdapter(mechanism="cat", engine="lw", device="cpu")
-        problem = _make_small_discrete_problem(n_samples=200, seed=1)
-        adapter.fit(problem, epochs=2)   # very short — just checking it runs
-        assert adapter.model is not None
-
 
 # ---------------------------------------------------------------------------
 # Regression: training-budget pass-through (PR A).

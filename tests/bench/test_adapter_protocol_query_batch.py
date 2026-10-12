@@ -141,25 +141,3 @@ class TestDefaultQueryBatchRealAdapter:
         assert len(batched) == len(sequential) == 3
         for b, s in zip(batched, sequential):
             assert torch.equal(b.probs, s.probs)  # bitwise identical (VE is exact)
-
-
-# ---- Protocol surface: every adapter has query_batch -------------------------
-
-class TestAdaptersExposeQueryBatch:
-    @pytest.mark.parametrize(
-        "adapter_cls, kwargs",
-        [
-            (NBNAdapter, {"mechanism": "cat", "engine": "ve", "device": "cpu"}),
-            (PgmpyAdapter, {"param_method": "mle", "inference_method": "ve"}),
-            (PomegranateAdapter, {"device": "cpu"}),
-            (
-                PyroAdapter,
-                {"mechanism": "empirical", "inference_method": "importance"},
-            ),
-        ],
-        ids=["nbn", "pgmpy", "pomegranate", "pyro"],
-    )
-    def test_has_callable_query_batch(self, adapter_cls, kwargs):
-        adapter = adapter_cls(**kwargs)
-        assert hasattr(adapter, "query_batch")
-        assert callable(adapter.query_batch)

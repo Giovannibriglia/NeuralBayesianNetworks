@@ -145,41 +145,6 @@ def test_extract_and_recovery_match_recomputation(mechanism):
 
 # ---- canonical row-index layout guard ---------------------------------------
 
-@pytest.mark.slow
-def test_canonical_row_index_multiparent():
-    """For a node with two parents, the canonical row for (X0=a, X1=b) equals
-    forward() at that assignment (catches stride/order surprises)."""
-    from nbn import NeuralBayesianNetwork
-
-    variables = {"X0": ("discrete", 2), "X1": ("discrete", 2), "X2": ("discrete", 3)}
-    dag = [("X0", "X2"), ("X1", "X2")]
-    model = NeuralBayesianNetwork(dag, variables=variables, device="cpu")
-    model.set_mechanism("X0", _cat_mech(torch.tensor([[0.5, 0.5]]), []))
-    model.set_mechanism("X1", _cat_mech(torch.tensor([[0.4, 0.6]]), []))
-    # 4 parent configs (X0 in 0..1 slowest, X1 in 0..1 fastest), K=3.
-    x2 = torch.tensor([
-        [0.7, 0.2, 0.1],   # (X0=0, X1=0)
-        [0.1, 0.8, 0.1],   # (X0=0, X1=1)
-        [0.2, 0.2, 0.6],   # (X0=1, X1=0)
-        [0.3, 0.3, 0.4],   # (X0=1, X1=1)
-    ])
-    model.set_mechanism("X2", _cat_mech(x2, [2, 2]))
-
-    cpts = extract_discrete_cpts(model, variables)
-    canonical = cpts["X2"]                            # [4, 3]
-    assert tuple(canonical.shape) == (4, 3)
-
-    mech_parents = list(model.dag.parents("X2"))      # mechanism's own column order
-    for a in (0, 1):
-        for b in (0, 1):
-            vals = {"X0": a, "X1": b}
-            pa = torch.tensor([[vals[p] for p in mech_parents]])
-            expected = model.mechanisms["X2"].forward(pa).probs.reshape(-1)
-            # canonical: parents sorted lex = [X0, X1]; first slowest -> a*2 + b
-            row = canonical[a * 2 + b]
-            assert torch.allclose(row, expected, atol=1e-6), (a, b)
-
-
 # ---- gate: discrete ok / continuous not_applicable --------------------------
 
 @pytest.mark.slow
