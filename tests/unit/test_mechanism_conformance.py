@@ -198,3 +198,58 @@ def test_to_device_moves_every_tensor(name, device):
         assert t.device.type == want, f"{name}.{key} stayed on {t.device}"
     lp = mech.log_prob(_x2d(mech, x)[:B].to(device), pa[:B].to(torch.float32).to(device))
     assert lp.device.type == want and torch.isfinite(lp).all()
+
+
+# ---- capability flags vs implementation ---------------------------------------
+# ``supports_update`` / ``supports_weights`` are read by nbn.update / nbn.learning
+# *instead of* calling the method and seeing what happens, because every
+# fit_local / update_local ends in **kwargs and would silently swallow an
+# unsupported keyword.  So each flag must match what the mechanism does.
+# (``warm_start_is_noop`` is pinned per mechanism in test_warm_start_contract.py.)
+
+#: Constant CPDs: nothing is estimated from data, so weights cannot bite.
+_CONSTANT = {"DeterministicMechanism", "DiracGaussianMechanism"}
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_supports_update_flag_matches_update_local(name):
+    mech, x, pa, kw = _REGISTRY[name]()
+    if kw.get("consolidate") is False:
+        kw = {**kw, "consolidate": True}   # the EWC update needs the snapshot
+    mech.fit_local(x, pa, **kw)
+    if type(mech).supports_update:
+        info = mech.update_local(x[:40], pa[:40])
+        assert isinstance(info, dict)
+        lp = mech.log_prob(_x2d(mech, x)[:B], pa[:B].to(torch.float32))
+        assert torch.isfinite(lp).all()
+    else:
+        # nbn.update must skip the node rather than call update_local.
+        from nbn import NeuralBayesianNetwork as NBN
+
+        kind = ("discrete", 2) if mech.is_discrete else ("continuous", 1)
+        model = NBN([], variables={"X": kind}, device="cpu")
+        model.set_mechanism("X", mech)
+        hist = model.update({"X": x[:40] if mech.is_discrete else _x2d(mech, x)[:40]})
+        assert hist.skipped == ["X"], hist
+
+
+@pytest.mark.parametrize("name", [n for n in NAMES if n not in _CONSTANT])
+def test_supports_weights_flag_matches_fit_local(name):
+    """True => the weights change the fit (FlexCode-root once claimed support
+    and silently fitted unweighted); False => fit_local refuses them loudly."""
+    mech, x, pa, kw = _REGISTRY[name]()
+    w = torch.zeros(x.shape[0])
+    w[: x.shape[0] // 4] = 1.0                       # keep a quarter of the rows
+    if not type(mech).supports_weights:
+        with pytest.raises(NotImplementedError):
+            mech.fit_local(x, pa, weights=w, **kw)
+        return
+    torch.manual_seed(0)
+    mech.fit_local(x, pa, weights=w, **kw)
+    other, *_ = _REGISTRY[name]()
+    torch.manual_seed(0)
+    other.fit_local(x, pa, **kw)
+    probe_x, probe_pa = _x2d(mech, x)[-B:], pa[-B:].to(torch.float32)
+    assert not torch.allclose(mech.log_prob(probe_x, probe_pa),
+                              other.log_prob(probe_x, probe_pa), atol=1e-4), (
+        f"{name} advertises supports_weights but the weighted fit equals the unweighted one")

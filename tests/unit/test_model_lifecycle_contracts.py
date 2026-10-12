@@ -15,6 +15,7 @@ import pytest
 import torch
 
 from nbn import NeuralBayesianNetwork as NBN
+from tests.conftest import available_accelerators
 from nbn.inference.tensor_ve import TensorVariableElimination
 from nbn.mechanisms import (
     CategoricalTableMechanism,
@@ -252,3 +253,57 @@ def test_joint_fit_without_parameters_explains_itself():
     # ...and the documented remedy works.
     model.fit(data)
     assert model.fit(data, method="joint", epochs=1).node_log_likelihoods
+
+
+# ---------------------------------------------------------------- map_query
+
+
+def test_map_query_returns_the_posterior_argmax():
+    model, _ = _discrete_model(p=0.1)        # P(A=1)=0.1, P(B=A)=0.9
+    assert int(model.map_query(["A"])["A"]) == 0
+    for a in (0, 1):
+        got = model.map_query(["B"], evidence={"A": torch.tensor(a)})
+        post = model.query(["B"], evidence={"A": torch.tensor(a)})
+        assert set(got) == {"B"}
+        assert int(got["B"]) == int(post.argmax()) == a
+
+
+def test_map_query_refuses_a_joint_target():
+    model, _ = _discrete_model()
+    with pytest.raises(NotImplementedError, match="multi-target"):
+        model.map_query(["A", "B"])
+
+
+# ------------------------------------------------- devices: save / multi-GPU
+
+
+@pytest.mark.parametrize("device", available_accelerators())
+def test_save_on_an_accelerator_load_on_cpu(device):
+    """A checkpoint written from cuda / mps loads on a CPU-only host and
+    answers the same queries (the other half of the round trip,
+    test_device_propagation, only moves a live model)."""
+    model, _ = _discrete_model()
+    want = model.query(["B"], evidence={"A": torch.tensor(1)}).cpu()
+    model.to(device)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "m.pt")
+        model.save(path)
+        loaded = NBN.load(path, map_location="cpu")
+    assert loaded.device.type == "cpu"
+    assert all(t.device.type == "cpu"
+               for t in list(loaded.parameters()) + list(loaded.buffers()))
+    torch.testing.assert_close(
+        loaded.query(["B"], evidence={"A": torch.tensor(1)}), want, atol=1e-5, rtol=0)
+
+
+@pytest.mark.multi_gpu
+def test_a_model_on_the_second_gpu_stays_there():
+    """Multi-GPU / SLURM hosts: an indexed device is honoured end to end
+    (fit, query, sample), never silently mapped back to cuda:0."""
+    model, data = _discrete_model()
+    model.to("cuda:1")
+    assert model.device == torch.device("cuda", 1)
+    model.fit(data)
+    assert all(p.device == torch.device("cuda", 1) for p in model.parameters())
+    assert model.query(["B"], evidence={"A": torch.tensor(1)}).device == torch.device("cuda", 1)
+    assert model.sample(4)["B"].device == torch.device("cuda", 1)

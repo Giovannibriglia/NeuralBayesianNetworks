@@ -580,3 +580,67 @@ def test_flexcode_root_zero_weighted_rows_leave_the_estimate():
     assert not torch.allclose(
         masked._root_coef, pooled._root_coef, atol=1e-3,
     )
+
+
+# ==========================================================================
+# Model level, method="joint"
+# ==========================================================================
+# The joint loop owns its own permutation and gathers the weights with the
+# batch's indices ("or they desynchronise", nbn/learning/fit.py).  Pinned two
+# ways: full-batch replication equivalence, and zero-weight rows staying inert
+# under mini-batches, where a desynchronised gather would hand their weight
+# to other rows.
+
+
+def _joint_model(data, seed=0):
+    torch.manual_seed(seed)
+    m = NBN([("A", "B")], variables={"A": ("continuous", 1), "B": ("continuous", 1)},
+            device="cpu")
+    m.set_mechanism("A", LinearGaussianMechanism())
+    m.set_mechanism("B", LinearGaussianMechanism())
+    m.fit(data)                          # local fit: builds the parameters
+    return m
+
+
+def _ab(n=60, seed=0):
+    g = torch.Generator().manual_seed(seed)
+    a = torch.randn(n, 1, generator=g)
+    return {"A": a, "B": 2.0 * a + 0.5 + 0.3 * torch.randn(n, 1, generator=g)}
+
+
+@pytest.mark.filterwarnings("ignore:method='joint' refined nodes:UserWarning")
+def test_joint_fit_with_weights_matches_replicated_data():
+    data = _ab()
+    w = torch.randint(1, 4, (60,)).float()
+    idx = _replicate(w)
+    init = {k: v[:20] for k, v in data.items()}       # same start for both
+
+    weighted = _joint_model(init)
+    weighted.fit(data, method="joint", weights=w, epochs=3, batch_size=10**6, lr=1e-2)
+    replicated = _joint_model(init)
+    replicated.fit({k: v[idx] for k, v in data.items()}, method="joint",
+                   epochs=3, batch_size=10**6, lr=1e-2)
+
+    for (k, p), (_, q) in zip(weighted.named_parameters(), replicated.named_parameters()):
+        torch.testing.assert_close(p, q, atol=1e-5, rtol=0, msg=k)
+    unweighted = _joint_model(init)
+    unweighted.fit(data, method="joint", epochs=3, batch_size=10**6, lr=1e-2)
+    assert any(not torch.allclose(p, q, atol=1e-4) for p, q in
+               zip(weighted.parameters(), unweighted.parameters())), "weights did not bite"
+
+
+@pytest.mark.filterwarnings("ignore:method='joint' refined nodes:UserWarning")
+def test_joint_minibatch_fit_ignores_zero_weighted_outliers():
+    clean = _ab(n=64)
+    outliers = {"A": torch.zeros(64, 1), "B": torch.full((64, 1), 100.0)}
+    data = {k: torch.cat([clean[k], outliers[k]]) for k in clean}
+    w = torch.cat([torch.ones(64), torch.zeros(64)])
+
+    def _bias_after(weights):
+        m = _joint_model(clean)
+        m.fit(data, method="joint", weights=weights, epochs=20, batch_size=16, lr=1e-2)
+        return float(m.mechanisms["B"]._bias.detach().reshape(-1)[0])
+
+    start = float(_joint_model(clean).mechanisms["B"]._bias.detach().reshape(-1)[0])
+    assert abs(_bias_after(w) - start) < 0.05          # outliers inert
+    assert abs(_bias_after(None) - start) > 0.05       # ...and they would bite
