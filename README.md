@@ -311,7 +311,7 @@ Repository layout:
     tests/data/          fixtures, incl. vendored bnlearn .bif networks
     examples/            executed Jupyter notebooks: one per feature, then SCMs and probability sets
     scripts/             run_all_benchmarks.sh and other helpers
-    docs/                benchmark guide, oracle methodology, SCM design notes
+    docs/                Sphinx documentation site (https://nbn.readthedocs.io), incl. the benchmark guides
 
 Releases are cut by pushing a `v*` tag; `.github/workflows/publish.yml` builds
 and uploads to PyPI. Known limitations and the roadmap are tracked in the
