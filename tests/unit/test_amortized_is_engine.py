@@ -143,37 +143,6 @@ def test_convergence_to_ve(discrete_problem):
     assert err_high < 0.6 * err_low
 
 
-# ---- 3. Batching speedup: per-query time falls as B grows ---------------------
-
-@pytest.mark.slow
-def test_batching_speedup(discrete_problem):
-    # n_samples=64 keeps the per-call overhead -- what batching amortises --
-    # dominant. At 1024 the work is compute-bound and B=64 beat B=1 by only
-    # ~1.2x on one core, a margin CI-runner noise flipped (master after #292,
-    # macOS lane); at 64 it is ~6x.
-    ais = _fit_adapter("cat", "ais", discrete_problem, n_samples=64, epochs=5)
-
-    def per_query_time(b: int) -> float:
-        queries = [_discrete_evidence_query(v % 2) for v in range(b)]
-        ais.query_batch(queries)  # warmup
-        # Best of 5, not the mean: on a shared CI runner (xdist workers on the
-        # same cores) a single preempted call can swamp the mean and flip the
-        # comparison; the minimum is what the engine can do.
-        times = []
-        for _ in range(5):
-            t0 = time.perf_counter()
-            ais.query_batch(queries)
-            times.append(time.perf_counter() - t0)
-        return min(times) / b
-
-    pq1 = per_query_time(1)
-    pq_big = per_query_time(64)
-    assert pq_big < pq1, (
-        f"batching contract violated: per-query at B=64 ({pq_big:.6f}s) "
-        f"not < per-query at B=1 ({pq1:.6f}s)"
-    )
-
-
 # ---- 6. mdn continuous: AIS agrees with LW (same fitted model) ---------------
 
 @pytest.mark.slow

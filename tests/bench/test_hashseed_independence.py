@@ -62,12 +62,14 @@ def _run(code: str, hashseed: str) -> str:
     return res.stdout.strip().splitlines()[-1]
 
 
+@pytest.mark.subprocess
 def test_selected_queries_identical_across_hash_seeds():
     outs = {_run(_SELECT, s) for s in ("1", "2", "3")}
     assert len(outs) == 1, "query selection depends on PYTHONHASHSEED"
     assert json.loads(outs.pop())
 
 
+@pytest.mark.subprocess
 @pytest.mark.slow
 def test_cell_scores_identical_across_hash_seeds():
     outs = [_run(_CELL, s) for s in ("1", "2")]

@@ -217,6 +217,7 @@ class TestRunSeedSkip:
         assert not any("skipped" in (r.error_msg or "") for r in rows)
 
 
+@pytest.mark.subprocess
 @pytest.mark.slow
 class TestRunSeedSkipRealSubprocess:
     """End-to-end through the real cell subprocess (no monkeypatch). A

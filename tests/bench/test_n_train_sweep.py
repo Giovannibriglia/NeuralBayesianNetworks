@@ -105,6 +105,7 @@ def test_validation_mutual_exclusion_and_synthetic_only():
 
 # ---- end-to-end: n_train column stamped with distinct values ----------------
 
+@pytest.mark.subprocess
 @pytest.mark.slow
 def test_sweep_stamps_n_train_column(tmp_path):
     from nbn.bench.core.runner import Runner

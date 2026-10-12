@@ -19,6 +19,7 @@ Reference: docs/v0.14-fit-once-query-many-design.md; issue #191.
 """
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from typing import Iterator
 
@@ -137,7 +138,9 @@ def _cfg(baselines, *, batch_sizes=None, tmp_path=None):
         selector=UniformRandomSelector(), measurement=TimingOnly(),
         baselines=baselines, n_queries_per_cell=1, per_cell_timeout_s=60.0,
         batch_sizes=batch_sizes,
-        jsonl_path=(tmp_path or Path("/tmp")) / "out.jsonl",
+        # Never a shared path such as /tmp/out.jsonl (multi-user / SLURM hosts):
+        # a private directory when the caller has no tmp_path.
+        jsonl_path=(tmp_path or Path(tempfile.mkdtemp(prefix="nbn-test-"))) / "out.jsonl",
     )
 
 
@@ -438,6 +441,7 @@ class TestGroupedEqualsUngrouped:
             )
         return list(Runner().run(cfg))
 
+    @pytest.mark.subprocess
     def test_grouped_matches_ungrouped_structure(self, tmp_path, monkeypatch):
         grouped = self._run(tmp_path / "g", monkeypatch, grouped=True)
         with pytest.MonkeyPatch.context() as mp:
@@ -454,6 +458,7 @@ class TestGroupedEqualsUngrouped:
               if r.metric == "query_time_s"}
         assert ("nbn-cat-lw", "ok") in ok and ("nbn-cat-ve", "ok") in ok
 
+    @pytest.mark.subprocess
     def test_fitcache_cleaned_after_run(self, tmp_path, monkeypatch):
         self._run(tmp_path, monkeypatch, grouped=True)
         leaked = list(Path(tmp_path).rglob("*.pt"))
@@ -466,6 +471,7 @@ class TestNonNbnUnaffected:
     """A config mixing nbn + pomegranate: the non-nbn baseline is never grouped
     or cached, and the run completes cleanly through real subprocesses."""
 
+    @pytest.mark.subprocess
     def test_mixed_run_completes_and_no_leak(self, tmp_path):
         baselines = [
             _spec("cat", "ve"), _spec("cat", "lw"),

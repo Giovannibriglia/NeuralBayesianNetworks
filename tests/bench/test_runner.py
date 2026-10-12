@@ -671,6 +671,7 @@ class TestSentinelQueryRole:
 # ---------------------------------------------------------------------------
 
 class TestNotSupportedPath:
+    @pytest.mark.subprocess
     def test_pgmpy_mle_ve_not_applicable_on_continuous_lg(self, tmp_path):
         """pgmpy-mle-ve is discrete-only → not_supported on continuous_lg."""
         problem = _minimal_continuous_problem()
@@ -685,6 +686,7 @@ class TestNotSupportedPath:
         assert rows[0].fit_time_s == 0.0
         assert rows[0].query_time_s == 0.0
 
+    @pytest.mark.subprocess
     def test_not_supported_written_to_jsonl(self, tmp_path):
         problem = _minimal_continuous_problem()
         spec = BaselineSpec("pgmpy", "discrete", "mle", "ve")
@@ -698,6 +700,7 @@ class TestNotSupportedPath:
         d = json.loads(lines[0])
         assert d["status"] == "not_supported"
 
+    @pytest.mark.subprocess
     def test_multiple_baselines_only_applicable_ones_run(self, tmp_path):
         """pgmpy-mle-ve not_supported; nbn-lg-lw applicable on continuous_lg."""
         problem = _minimal_continuous_problem()
@@ -775,6 +778,7 @@ class TestFitFailurePath:
         for r in rows:
             assert r["status"] == "oom"
 
+    @pytest.mark.subprocess
     def test_fit_failure_rows_written_to_jsonl(self, tmp_path, monkeypatch):
         problem = _minimal_discrete_problem()
         spec = BaselineSpec("pgmpy", "discrete", "mle", "ve")
@@ -932,10 +936,35 @@ _MATRIX = [
     _MATRIX,
     ids=[f"{t[0]}@{t[1]}" for t in _MATRIX],
 )
-def test_end_to_end_cell(adapter_id, family, spec, requires, tmp_path):
-    """Full runner pipeline: problem → adapter → measurement → JSONL."""
+@pytest.mark.subprocess
+def test_end_to_end_cell(adapter_id, family, spec, requires, tmp_path, monkeypatch):
+    """Full runner pipeline: problem → adapter → measurement → JSONL.
+
+    This drives real cell subprocesses, so a failure can come from the host
+    (memory pressure, a signal) rather than the code under test.  Every
+    assertion therefore reports the cell's classification, exit code and
+    stderr tail -- a one-off failure under ``-n auto`` must leave enough
+    evidence to tell the two apart.
+    """
     if requires:
         pytest.importorskip(requires)
+
+    from nbn.bench.core import cell_runner
+
+    cells: list = []
+    real_run = cell_runner.run_cell_in_subprocess
+
+    def _recording_run(ctx, **kw):
+        res = real_run(ctx, **kw)
+        cells.append(res)
+        return res
+
+    monkeypatch.setattr(cell_runner, "run_cell_in_subprocess", _recording_run)
+
+    def _diag() -> str:
+        return "; ".join(
+            f"cell[{i}] classification={c.classification} exit_code={c.exit_code} "
+            f"stderr tail={c.stderr[-600:]!r}" for i, c in enumerate(cells))
 
     src, src_cfg = _make_source_cfg(family, n_nodes=4, seed=0)
     measurement = AccuracyAndTiming(n_oracle_samples=100)
@@ -969,12 +998,15 @@ def test_end_to_end_cell(adapter_id, family, spec, requires, tmp_path):
     assert len(bad_rows) == 0, (
         f"Got error/oom rows for {adapter_id}@{family}: "
         + str([(r.status, r.error_msg) for r in bad_rows[:3]])
+        + f" | {_diag()}"
     )
 
     # fit_time_s identical across all rows (per-cell cost)
     fit_times = {r.fit_time_s for r in rows}
-    assert len(fit_times) == 1, f"fit_time_s not identical: {fit_times}"
-    assert next(iter(fit_times)) > 0.0, "fit_time_s should be > 0"
+    assert len(fit_times) == 1, (
+        f"fit_time_s not identical: {fit_times}; statuses "
+        f"{sorted({r.status for r in rows})} | {_diag()}")
+    assert next(iter(fit_times)) > 0.0, f"fit_time_s should be > 0 | {_diag()}"
 
     # query_time_s > 0 for ok rows
     ok_rows = [r for r in rows if r.status == "ok"]
@@ -990,6 +1022,7 @@ def test_end_to_end_cell(adapter_id, family, spec, requires, tmp_path):
         assert r.baseline == adapter_id
 
 
+@pytest.mark.subprocess
 @pytest.mark.slow
 def test_zero_budget_forces_timeout_rows(tmp_path):
     """budget=0.0: cumulative 0.0 >= 0.0 at query 0 → all queries timeout.
@@ -1027,6 +1060,7 @@ def test_zero_budget_forces_timeout_rows(tmp_path):
         assert r.error_msg == "query budget exceeded"
 
 
+@pytest.mark.subprocess
 @pytest.mark.slow
 def test_multiple_baselines_iterate_correctly(tmp_path):
     """Runner iterates all baselines for each problem."""
@@ -1059,6 +1093,7 @@ def test_multiple_baselines_iterate_correctly(tmp_path):
     assert len(lines) == len(rows)
 
 
+@pytest.mark.subprocess
 @pytest.mark.slow
 def test_fit_time_s_identical_across_rows_in_cell(tmp_path):
     """fit_time_s is a per-cell cost: identical across all metric rows for a cell."""
@@ -1084,6 +1119,7 @@ def test_fit_time_s_identical_across_rows_in_cell(tmp_path):
     assert next(iter(fit_times)) > 0.0
 
 
+@pytest.mark.subprocess
 @pytest.mark.slow
 def test_problem_seed_propagated_to_cell_result(tmp_path):
     """problem.seed is used as CellResult.seed for every row in the cell."""

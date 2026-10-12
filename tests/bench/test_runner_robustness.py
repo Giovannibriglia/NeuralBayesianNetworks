@@ -245,6 +245,7 @@ class TestRunnerFailedProblem:
             assert "404" in r.error_msg
         assert {r.baseline for r in rows} == {"pgmpy-mle-ve", "nbn-cat-ve"}
 
+    @pytest.mark.subprocess
     def test_continues_to_real_problem_after_failure(self, tmp_path):
         fp = FailedProblem("munin1", "discrete", "RuntimeError: boom", "bnlearn")
         real = _minimal_continuous_problem(problem_id="realprob")

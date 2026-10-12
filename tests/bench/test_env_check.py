@@ -195,12 +195,14 @@ def _cli(*args):
                           capture_output=True, text=True)
 
 
+@pytest.mark.subprocess
 def test_check_env_command_passes_in_this_environment():
     res = _cli("check-env")
     assert res.returncode == 0, res.stdout + res.stderr
     assert "environment OK" in res.stdout and "pgmpy" in res.stdout
 
 
+@pytest.mark.subprocess
 def test_check_env_with_config_restricts_to_baselines(tmp_path):
     cfg = tmp_path / "c.yaml"
     cfg.write_text(yaml.safe_dump({"baselines": [{"library": "nbn", "mechanism": "cat"}]}))

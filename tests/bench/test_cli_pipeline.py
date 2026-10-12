@@ -61,6 +61,7 @@ _MINIMAL_CONFIG = {
 }
 
 
+@pytest.mark.subprocess
 @pytest.mark.slow
 def test_cli_inference_produces_all_outputs(tmp_path: Path) -> None:
     """nbn-bench inference must produce JSONL + parquet (the canonical run
@@ -118,6 +119,7 @@ def test_cli_inference_produces_all_outputs(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.subprocess
 @pytest.mark.slow
 def test_cli_param_learning_produces_parquet(tmp_path: Path) -> None:
     """nbn-bench param-learning runs end-to-end and writes the parquet (#109).

@@ -70,6 +70,7 @@ class TestStatusMapping:
         assert _classification_to_status("killed", 137) == "oom"
 
 
+@pytest.mark.subprocess
 class TestSubprocessLaunch:
     """Integration tests for the parent-subprocess interaction."""
 
@@ -201,6 +202,7 @@ class TestSubprocessLaunch:
         assert "boom: CUDA error 700" in msg
 
 
+@pytest.mark.subprocess
 @pytest.mark.slow
 class TestFailureModes:
     """Stage 3: empirical proof that the runner survives each failure mode.

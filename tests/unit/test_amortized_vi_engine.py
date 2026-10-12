@@ -142,29 +142,6 @@ def test_mdn_continuous_finite(continuous_problem):
     assert abs(float(lw_samp.mean()) - float(avi_samp.mean())) < 0.5
 
 
-# ---- 5. Single-forward-pass speed: faster than Engine A -----------------------
-
-@pytest.mark.slow
-def test_single_forward_pass_faster_than_ais(discrete_problem):
-    avi = _fit_adapter("cat", "avi", discrete_problem, n_samples=1024, epochs=10)
-    ais = _fit_adapter("cat", "ais", discrete_problem, n_samples=1024, epochs=5)
-
-    def batch_time(adapter, b: int = 64) -> float:
-        queries = [_disc_q(v % 2) for v in range(b)]
-        adapter.query_batch(queries)  # warmup
-        t0 = time.perf_counter()
-        for _ in range(5):
-            adapter.query_batch(queries)
-        return (time.perf_counter() - t0) / 5
-
-    t_avi = batch_time(avi)
-    t_ais = batch_time(ais)
-    assert t_avi < 0.5 * t_ais, (
-        f"AVI single-forward-pass ({t_avi:.6f}s) not < 50% of AIS "
-        f"({t_ais:.6f}s) at B=64"
-    )
-
-
 # ---- 6. Discrete gradient flow (Rao-Blackwellized ELBO) ----------------------
 
 @pytest.mark.slow

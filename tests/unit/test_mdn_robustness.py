@@ -298,6 +298,7 @@ def test_mdn_log_scale_output_clamp_issue_95() -> None:
     assert torch.isfinite(scale).all(), "scale has Inf/NaN after output clamp"
 
 
+@pytest.mark.slow
 def test_make_synthetic_bn_continuous_nongauss_n5000_seed0_runs() -> None:
     """Regression test for the exact paper-config failure case.
 

@@ -46,6 +46,10 @@ import numpy as np
 import pytest
 import torch
 
+# barley / hailfinder / link are not vendored under tests/data: first use
+# downloads them from bnlearn.com.
+pytestmark = pytest.mark.network
+
 logger = logging.getLogger(__name__)
 
 # Six-network representative subset (scoping conversation).

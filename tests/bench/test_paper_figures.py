@@ -56,21 +56,18 @@ def _make_minimal_parquet(tmp_path: Path) -> Path:
     return out
 
 
-def _run(parquet: Path, out_dir: Path, aggregation: str, *extra):
-    """Invoke the `nbn-bench plot` subcommand (positional parquet)."""
-    return subprocess.run(
-        [sys.executable, "-m", "nbn.bench.cli", "plot", str(parquet),
-         "--output-dir", str(out_dir), "--aggregation", aggregation, *extra],
-        capture_output=True, text=True,
-    )
+def _run(parquet: Path, out_dir: Path, aggregation: str) -> int:
+    """Run the ``nbn-bench plot`` entry point in-process (the CLI argument
+    plumbing itself is covered by ``test_multi_parquet_cli_nargs``)."""
+    from nbn.bench._paper_figures import run_plot
+    return run_plot(parquet=parquet, output_dir=out_dir, aggregation=aggregation)
 
 
 @pytest.mark.parametrize("aggregation", ["iqm_iqr", "mean_std"])
 def test_pipeline_runs(tmp_path, aggregation):
     parquet = _make_minimal_parquet(tmp_path)
     out_dir = tmp_path / f"figures_{aggregation}"
-    result = _run(parquet, out_dir, aggregation)
-    assert result.returncode == 0, f"script failed: {result.stderr[-800:]}"
+    assert _run(parquet, out_dir, aggregation) == 0
     assert list(out_dir.rglob("*.pdf")), f"no PDFs in {out_dir}"
     assert list(out_dir.rglob("*.tex")), f"no LaTeX tables in {out_dir}"
 
@@ -79,7 +76,7 @@ def test_w1_skipped_for_discrete(tmp_path):
     """family==discrete must not emit w1_per_node figures."""
     parquet = _make_minimal_parquet(tmp_path)
     out_dir = tmp_path / "figures"
-    assert _run(parquet, out_dir, "iqm_iqr").returncode == 0
+    assert _run(parquet, out_dir, "iqm_iqr") == 0
     assert not list(out_dir.rglob("*w1_per_node*")), "w1 figures should be skipped for discrete"
 
 
@@ -88,8 +85,7 @@ def test_n_parameters_is_not_an_axis(tmp_path):
     benchmark's x grid is rendered (network for bnlearn)."""
     parquet = _make_minimal_parquet(tmp_path)
     out_dir = tmp_path / "figures"
-    result = _run(parquet, out_dir, "iqm_iqr")
-    assert result.returncode == 0
+    assert _run(parquet, out_dir, "iqm_iqr") == 0
     assert not list(out_dir.rglob("*_vs_n_parameters*"))
     assert list(out_dir.rglob("*_vs_network*"))
 
@@ -475,6 +471,7 @@ def test_multi_parquet_concat_renders_both(tmp_path):
     assert list((out_dir / "synthetic").rglob("param_recovery_tv_vs_*.pdf"))
 
 
+@pytest.mark.subprocess
 def test_multi_parquet_cli_nargs(tmp_path):
     inf = _make_minimal_parquet(tmp_path)
     pl = _make_learning_curve_parquet(tmp_path)

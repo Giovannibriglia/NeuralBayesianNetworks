@@ -43,6 +43,7 @@ def sweep_df(tmp_path_factory) -> pd.DataFrame:
 
 @pytest.mark.slow
 class TestSweepDispatch:
+    @pytest.mark.subprocess
     def test_swept_baseline_runs_at_every_batch_size(self, sweep_df):
         qt = sweep_df[sweep_df.metric == "query_time_s"]
         nbn = qt[qt.baseline == "nbn-cat-ve"]

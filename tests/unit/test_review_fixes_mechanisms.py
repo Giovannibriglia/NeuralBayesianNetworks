@@ -555,6 +555,7 @@ def _flexcode_root(y, **kw):
     return mech
 
 
+@pytest.mark.slow
 def test_a11_flexcode_density_is_normalised_over_the_real_line():
     # Pre-fix: z was clamped into [0, 1], so every y off the support scored
     # the boundary density and the integral over [-100, 100] was 4.29.  An
