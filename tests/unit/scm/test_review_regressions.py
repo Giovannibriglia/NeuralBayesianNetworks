@@ -40,7 +40,7 @@ def _continuous_scm(device="cpu", **mech_kwargs):
     model = StructuralCausalModel([("x", "y")], {"x": ("continuous", 1), "y": ("continuous", 1)},
                                   device=device)
     model.set_mechanism("y", AdditiveNoiseMechanism(**mech_kwargs))
-    model.auto_mechanisms(default_continuous="linear")
+    model.auto_mechanisms(default_continuous="lg")
     return model
 
 
@@ -114,7 +114,7 @@ def test_mlp_respects_the_epoch_budget_and_tied_history_is_post_refit():
                                   dict.fromkeys(data, ("continuous", 1)), device="cpu")
     model.set_mechanism("y", AdditiveNoiseMechanism("mlp", epochs=1))
     model.set_mechanism("z", AdditiveNoiseMechanism("mlp", epochs=1))
-    model.auto_mechanisms(default_continuous="linear")
+    model.auto_mechanisms(default_continuous="lg")
     model.tie_noise(["y", "z"])
     history = model.fit(data, epochs=0)  # zero epochs: the MLPs must stay at initialisation
     for node in ("y", "z"):
@@ -377,7 +377,7 @@ def test_white_test_counts_binary_parents_once():
     model = StructuralCausalModel([("b", "y")], {"b": ("continuous", 1), "y": ("continuous", 1)},
                                   device="cpu")
     model.set_mechanism("y", AdditiveNoiseMechanism())
-    model.auto_mechanisms(default_continuous="linear")
+    model.auto_mechanisms(default_continuous="lg")
     model.fit(data)
     assert noise_sharing_test(model, data, "y").details["df"] == 1
 

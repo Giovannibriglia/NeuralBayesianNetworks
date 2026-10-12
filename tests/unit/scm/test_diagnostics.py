@@ -74,7 +74,7 @@ def _continuous(n=3000, seed=0, heteroscedastic=False):
                                   dict.fromkeys(data, ("continuous", 1)), device="cpu")
     model.set_mechanism("y", AdditiveNoiseMechanism("linear"))
     model.set_mechanism("z", AdditiveNoiseMechanism("linear"))
-    model.auto_mechanisms(default_continuous="linear")
+    model.auto_mechanisms(default_continuous="lg")
     model.fit(data)
     return model, data
 
@@ -195,7 +195,7 @@ def test_context_test_on_a_continuous_mechanism():
         model = StructuralCausalModel([("x", "y")], {"x": ("continuous", 1), "y": ("continuous", 1),
                                                      "c": ("discrete", 2)}, context="c", device="cpu")
         model.set_mechanism("y", AdditiveNoiseMechanism("linear"))
-        model.auto_mechanisms(default_continuous="linear")
+        model.auto_mechanisms(default_continuous="lg")
         model.fit(d)
         p = context_invariance_test(model, d, "y").p_value
         assert (p < 1e-6) if small else (p > 0.01)

@@ -109,7 +109,7 @@ def _continuous_model(mech, device="cpu"):
     model = StructuralCausalModel([("x", "y")], {"x": ("continuous", 1), "y": ("continuous", 1)},
                                   device=device)
     model.set_mechanism("y", mech)
-    model.auto_mechanisms(default_continuous="linear")
+    model.auto_mechanisms(default_continuous="lg")
     return model
 
 

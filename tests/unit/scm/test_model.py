@@ -50,7 +50,7 @@ def test_tied_continuous_nodes_pool_their_residuals():
                                   dict.fromkeys(data, ("continuous", 1)), device="cpu")
     model.set_mechanism("y", AdditiveNoiseMechanism("linear"))
     model.set_mechanism("z", AdditiveNoiseMechanism("linear"))
-    model.auto_mechanisms(default_continuous="linear")
+    model.auto_mechanisms(default_continuous="lg")
     model.tie_noise(["y", "z"])
     model.fit(data)
     assert model.mechanisms["y"].noise is model.mechanisms["z"].noise
