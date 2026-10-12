@@ -175,8 +175,13 @@ def test_guard_rejects_query_that_would_oom_without_multiplier() -> None:
             device=fake_device, order="min_fill", safety=safety,
         )
 
+    # #264: the guard also counts PyTorch's reusable cached blocks
+    # (reserved - allocated) as headroom; pin them to 0 so CUDA work done
+    # earlier in this worker cannot lift the budget above the mock (#298).
     with patch("torch.cuda.mem_get_info",
-               return_value=(free_bytes, free_bytes)):
+               return_value=(free_bytes, free_bytes)), \
+         patch("torch.cuda.memory_reserved", return_value=0), \
+         patch("torch.cuda.memory_allocated", return_value=0):
         # Current code (multiplier=3.0): the query is rejected.
         msg = _call()
         assert msg is not None and "pre-allocation guard" in msg, (
