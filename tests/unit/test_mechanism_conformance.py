@@ -121,12 +121,9 @@ def _x2d(mech, x):
 
 
 #: Known contract violations, kept visible as strict xfails (an xpass fails).
-_KNOWN_VIOLATIONS = {
-    ("is_fitted", "DiracGaussianMechanism"): (
-        "DiracGaussianMechanism inherits Mechanism.is_fitted (always False) -- "
-        "DeterministicMechanism got the 'always fitted' override, its "
-        "continuous sibling did not (library fix pending)"),
-}
+#: Empty: DiracGaussianMechanism.is_fitted was fixed (always fitted, like
+#: DeterministicMechanism).
+_KNOWN_VIOLATIONS: dict = {}
 
 
 def _maybe_xfail(contract, names):

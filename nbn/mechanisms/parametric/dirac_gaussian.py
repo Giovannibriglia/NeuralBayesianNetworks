@@ -115,6 +115,16 @@ class DiracGaussianMechanism(Mechanism):
     # fixed at construction), so there is no statistic for a weight to bias.
     supports_weights: bool = True
 
+    @property
+    def is_fitted(self) -> bool:
+        """Always True: the point mass is fully specified at construction.
+
+        Same contract as :class:`DeterministicMechanism`, its discrete sibling;
+        the base-class default (``False``) made an intervened continuous node
+        look unfitted to code that checks ``is_fitted``.
+        """
+        return True
+
     def fit_local(
         self,
         x: torch.Tensor,
