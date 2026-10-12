@@ -54,11 +54,14 @@ bench = [
 neural = ["zuko>=1.2,<2.0"]
 gp = ["gpytorch>=1.11"]
 mcmc = ["pyro-ppl>=1.9"]
-# What the notebooks in examples/ need on top of the core: plots and Jupyter.
+# What the notebooks in examples/ need on top of the core: plots, Jupyter, and
+# zuko for the normalizing-flow mechanism (same pin as ``neural``).  Notebook 07
+# also reads a .bif file, which needs pgmpy (in ``bench``).
 examples = [
     "matplotlib>=3.7",
     "jupyterlab>=4.0",
     "ipykernel>=6.0",
+    "zuko>=1.2,<2.0",
 ]
 # Everything a paper-grade benchmark run needs, in one extra, plus what the
 # example notebooks need. The runner records a baseline whose library is
