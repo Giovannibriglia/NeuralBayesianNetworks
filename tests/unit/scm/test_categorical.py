@@ -450,3 +450,36 @@ def test_with_coupling_keeps_the_kernel(fitted):
         assert torch.equal(other.probs(pa), mech.probs(pa))
     assert other.coupling == "gumbel_max" and mech.coupling == "monotone"
     assert other.noise.sample(4).shape == (4, 3)
+
+
+def test_monotone_tables_handle_floored_cells_where_float64_exists():
+    """Table lookups do not jitter, so on CPU/CUDA (float64 CDF) even a 1e-12 cell is exact."""
+    table = torch.tensor([[0.6, 0.4, 0.0], [0.2, 0.3, 0.5], [0.3, 0.3, 0.4]])
+    model = _scm(StructuralCategoricalTable(coupling="monotone"))
+    model.fit(_data(3000, seed=0, table=table))
+    mech = model.mechanisms["s"]
+    x, pa = torch.full((500, 1), 2.0), torch.zeros(500, 1)              # p(2 | a=0) floored at 1e-12
+    u = mech.abduct(x, pa)[0]
+    with torch.no_grad():
+        assert torch.equal(mech.structural(pa, u), x)
+
+
+def test_small_probability_bias_is_within_the_stated_bound():
+    """Exact comonotone answer vs abduction for p_x = 1e-5 (neural margin: 2 float32 eps)."""
+    mech = StructuralNeuralCategorical(n_classes=2, hidden=(4,), coupling="monotone")
+    mech.fit_local(torch.zeros(10).long(), None, epochs=1)
+    with torch.no_grad():
+        mech._root_logits.copy_(torch.tensor([1 - 1e-5, 1e-5]).log())
+    torch.manual_seed(0)
+    u = mech.abduct(torch.ones(400_000, 1), None)[0].double()
+    lo_edge = float(mech._cdf_rows(mech.probs(None).detach())[0, 0])
+    frac = float((u[:, 0] <= lo_edge + 5e-7).double().mean())          # mass of a slice of width 5e-7
+    exact = 5e-7 / 1e-5
+    bound = 2 * 2 * torch.finfo(torch.float32).eps / 1e-5
+    assert abs(frac - exact) <= bound + 0.005
+
+
+def test_bounds_from_sets_reject_an_empty_box():
+    with pytest.raises(ValueError, match="simplex"):
+        counterfactual_bounds_from_sets(torch.tensor([[0.5, 0.5]]), torch.tensor([[0.7, 0.7]]),
+                                        torch.tensor([[0.9, 0.9]]), torch.tensor([0]))

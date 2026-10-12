@@ -37,10 +37,10 @@ two marginals, the row is ``pi(x, .) / p``, and any first row ``r`` with
 marginals both have mass ``1 - p``).  For ``pa' = pa`` the answer is the point
 ``X = x`` (consistency; Bareinboim, *Causal AI*, Lemma 5.3.1, p. 268).
 
-Float note: probabilities below the dtype's resolution (NBN tables floor
-unseen cells at ``1e-12``) cannot be told apart from their neighbours in the
-CDF; monotone abduction then refuses the row instead of returning a wrong
-class.  Use float64 kernels (CPU/CUDA) or table smoothing (``alpha > 0``).
+Float note: the monotone CDF is summed in float64 on CPU/CUDA (float32 on
+MPS).  Probabilities below the resolution that abduction needs (2 eps of the
+neural kernel's dtype; for tables, of the CDF dtype) are refused rather than
+mapped to a wrong class: e.g. table cells floored at ``1e-12`` on MPS.
 """
 from __future__ import annotations
 
@@ -57,10 +57,10 @@ from nbn.scm._stats import require_cpu_generator
 from nbn.scm.mechanisms import StructuralMechanism
 from nbn.uncertainty.sets import tighten_box_to_simplex
 from nbn.utils.batching import ensure_2d
-from nbn.utils.device import to_device_dtype
+from nbn.utils.device import accum_dtype, to_device_dtype
 
 Coupling = Literal["gumbel_max", "monotone"]
-_MARGIN_ULPS = 8  # monotone abduction keeps this many float eps away from the CDF jumps
+_MARGIN_EPS = 2  # monotone abduction keeps this many float eps away from the CDF jumps
 _COUPLINGS = ("gumbel_max", "monotone")
 
 
@@ -118,6 +118,8 @@ def counterfactual_bounds_from_sets(
     kernel are the attributed ones above.)
     """
     q_lower, q_upper = tighten_box_to_simplex(q_lower, q_upper)
+    if bool((q_lower > q_upper + 1e-12).any()):
+        raise ValueError("the q box does not meet the probability simplex in some row: no kernel is in the set.")
     p_x = _observed_probability(p_observed_lower, x_observed, allow_zero=True)
     safe = p_x.clamp_min(torch.finfo(p_x.dtype).tiny)
     lower = ((safe + q_lower - 1.0) / safe).clamp(0.0, 1.0)
@@ -253,15 +255,16 @@ class _CategoricalStructural(StructuralMechanism):
         """``x = f(pa, u)``: ``noise`` is ``[B, K]`` Gumbels or ``[B, 1]`` uniforms."""
         noise = ensure_2d(noise)
         probs = self.probs(parents, noise.shape[0])
-        noise = noise.to(probs.device, probs.dtype)
         if self.coupling == "gumbel_max":
+            noise = noise.to(probs.device, probs.dtype)
             if noise.shape[-1] != probs.shape[-1]:
                 raise ValueError(f"gumbel_max noise must be [B, K={probs.shape[-1]}].")
             idx = (_safe_log(probs) + noise).argmax(-1)
         else:
             if noise.shape[-1] != 1:
                 raise ValueError("monotone noise must be [B, 1] uniforms.")
-            cdf = probs.cumsum(-1)
+            cdf = self._cdf_rows(probs)
+            noise = to_device_dtype(noise, cdf.device, cdf.dtype)
             idx = torch.searchsorted(cdf.contiguous(), noise.contiguous()).reshape(-1)
             idx = idx.clamp_max(probs.shape[-1] - 1)  # rounding: F(K - 1) may be 1 - eps
         return self.class_value(idx)
@@ -270,7 +273,12 @@ class _CategoricalStructural(StructuralMechanism):
     def abduct(self, x: torch.Tensor, parents: torch.Tensor | None, n_samples: int = 1) -> torch.Tensor:
         """Exact posterior draws of the noise given ``X = x``: ``[n_samples, B, D_u]``.
 
-        Every draw reproduces ``x`` through :meth:`structural` (also in float32).
+        Every draw reproduces ``x`` through :meth:`structural`.  Monotone
+        draws stay a margin ``m`` inside ``(F(x-1), F(x)]`` (the kernel may give
+        slightly different probabilities on another batch size), so a
+        counterfactual probability can be off by at most ``2 m / P(x | pa)``;
+        ``m`` is 2 eps of the kernel's float dtype for neural kernels and of
+        the CDF dtype (float64 on CPU/CUDA) for table lookups.
         """
         idx = self.class_index(x)
         probs = self.probs(parents, idx.shape[0])
@@ -279,16 +287,15 @@ class _CategoricalStructural(StructuralMechanism):
             raise ValueError("an observed class has probability 0 under its parents: no noise produces it.")
         if self.coupling == "gumbel_max":
             return _gumbel_posterior(probs, idx, n_samples)
-        cdf = probs.cumsum(-1)
+        cdf = self._cdf_rows(probs)
         high = cdf.gather(-1, idx.unsqueeze(-1))
         prev = torch.where(idx.unsqueeze(-1) > 0, cdf.gather(-1, (idx - 1).clamp_min(0).unsqueeze(-1)),
                            torch.zeros_like(high))
-        # Keep draws a few ulps inside (F(x-1), F(x)]: structural() recomputes the CDF,
-        # possibly on another batch size, and float32 results can differ by ~1 ulp.
-        margin = _MARGIN_ULPS * torch.finfo(probs.dtype).eps
+        jitter_dtype = cdf.dtype if self._deterministic_lookup else probs.dtype
+        margin = _MARGIN_EPS * torch.finfo(jitter_dtype).eps
         if bool((high - prev <= 2 * margin).any()):
             raise ValueError(
-                f"an observed class has probability below the {probs.dtype} resolution of the CDF "
+                f"an observed class has probability below the {jitter_dtype} resolution of the CDF "
                 f"(<= {2 * margin:.1e}; e.g. a table cell floored at 1e-12): the monotone coupling "
                 "cannot represent it reliably. Use a float64 kernel, table smoothing (alpha > 0) "
                 "or coupling='gumbel_max'."
@@ -337,6 +344,12 @@ class _CategoricalStructural(StructuralMechanism):
     # Helpers
     # ------------------------------------------------------------------
 
+    _deterministic_lookup = False  # tables: the same probabilities for any batch size
+
+    def _cdf_rows(self, probs: torch.Tensor) -> torch.Tensor:
+        """Row CDFs in the device's widest float dtype (float64 on CPU/CUDA)."""
+        return probs.to(accum_dtype(probs.device)).cumsum(-1)
+
     def _kernel_device(self) -> torch.device:
         for t in list(self.parameters()) + list(self.buffers()):
             return t.device
@@ -362,6 +375,8 @@ class StructuralNeuralCategorical(_CategoricalStructural, NeuralCategoricalMecha
 class StructuralCategoricalTable(_CategoricalStructural, CategoricalTableMechanism):
     """:class:`CategoricalTableMechanism` read as ``X := f(pa, U)`` under a declared ``coupling``."""
 
+    _deterministic_lookup = True
+
     def __init__(self, *args: Any, coupling: Coupling = "gumbel_max", **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._init_coupling(coupling)
@@ -378,12 +393,12 @@ def _safe_log(probs: torch.Tensor) -> torch.Tensor:
 
 
 def _gumbel_posterior(probs: torch.Tensor, idx: torch.Tensor, n_samples: int) -> torch.Tensor:
-    """Gumbels ``G`` with ``argmax(log p + G) = idx``, drawn from their exact posterior.
+    r"""Gumbels ``G`` with ``argmax(log p + G) = idx``, drawn from their exact posterior.
 
     The maximum ``M = max_k(log p_k + G_k)`` is standard Gumbel (``sum p = 1``)
     and independent of the argmax; the other perturbed values are Gumbels with
     location ``log p_k`` truncated below ``M`` (Oberst & Sontag 2019, after
-    Maddison et al. 2014).  Classes with ``p_k = 0`` are not informed by the
+    Maddison, Tarlow & Minka, *A\* Sampling*, arXiv:1411.0030).  Classes with ``p_k = 0`` are not informed by the
     observation and keep their prior.
     """
     b, k = probs.shape
