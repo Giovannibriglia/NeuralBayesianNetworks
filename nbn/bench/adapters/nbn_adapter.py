@@ -217,15 +217,12 @@ class NBNAdapter:
         # None / "auto" -> cuda-if-available-else-cpu; concrete passes through.
         self.device = torch.device(resolve_device(device))
         self.n_samples = int(n_samples)
-        # ``_label_key`` is the registered label (applicability lookup);
-        # ``name`` adds a non-default alpha so results stay distinguishable.
-        self._label_key = (
-            f"nbn-{mechanism}-{engine}" if engine is not None
-            else f"nbn-{mechanism}"
-        )
-        mech_label = mechanism
+        # A non-default alpha is tagged into the label so results stay
+        # distinguishable; ``is_applicable`` strips the tag again.
+        self._alpha_label = ""
         if self.alpha is not None and self.alpha != default_alpha:
-            mech_label = f"{mechanism}-{_alpha_tag(self.alpha)}"
+            self._alpha_label = f"-{_alpha_tag(self.alpha)}"
+        mech_label = f"{mechanism}{self._alpha_label}"
         self.name = (
             f"nbn-{mech_label}-{engine}" if engine is not None
             else f"nbn-{mech_label}"
@@ -692,7 +689,7 @@ class NBNAdapter:
         """Return True if this adapter can handle problem.family.
 
         Delegates to the existing _BASELINE_APPLICABILITY table using
-        the registered label (``self.name`` minus any alpha tag) as the key.
+        ``self.name`` (minus any alpha tag) as the lookup key.
 
         Family derivation: BenchmarkProblem has no .family attribute in
         Phase 1b; family is inferred from variable kinds:
@@ -716,8 +713,11 @@ class NBNAdapter:
         else:
             family = "hybrid"
 
-        # The registered label: an alpha tag does not change applicability.
-        entry = _BASELINE_APPLICABILITY.get(self._label_key)
+        # An alpha tag does not change applicability: look up the label
+        # without it.
+        label = self.name.replace(self._alpha_label, "", 1) if self._alpha_label \
+            else self.name
+        entry = _BASELINE_APPLICABILITY.get(label)
         if entry is None:
             return False
         return family in entry.families
