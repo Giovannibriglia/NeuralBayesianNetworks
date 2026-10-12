@@ -476,3 +476,65 @@ def test_mps_tabulation_buffers_are_priced_one_by_one():
     pm = eng._peak_model(model, "C", {"P0": torch.tensor([1, 2])}, B=2)
     pm.device_type = "mps"
     assert pm.bytes(2) < 256 * MiB
+
+
+# --------------------------------------------------------------------------- #
+# Review round 3
+# --------------------------------------------------------------------------- #
+
+def test_dtype_is_the_widest_cached_factor():
+    """#301 review 3, finding 1: the warm-cache dtype came from the first
+    cached factor.  In a float64 model with an intervened root, that factor is
+    the DeterministicMechanism's float32 point mass while every product is
+    float64: estimate 5.50 MiB vs 10.01 MiB measured (0.55)."""
+    model = _wide().double().intervene({"V0": 1})
+    ev = _evidence(model, [f"V{i}" for i in range(17, 22)], 8)
+    eng = TensorVariableElimination(memory_budget=float("inf"))
+    eng.query_batch(model, ["V8"], ev)  # warm
+    first = next(iter(eng._cached_factors(model).values())).log_values
+    assert first.dtype == torch.float32  # the trap: the first factor is narrow
+    estimate = eng.estimate_peak_bytes(model, "V8", ev, B=8)
+    measured = _cpu_peak(lambda: eng.query_batch(model, ["V8"], ev))
+    assert measured <= estimate <= 1.3 * measured, (estimate, measured)
+
+
+@pytest.mark.parametrize("api", ["estimate_peak_bytes", "fits_memory"])
+def test_read_only_apis_leave_no_cache_token(models, api):
+    """#301 review 3, finding 2: ``estimate_peak_bytes`` / ``fits_memory``
+    left the guard's single-use cache token behind; an in-place parameter
+    edit before the next extraction then got the stale factors."""
+    model = _wide(seed=5)
+    eng = TensorVariableElimination()
+    eng._extract_factors(model)
+    getattr(eng, api)(model, "V8", {"V20": torch.tensor([1])})
+    mech = model.mechanisms["V8"]
+    with torch.no_grad():
+        mech._logits.add_(torch.randn_like(mech._logits))
+    fresh = eng._extract_factors(model)["V8"].log_values
+    expected = torch.log_softmax(mech.tabulate(None).detach(), dim=-1)
+    torch.testing.assert_close(fresh, expected)
+
+
+def test_chunk_sizer_does_not_subtract_resident_memory_from_live_headroom(models):
+    """#301 review 3, finding 3: live headroom already reflects the evidence
+    and CPTs this call holds, but the sizer subtracted them again, halving
+    chunks (hmm60 at 2 GiB on MPS: 114688 rows instead of 262144)."""
+    from nbn.inference import tensor_ve as tv
+    from nbn.inference._ve_memory import _max_fitting_rows
+
+    model = models["naive-bayes"]
+    B = 4096
+    ev = _evidence(model, [f"X{i}" for i in range(30)], B, dtype=torch.float32)
+    probe = TensorVariableElimination()
+    probe._extract_factors(model)
+    pm = probe._peak_model(model, "Y", ev, B=B)
+    budget = pm.bytes(B)
+    head = 0.6 * budget / 0.9           # live room 0.6x the batch: chunk on it
+    eng = TensorVariableElimination(memory_budget=budget, memory_safety=0.9)
+    eng._extract_factors(model)
+    with mock.patch.object(tv, "device_headroom_bytes", lambda d: head), \
+         mock.patch.object(eng, "_query_batch_chunked",
+                           wraps=eng._query_batch_chunked) as spy:
+        eng.query_batch(model, ["Y"], ev)
+    room = min(budget - pm.reserve_bytes(B), 0.9 * head - 2 * pm.output_bytes(B))
+    assert spy.call_args.kwargs["chunk"] == _max_fitting_rows(pm.child().bytes, B - 1, room)

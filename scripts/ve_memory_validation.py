@@ -169,6 +169,7 @@ class Case:
     budget_frac: float = 0.0  # > 0: memory_budget = frac x estimate (forces chunking)
     big: bool = False         # peak >= ~1 GiB: skipped by --quick
     ev_kind: str = "long"     # "long" (int64 on the device), "float" tensors, "list"
+    cpu_only: bool = False    # float64 models: MPS has no float64
 
 
 def _tail(n: int, k: int) -> list[str]:
@@ -190,6 +191,9 @@ def cases() -> tuple[dict[str, Callable], list[Case]]:
         "hmm-60": lambda: hmm(60),
         "neuralcat-7-parents": seven_parent_neural,
         "barley": barley,
+        # Review #301 round 3: float64 model whose first factor is the
+        # intervened root's float32 point mass.
+        "wide22-double-do-V0": lambda: wide_net(22, 3, 4, seed=1).double().intervene({"V0": 1}),
     }
     w30_ev = [f"V{i}" for i in range(24, 30)]
     scatter36 = [f"V{i}" for i in range(0, 36, 3) if i != 18]
@@ -238,6 +242,8 @@ def cases() -> tuple[dict[str, Callable], list[Case]]:
     for B in (64, 256, 384, 512, 700, 715):
         out.append(Case("barley q7", "barley", [BARLEY_Q7_TARGET], BARLEY_Q7_EVIDENCE,
                         B=B, big=B >= 256))
+    out.append(Case("wide22 float64 do(V0)", "wide22-double-do-V0", ["V8"],
+                    [f"V{i}" for i in range(17, 22)], B=8, cpu_only=True))
     out.append(Case("naive-bayes Y32 x16 binary", "naive-bayes-y32-x16", ["Y"],
                     [f"X{i}" for i in range(16)], B=2_801_664, big=True))
     out.append(Case("wide30 no-ev", "wide30-d3-k4", ["V29"], [], B=64))
@@ -562,7 +568,8 @@ def main() -> int:
 
     _, todo = cases()
     picked = [i for i, c in enumerate(todo)
-              if not (args.quick and c.big) and not (args.big_only and not c.big)]
+              if not (args.quick and c.big) and not (args.big_only and not c.big)
+              and not (c.cpu_only and device != "cpu")]
     isolate = args.isolate or device != "cpu"
     rows = []
     models: dict = {}
