@@ -23,6 +23,8 @@ counterfactuals and for noise tying, not for interventional queries.
 """
 from __future__ import annotations
 
+import math
+
 import warnings
 from abc import abstractmethod
 from typing import List, Literal
@@ -303,6 +305,15 @@ class DiscreteAdditiveNoiseMechanism(StructuralMechanism):
         if not self._parent_cards:
             return log_table[0]
         return log_table.reshape(*self._parent_cards, self._n_classes)
+
+    def tabulate_working_bytes(self, parent_cards: list[int] | None = None) -> int:
+        """The offset transfer map, the child law per location, the
+        probability table and its clamped copy (four bytes per element)."""
+        with torch.no_grad():
+            g_k_m = self.transfer().numel()
+            g_k = self.child_law().numel()
+        rows = math.prod(self._parent_cards or [1])
+        return 4 * (g_k_m + g_k + 2 * rows * self._n_classes)
 
     # ------------------------------------------------------------------
     # Helpers

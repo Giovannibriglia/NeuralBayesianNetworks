@@ -486,3 +486,10 @@ class CategoricalTableMechanism(Mechanism):
         if not self._parent_cards:
             return self._logits[0]
         return self._logits.reshape(*self._parent_cards, self._n_classes)
+
+    #: ``tabulate`` returns a view of the stored logits (no new tensor).
+    tabulate_returns_view = True
+
+    def tabulate_working_bytes(self, parent_cards: list[int] | None = None) -> int:
+        """``tabulate`` returns a view of the stored logits: no working memory."""
+        return 0

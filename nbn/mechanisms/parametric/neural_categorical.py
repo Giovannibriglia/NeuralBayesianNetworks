@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Tuple
 
 import torch
@@ -331,6 +332,21 @@ class NeuralCategoricalMechanism(Mechanism):
             if was_training:
                 self.train()
         return logits_flat.reshape(*parent_cards, self.n_classes)
+
+    def tabulate_working_bytes(self, parent_cards: list[int] | None = None) -> int:
+        """Enumerating P parent configurations: the int64 grids, their stack
+        and float copy, the embeddings, and every MLP layer's output (counted
+        all at once, though each is freed after the next layer runs)."""
+        if self._d_pa == 0 or not parent_cards:
+            return 0  # the root's logits parameter itself
+        p, d = math.prod(parent_cards), len(parent_cards)
+        grids = p * d * (8 + 8 + 4)
+        emb = 0
+        if self.embeddings is not None:
+            emb = 2 * p * sum(e.embedding_dim for e in self.embeddings) * 4
+        widths = sum(m.out_features for m in self.net.modules()
+                     if isinstance(m, nn.Linear))
+        return grids + emb + 2 * p * widths * 4
 
     def log_prob(self, x: torch.Tensor, parents: torch.Tensor | None) -> torch.Tensor:
         squeeze_s = False

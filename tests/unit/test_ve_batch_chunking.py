@@ -10,9 +10,15 @@ rejecting it, and raises the pre-existing ``OutOfMemoryError`` only when
 even a single row does not fit.
 
 Two layers:
-- ``_max_chunk_rows`` — the pure chunk-size decision (no cuda needed);
+- ``_max_fitting_rows`` — the pure chunk-size search (no cuda needed);
 - ``_query_batch_chunked`` — the chunked execution path, exercised
   directly on CPU and pinned row-identical to the single-pass result.
+
+#178 review: the chunk size used to come from two peak evaluations
+(``_max_chunk_rows(peak_at_B, peak_at_1, B, budget)``, the chord through
+them).  Allocator heaps make the peak a step function of the row count, so it
+is now a search over the peak model itself; these tests pin the same
+decisions on the same affine peaks.
 """
 from __future__ import annotations
 
@@ -21,50 +27,45 @@ import torch
 from nbn.bench.synthetic import make_synthetic_bn
 from nbn.inference.tensor_ve import (
     TensorVariableElimination,
-    _max_chunk_rows,
+    _max_fitting_rows,
 )
 
 
-# ---- _max_chunk_rows: pure chunk-size decision -------------------------------
-
-def test_max_chunk_rows_full_batch_fits() -> None:
-    """Estimate within budget → the whole batch runs in a single pass."""
-    assert _max_chunk_rows(peak_at_B=100, peak_at_1=10, B=10, budget=200) == 10
-    # Exactly on the budget still fits (guard uses a strict > comparison).
-    assert _max_chunk_rows(peak_at_B=100, peak_at_1=10, B=10, budget=100) == 10
+def _affine(a, r):
+    return lambda c: a + r * c
 
 
-def test_max_chunk_rows_tight_budget_yields_smaller_chunk() -> None:
-    """Batch-dominated peak over budget → largest chunk with per-row cost
-    ``peak_at_B / B`` that fits; the chunked peak must itself fit."""
-    # per_row = 10; budget 45 → floor(45/10) = 4 rows per chunk.
-    chunk = _max_chunk_rows(peak_at_B=100, peak_at_1=10, B=10, budget=45)
-    assert chunk == 4
-    assert chunk * (100 / 10) <= 45          # the chosen chunk fits the budget
-    # A budget that barely holds one row degrades gracefully to chunk=1.
-    assert _max_chunk_rows(peak_at_B=100, peak_at_1=10, B=10, budget=10) == 1
+# ---- _max_fitting_rows: pure chunk-size decision -----------------------------
+
+def test_max_fitting_rows_full_batch_fits() -> None:
+    """Estimate within budget → the whole range fits."""
+    assert _max_fitting_rows(_affine(0, 10), 10, budget=200) == 10
+    # Exactly on the budget still fits (the guard uses a strict >).
+    assert _max_fitting_rows(_affine(0, 10), 10, budget=100) == 10
 
 
-def test_max_chunk_rows_impossible_budget_signals_zero() -> None:
-    """Even B=1 exceeds the budget → 0, i.e. the caller raises the
-    pre-existing guard error (chunking cannot help)."""
-    assert _max_chunk_rows(peak_at_B=100, peak_at_1=15, B=10, budget=9) == 0
-    # Degenerate single-row batch over budget: nothing to split.
-    assert _max_chunk_rows(peak_at_B=7, peak_at_1=7, B=1, budget=5) == 0
+def test_max_fitting_rows_tight_budget_yields_smaller_chunk() -> None:
+    """The largest chunk whose own peak fits."""
+    assert _max_fitting_rows(_affine(0, 10), 10, budget=45) == 4
+    # A budget that barely holds one row degrades gracefully to 1.
+    assert _max_fitting_rows(_affine(0, 10), 10, budget=10) == 1
 
 
-def test_max_chunk_rows_batch_free_peak_cannot_be_chunked() -> None:
-    """When the peak step carries no batch axis (peak_at_1 == peak_at_B >
-    budget), splitting rows does not shrink the peak → 0."""
-    assert _max_chunk_rows(peak_at_B=100, peak_at_1=100, B=16, budget=50) == 0
+def test_max_fitting_rows_respects_the_batch_free_part() -> None:
+    """Peak 40 + 6c: the old per-row rule (budget / (peak_B / B)) gave 7
+    rows (peak 82) for a budget of 75; the search gives 5 (peak 70)."""
+    assert _max_fitting_rows(_affine(40, 6), 9, budget=75) == 5
 
 
-def test_max_chunk_rows_never_returns_full_batch_when_over_budget() -> None:
-    """Over-budget input must always yield a chunk strictly below B (or 0),
-    so the caller's chunk-vs-single-pass branch cannot loop."""
-    for budget in (10, 25, 50, 99):
-        chunk = _max_chunk_rows(peak_at_B=100, peak_at_1=10, B=10, budget=budget)
-        assert 0 <= chunk < 10
+def test_max_fitting_rows_impossible_budget_signals_zero() -> None:
+    """Even one row exceeds the budget → 0 (the caller refuses the query)."""
+    assert _max_fitting_rows(_affine(5, 10), 9, budget=9) == 0
+    assert _max_fitting_rows(_affine(0, 7), 0, budget=5) == 0
+
+
+def test_max_fitting_rows_batch_free_peak_cannot_be_chunked() -> None:
+    """A peak that does not shrink with the rows cannot be chunked → 0."""
+    assert _max_fitting_rows(_affine(100, 0), 15, budget=50) == 0
 
 
 # ---- _query_batch_chunked: chunked execution == single pass ------------------

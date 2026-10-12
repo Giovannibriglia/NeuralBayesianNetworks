@@ -2,42 +2,47 @@
 
 ``TensorVariableElimination`` refuses (or chunks) a query whose estimated
 peak exceeds the device budget, so the estimate must be an *upper bound* of
-what the query really allocates.  This script runs a set of problems with
-different treewidths, evidence patterns, batch sizes and query kinds, measures
-the peak each call allocates, and prints it next to the estimate
-(``estimate_peak_bytes``) and next to the rule it replaced (largest
-elimination factor x 3.0, ``_LIVESET_MULTIPLIER`` of #177).
+what the query makes the device hold.  This script runs problems with
+different treewidths, evidence patterns, evidence types, batch sizes and query
+kinds, measures each call's peak, and prints it next to the estimate
+(``estimate_peak_bytes`` with the call's values) and next to the rule it
+replaced (largest elimination factor x 3.0, ``_LIVESET_MULTIPLIER`` of #177).
 
-Measurement, per device (the peak is relative to the allocation level just
-before the call, so the output tensor counts and pre-existing tensors do not):
+Measurement, per device (relative to just before the call, so the output
+counts and pre-existing tensors do not):
 
 * ``cpu``  -- exact: ``torch.profiler`` with ``profile_memory=True`` records
   every allocation and free of the CPU allocator, intra-op temporaries
   included; the peak is the maximum running sum.
-* ``cuda`` -- exact: ``torch.cuda.max_memory_allocated`` after
-  ``reset_peak_memory_stats``.
-* ``mps``  -- no peak counter exists, so two readings bracket it:
-  ``polled`` = ``torch.mps.current_allocated_memory()`` read after every aten
-  op (tensor-level, but blind to temporaries freed inside an op: a lower
-  bound), and ``driver`` = growth of ``torch.mps.driver_allocated_memory()``
-  from an emptied cache (heap-level: buffers of 10 MB..1 GiB are carved from
-  1 GiB heaps, so it overstates small plans).  ``--op-probe`` additionally
-  measures the temporaries of each op VE uses, at 1 GiB, where heaps are
-  exact.
+* ``cuda`` -- ``measured`` = ``max_memory_allocated`` (exact, tensor level);
+  ``driver`` = growth of ``max_memory_reserved`` (the caching allocator's
+  segments, what the device actually gives up).  The estimate must bound
+  both.
+* ``mps``  -- no peak counter exists: ``measured`` =
+  ``current_allocated_memory()`` read after every aten op (tensor level, a
+  lower bound: blind to temporaries freed inside an op) and ``driver`` =
+  growth of ``driver_allocated_memory()`` (heap level, what Metal gives up).
+  The estimate must bound ``driver``.  ``--op-probe`` measures the
+  temporaries of each op VE uses, at 1 GiB, where heaps are exact.
 
-Queries run with a warm factor cache (the CPTs are tabulated by a first call,
-as in any repeated use); ``cold`` rows use a fresh engine, so the call also
-tabulates every CPT.
+Every case runs in a fresh process on MPS / CUDA (``--isolate`` elsewhere):
+blocks cached by earlier work absorb a case's allocations and would let an
+under-estimate pass.  Before measuring, only the CPT cache is warmed
+(``_extract_factors``), never a full query, for the same reason; ``cold``
+cases skip even that, so the call also tabulates every CPT.
 
 Usage::
 
     uv run --extra all python scripts/ve_memory_validation.py --device cpu
     uv run --extra all python scripts/ve_memory_validation.py --device mps
     uv run --extra all python scripts/ve_memory_validation.py --device cuda
-    # options: --quick (small problems only), --json out.json, --op-probe (mps)
+    # --quick: peaks < ~1 GiB only;  --big-only;  --json out.json;
+    # --op-probe (mps);  --mps-uncapped (lift the MPS element cap: large
+    #   plans run unchunked, buffers > 512 MiB get exact heaps)
 
-Exit status 1 if any estimate is below the exact measured peak (cpu / cuda)
-or below the polled tensor-level peak (mps).
+Exit status 1 if any estimate is below a bounded reading (cpu: measured;
+cuda: measured and driver; mps: driver), or if a budget-forced case ran over
+its budget instead of being chunked within it or refused.
 """
 from __future__ import annotations
 
@@ -46,6 +51,7 @@ import gc
 import json
 import os
 import statistics
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -107,6 +113,22 @@ def hmm(n: int, card_h: int = 4, card_o: int = 5):
     return _fit(edges, hs + os_, cards, 0)
 
 
+def seven_parent_neural():
+    """A neural-categorical child of 7 four-state parents: tabulating it on a
+    cold cache runs 16384 configurations through the MLP (review #301)."""
+    from nbn.mechanisms import NeuralCategoricalMechanism
+
+    parents = [f"P{i}" for i in range(7)]
+    names = parents + ["C"]
+    g = torch.Generator().manual_seed(0)
+    m = NBN([(p, "C") for p in parents], variables=dict.fromkeys(names, ("discrete", 4)),
+            device="cpu")
+    m.auto_mechanisms()
+    m.set_mechanism("C", NeuralCategoricalMechanism(n_classes=4))
+    m.fit({n: torch.randint(0, 4, (300,), generator=g).float() for n in names})
+    return m
+
+
 @dataclass
 class Case:
     name: str
@@ -119,7 +141,7 @@ class Case:
     cold: bool = False        # fresh engine: the call also tabulates every CPT
     budget_frac: float = 0.0  # > 0: memory_budget = frac x estimate (forces chunking)
     big: bool = False         # peak >= ~1 GiB: skipped by --quick
-    float_ev: bool = False    # evidence as float tensors: the engine copies it to int64
+    ev_kind: str = "long"     # "long" (int64 on the device), "float" tensors, "list"
 
 
 def _tail(n: int, k: int) -> list[str]:
@@ -136,7 +158,10 @@ def cases() -> tuple[dict[str, Callable], list[Case]]:
         "grid4x12-k4": lambda: grid(4, 12, 4),
         "grid6x10-k3": lambda: grid(6, 10, 3),
         "naive-bayes-40": lambda: naive_bayes(40),
+        "naive-bayes-30": lambda: naive_bayes(30),
+        "naive-bayes-y32-x16": lambda: naive_bayes(16, card_y=32, card_x=2),
         "hmm-60": lambda: hmm(60),
+        "neuralcat-7-parents": seven_parent_neural,
     }
     w30_ev = [f"V{i}" for i in range(24, 30)]
     scatter36 = [f"V{i}" for i in range(0, 36, 3) if i != 18]
@@ -167,7 +192,20 @@ def cases() -> tuple[dict[str, Callable], list[Case]]:
     for B in (256, 4096, 65536):
         out.append(Case("hmm-60 all-obs", "hmm-60", ["H30"], [f"O{i}" for i in range(60)], B=B))
     out.append(Case("naive-bayes float-ev", "naive-bayes-40", ["Y"],
-                    [f"X{i}" for i in range(40)], B=131072, float_ev=True))
+                    [f"X{i}" for i in range(40)], B=131072, ev_kind="float"))
+    # Review #301 counterexamples.
+    nb30 = [f"X{i}" for i in range(30)]
+    out.append(Case("naive-bayes list-ev", "naive-bayes-30", ["Y"], nb30, B=4096,
+                    ev_kind="list"))
+    out.append(Case("naive-bayes X0 d-sep int64", "naive-bayes-30", ["X0"],
+                    ["Y"] + nb30[1:], B=20000))
+    for frac in (0.15, 0.25):
+        out.append(Case(f"naive-bayes float {frac}x budget", "naive-bayes-30", ["Y"], nb30,
+                        B=4096, ev_kind="float", budget_frac=frac))
+    out.append(Case("neuralcat 7 parents cold", "neuralcat-7-parents", ["C"], ["P0"], B=2,
+                    cold=True))
+    out.append(Case("naive-bayes Y32 x16 binary", "naive-bayes-y32-x16", ["Y"],
+                    [f"X{i}" for i in range(16)], B=2_801_664, big=True))
     out.append(Case("wide30 no-ev", "wide30-d3-k4", ["V29"], [], B=64))
     out.append(Case("wide30 joint+clamped", "wide30-d3-k4", ["V12", "V13", "V25"], w30_ev, B=16))
     out.append(Case("wide30 do", "wide30-d3-k4", ["V12"], _tail(30, 4), do=("V20", "V21"), B=64))
@@ -356,42 +394,61 @@ def mps_op_probe() -> list[dict]:
 # Driver
 # --------------------------------------------------------------------------- #
 
+def _values(model, nodes, B, kind, seed):
+    g = torch.Generator().manual_seed(seed)
+    out = {}
+    for n in nodes:
+        v = torch.randint(0, model.mechanisms[n].n_classes, (B,), generator=g)
+        out[n] = v.float() if kind == "float" else v.float().tolist() if kind == "list" else v
+    return out
+
+
 def run_case(device: str, model, case: Case) -> dict:
-    g = torch.Generator().manual_seed(0)
-    ev = {n: torch.randint(0, model.mechanisms[n].n_classes, (case.B,), generator=g).to(device)
-          for n in case.evidence}
-    do = {n: torch.randint(0, model.mechanisms[n].n_classes, (case.B,), generator=g).to(device)
-          for n in case.do}
-    if case.float_ev:
-        ev = {n: v.float() for n, v in ev.items()}
-    eng = TensorVariableElimination(memory_budget=float("inf"))
+    from nbn.inference._memory import OutOfMemoryError
+
+    ev = _values(model, case.evidence, case.B, case.ev_kind, 0)
+    do = _values(model, case.do, case.B, "long", 1)
+    if case.ev_kind == "long":
+        ev = {k: v.to(device) for k, v in ev.items()}
+    do = {k: v.to(device) for k, v in do.items()}
     target = case.targets if len(case.targets) > 1 else case.targets[0]
-    estimate = eng.estimate_peak_bytes(model, target, tuple(ev), tuple(do), B=case.B)
+    probe = TensorVariableElimination()
+    if not case.cold:
+        probe._extract_factors(model)  # the warm state the measured engine will be in
+    estimate = probe.estimate_peak_bytes(model, target, ev, do, B=case.B)
+    eng = TensorVariableElimination(memory_budget=float("inf"))
+    row = {"case": case.name, "B": case.B, "estimate": estimate}
     if case.budget_frac:
-        # The guard promises the call stays within its budget: chunking must
-        # keep the measured peak below it.
+        # The guard promises the call stays within its budget (chunking), or
+        # refuses it before allocating.
         estimate = int(case.budget_frac * estimate)
+        row["estimate"] = estimate
+        row["budget"] = True
         eng = TensorVariableElimination(memory_budget=estimate, memory_safety=1.0)
+    if not case.cold:
+        eng._extract_factors(model)  # tabulate the CPTs only, never a full query
 
     if case.single_row:
-        row = {k: v[0] for k, v in ev.items()}
-        do_row = {k: v[0] for k, v in do.items()}
+        r1 = {k: (v[0] if isinstance(v, (torch.Tensor, list)) else v) for k, v in ev.items()}
+        d1 = {k: v[0] for k, v in do.items()}
 
         def call():
-            return eng.query(model, case.targets, row, do=do_row)
+            return eng.query(model, case.targets, r1, do=d1)
     else:
         def call():
             return eng.query_batch(model, case.targets, ev, do=do)
 
-    if not case.cold:
-        call()  # tabulate the CPTs once, as in any repeated use
-        if not case.budget_frac:
-            estimate = eng.estimate_peak_bytes(model, target, tuple(ev), tuple(do), B=case.B)
-    old = old_estimate(eng, model, case)
-    m = measure(device, call)
-    row = {"case": case.name, "B": case.B, "estimate": estimate, "old_3x": old, **m}
+    row["old_3x"] = old_estimate(eng, model, case)
+    try:
+        m = measure(device, call)
+    except OutOfMemoryError as exc:
+        if not case.budget_frac or "pre-allocation guard" not in str(exc):
+            raise
+        row.update(refused=True, measured=0, ratio=float("nan"), old_ratio=float("nan"))
+        return row
+    row.update(m)
     row["ratio"] = estimate / m["measured"] if m["measured"] else float("nan")
-    row["old_ratio"] = old / m["measured"] if m["measured"] else float("nan")
+    row["old_ratio"] = row["old_3x"] / m["measured"] if m["measured"] else float("nan")
     if "driver" in m:
         row["driver_ratio"] = estimate / m["driver"] if m["driver"] else float("nan")
     return row
@@ -404,63 +461,115 @@ def _fmt(b: float) -> str:
     return f"{b:7.0f} B  "
 
 
+def _print_row(r: dict) -> None:
+    if r.get("refused"):
+        print(f"{r['case']:30s} B={r['B']:<8d} REFUSED by the guard (budget "
+              f"{_fmt(r['estimate'])})", flush=True)
+        return
+    extra = (f"  driver {_fmt(r['driver'])}  est/driver {r['driver_ratio']:5.2f}"
+             if "driver" in r else "")
+    print(f"{r['case']:30s} B={r['B']:<8d} measured {_fmt(r['measured'])}  "
+          f"{'budget  ' if r.get('budget') else 'estimate'} {_fmt(r['estimate'])}  "
+          f"est/meas {r['ratio']:6.2f}  old {_fmt(r['old_3x'])}  "
+          f"old/meas {r['old_ratio']:6.2f}{extra}", flush=True)
+
+
+def _failures(device: str, rows: list[dict]) -> list[str]:
+    bad = []
+    for r in rows:
+        if r.get("refused"):
+            continue
+        readings = (("driver",) if device == "mps"
+                    else ("measured", "driver") if device.startswith("cuda") else ("measured",))
+        for key in readings:
+            if key in r and r["estimate"] < r[key]:
+                what = "over budget" if r.get("budget") else "UNDER-ESTIMATE"
+                bad.append(f"{what}: {r['case']} B={r['B']}: "
+                           f"{'budget' if r.get('budget') else 'estimate'} "
+                           f"{r['estimate']} < {key} {r[key]}")
+    return bad
+
+
+def _run_one(device: str, index: int, args) -> dict:
+    """One case in this process."""
+    if args.mps_uncapped:
+        from nbn.inference import tensor_ve
+        tensor_ve._MPS_MAX_ELEMENTS = 1 << 62
+    builders, todo = cases()
+    case = todo[index]
+    model = builders[case.model_key]().to(device)
+    return run_case(device, model, case)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--quick", action="store_true")
-    ap.add_argument("--json")
-    ap.add_argument("--op-probe", action="store_true")
     ap.add_argument("--big-only", action="store_true",
                     help="only the cases marked big (peak ~1 GiB or more)")
+    ap.add_argument("--json")
+    ap.add_argument("--op-probe", action="store_true")
     ap.add_argument("--mps-uncapped", action="store_true",
                     help="lift the MPS element cap (measurement only: MPS reductions "
-                         "past it return wrong values, but allocate as usual), so "
-                         "large plans run unchunked and buffers >= 1 GiB get exact heaps")
+                         "past it return wrong values, but allocate as usual)")
+    ap.add_argument("--isolate", action="store_true",
+                    help="run every case in a fresh process (default on mps / cuda)")
+    ap.add_argument("--case", type=int, help=argparse.SUPPRESS)
     args = ap.parse_args()
     device = args.device
-    if args.mps_uncapped:
-        from nbn.inference import tensor_ve
-        tensor_ve._MPS_MAX_ELEMENTS = 1 << 62
+
+    if args.case is not None:  # child process: one case, one JSON line
+        print("ROW " + json.dumps(_run_one(device, args.case, args)), flush=True)
+        return 0
 
     if args.op_probe and device == "mps":
         for r in mps_op_probe():
             print(r)
 
-    builders, todo = cases()
-    if args.quick:
-        todo = [c for c in todo if not c.big]
-    if args.big_only:
-        todo = [c for c in todo if c.big]
-    models = {}
+    _, todo = cases()
+    picked = [i for i, c in enumerate(todo)
+              if not (args.quick and c.big) and not (args.big_only and not c.big)]
+    isolate = args.isolate or device != "cpu"
     rows = []
-    for case in todo:
-        if case.model_key not in models:
-            models[case.model_key] = builders[case.model_key]().to(device)
-        r = run_case(device, models[case.model_key], case)
+    models: dict = {}
+    for i in picked:
+        if isolate:
+            cmd = [sys.executable, os.path.abspath(__file__), "--device", device,
+                   "--case", str(i)] + (["--mps-uncapped"] if args.mps_uncapped else [])
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("ROW ")]
+            if proc.returncode or not lines:
+                print(proc.stdout[-2000:], proc.stderr[-4000:], file=sys.stderr)
+                raise SystemExit(f"case {todo[i].name} B={todo[i].B} failed")
+            r = json.loads(lines[-1][4:])
+        else:
+            builders, _ = cases()
+            case = todo[i]
+            if case.model_key not in models:
+                models[case.model_key] = builders[case.model_key]().to(device)
+            r = run_case(device, models[case.model_key], case)
         rows.append(r)
-        extra = (f"  driver {_fmt(r['driver'])}  est/driver {r['driver_ratio']:5.2f}"
-                 if "driver" in r else "")
-        print(f"{r['case']:28s} B={r['B']:<7d} measured {_fmt(r['measured'])}  "
-              f"estimate {_fmt(r['estimate'])}  est/meas {r['ratio']:6.2f}  "
-              f"old {_fmt(r['old_3x'])}  old/meas {r['old_ratio']:6.2f}{extra}",
-              flush=True)
+        _print_row(r)
 
-    big = [r for r in rows if r["measured"] >= (1 << 20)]
-    for label, sel in (("all", rows), ("measured >= 1 MiB", big)):
+    est = [r for r in rows if not r.get("budget") and not r.get("refused")]
+    for label, sel in (("all", est), ("measured >= 1 MiB",
+                                       [r for r in est if r["measured"] >= (1 << 20)])):
         if not sel:
             continue
         for key in ("ratio", "old_ratio") + (("driver_ratio",) if "driver_ratio" in sel[0] else ()):
             vals = [r[key] for r in sel if r[key] == r[key]]
-            print(f"[{device}] {label:18s} {key:12s} min {min(vals):6.2f}  "
-                  f"median {statistics.median(vals):6.2f}  max {max(vals):6.2f}  (n={len(vals)})")
+            if vals:
+                print(f"[{device}] {label:18s} {key:12s} min {min(vals):6.2f}  "
+                      f"median {statistics.median(vals):6.2f}  max {max(vals):6.2f}  "
+                      f"(n={len(vals)})")
     if args.json:
         with open(args.json, "w") as fh:
-            json.dump({"device": device, "torch": torch.__version__, "rows": rows}, fh, indent=1)
-    under = [r for r in rows if r["estimate"] < r["measured"]]
-    for r in under:
-        print(f"UNDER-ESTIMATE: {r['case']} B={r['B']}: estimate {r['estimate']} < "
-              f"measured {r['measured']}", file=sys.stderr)
-    return 1 if under else 0
+            json.dump({"device": device, "torch": torch.__version__, "rows": rows}, fh,
+                      indent=1)
+    bad = _failures(device, rows)
+    for line in bad:
+        print(line, file=sys.stderr)
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":
