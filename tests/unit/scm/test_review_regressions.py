@@ -22,6 +22,12 @@ from tests.conftest import available_devices
 from tests.unit.scm.simulators import rehab_iid, rehab_model
 
 ACCELERATORS = [d for d in available_devices() if d != "cpu"]
+# Cross-device tests compare an accelerator with the CPU.  On a CPU-only host
+# they have nothing to compare, so they are reported as skipped instead of
+# silently passing as a CPU-vs-CPU check.
+ACCELERATOR_PARAMS = ACCELERATORS or [
+    pytest.param("none", marks=pytest.mark.skip(reason="no CUDA/MPS device available"))
+]
 
 
 def _xy(n=500, seed=0):
@@ -66,7 +72,7 @@ def test_continuous_log_prob_accepts_flat_input():
 
 
 # 2 ---------------------------------------------------------------------------
-@pytest.mark.parametrize("device", ACCELERATORS or ["cpu"])
+@pytest.mark.parametrize("device", ACCELERATOR_PARAMS)
 def test_discrete_structural_root_fits_on_every_device(device):
     model, _ = _discrete_root_scm(device=device)
     assert model.mechanisms["x"].table().device.type == torch.device(device).type
@@ -125,7 +131,7 @@ def test_tying_a_fitted_mechanism_is_refused():
 
 
 # 5 + 6 -----------------------------------------------------------------------
-@pytest.mark.parametrize("device", ACCELERATORS or ["cpu"])
+@pytest.mark.parametrize("device", ACCELERATOR_PARAMS)
 def test_entry_points_move_cpu_data_to_the_model_device(device):
     data = rehab_iid(2000, generator=torch.Generator().manual_seed(0)).data
     model = rehab_model(device=device)
@@ -430,7 +436,7 @@ def _saturating_pair(device):
     return model
 
 
-@pytest.mark.parametrize("device", ACCELERATORS or ["cpu"])
+@pytest.mark.parametrize("device", ACCELERATOR_PARAMS)
 def test_fit_is_the_same_on_every_device(device):
     data = rehab_iid(5000, generator=torch.Generator().manual_seed(0)).data
     cpu, other = rehab_model(max_offset=None), rehab_model(device=device, max_offset=None)
@@ -441,7 +447,7 @@ def test_fit_is_the_same_on_every_device(device):
                           other.mechanisms["h'"].noise.probs.detach().cpu(), atol=1e-4)
 
 
-@pytest.mark.parametrize("device", ACCELERATORS or ["cpu"])
+@pytest.mark.parametrize("device", ACCELERATOR_PARAMS)
 def test_saturated_rows_do_not_block_the_canonical_shift(device):
     cpu, other = _saturating_pair("cpu"), _saturating_pair(device)
     for model in (cpu, other):
