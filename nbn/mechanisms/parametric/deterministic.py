@@ -5,6 +5,7 @@ from torch.distributions import Distribution
 
 from nbn.mechanisms.base import Mechanism
 from nbn.utils.batching import ensure_2d
+from nbn.utils.device import to_device_dtype
 
 # Log-probability stand-in for "impossible state" in a tabulated delta CPD.
 # A true ``-inf`` propagates NaN through variable elimination's factor
@@ -36,7 +37,7 @@ def _delta_log_prob(x: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
     else:
         dtype = torch.get_default_dtype()
     xv = x.to(dtype)
-    v = value.to(device=x.device, dtype=dtype)
+    v = to_device_dtype(value, x.device, dtype)
     match = torch.isclose(xv, v, rtol=1e-5, atol=1e-6).all(-1)
     zero = torch.zeros((), dtype=dtype, device=x.device)
     return torch.where(match, zero, torch.full_like(zero, _LOG_ZERO))

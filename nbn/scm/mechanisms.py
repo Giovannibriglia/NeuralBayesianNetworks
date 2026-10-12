@@ -43,7 +43,7 @@ from nbn.scm.fitting import (
 from nbn.scm.noise import GaussianMixtureNoise, GaussianNoise, OffsetNoise
 from nbn.uncertainty.counts import parent_row_index, scatter_counts
 from nbn.utils.batching import ensure_2d
-from nbn.utils.device import accum_dtype, linalg_device
+from nbn.utils.device import accum_dtype, linalg_device, to_device_dtype
 
 _TINY = torch.finfo(torch.float32).tiny
 
@@ -453,9 +453,9 @@ class AdditiveNoiseMechanism(StructuralMechanism):
             solve_on = linalg_device(x.device)
             dtype = accum_dtype(solve_on)
             design = torch.cat([pa, torch.ones(pa.shape[0], 1, device=x.device)], 1)
-            design = design.to(solve_on, dtype)
-            target = x.to(solve_on, dtype)
-            wd = design if w is None else design * w.to(solve_on, dtype).unsqueeze(-1)
+            design = to_device_dtype(design, solve_on, dtype)
+            target = to_device_dtype(x, solve_on, dtype)
+            wd = design if w is None else design * to_device_dtype(w, solve_on, dtype).unsqueeze(-1)
             gram = design.T @ wd + self.ridge * torch.eye(d_pa + 1, device=solve_on, dtype=dtype)
             coef = torch.linalg.solve(gram, wd.T @ target).to(x.device, torch.float32)
             weight, bias = coef[:d_pa].T, coef[d_pa]
@@ -533,7 +533,7 @@ class AdditiveNoiseMechanism(StructuralMechanism):
             return self.net(torch.zeros(1, 0, device=device))
         if parents.shape[-1] == 0:
             return self.net(torch.zeros(*parents.shape[:-1], 0, device=device))
-        z = (parents.to(device=device, dtype=torch.float32) - self._pa_mean) / self._pa_std
+        z = (to_device_dtype(parents, device, torch.float32) - self._pa_mean) / self._pa_std
         return self.net(z)
 
     def structural(self, parents: torch.Tensor | None, noise: torch.Tensor) -> torch.Tensor:
@@ -583,4 +583,4 @@ class AdditiveNoiseMechanism(StructuralMechanism):
     def _parents_or_empty(parents: torch.Tensor | None, x: torch.Tensor) -> torch.Tensor:
         if parents is None:
             return torch.zeros(x.shape[0], 0, device=x.device)
-        return ensure_2d(parents).to(device=x.device, dtype=torch.float32)
+        return to_device_dtype(ensure_2d(parents), x.device, torch.float32)

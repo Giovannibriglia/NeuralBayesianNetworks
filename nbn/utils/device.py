@@ -80,7 +80,7 @@ def to_device(obj: Any, device: torch.device) -> Any:
         device = torch.device(device)
         if obj.dtype == torch.float64 and not supports_float64(device):
             # Cast on the source device first; MPS cannot hold the float64.
-            return obj.to(device=device, dtype=torch.float32)
+            return to_device_dtype(obj, device, torch.float32)
         if obj.device == device:
             return obj
         # non_blocking is only safe for a pinned host -> accelerator copy.  A
@@ -233,3 +233,18 @@ def accelerator_summary() -> str:
     if mps_available():
         return "mps (Apple Metal; float64 unavailable, accumulations run in float32)"
     return "none (cpu only)"
+
+
+def to_device_dtype(t: torch.Tensor, device, dtype: torch.dtype) -> torch.Tensor:
+    """Move ``t`` to ``device`` and cast it to ``dtype`` in the order every backend supports.
+
+    One fused ``t.to(device=..., dtype=...)`` is wrong on torch 2.14 for an
+    MPS tensor sent to the CPU as ``float64``: the values come back garbled
+    (errors up to 1e294).  Doing the two steps separately is exact, but the
+    order matters: a ``float64`` target is reached by moving first (MPS has no
+    ``float64``, so the cast must happen on the destination), any other dtype
+    by casting first (so a CPU ``float64`` tensor is never moved to MPS).
+    """
+    if dtype == torch.float64:
+        return t.to(device=device).to(dtype=dtype)
+    return t.to(dtype=dtype).to(device=device)

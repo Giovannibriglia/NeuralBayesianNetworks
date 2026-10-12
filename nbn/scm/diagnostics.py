@@ -36,7 +36,7 @@ from nbn.scm.mechanisms import (
     StructuralMechanism,
 )
 from nbn.uncertainty.counts import count_table, parent_row_index, scatter_counts
-from nbn.utils.device import to_device
+from nbn.utils.device import to_device, to_device_dtype
 
 
 @dataclass(frozen=True)
@@ -423,7 +423,7 @@ def _pearson(a: torch.Tensor, b: torch.Tensor) -> tuple[float, float]:
 
 def _hsic_permutation(a: torch.Tensor, b: torch.Tensor, n_permutations: int) -> tuple[float, float]:
     a = a.reshape(a.shape[0], -1).to(torch.float32)
-    b = b.reshape(b.shape[0], -1).to(device=a.device, dtype=torch.float32)
+    b = to_device_dtype(b.reshape(b.shape[0], -1), a.device, torch.float32)
     n = a.shape[0]
 
     def centred_gram(z: torch.Tensor) -> torch.Tensor:

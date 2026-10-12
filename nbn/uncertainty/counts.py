@@ -5,7 +5,7 @@ from typing import Mapping
 
 import torch
 
-from nbn.utils.device import accum_dtype
+from nbn.utils.device import accum_dtype, to_device_dtype
 
 
 def parent_row_index(parents: torch.Tensor, parent_cards: list[int]) -> torch.Tensor:
@@ -42,7 +42,7 @@ def scatter_counts(
     dtype = accum_dtype(values.device)
     contrib = (
         torch.ones(values.shape[0], dtype=dtype, device=values.device)
-        if weights is None else weights.to(device=values.device, dtype=dtype)
+        if weights is None else to_device_dtype(weights, values.device, dtype)
     )
     counts = torch.zeros(n_rows * n_classes, dtype=dtype, device=values.device)
     counts.scatter_add_(0, rows.reshape(-1) * n_classes + values, contrib)
