@@ -88,6 +88,7 @@ def test_export_matches_the_stacked_forward(device):
         active = torch.nonzero(_masks()[c]).reshape(-1).tolist()
         seq = net.export(c)
         assert next(seq.parameters()).device.type == torch.device(device).type
+        assert all(isinstance(m, torch.nn.Linear) for m in seq if not isinstance(m, torch.nn.SiLU))
         torch.testing.assert_close(seq(z[:, active]).cpu(), ref[c], rtol=1e-4, atol=1e-5,
                                    msg=lambda m, c=c: f"export of candidate {c} on {device}: {m}")
         perm = active[::-1]                                  # inputs in another order
@@ -452,35 +453,3 @@ def test_fitted_mechanisms_record_their_device_and_roots_reuse_the_counts(device
     direct, _ = count_table_for(hs.variables, data, "a", ())
     torch.testing.assert_close(fm.roots["a"]._counts.to(direct), direct)
 
-
-@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS diagnostic")
-def test_mps_ops_used_by_the_export_diagnostic():
-    """Temporary (CI MPS): which operation of the export path disagrees with the CPU."""
-    g = torch.Generator().manual_seed(3)
-    zc = torch.randn(50, 3, generator=g)
-    z = zc.to("mps")
-    net = StackedMLP(_masks(), (8, 8), 2, activation="silu")
-    seq_c = net.export(0)                                   # CPU
-    seq_m = net.export(0).to("mps")
-    lin_c = seq_c[0]
-    lin_m = torch.nn.Linear(2, 8).to("mps")
-    with torch.no_grad():
-        lin_m.weight.copy_(lin_c.weight.to("mps"))
-        lin_m.bias.copy_(lin_c.bias.to("mps"))
-    variants = {
-        "list index z[:, [0, 1]]": (z[:, [0, 1]], zc[:, [0, 1]]),
-        "index_select": (z.index_select(1, torch.tensor([0, 1], device="mps")), zc[:, [0, 1]]),
-        "slice z[:, 0:2]": (z[:, 0:2].contiguous(), zc[:, 0:2]),
-        "first Linear, CPU-selected input": (lin_m(zc[:, :2].to("mps")), lin_c(zc[:, :2])),
-        "first Linear (module moved)": (seq_m[0](zc[:, :2].to("mps")), lin_c(zc[:, :2])),
-        "F.linear": (torch.nn.functional.linear(zc[:, :2].to("mps"), lin_c.weight.to("mps"), lin_c.bias.to("mps")),
-                     lin_c(zc[:, :2])),
-        "matmul + bias": (zc[:, :2].to("mps") @ lin_c.weight.t().to("mps") + lin_c.bias.to("mps"), lin_c(zc[:, :2])),
-        "SiLU": (torch.nn.SiLU()(z), torch.nn.SiLU()(zc)),
-        "whole export, CPU-selected input": (seq_m(zc[:, :2].to("mps")), seq_c(zc[:, :2])),
-        "whole export": (seq_m(z[:, [0, 1]]), seq_c(zc[:, [0, 1]])),
-    }
-    bad = {k: float((a.detach().cpu() - b.detach()).abs().max()) for k, (a, b) in variants.items()
-           if not torch.allclose(a.detach().cpu(), b.detach(), rtol=1e-4, atol=1e-5)}
-    import platform
-    assert not bad, f"MPS disagrees with CPU on: {bad} (torch {torch.__version__}, macOS {platform.mac_ver()[0]})"

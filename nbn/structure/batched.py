@@ -32,6 +32,22 @@ Activation = Literal["relu", "silu", "tanh", "gelu", "elu"]
 _ACTIVATIONS = {"relu": nn.ReLU, "silu": nn.SiLU, "tanh": nn.Tanh, "gelu": nn.GELU, "elu": nn.ELU}
 
 
+class MatmulLinear(nn.Linear):
+    """An ``nn.Linear`` that computes ``x @ W.T + b`` with ``matmul``.
+
+    Same parameters and state dict as ``nn.Linear``.  On the MPS backend of
+    the macOS CI runner (macOS 26.6.2, torch 2.14.1) ``F.linear`` gave wrong
+    outputs for the exported layers (e.g. 2 -> 8 features; max error 0.59),
+    while ``matmul`` plus the bias, ``baddbmm`` and the CPU agreed.  The
+    exported candidates use this layer so they match the trained stack on
+    every device.
+    """
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:  # noqa: A002 (nn.Linear's name)
+        out = torch.matmul(input, self.weight.t())
+        return out if self.bias is None else out + self.bias
+
+
 class StackedMLP(nn.Module):
     """``C`` MLPs with the same hidden sizes, stacked along a leading axis.
 
@@ -128,10 +144,10 @@ class StackedMLP(nn.Module):
         """Candidate ``c`` as an ``nn.Sequential`` over its own inputs.
 
         Inputs are in union order, or in ``order`` (a permutation of the active
-        union columns) when given.  Each parameter tensor is copied to the CPU
-        **whole** and only then indexed by candidate, and the layers are moved
-        to the device at the end: on the MPS of the macOS CI runner, copying a
-        per-candidate view (a non-zero storage offset) gave wrong weights.
+        union columns) when given.  The layers are :class:`MatmulLinear`
+        (``F.linear`` was wrong on the MPS of the macOS CI runner); they are
+        assembled on the CPU from whole copies of the parameters and moved to
+        the parameters' device at the end.
         """
         device = self.weights[0].device
         weights = [p.detach().cpu() for p in self.weights]          # whole tensors, offset 0
@@ -149,7 +165,7 @@ class StackedMLP(nn.Module):
                 w = w.index_select(0, torch.tensor(list(order), dtype=torch.long))
             weight = w.t().contiguous()
             bias = biases[li][c].clone().contiguous()
-            lin = nn.Linear(weight.shape[1], weight.shape[0])
+            lin = MatmulLinear(weight.shape[1], weight.shape[0])
             with torch.no_grad():
                 lin.weight.copy_(weight)
                 lin.bias.copy_(bias)
