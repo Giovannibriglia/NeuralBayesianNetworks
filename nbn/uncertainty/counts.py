@@ -18,6 +18,8 @@ def parent_row_index(parents: torch.Tensor, parent_cards: list[int]) -> torch.Te
     per-parent axes.  Raises on values outside the declared cardinalities.
     """
     index = torch.zeros(parents.shape[:-1], dtype=torch.long, device=parents.device)
+    if parents.is_floating_point() and parents.numel() and bool((parents != parents.round()).any()):
+        raise ValueError("Parent values must be whole numbers (state indices); got fractional values.")
     for d, card in enumerate(parent_cards):
         values = parents[..., d].long()
         if values.numel() and (int(values.min()) < 0 or int(values.max()) >= card):
@@ -49,9 +51,13 @@ def scatter_counts(
     """``[n_rows, n_classes]`` (weighted) counts of ``values`` per row index.
 
     Accumulates in the widest float the device supports.  Raises on values
-    outside ``0 .. n_classes - 1`` instead of spilling them into the next row.
+    outside ``0 .. n_classes - 1`` instead of spilling them into the next row,
+    and on fractional values instead of truncating them.
     """
-    values = values.reshape(-1).long()
+    values = values.reshape(-1)
+    if values.is_floating_point() and values.numel() and bool((values != values.round()).any()):
+        raise ValueError("Child values must be whole numbers (state indices); got fractional values.")
+    values = values.long()
     if values.numel() and (int(values.min()) < 0 or int(values.max()) >= n_classes):
         raise ValueError(f"Child values outside the {n_classes} declared states.")
     dtype = accum_dtype(values.device)
@@ -106,15 +112,16 @@ def count_table_for(
     Parameters
     ----------
     variables:
-        Variable specs by name (e.g. ``model.variables``); each needs
-        ``is_discrete`` and ``cardinality``.
+        Variables by name: ``model.variables``, or ``(kind, dim)`` specs as
+        for a model (``{"x": ("discrete", 3)}``).
     data:
         Columns by name; ``data[v]`` holds the integer values of ``v``.
     node, parents:
         The child and the parent tuple to count against.
     weights:
         Optional ``[N]`` per-row weights (replication semantics), validated
-        like ``fit``'s.  Weighted tables suit fitting and Bayesian sets, not
+        like ``fit``'s, except that an all-zero vector is allowed (it gives an
+        all-zero table, as before weights were validated).  Weighted tables suit fitting and Bayesian sets, not
         the PAC builders (``interval_set_from_counts``,
         ``l1_ball_set_from_counts``): a weight is not a number of independent
         draws.
@@ -135,23 +142,28 @@ def count_table_for(
         raise ValueError(f"'{node}' cannot be its own parent.")
     if len(set(parents)) != len(parents):
         raise ValueError(f"Repeated parents in {parents}.")
-    variable = variables[node]
+    variable = _as_variable(node, variables[node])
     if not variable.is_discrete:
         raise ValueError(f"count_table_for needs a discrete node; '{node}' is continuous.")
     parent_cards = []
     for p in parents:
         if p not in variables:
             raise KeyError(f"Unknown parent '{p}'.")
-        pv = variables[p]
+        pv = _as_variable(p, variables[p])
         if not pv.is_discrete:
             raise ValueError(f"count_table_for needs discrete parents; '{p}' is continuous.")
         parent_cards.append(int(pv.cardinality))
     absent = [v for v in (node, *parents) if v not in data]
     if absent:
         raise KeyError(f"No data column for {absent}.")
+    n_cells = math.prod(parent_cards) * int(variable.cardinality)
+    if n_cells >= 2**62:
+        raise ValueError(f"The table of '{node}' against {parents} has {n_cells:.3e} cells; "
+                         f"the row index would overflow. Use fewer or smaller parents.")
 
     x = data[node].reshape(-1)
-    weights = validate_weights(weights, x.shape[0], where="count_table_for", device=x.device)
+    weights = validate_weights(weights, x.shape[0], where="count_table_for", device=x.device,
+                               allow_zero_total=True)
     if parents:
         pa = torch.stack([data[p].reshape(-1) for p in parents], dim=-1)
     else:
@@ -159,3 +171,12 @@ def count_table_for(
     rows = parent_row_index(pa, parent_cards)
     n_rows = math.prod(parent_cards)
     return scatter_counts(rows, x, n_rows, int(variable.cardinality), weights), parent_cards
+
+
+def _as_variable(name: str, spec: Any) -> Any:
+    """A variable object, from itself or from a ``(kind, dim)`` spec."""
+    if hasattr(spec, "is_discrete"):
+        return spec
+    from nbn.core.network import _build_variable
+
+    return _build_variable(name, spec)

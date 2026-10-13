@@ -160,7 +160,7 @@ def fit_factors(
             neural_cands = [c for c in cands if cont_parent[c]]
             if table_cands:
                 if counts is None:
-                    counts = hs.counts(data, weights=w, input_marginals=False, discrete_only=True)
+                    counts = hs.counts(data, weights=w, discrete_only=True)
                 for c in table_cands:
                     mech = StructuralCategoricalTable(alpha=alpha, coupling=coupling)
                     mech.fit_from_counts(counts.tables[(node, c)], counts.parent_cards[(node, c)])

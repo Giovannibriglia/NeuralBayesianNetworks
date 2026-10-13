@@ -185,7 +185,7 @@ def test_model_for_gives_a_structural_model_with_the_fitted_mechanisms():
 def test_discrete_only_counts_skip_continuous_factors():
     data = simulate(500)
     hs = HypothesisSet(VARS, CANDS)
-    fc = hs.counts(data, discrete_only=True, input_marginals=False)
+    fc = hs.counts(data, discrete_only=True)
     assert set(fc.tables) == {("d'", ("a",))}
     with pytest.raises(ValueError, match="calibrated_sets"):
         hs.counts(data)

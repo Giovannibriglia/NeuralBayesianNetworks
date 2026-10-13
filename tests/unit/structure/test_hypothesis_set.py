@@ -452,16 +452,22 @@ def test_dirichlet_draws_scale_with_the_split_level():
     assert all(s.samples.shape[0] >= 4000 for s in fs.sets.values())
 
 
-def test_model_for_works_from_factor_set_counts_without_marginals():
+@pytest.mark.parametrize("weighted", [False, True])
+def test_input_marginals_are_summed_from_factor_tables_exactly(weighted):
+    from nbn.uncertainty import count_table_for
+
     v, data = _small()
+    w = torch.rand(200, generator=torch.Generator().manual_seed(1)) if weighted else None
     hs = HypothesisSet(v, {"x'": [("x",), ("x", "a")]})
+    fc = hs.counts(data, weights=w)
+    assert set(fc.input_marginals) == {"x", "a"}
+    for name in ("x", "a"):
+        direct, _ = count_table_for(hs.variables, data, name, (), w)
+        torch.testing.assert_close(fc.input_marginals[name], direct)
     fs = hs.factor_sets(data)
-    assert fs.counts.input_marginals == {}                # not counted again
-    full = hs.counts(data)
-    assert set(full.input_marginals) == {"x", "a"}
     for h in hs.hypotheses():
-        a, b = hs.model_for(h, fs.counts), hs.model_for(h, full)
-        for node in a.dag.nodes():                         # marginals summed from factor tables = direct
+        a, b = hs.model_for(h, fs.counts), hs.model_for(h, hs.counts(data))
+        for node in a.dag.nodes():
             assert torch.equal(a.mechanisms[node]._counts, b.mechanisms[node]._counts)
 
 
@@ -470,3 +476,52 @@ def test_unknown_builder_fails_before_counting():
     hs = HypothesisSet(v, {"x'": [("x",)]})
     with pytest.raises(ValueError, match="Unknown builder"):
         hs.factor_sets({}, builder="Interval")      # no data needed to fail
+
+
+# ---------------------------------------------------------------------------
+# Third review round (#319)
+# ---------------------------------------------------------------------------
+
+
+def _wide():
+    v = {f"p{i}": ("discrete", 3) for i in range(5)}
+    v.update({"x'": ("discrete", 3), "y'": ("discrete", 2)})
+    gen = torch.Generator().manual_seed(0)
+    data = {k: torch.randint(0, c, (500,), generator=gen) for k, (_, c) in v.items()}
+    return v, data
+
+
+def test_dirichlet_refuses_draws_that_cannot_support_the_level():
+    v, data = _wide()
+    hs = HypothesisSet(v, {"x'": [tuple(f"p{i}" for i in range(5))], "y'": [("p0",)]})
+    with pytest.raises(ValueError, match="posterior draws are needed"):
+        hs.factor_sets(data, builder="dirichlet", delta=0.05)
+    fs = hs.factor_sets(data, builder="dirichlet", delta=0.05, n_samples=500)   # the user's choice
+    assert all(s.samples.shape[0] == 500 for s in fs.sets.values())
+
+
+def test_dirichlet_sets_record_no_sampling_mode():
+    v, data = _small()
+    hs = HypothesisSet(v, {"x'": [("x",)]})
+    assert hs.factor_sets(data, builder="dirichlet", sampling="trajectory").sampling is None
+    assert hs.factor_sets(data, builder="interval", sampling="trajectory").sampling == "trajectory"
+
+
+def test_a_fixed_edge_that_merges_candidates_warns():
+    v = {"x": ("discrete", 2), "a": ("discrete", 2), "x'": ("discrete", 2)}
+    with pytest.warns(UserWarning, match="same family"):
+        hs = HypothesisSet(v, {"x'": [("x",), ("x", "a")]}, fixed_edges=[("a", "x'")])
+    assert hs.candidates["x'"] == [("x", "a")]
+
+
+def test_many_candidates_on_a_large_union_are_counted_directly():
+    v = {f"u{i}": ("discrete", 2) for i in range(12)}
+    v["x'"] = ("discrete", 2)
+    gen = torch.Generator().manual_seed(0)
+    data = {k: torch.randint(0, 2, (100,), generator=gen) for k in v}
+    cands = list(itertools.combinations([f"u{i}" for i in range(12)], 2))
+    hs = HypothesisSet(v, {"x'": cands})
+    fc = hs.counts(data)
+    assert fc.union_used["x'"] is False         # 66 sums of an 8192-cell table cost more than 66 passes
+    small = HypothesisSet(v, {"x'": cands[:3]})
+    assert small.counts({k: t.repeat(50) for k, t in data.items()}).union_used["x'"] is True

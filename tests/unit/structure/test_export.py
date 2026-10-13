@@ -336,3 +336,122 @@ def test_parameter_block_lists_only_exported_nodes_and_row_maps_are_compact(tmp_
     ex = load_factored_sets(export_factored_sets(tmp_path / "p", {"h'": poly}, model, ["h"], ["e"]))
     assert ex.manifest["parameters"][0]["nodes"] == ["h'"]
     assert ex.array("f0", "row_index").dtype == np.int32
+
+
+# ---------------------------------------------------------------------------
+# Third review round (#321)
+# ---------------------------------------------------------------------------
+
+
+def _xa_model():
+    v = {"x": ("discrete", 2), "a": ("discrete", 2), "x'": ("discrete", 2)}
+    model = NeuralBayesianNetwork([("x", "x'"), ("a", "x'")], v, device="cpu")
+    for node in model.dag.nodes():
+        model.set_mechanism(node, CategoricalTableMechanism())
+    return model
+
+
+def _box(lower, upper, unseen=None):
+    lower = torch.as_tensor(lower, dtype=torch.float64)
+    upper = torch.as_tensor(upper, dtype=torch.float64)
+    unseen = torch.zeros(lower.shape[0], dtype=torch.bool) if unseen is None else unseen
+    return IntervalSet(level=0.9, guarantee="pac", unseen=unseen, lower=lower, upper=upper)
+
+
+def test_outward_rounding_keeps_structural_zeros_and_ones_exact():
+    from nbn.structure.export import _outward
+
+    num_lo, num_hi = _outward(np.array([0.0, 1.0, 0.4]), np.array([0.0, 1.0, 0.6]), 1000)
+    assert num_hi[0] == 0                # an impossible transition stays impossible (was 1/D)
+    assert num_lo[1] == 1000             # a certain one stays certain (was (D-1)/D)
+    assert num_lo[2] <= 400 <= 600 <= num_hi[2]
+
+
+def test_graph_preserving_holds_for_the_exported_rational_bounds(tmp_path):
+    model = _xa_model()
+    box = _box([[3e-10, 0.5]] * 4, [[0.5, 1.0]] * 4)
+    plain = export_factored_sets(tmp_path / "p", {"x'": box}, model, ["x"], ["a"])
+    exact = export_factored_sets(tmp_path / "e", {"x'": box}, model, ["x"], ["a"], exact=True)
+    assert load_factored_sets(plain).manifest["factors"][0]["graph_preserving"] is True
+    ex = load_factored_sets(exact)
+    assert int(ex.array("f0", "lower_num")[0, 0]) == 0      # 3e-10 floors to 0 / 10^9
+    assert ex.manifest["factors"][0]["graph_preserving"] is False
+    zero = _box([[0.0, 0.5]] * 4, [[0.0, 1.0]] * 4)          # a structural zero is fine either way
+    out = export_factored_sets(tmp_path / "z", {"x'": zero}, model, ["x"], ["a"], exact=True)
+    assert load_factored_sets(out).manifest["factors"][0]["graph_preserving"] is True
+
+
+def test_an_unseen_mask_of_the_wrong_size_is_an_error(tmp_path):
+    box = _box([[0.2, 0.2]] * 4, [[0.8, 0.8]] * 4, unseen=torch.zeros(3, dtype=torch.bool))
+    with pytest.raises(ValueError, match="unseen mask"):
+        export_factored_sets(tmp_path / "u", {"x'": box}, _xa_model(), ["x"], ["a"])
+
+
+def test_parents_name_the_order_a_table_was_counted_in(tmp_path):
+    model = _xa_model()
+    lower = torch.tensor([[0.1, 0.1], [0.2, 0.2], [0.3, 0.3], [0.4, 0.4]], dtype=torch.float64)
+    box = _box(lower, lower + 0.5)                                # rows over (a, x): a is the slow digit
+    out = export_factored_sets(tmp_path / "o", {"x'": box}, model, ["x"], ["a"], parents={"x'": ("a", "x")})
+    ex = load_factored_sets(out)
+    assert ex.manifest["factors"][0]["parents"] == ["a", "x"]
+    # planning row (x=0, a=1) is row 1 of C order over (x, a); in the table it is (a=1, x=0) -> row 2
+    assert ex.factor_row("f0", 1) == 2
+    with pytest.raises(ValueError, match="not the DAG's parents"):
+        export_factored_sets(tmp_path / "w", {"x'": box}, model, ["x"], ["a"], parents={"x'": ("x",)})
+    variables = {"x": ("discrete", 2), "a": ("discrete", 2), "x'": ("discrete", 2)}
+    out = export_factored_sets(tmp_path / "v", {"x'": box}, variables, ["x"], ["a"], parents={"x'": ("a", "x")})
+    assert load_factored_sets(out).factor_row("f0", 1) == 2     # no model needed when parents are given
+
+
+def test_state_and_action_names_must_be_distinct(tmp_path):
+    box = _box([[0.2, 0.2]] * 4, [[0.8, 0.8]] * 4)
+    with pytest.raises(ValueError, match="distinct"):
+        export_factored_sets(tmp_path / "d", {"x'": box}, _xa_model(), ["x", "a"], ["x"])
+
+
+def test_the_export_directory_gets_a_normal_mode_and_overwrite_ignores_desktop_files(tmp_path):
+    import os
+    import stat
+
+    box = _box([[0.2, 0.2]] * 4, [[0.8, 0.8]] * 4)
+    model = _xa_model()
+    probe = tmp_path / "probe"
+    probe.mkdir()
+    out = export_factored_sets(tmp_path / "n", {"x'": box}, model, ["x"], ["a"])
+    assert stat.S_IMODE(out.stat().st_mode) == stat.S_IMODE(probe.stat().st_mode)   # not 0700
+    os.chmod(out, 0o750)
+    (out / ".DS_Store").write_bytes(b"")
+    export_factored_sets(out, {"x'": box}, model, ["x"], ["a"], overwrite=True)
+    assert stat.S_IMODE(out.stat().st_mode) == 0o750                              # kept on overwrite
+    (out / "notes.txt").write_text("mine")
+    with pytest.raises(FileExistsError, match="other files"):
+        export_factored_sets(out, {"x'": box}, model, ["x"], ["a"], overwrite=True)
+
+
+def test_max_rows_bounds_the_total_size_of_the_row_maps(tmp_path):
+    out, _ = _export_ring(tmp_path / "a")
+    ex = load_factored_sets(out)
+    n_maps = len({tuple(f["parents"]) for f in ex.manifest["factors"]})
+    total = ex.manifest["planning_space"]["n_rows"] * n_maps
+    at, _ = _export_ring(tmp_path / "b", max_rows=total)
+    below, _ = _export_ring(tmp_path / "c", max_rows=total - 1)
+    assert load_factored_sets(at).manifest["planning_space"]["n_rows"] is not None
+    assert load_factored_sets(below).manifest["planning_space"]["n_rows"] is None
+
+
+def test_hypothesis_set_composition_note_is_conditional_on_superset_factors(tmp_path):
+    data = ring_data(n_episodes=50)
+    hs = HypothesisSet(VARIABLES, {"m0'": [("m0", "m3", "rep0"), ("m0", "rep0")]})
+    out = export_factored_sets(tmp_path / "h", hs.factor_sets(data), hs, STATE, [f"rep{i}" for i in range(N)])
+    assert "supersets of the true parents" in load_factored_sets(out).manifest["composition"]["note"]
+    single, _ = _export_ring(tmp_path / "s")
+    assert "supersets" not in load_factored_sets(single).manifest["composition"]["note"]
+
+
+def test_dirichlet_factor_sets_export_with_no_sampling_mode(tmp_path):
+    data = ring_data(n_episodes=50)
+    hs = HypothesisSet(VARIABLES, {"m0'": [("m0", "rep0")]})
+    fs = hs.factor_sets(data, builder="dirichlet", n_samples=4000)
+    out = export_factored_sets(tmp_path / "dir", fs, hs, STATE, [f"rep{i}" for i in range(N)])
+    ex = load_factored_sets(out)
+    assert ex.manifest["factors"][0]["sampling"] is None

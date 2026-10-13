@@ -53,6 +53,7 @@ def validate_weights(
     *,
     where: str,
     device: torch.device | str | None = None,
+    allow_zero_total: bool = False,
 ) -> torch.Tensor | None:
     """Return ``weights`` as a validated 1-D accumulation-dtype tensor, or ``None``.
 
@@ -70,6 +71,9 @@ def validate_weights(
         MPS).  ``None`` keeps the weights' own device.  Pass it rather than
         calling ``.to(device)`` on the result: a float64 tensor cannot be
         moved onto an MPS device at all.
+    allow_zero_total:
+        Accept weights that sum to 0 (all rows weightless).  Counting allows
+        it (the table is all zeros); fitting does not (nothing to fit).
     """
     if weights is None:
         return None
@@ -90,6 +94,8 @@ def validate_weights(
             f"{where}: weights must be non-negative (they are multiplicities, "
             f"not log-weights); found a minimum of {float(w.min())}."
         )
+    if allow_zero_total:
+        return w
     total = float(w.sum())
     if total <= 0.0:
         raise ValueError(
