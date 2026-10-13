@@ -36,6 +36,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The IV linear program and the sensitivity LP of nbn.uncertainty.confounded_interval_set.
+bounds = [
+    "scipy>=1.10",
+]
 bench = [
     "scipy>=1.10",
     "pyyaml>=6.0",
@@ -68,7 +72,7 @@ examples = [
 # absent as ``not_supported`` rather than failing, so partial installs produce
 # quiet, wrong runs; ``nbn-bench check-env`` (and the run commands themselves)
 # verify the benchmark part of this set.
-all = ["nbn[bench,neural,gp,mcmc,examples]"]
+all = ["nbn[bench,neural,gp,mcmc,examples,bounds]"]
 # The documentation site (docs/, built by Sphinx; Read the Docs installs this
 # extra). The notebooks are rendered from their stored outputs, not executed.
 docs = [

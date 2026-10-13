@@ -168,7 +168,9 @@ def _clopper_pearson_interval(
         ) from exc
     k_np, n_np, d_np = (t.detach().cpu().double().numpy() for t in (k, n, delta))
     lower = beta.ppf(d_np / 2.0, k_np, n_np - k_np + 1.0)
-    upper = beta.ppf(1.0 - d_np / 2.0, k_np + 1.0, n_np - k_np)
+    # isf, not ppf(1 - d/2): 1 - d/2 rounds to 1.0 for d < 1.1e-16 (anytime levels at
+    # large n), which made the upper end 1 (sound but vacuous).
+    upper = beta.isf(d_np / 2.0, k_np + 1.0, n_np - k_np)
     lower = torch.from_numpy(lower).nan_to_num(0.0)  # k == 0 -> NaN -> 0
     upper = torch.from_numpy(upper).nan_to_num(1.0)  # k == n -> NaN -> 1
     return lower.to(n), upper.to(n)
