@@ -72,14 +72,37 @@ def test_unused_inputs_never_reach_a_candidate():
     assert float(net.weights[0][0][2].detach().abs().max()) == 0.0    # masked weights stay zero
 
 
-def test_export_matches_the_stacked_forward():
+@pytest.mark.parametrize("device", available_devices())
+def test_export_matches_the_stacked_forward(device):
     g = torch.Generator().manual_seed(3)
-    z = torch.randn(50, 3, generator=g)
-    net = StackedMLP(_masks(), (8, 8), 2, activation="silu")
+    z = torch.randn(50, 3, generator=g).to(device)
+    net = StackedMLP(_masks(), (8, 8), 2, activation="silu").to(device)
+    train_stacked(net, z, torch.randn(50, 2, generator=g).to(device), "mse", epochs=5, lr=1e-2)
     for c in range(3):
+        active = torch.nonzero(_masks()[c]).reshape(-1).tolist()
         seq = net.export(c)
-        active = _masks()[c].bool()
-        torch.testing.assert_close(seq(z[:, active]), net(z)[c], rtol=1e-5, atol=1e-6)
+        assert next(seq.parameters()).device.type == torch.device(device).type
+        torch.testing.assert_close(seq(z[:, active]), net(z)[c], rtol=1e-4, atol=1e-5)
+        perm = active[::-1]                                  # inputs in another order
+        torch.testing.assert_close(net.export(c, order=perm)(z[:, perm]), net(z)[c], rtol=1e-4, atol=1e-5)
+    with pytest.raises(ValueError, match="permutation"):
+        net.export(0, order=[0, 2])
+
+
+@pytest.mark.parametrize("device", available_devices())
+def test_exported_mlp_mechanisms_reproduce_their_training_loss(device):
+    """Regression (CI, MPS): the exported location must be the trained one."""
+    data = simulate(1500, device=device)
+    hs = HypothesisSet(VARS, CANDS)
+    fm = hs.fit(data, location="mlp", epochs=30)
+    for c in CANDS["x'"]:
+        mech = fm[("x'", c)]
+        pa = torch.stack([data[p] for p in c], -1)
+        mse = float((mech.location(pa)[:, 0] - data["x'"]).pow(2).mean())
+        assert mse == pytest.approx(fm.train_loss[("x'", c)], rel=1e-3, abs=1e-5)
+    mech = fm[("d'", ("x",))]
+    logits_ll = float(mech.log_prob(data["d'"], data["x"].reshape(-1, 1)).mean())
+    assert -logits_ll == pytest.approx(fm.train_loss[("d'", ("x",))], rel=1e-3, abs=1e-5)
 
 
 # ---------------------------------------------------------------------------

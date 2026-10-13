@@ -184,8 +184,7 @@ def fit_factors(
                 for i, c in enumerate(neural_cands):
                     mech = StructuralNeuralCategorical(n_classes=k, hidden=categorical_hidden,
                                                        activation="relu", coupling=coupling)
-                    mech.set_network(_reorder_first_layer(net.export(i), _cols_in_union_order(col_of, c),
-                                                          _cols_in_candidate_order(col_of, c)),
+                    mech.set_network(net.export(i, order=_cols_in_candidate_order(col_of, c)),
                                      d_pa=sum(len(col_of[p]) for p in c))
                     mech.noise.n_classes = k
                     mech.to(dev)
@@ -228,7 +227,7 @@ def fit_factors(
             for i, c in enumerate(with_parents):
                 cols = _cols_in_candidate_order(col_of, c)
                 mech = AdditiveNoiseMechanism(location="mlp", noise=noise, hidden=hidden)
-                mech.set_mlp_location(_reorder_first_layer(net.export(i), _cols_in_union_order(col_of, c), cols),
+                mech.set_mlp_location(net.export(i, order=cols),
                                       mean[cols], std[cols], output_dim=x.shape[1])
                 mech.fit_noise(x, pa_union[:, cols], w)
                 mechs[(node, c)], kinds[(node, c)] = mech, "mlp"
@@ -263,10 +262,6 @@ def _masks(col_of: Dict[str, List[int]], d: int, cands) -> torch.Tensor:
 
 def _cols_in_candidate_order(col_of: Dict[str, List[int]], c: Tuple[str, ...]) -> List[int]:
     return [j for p in c for j in col_of[p]]
-
-
-def _cols_in_union_order(col_of: Dict[str, List[int]], c: Tuple[str, ...]) -> List[int]:
-    return sorted(_cols_in_candidate_order(col_of, c))
 
 
 def _fit_linear_subblocks(x, pa_union, col_of, cands, w, noise) -> Dict[Tuple[str, ...], nn.Module]:
@@ -307,17 +302,6 @@ def _fit_roots(hs, data, w, noise, alpha: float = 0.0, coupling: str = "gumbel_m
             mech.fit_local(data[v].reshape(data[v].shape[0], -1).to(torch.float32), None, weights=w)
         roots[v] = mech
     return roots
-
-
-def _reorder_first_layer(seq: nn.Sequential, current: List[int], target: List[int]) -> nn.Sequential:
-    """Permute the input columns of the first ``nn.Linear`` from ``current`` to ``target`` order."""
-    if current == target:
-        return seq
-    first = seq[0]
-    perm = [current.index(j) for j in target]
-    with torch.no_grad():
-        first.weight.copy_(first.weight[:, perm].clone())
-    return seq
 
 
 def _seed(seed: int, node: str, parents: Tuple[str, ...]) -> int:
