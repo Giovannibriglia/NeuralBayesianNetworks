@@ -164,8 +164,8 @@ policy, Simão & Spaan 2019).
    holding together at `1 - delta`.
 2. If `c` contains the true parents, so does `c ∪ {v}`, and their conditionals
    are equal, so their balls overlap on every row. **Disjoint balls prove that
-   `c` misses a parent**, so `c` is discarded. A superset candidate is never
-   discarded.
+   `c` misses a parent**, so `c` is discarded. On the joint event (probability
+   at least `1 - delta`) a superset candidate is never discarded.
 3. Over the union of the survivors' parents, each row where every survivor
    has data gets a ball containing all of the survivors' balls. Some survivor
    is a superset, so the ball contains the truth. Other rows get the simplex.
@@ -173,10 +173,11 @@ policy, Simão & Spaan 2019).
 ```python
 from nbn.structure import agreement_set
 
-res = agreement_set(model.variables, data, "health'", inputs=["health", "tired", "exercise"],
-                    max_parents=3, delta=0.1)
+# inputs: every variable allowed as a parent; feasible: the (s, a) rows that can occur
+res = agreement_set(variables, data, "m0'", inputs, max_parents=3, delta=0.1,
+                    sampling="trajectory", coverage_rows=feasible)
 print(res.survivors, res.parents, res.set.guarantee)          # pac_under_model
-print("joint values visited / with a set:", res.flat_visited, "/", res.flat_with_set)
+print("feasible rows visited / with a set:", res.flat_visited, "/", res.flat_with_set)
 ```
 
 The gain is `res.n_rows_gained`: joint input values that no dataset visited
@@ -186,7 +187,9 @@ single action), pass the feasible rows as `coverage_rows`. Otherwise the
 counts include flag combinations that never occur.
 If every candidate is refuted, the bound `d` is contradicted
 (`res.assumption_refuted`), and the result falls back to the flat model (all
-inputs as parents). Declared assumptions (in `res.assumptions`): `|Pa| <= d`,
+inputs as parents). With explicit `candidates`, the first assumption becomes
+"some given candidate contains the true parents". Declared assumptions (in
+`res.assumptions`): `|Pa| <= d`,
 `Pa ⊆ inputs`, no intra-slice edges into the node, and the same mechanism for
 every logger (no hidden confounding). Several nodes: split `delta` between
 them. Worked example: {doc}`../examples/15_agreement_rule`.
