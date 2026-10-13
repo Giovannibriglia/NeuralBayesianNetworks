@@ -169,7 +169,7 @@ class Case:
     budget_frac: float = 0.0  # > 0: memory_budget = frac x estimate (forces chunking)
     big: bool = False         # peak >= ~1 GiB: skipped by --quick
     ev_kind: str = "long"     # "long" (int64 on the device), "float" tensors, "list"
-    cpu_only: bool = False    # float64 models: MPS has no float64
+    no_mps: bool = False      # float64 models: MPS has no float64
 
 
 def _tail(n: int, k: int) -> list[str]:
@@ -243,7 +243,7 @@ def cases() -> tuple[dict[str, Callable], list[Case]]:
         out.append(Case("barley q7", "barley", [BARLEY_Q7_TARGET], BARLEY_Q7_EVIDENCE,
                         B=B, big=B >= 256))
     out.append(Case("wide22 float64 do(V0)", "wide22-double-do-V0", ["V8"],
-                    [f"V{i}" for i in range(17, 22)], B=8, cpu_only=True))
+                    [f"V{i}" for i in range(17, 22)], B=8, no_mps=True))
     out.append(Case("naive-bayes Y32 x16 binary", "naive-bayes-y32-x16", ["Y"],
                     [f"X{i}" for i in range(16)], B=2_801_664, big=True))
     out.append(Case("wide30 no-ev", "wide30-d3-k4", ["V29"], [], B=64))
@@ -569,7 +569,7 @@ def main() -> int:
     _, todo = cases()
     picked = [i for i, c in enumerate(todo)
               if not (args.quick and c.big) and not (args.big_only and not c.big)
-              and not (c.cpu_only and device != "cpu")]
+              and not (c.no_mps and device == "mps")]
     isolate = args.isolate or device != "cpu"
     rows = []
     models: dict = {}

@@ -26,7 +26,11 @@ hold.  It is computed in three layers:
      cached blocks, splitting, 2 MiB / 20 MiB segments for blocks <= 1 MiB /
      < 10 MiB, 2 MiB-rounded segments beyond), whose peak *reserved* bytes
      bound what the call takes from the driver, freed-but-unusable cached
-     segments included.
+     segments included.  The settings of ``PYTORCH_CUDA_ALLOC_CONF`` that
+     change the reserve are followed (``_cuda_policy``: ``max_split_size_mb``,
+     ``max_non_split_rounding_mb``, ``roundup_power2_divisions``,
+     ``expandable_segments``, ``large_segment_size_mb``); another backend
+     or an unknown key falls back to a bound that credits no free.
 3. **A margin**: ``_LIVESET_SAFETY`` (10 %).
 
 ``scripts/ve_memory_validation.py`` measures the bound on CPU (exact), MPS
@@ -35,7 +39,9 @@ hold.  It is computed in three layers:
 from __future__ import annotations
 
 import bisect
+import functools
 import math
+import os
 from typing import Dict, Mapping, NamedTuple, Sequence
 
 import numpy as np
@@ -109,31 +115,18 @@ def _round_up(x: np.ndarray, q: int) -> np.ndarray:
     return np.ceil(x / q) * q
 
 
+def _accept_any(block: int, req: int, pool) -> bool:
+    return True
+
+
 class _Policy(NamedTuple):
     """How a caching allocator rounds, pools and grows (``_segment_peak``)."""
 
     round: object      # request bytes -> block bytes
     pool: object       # block bytes -> pool key
     segment: object    # (block bytes, pool key) -> new segment bytes
-    split: object      # (rest bytes, pool key) -> keep the rest as a free block
-
-
-def _cuda_round(s: float) -> int:
-    return max(512, math.ceil(s / 512) * 512)
-
-
-def _cuda_segment(req: int, pool) -> int:
-    if pool == "small":
-        return 2 * _MiB
-    return 20 * _MiB if req < 10 * _MiB else math.ceil(req / (2 * _MiB)) * 2 * _MiB
-
-
-_CUDA = _Policy(
-    round=_cuda_round,
-    pool=lambda req: "small" if req <= _MiB else "large",
-    segment=_cuda_segment,
-    split=lambda rest, pool: rest >= 512 if pool == "small" else rest > _MiB,
-)
+    split: object      # (rest bytes, pool key, block bytes) -> keep the rest as a free block
+    accept: object = _accept_any  # (cached block bytes, block bytes, pool key) -> may it serve?
 
 
 def _mps_round(s: float) -> int:
@@ -158,8 +151,191 @@ _MPS = _Policy(
     pool=_mps_pool,
     segment=lambda req, pool: {"small": 8 * _MiB, "medium": 32 * _MiB,
                                "large": _GiB}.get(pool, req),  # type: ignore[arg-type]
-    split=lambda rest, pool: rest >= 256,
+    split=lambda rest, pool, req: rest >= 256,
 )
+
+
+# --------------------------------------------------------------------------- #
+# CUDA allocator configuration (``PYTORCH_CUDA_ALLOC_CONF``)
+# --------------------------------------------------------------------------- #
+
+# Keys of ``CUDACachingAllocator`` that change what the allocator reserves
+# (``_cuda_policy`` models them) ...
+_CUDA_MODELLED = frozenset({"max_split_size_mb", "max_non_split_rounding_mb",
+                            "roundup_power2_divisions", "expandable_segments",
+                            "large_segment_size_mb"})
+# ... keys that do not: garbage collection only releases cached blocks (the
+# reserve can only be lower), the rest configure host (pinned) memory, locks,
+# graph capture or the per-process cap.
+_CUDA_NO_EFFECT = frozenset({
+    "garbage_collection_threshold", "release_lock_on_cudamalloc",
+    "release_lock_on_hipmalloc", "pinned_use_cuda_host_register",
+    "pinned_use_hip_host_register", "pinned_num_register_threads",
+    "pinned_use_background_threads", "pinned_reserve_segment_size_mb",
+    "graph_capture_record_stream_reuse", "per_process_memory_fraction",
+})
+_ROUNDUP_INTERVALS = 17   # buckets from 1 MiB to 64 GiB, by powers of two
+
+
+class _CudaConf(NamedTuple):
+    """The settings of ``CUDACachingAllocator`` the reserve depends on."""
+
+    max_split: float = math.inf         # blocks this large are never split
+    non_split_rounding: int = 20 * _MiB  # oversize blocks may exceed a request by this
+    divisions: tuple = (0,) * _ROUNDUP_INTERVALS  # roundup_power2_divisions per bucket
+    expandable: bool = False
+    large_segment: int = 20 * _MiB
+    known: bool = True                  # False: a setting the model cannot follow
+
+
+def _parse_cuda_conf(text: str | None) -> _CudaConf:
+    """``_CudaConf`` of a ``PYTORCH_CUDA_ALLOC_CONF`` string (``parseArgs``).
+
+    ``backend:cudaMallocAsync`` and any key this module does not know give
+    ``known=False``: the estimate then falls back to the no-reuse bound.
+    """
+    conf = _CudaConf()
+    if not text:
+        return conf
+    items, depth, cur = [], 0, []
+    for ch in text:
+        depth += (ch == "[") - (ch == "]")
+        if ch == "," and depth == 0:
+            items.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    items.append("".join(cur))
+    for item in items:
+        if not item.strip():
+            continue
+        key, _, val = item.partition(":")
+        key, val = key.strip(), val.strip()
+        try:
+            if key == "max_split_size_mb":
+                conf = conf._replace(max_split=int(val) * _MiB)
+            elif key == "max_non_split_rounding_mb":
+                conf = conf._replace(non_split_rounding=int(val) * _MiB)
+            elif key == "large_segment_size_mb":
+                conf = conf._replace(large_segment=int(val) * _MiB)
+            elif key == "expandable_segments":
+                conf = conf._replace(expandable=val.lower() == "true")
+            elif key == "roundup_power2_divisions":
+                conf = conf._replace(divisions=_parse_divisions(val))
+            elif key == "backend":
+                if val.lower() != "native":
+                    conf = conf._replace(known=False)
+            elif key not in _CUDA_NO_EFFECT:
+                conf = conf._replace(known=False)
+        except ValueError:
+            conf = conf._replace(known=False)
+    return conf
+
+
+def _parse_divisions(val: str) -> tuple:
+    """``roundup_power2_divisions``: one value for every size, or
+    ``[64:8,256:4,>:1]`` — a value per power-of-two bucket of MiB (the first
+    entry also covers every smaller bucket, ``>`` every larger one)."""
+    n = _ROUNDUP_INTERVALS
+    if not val.startswith("["):
+        return (int(val),) * n
+    div = [0] * n
+    last, first = 0, True
+    for entry in val.strip("[]").split(","):
+        bound, _, value = entry.partition(":")
+        bound, value = bound.strip(), int(value)
+        if bound == ">":
+            for i in range(last, n):
+                div[i] = value
+            continue
+        b = int(bound)
+        if b <= 0 or b & (b - 1):
+            raise ValueError(bound)
+        index = min(b.bit_length() - 1, n - 1)
+        if first:
+            for i in range(index):
+                div[i] = value
+            first = False
+        div[index] = value
+        last = index
+    return tuple(div)
+
+
+def _round_pow2_division(size: int, divisions: int) -> int:
+    """``roundup_power2_next_division``: round up to the next multiple of
+    (the power of two below ``size``) / ``divisions``."""
+    if size <= 4 or divisions <= 1 or size & (size - 1) == 0:
+        return size
+    floor = 1 << (size.bit_length() - 1)
+    step = floor >> (divisions.bit_length() - 1)
+    if step == 0:
+        return floor << 1
+    base = size & ~(step - 1)
+    return size if base == size else base + step
+
+
+def _cuda_round(s: float, divisions: tuple = _CudaConf().divisions) -> int:
+    """``round_size``: 512 B blocks, or power-of-two divisions when set."""
+    size = max(512, math.ceil(s))
+    bucket = min(max(size.bit_length() - 1 - 20, 0), _ROUNDUP_INTERVALS - 1)
+    d = divisions[bucket]
+    if d > 1 and size > 512 * d:
+        return _round_pow2_division(size, d)
+    return math.ceil(size / 512) * 512
+
+
+def _cuda_policy(conf: _CudaConf) -> _Policy:
+    """``_Policy`` of ``CUDACachingAllocator`` under ``conf`` (``get_free_block``,
+    ``should_split``, ``get_allocation_size``)."""
+    large = conf.large_segment
+
+    def segment(req: int, pool) -> int:
+        if pool == "small":
+            return 2 * _MiB
+        return large if req < 10 * _MiB else math.ceil(req / (2 * _MiB)) * 2 * _MiB
+
+    def split(rest: int, pool, req: int) -> bool:
+        if pool == "small" or conf.expandable:
+            return rest >= 512
+        return req < conf.max_split and rest > _MiB
+
+    def accept(block: int, req: int, pool) -> bool:
+        # Only the best-fitting cached block is examined; an oversize block
+        # (>= max_split) never serves a smaller request, and an oversize
+        # request takes a block at most ``non_split_rounding`` larger.
+        if req < conf.max_split and block >= conf.max_split:
+            return False
+        return not (req >= conf.max_split and block >= req + conf.non_split_rounding)
+
+    return _Policy(
+        round=lambda s: _cuda_round(s, conf.divisions),
+        pool=lambda req: "small" if req <= _MiB else "large",
+        segment=segment,
+        split=split,
+        accept=accept,
+    )
+
+
+@functools.lru_cache(maxsize=16)
+def _cuda_conf(text: str | None) -> _CudaConf:
+    return _parse_cuda_conf(text)
+
+
+def cuda_allocator_conf() -> str:
+    """The allocator configuration the CUDA estimate follows: the
+    ``PYTORCH_CUDA_ALLOC_CONF`` environment variable (what torch reads at
+    start-up; ``torch.cuda.memory._set_allocator_settings`` cannot be read
+    back, so callers who use it should set the variable too), plus the
+    backend torch reports."""
+    text = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "") or ""
+    if torch.cuda.is_available():
+        try:
+            backend = torch.cuda.get_allocator_backend()
+        except Exception:  # noqa: BLE001  — no device, driver error
+            backend = "native"
+        if backend != "native":
+            text = f"backend:{backend},{text}" if text else f"backend:{backend}"
+    return text
 
 
 class _Segment:
@@ -176,10 +352,10 @@ def _segment_peak(sizes: Sequence[float], sign: Sequence[int], ref: Sequence[int
     """Peak bytes of segments (CUDA) / heaps (MPS) held while replaying the tape.
 
     A request takes the smallest free block of its pool that fits (splitting
-    off the rest), else a new segment; a freed block merges with free
-    neighbours in its segment and stays there — reserved memory never shrinks
-    during the call.  This is ``CUDACachingAllocator`` in its default
-    configuration (``_CUDA``), and the behaviour measured for Metal heaps
+    off the rest) if the policy accepts it, else a new segment; a freed block
+    merges with free neighbours in its segment and stays there — reserved
+    memory never shrinks during the call.  This is ``CUDACachingAllocator``
+    without expandable segments (``_cuda_policy``), and the behaviour measured for Metal heaps
     under PyTorch's MPS allocator (``_MPS``): freed buffers return their
     space to the heap, holes coalesce, and a request no hole fits opens a new
     heap even when the heap's total free space would suffice.
@@ -208,7 +384,7 @@ def _segment_peak(sizes: Sequence[float], sign: Sequence[int], ref: Sequence[int
             key = policy.pool(req)
             free = pools.setdefault(key, [])
             j = bisect.bisect_left(free, (req, -1, -1))
-            if j < len(free):
+            if j < len(free) and policy.accept(free[j][0], req, key):
                 size, seg, off = free.pop(j)
             else:
                 size = policy.segment(req, key)
@@ -219,7 +395,7 @@ def _segment_peak(sizes: Sequence[float], sign: Sequence[int], ref: Sequence[int
                 peak = max(peak, reserved)
             sg = segs[seg]
             rest = size - req
-            if rest > 0 and policy.split(rest, key):
+            if rest > 0 and policy.split(rest, key, req):
                 put_free(seg, off + req, rest)
                 size = req
             sg.blocks[off] = [size, False]
@@ -246,17 +422,125 @@ def _segment_peak(sizes: Sequence[float], sign: Sequence[int], ref: Sequence[int
     return float(peak)
 
 
-def _cuda_reserved_peak(sizes: Sequence[float], sign: Sequence[int],
-                        ref: Sequence[int]) -> float:
-    """Peak reserved bytes of ``CUDACachingAllocator`` (``_segment_peak``).
+def _expandable_peak(sizes: Sequence[float], sign: Sequence[int], ref: Sequence[int],
+                     policy: _Policy, large_quantum: int) -> float:
+    """Peak mapped bytes of ``CUDACachingAllocator`` with ``expandable_segments``.
 
-    Default configuration (no ``max_split_size``, no garbage collection): a
-    request rounded up to 512 B takes the smallest cached free block of its
-    pool (<= 1 MiB: small pool, else large) that fits, splitting it when the
-    rest is >= 512 B (small) or > 1 MiB (large); without one, a new segment
-    of 2 MiB (small), 20 MiB (< 10 MiB) or the request rounded up to 2 MiB.
+    One mapping per pool grows in place in units of 2 MiB (small pool) or
+    ``large_quantum`` (large pool, ``kLargeBuffer`` / ``large_segment_size_mb``).
+    A request takes the smallest free block that fits among those not at the
+    mapped end; failing that, the free block at the end, extended by mapping
+    what is missing (``find_expandable_block`` / ``try_allocate_expandable_block``);
+    failing that, newly mapped space.  Freed blocks coalesce.  Mapped memory
+    is never released during the call.
     """
-    return _segment_peak(sizes, sign, ref, _CUDA)
+    pools: dict = {}
+    owner: dict[int, tuple] = {}
+    reserved = peak = 0
+
+    def pool_of(key):
+        if key not in pools:
+            pools[key] = {"blocks": {}, "offs": [], "free": [], "mapped": 0}
+        return pools[key]
+
+    def put_free(pl, off, size):
+        if off not in pl["blocks"]:
+            bisect.insort(pl["offs"], off)
+        pl["blocks"][off] = [size, True]
+        bisect.insort(pl["free"], (size, off))
+
+    def take_free(pl, off):
+        size = pl["blocks"][off][0]
+        pl["free"].remove((size, off))
+        return size
+
+    for i, s in enumerate(sizes):
+        if sign[i] > 0:
+            req = policy.round(s)
+            key = policy.pool(req)
+            pl = pool_of(key)
+            quantum = 2 * _MiB if key == "small" else large_quantum
+            chosen = None
+            j = bisect.bisect_left(pl["free"], (req, -1))
+            while j < len(pl["free"]):
+                size, off = pl["free"][j]
+                if off + size != pl["mapped"]:           # not the block at the end
+                    chosen = (size, off) if policy.accept(size, req, key) else None
+                    break
+                j += 1
+            if chosen is None:
+                tail = pl["offs"][-1] if pl["offs"] else None
+                if tail is not None and pl["blocks"][tail][1] and \
+                        pl["blocks"][tail][0] + tail == pl["mapped"]:
+                    size = take_free(pl, tail)
+                    off = tail
+                    if size < req:
+                        grow = math.ceil((req - size) / quantum) * quantum
+                        pl["mapped"] += grow
+                        reserved += grow
+                        size += grow
+                    chosen = (size, off)
+                else:
+                    grow = math.ceil(req / quantum) * quantum
+                    chosen = (grow, pl["mapped"])
+                    bisect.insort(pl["offs"], pl["mapped"])
+                    pl["mapped"] += grow
+                    reserved += grow
+                peak = max(peak, reserved)
+            else:
+                pl["free"].remove(chosen)
+            size, off = chosen
+            rest = size - req
+            if rest > 0 and policy.split(rest, key, req):
+                put_free(pl, off + req, rest)
+                size = req
+            pl["blocks"][off] = [size, False]
+            owner[i] = (key, off)
+        else:
+            key, off = owner.pop(ref[i])
+            pl = pools[key]
+            size = pl["blocks"][off][0]
+            k = bisect.bisect_left(pl["offs"], off)
+            if k + 1 < len(pl["offs"]):
+                nxt = pl["offs"][k + 1]
+                if pl["blocks"][nxt][1]:
+                    size += take_free(pl, nxt)
+                    del pl["blocks"][nxt]
+                    pl["offs"].pop(k + 1)
+            if k > 0:
+                prv = pl["offs"][k - 1]
+                if pl["blocks"][prv][1]:
+                    size += take_free(pl, prv)
+                    del pl["blocks"][off]
+                    pl["offs"].pop(k)
+                    off = prv
+            put_free(pl, off, size)
+    return float(peak)
+
+
+def _cuda_reserved_peak(sizes: Sequence[float], sign: Sequence[int],
+                        ref: Sequence[int], *, conf: str | None = None) -> float:
+    """Peak reserved bytes of ``CUDACachingAllocator`` replaying the tape.
+
+    ``conf`` is a ``PYTORCH_CUDA_ALLOC_CONF`` string (default: the process's,
+    ``cuda_allocator_conf``).  Default configuration: a request rounded up to
+    512 B takes the smallest cached free block of its pool (<= 1 MiB: small
+    pool, else large) that fits, splitting it when the rest is >= 512 B
+    (small) or > 1 MiB (large); without one, a new segment of 2 MiB (small),
+    20 MiB (< 10 MiB) or the request rounded up to 2 MiB.  ``max_split_size_mb``
+    stops splitting and reuse of oversize blocks, ``roundup_power2_divisions``
+    rounds requests to power-of-two divisions, ``expandable_segments`` grows
+    one mapping per pool (``_expandable_peak``).  Under another backend or an
+    unknown setting no free is credited: every allocation is priced as new.
+    """
+    c = _cuda_conf(cuda_allocator_conf() if conf is None else conf)
+    if not c.known:
+        keep = [i for i, g in enumerate(sign) if g > 0]
+        return _segment_peak([sizes[i] for i in keep], [1] * len(keep),
+                             list(range(len(keep))), _cuda_policy(_CudaConf()))
+    if c.expandable:
+        return _expandable_peak(sizes, sign, ref, _cuda_policy(c), c.large_segment)
+    return _segment_peak(sizes, sign, ref, _cuda_policy(c))
 
 
 def _mps_heap_peak(sizes: Sequence[float], sign: Sequence[int],
@@ -280,21 +564,25 @@ def _mps_heap_peak(sizes: Sequence[float], sign: Sequence[int],
     return _segment_peak(sizes, sign, ref, _MPS)
 
 
-def _replay(tape: tuple, B: int, dtype_bytes: int, device_type: str) -> tuple[float, float]:
+def _replay(tape: tuple, B: int, dtype_bytes: int, device_type: str,
+            conf: str | None = None) -> tuple[float, float]:
     """``(peak, end)`` bytes the device holds replaying ``tape`` at ``B`` rows.
 
     CPU: the running sum of live bytes (64 B aligned) — ``end`` is what is
     still allocated afterwards.  MPS / CUDA: the peak of the simulated heaps
-    / segments, which are never released during the call (``end == peak``).
+    / segments, which are never released during the call (``end == peak``);
+    ``conf`` is the CUDA allocator configuration (default: the process's).
     """
     a, r, es, sign, ref = (np.asarray(x) for x in tape)
     if a.size == 0:
         return 0.0, 0.0
     es = np.where(es == _FACTOR, dtype_bytes, es)
     sizes = (a + B * r).astype(np.float64) * es
-    if device_type in ("cuda", "mps"):
-        sim = _cuda_reserved_peak if device_type == "cuda" else _mps_heap_peak
-        peak = sim(sizes.tolist(), sign.tolist(), ref.tolist())
+    if device_type == "cuda":
+        peak = _cuda_reserved_peak(sizes.tolist(), sign.tolist(), ref.tolist(), conf=conf)
+        return peak, peak
+    if device_type == "mps":
+        peak = _mps_heap_peak(sizes.tolist(), sign.tolist(), ref.tolist())
         return peak, peak
     running = np.cumsum(sign * _round_up(sizes, 64))
     return float(running[sign > 0].max()), float(running[-1])
@@ -328,10 +616,11 @@ class _PlanCost(NamedTuple):
     def peak(self, B: int, dtype_bytes: int, device_type: str, embed: tuple = ()) -> float:
         """Peak bytes of the plan (and a joint answer's embedding) at ``B``
         rows, memoised: repeated queries of one shape replay it once."""
-        key = (B, dtype_bytes, device_type, embed)
+        conf = cuda_allocator_conf() if device_type == "cuda" else None
+        key = (B, dtype_bytes, device_type, embed, conf)
         if key not in self.memo:
             tape = _concat([self.tape, embed]) if embed else self.tape
-            self.memo[key] = _replay(tape, B, dtype_bytes, device_type)[0]
+            self.memo[key] = _replay(tape, B, dtype_bytes, device_type, conf)[0]
         return self.memo[key]
 
 
@@ -584,13 +873,16 @@ class _PeakModel:
         tapes).  On CPU live bytes add exactly; on MPS / CUDA each phase's
         simulated heaps / segments are added, as separate pools — an upper
         bound of sharing them.
+
         """
         if B not in self._memo:
             dt, dev = self.dtype_bytes, self.device_type
+            conf = cuda_allocator_conf() if dev == "cuda" else None
             plan = self.cost.peak(B, dt, dev, self.embed)
-            tab_peak, tab_end = _replay(self.tables, B, dt, dev) if self.tables else (0.0, 0.0)
+            tab_peak, tab_end = (_replay(self.tables, B, dt, dev, conf) if self.tables
+                                 else (0.0, 0.0))
             if dev in ("cuda", "mps"):
-                evidence = _replay(_concat([self.prelude, self.transient]), B, dt, dev)[0] \
+                evidence = _replay(_concat([self.prelude, self.transient]), B, dt, dev, conf)[0] \
                     if self.prelude or self.transient else 0.0
                 total = evidence + tab_peak + plan
             else:

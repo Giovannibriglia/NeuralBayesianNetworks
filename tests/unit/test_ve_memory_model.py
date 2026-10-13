@@ -538,3 +538,123 @@ def test_chunk_sizer_does_not_subtract_resident_memory_from_live_headroom(models
         eng.query_batch(model, ["Y"], ev)
     room = min(budget - pm.reserve_bytes(B), 0.9 * head - 2 * pm.output_bytes(B))
     assert spy.call_args.kwargs["chunk"] == _max_fitting_rows(pm.child().bytes, B - 1, room)
+
+
+# --------------------------------------------------------------------------- #
+# CUDA phase: PYTORCH_CUDA_ALLOC_CONF (#301 review C)
+# --------------------------------------------------------------------------- #
+
+def test_cuda_allocator_conf_is_parsed_like_torch():
+    """``parseArgs``: known keys set their field, keys without effect on the
+    reserve are ignored, another backend or an unknown key is ``known=False``."""
+    from nbn.inference._ve_memory import _CudaConf, _parse_cuda_conf
+
+    assert _parse_cuda_conf(None) == _CudaConf()
+    assert _parse_cuda_conf("") == _CudaConf()
+    c = _parse_cuda_conf("max_split_size_mb:128,max_non_split_rounding_mb:40,"
+                         "garbage_collection_threshold:0.8,expandable_segments:True,"
+                         "large_segment_size_mb:64")
+    assert (c.max_split, c.non_split_rounding, c.expandable, c.large_segment, c.known) == (
+        128 * MiB, 40 * MiB, True, 64 * MiB, True)
+    assert _parse_cuda_conf("roundup_power2_divisions:4").divisions == (4,) * 17
+    d = _parse_cuda_conf("roundup_power2_divisions:[64:8,256:4,>:1]").divisions
+    assert d[:7] == (8,) * 7 and d[7] == 0 and d[8:] == (1,) * 9   # ">" fills from the last bucket on
+    assert _parse_cuda_conf("backend:native,pinned_use_background_threads:True").known
+    assert not _parse_cuda_conf("backend:cudaMallocAsync").known
+    assert not _parse_cuda_conf("some_future_key:1").known
+    assert not _parse_cuda_conf("max_split_size_mb:lots").known
+
+
+def test_cuda_rounding_follows_power2_divisions():
+    """``round_size``: 512 B by default; with divisions, up to the next
+    multiple of (power of two below the size) / divisions."""
+    from nbn.inference._ve_memory import _cuda_round
+
+    assert _cuda_round(1) == 512
+    assert _cuda_round(513) == 1024
+    four = (4,) * 17
+    assert _cuda_round(5 * MiB, four) == 5 * MiB           # 4 MiB floor, 1 MiB steps
+    assert _cuda_round(4.5 * MiB, four) == 5 * MiB
+    assert _cuda_round(2.1 * MiB, four) == 2.5 * MiB       # 2 MiB floor, 512 KiB steps
+    assert _cuda_round(3 * MiB, four) == 3 * MiB
+    assert _cuda_round(2 * MiB, four) == 2 * MiB            # powers of two are kept
+    assert _cuda_round(1000, four) == 1024                   # size <= 512 * divisions: 512 B rounding
+    assert _cuda_round(4.5 * MiB, (1,) * 17) == 4.5 * MiB   # divisions 1: plain rounding
+    assert _cuda_round(3 * MiB + 1, (2,) * 17) == 4 * MiB   # 2 divisions: 1 MiB steps above 2 MiB
+
+
+def test_cuda_max_split_size_blocks_oversize_reuse():
+    """``get_free_block`` with ``max_split_size_mb``: an oversize cached block
+    never serves a smaller request, an oversize request takes a block at most
+    ``max_non_split_rounding_mb`` (20 MiB) larger, and oversize blocks are
+    not split."""
+    conf = "max_split_size_mb:128"
+    seq = ([256 * MiB, 256 * MiB, 64 * MiB], [1, -1, 1], [0, 0, 2])
+    assert _cuda_reserved_peak(*seq) == 256 * MiB                 # default: split and reuse
+    assert _cuda_reserved_peak(*seq, conf=conf) == 320 * MiB      # oversize block refused
+    seq = ([300 * MiB, 300 * MiB, 256 * MiB], [1, -1, 1], [0, 0, 2])
+    assert _cuda_reserved_peak(*seq, conf=conf) == 556 * MiB      # 300 >= 256 + 20: refused
+    seq = ([300 * MiB, 300 * MiB, 290 * MiB], [1, -1, 1], [0, 0, 2])
+    assert _cuda_reserved_peak(*seq, conf=conf) == 300 * MiB      # within the rounding: taken
+    # Taken whole: the 10 MiB rest is not split off, so a later 8 MiB request
+    # opens a 20 MiB segment instead of reusing it.
+    seq = ([300 * MiB, 300 * MiB, 290 * MiB, 8 * MiB], [1, -1, 1, 1], [0, 0, 2, 3])
+    assert _cuda_reserved_peak(*seq, conf=conf) == 320 * MiB
+    assert _cuda_reserved_peak(*seq) == 300 * MiB
+
+
+def test_cuda_expandable_segments_grow_one_mapping_per_pool():
+    """``expandable_segments:True``: the large pool maps 20 MiB units in place;
+    the free block at the end is extended rather than left behind."""
+    conf = "expandable_segments:True"
+    seq = ([64 * MiB, 64 * MiB, 256 * MiB], [1, -1, 1], [0, 0, 2])
+    assert _cuda_reserved_peak(*seq) == 320 * MiB
+    assert _cuda_reserved_peak(*seq, conf=conf) == 260 * MiB      # 80 mapped, +180 for 256
+    # A non-tail hole that fits is preferred over growing the mapping.
+    seq = ([100 * MiB, 50 * MiB, 100 * MiB, 90 * MiB], [1, 1, -1, 1], [0, 1, 0, 3])
+    assert _cuda_reserved_peak(*seq, conf=conf) == 160 * MiB
+    # Small and large pools map separately, 2 MiB and 20 MiB at a time.
+    seq = ([100_000.0, 3 * MiB], [1, 1], [0, 1])
+    assert _cuda_reserved_peak(*seq, conf=conf) == 22 * MiB
+    assert _cuda_reserved_peak(*seq, conf=conf + ",large_segment_size_mb:64") == 66 * MiB
+
+
+def test_cuda_unknown_settings_credit_no_free():
+    """Another backend or a setting the model does not know: every allocation
+    is priced as new (an upper bound of any reuse)."""
+    seq = ([64 * MiB, 64 * MiB, 64 * MiB], [1, -1, 1], [0, 0, 2])
+    assert _cuda_reserved_peak(*seq) == 64 * MiB
+    for conf in ("backend:cudaMallocAsync", "new_knob:1"):
+        assert _cuda_reserved_peak(*seq, conf=conf) == 128 * MiB
+
+
+def test_cuda_estimate_follows_the_process_allocator_conf(monkeypatch, models):
+    """The estimate reads ``PYTORCH_CUDA_ALLOC_CONF`` at each call and memoises
+    per configuration; measured on an RTX 4070 (torch 2.11) with
+    ``roundup_power2_divisions:4``, ``wide34 tail-ev`` B=16 reserved
+    1,012,924,416 B and ``wide36 scattered-ev`` B=16 339,738,624 B, both above
+    the default-configuration estimate."""
+    from nbn.inference import _ve_memory
+
+    model = _wide(34, 4, 3, seed=2)
+    B = 16
+    ev = _evidence(model, [f"V{i}" for i in range(28, 34)], B)
+    eng = TensorVariableElimination()
+    eng._extract_factors(model)
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+    pm = eng._peak_model(model, "V10", ev, B=B)
+    pm.device_type = "cuda"
+    default = pm.bytes(B)
+    assert default < 1_012_924_416
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "roundup_power2_divisions:4")
+    pm._memo = {}
+    assert pm.bytes(B) >= 1_012_924_416
+    model36 = _wide(36, 3, 3, seed=6)
+    ev = _evidence(model36, [f"V{i}" for i in range(0, 36, 3) if i != 18], B)
+    eng = TensorVariableElimination()
+    eng._extract_factors(model36)
+    pm = eng._peak_model(model36, "V18", ev, B=B)
+    pm.device_type = "cuda"
+    assert pm.bytes(B) >= 339_738_624
+    assert _ve_memory.cuda_allocator_conf().endswith("roundup_power2_divisions:4")
+
