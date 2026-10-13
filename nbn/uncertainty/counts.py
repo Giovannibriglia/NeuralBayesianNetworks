@@ -1,10 +1,12 @@
 """Count tables of a discrete node, straight from data (no fitted mechanism needed)."""
 from __future__ import annotations
 
+import math
 from typing import Any, Mapping, Sequence
 
 import torch
 
+from nbn.learning.weighting import validate_weights
 from nbn.utils.device import accum_dtype, to_device_dtype
 
 
@@ -98,10 +100,11 @@ def count_table_for(
     node, parents:
         The child and the parent tuple to count against.
     weights:
-        Optional per-row weights (replication semantics).  Weighted tables
-        suit fitting and Bayesian sets; the PAC builders
-        (``interval_set_from_counts``, ``l1_ball_set_from_counts``) reject
-        them, since a weight is not a number of independent draws.
+        Optional ``[N]`` per-row weights (replication semantics), validated
+        like ``fit``'s.  Weighted tables suit fitting and Bayesian sets, not
+        the PAC builders (``interval_set_from_counts``,
+        ``l1_ball_set_from_counts``): a weight is not a number of independent
+        draws.
 
     Returns
     -------
@@ -121,23 +124,25 @@ def count_table_for(
         raise ValueError(f"Repeated parents in {parents}.")
     variable = variables[node]
     if not variable.is_discrete:
-        raise ValueError(f"count_table needs a discrete node; '{node}' is continuous.")
+        raise ValueError(f"count_table_for needs a discrete node; '{node}' is continuous.")
     parent_cards = []
     for p in parents:
         if p not in variables:
             raise KeyError(f"Unknown parent '{p}'.")
         pv = variables[p]
         if not pv.is_discrete:
-            raise ValueError(f"count_table needs discrete parents; '{p}' is continuous.")
+            raise ValueError(f"count_table_for needs discrete parents; '{p}' is continuous.")
         parent_cards.append(int(pv.cardinality))
+    absent = [v for v in (node, *parents) if v not in data]
+    if absent:
+        raise KeyError(f"No data column for {absent}.")
 
     x = data[node].reshape(-1)
+    weights = validate_weights(weights, x.shape[0], where="count_table_for", device=x.device)
     if parents:
         pa = torch.stack([data[p].reshape(-1) for p in parents], dim=-1)
     else:
         pa = torch.zeros(x.shape[0], 0, device=x.device)
     rows = parent_row_index(pa, parent_cards)
-    n_rows = 1
-    for c in parent_cards:
-        n_rows *= c
+    n_rows = math.prod(parent_cards)
     return scatter_counts(rows, x, n_rows, int(variable.cardinality), weights), parent_cards

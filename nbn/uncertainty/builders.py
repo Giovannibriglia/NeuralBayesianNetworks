@@ -64,7 +64,7 @@ def interval_set(
     :func:`interval_set_from_counts` on :func:`count_table`.
     """
     counts, _ = count_table(model, data, node)
-    return interval_set_from_counts(counts, delta=delta, method=method, sampling=sampling)
+    return _interval_set(counts, delta, method, sampling)  # valid by construction
 
 
 def interval_set_from_counts(
@@ -77,11 +77,17 @@ def interval_set_from_counts(
 
     Use it when the counts do not come from one model's DAG, e.g. a table
     counted against a candidate parent set (:func:`count_table_for`).  The
-    PAC guarantee holds for **counts of independent draws**, so the entries
-    must be whole numbers; weighted counts (``count_table_for(...,
-    weights=w)``) are rejected, since a weight is not a number of draws.
+    PAC guarantee holds only for **counts of independent draws**: pass
+    unweighted counts.  A weight is not a number of draws, so a weighted
+    table makes the set overconfident.  Fractional entries are rejected; a
+    table built with whole-number weights cannot be told apart from real
+    counts, so that check is the caller's.
     """
-    counts = _check_counts(counts, integer=True)
+    return _interval_set(_check_counts(counts, integer=True), delta, method, sampling)
+
+
+def _interval_set(counts: torch.Tensor, delta: float, method: IntervalMethod,
+                  sampling: Sampling) -> IntervalSet:
     trials = counts.sum(dim=-1, keepdim=True).expand_as(counts)
     per_entry = per_interval_delta(delta, counts.numel(), trials, sampling)
     lower, upper = binomial_interval(counts, trials, per_entry, method=method)
@@ -110,7 +116,7 @@ def l1_ball_set(
     :func:`count_table`.
     """
     counts, _ = count_table(model, data, node)
-    return l1_ball_set_from_counts(counts, delta=delta, sampling=sampling)
+    return _l1_ball_set(counts, delta, sampling)
 
 
 def l1_ball_set_from_counts(
@@ -120,10 +126,13 @@ def l1_ball_set_from_counts(
 ) -> L1BallSet:
     """:func:`l1_ball_set` from a count table ``[R, K]`` (rows = parent values).
 
-    Like :func:`interval_set_from_counts`, the PAC guarantee needs whole-number
-    counts of independent draws; weighted counts are rejected.
+    Like :func:`interval_set_from_counts`, the PAC guarantee holds only for
+    unweighted counts of independent draws (fractional entries are rejected).
     """
-    counts = _check_counts(counts, integer=True)
+    return _l1_ball_set(_check_counts(counts, integer=True), delta, sampling)
+
+
+def _l1_ball_set(counts: torch.Tensor, delta: float, sampling: Sampling) -> L1BallSet:
     trials = counts.sum(dim=-1)
     n_rows, k = counts.shape
     per_row = per_interval_delta(delta, n_rows, trials, sampling)
@@ -157,7 +166,7 @@ def dirichlet_set(
     :func:`dirichlet_set_from_counts` on :func:`count_table`.
     """
     counts, _ = count_table(model, data, node)
-    return dirichlet_set_from_counts(counts, delta=delta, prior=prior, n_samples=n_samples)
+    return _dirichlet_set(counts, delta, prior, n_samples)
 
 
 def dirichlet_set_from_counts(
@@ -171,7 +180,10 @@ def dirichlet_set_from_counts(
     Fractional (weighted) counts are accepted and act as pseudo-counts; the
     result is a posterior under that choice, with no frequentist guarantee.
     """
-    counts = _check_counts(counts)
+    return _dirichlet_set(_check_counts(counts), delta, prior, n_samples)
+
+
+def _dirichlet_set(counts: torch.Tensor, delta: float, prior: float, n_samples: int) -> SampleSet:
     # MPS has no float64 Dirichlet sampler; float32 draws are plenty here.
     posterior = Dirichlet((counts + prior).to(torch.float32))
     return SampleSet(
@@ -239,20 +251,19 @@ def _check_counts(counts: torch.Tensor, integer: bool = False) -> torch.Tensor:
     """
     if counts.dim() != 2:
         raise ValueError(f"A count table is [R, K]; got shape {tuple(counts.shape)}.")
-    if counts.shape[1] < 1:
-        raise ValueError("A count table needs at least one child value (K >= 1).")
+    if counts.shape[0] < 1 or counts.shape[1] < 1:
+        raise ValueError(f"A count table needs R >= 1 rows and K >= 1 values; got {tuple(counts.shape)}.")
     counts = counts.to(accum_dtype(counts.device))
-    if counts.numel():
-        ok = torch.isfinite(counts) & (counts >= 0)
-        if integer:
-            ok = ok & (counts == counts.round())
-        if not bool(ok.all()):
-            if integer:
-                raise ValueError(
-                    "Counts must be finite, non-negative whole numbers (counts of independent "
-                    "draws): the PAC sets do not hold for weighted counts."
-                )
-            raise ValueError("Counts must be finite and non-negative.")
+    valid = torch.isfinite(counts) & (counts >= 0)
+    whole = counts == counts.round()
+    flags = torch.stack([valid.all(), (valid & whole).all() if integer else valid.all()]).tolist()
+    if not flags[0]:
+        raise ValueError("Counts must be finite and non-negative.")
+    if not flags[1]:
+        raise ValueError(
+            "Counts must be whole numbers (counts of independent draws): fractional entries "
+            "mean a weighted table, for which the PAC sets do not hold."
+        )
     return counts
 
 
