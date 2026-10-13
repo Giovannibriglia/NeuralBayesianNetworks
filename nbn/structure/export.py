@@ -79,6 +79,7 @@ def export_factored_sets(
     denominator: int = 10**9,
     max_rows: int = 1 << 22,
     overwrite: bool = False,
+    parents: Mapping[str, Sequence[str]] | None = None,
 ) -> Path:
     """Write ``manifest.json`` + ``arrays.npz`` for a factored transition model.
 
@@ -92,7 +93,9 @@ def export_factored_sets(
         Either a :class:`FactorSets` (every factor of a :class:`HypothesisSet`;
         the hypotheses are its product of candidates), or a mapping
         ``node -> set`` for one model: a :class:`ProbabilitySet` (parents from
-        ``source``'s DAG), an :class:`AgreementSet` (its own parents), or a
+        ``parents[node]`` if given, else from ``source``'s DAG, in that
+        order: a table counted in another parent order must say so through
+        ``parents``, since equal shapes cannot reveal it), an :class:`AgreementSet` (its own parents), or a
         :class:`NoiseParameterSet` (the node is tied to that shared polytope;
         nodes given the same object share one parameter block).
     source:
@@ -106,11 +109,19 @@ def export_factored_sets(
         Also write outward-rounded rational bounds over one ``denominator``
         ``D``: ``lower_num / D <= lower`` and ``upper_num / D >= upper``
         exactly, for the factor boxes and the noise-polytope constraints.
+        Bounds at 0 and 1 stay exact (a structural zero stays impossible).
+        A factor's ``graph_preserving`` flag then holds for both the float
+        and the rational bounds.
     max_rows:
-        Largest planning space ``|S||A|`` for which row maps are written;
-        above it they are omitted (``planning_space.n_rows`` is null) and a
-        tool computes rows from each factor's parents and the row layout
-        (:func:`joint_row_bounds` does).
+        Largest total size of the row maps: ``|S||A|`` times the number of
+        distinct parent tuples.  Above it no row map is written
+        (``planning_space.n_rows`` is null) and a tool computes rows from
+        each factor's parents and the row layout (:func:`joint_row_bounds`
+        does).
+    parents:
+        Optional ``node -> parent tuple`` for :class:`ProbabilitySet` values
+        (see ``sets``); with a model as ``source`` it must name the DAG's
+        parents, in any order.
 
     Returns
     -------
@@ -121,20 +132,23 @@ def export_factored_sets(
     if isinstance(state_vars, str) or isinstance(action_vars, str):
         raise TypeError("state_vars and action_vars must be sequences of names.")
     state_vars, action_vars = tuple(state_vars), tuple(action_vars)
+    plan_vars = (*state_vars, *action_vars)
+    if len(set(plan_vars)) != len(plan_vars):
+        raise ValueError(f"state_vars and action_vars must be distinct names; got {list(plan_vars)}.")
     if not 1 <= denominator <= 10**15:
         raise ValueError("denominator must be in [1, 1e15] (int64-safe numerators).")
 
     variables = _variables_of(source if not isinstance(sets, FactorSets) else sets.hypothesis_set)
-    entries, hypotheses, candidates = _collect(sets, source)
+    entries, hypotheses, candidates = _collect(sets, source, parents)
     roles = _roles(variables, state_vars, action_vars, next_suffix, reward, termination)
 
-    plan_vars = (*state_vars, *action_vars)
     for v in plan_vars:
         if v not in variables or not variables[v].is_discrete:
             raise ValueError(f"'{v}' must be a discrete variable to index the planning space.")
     plan_cards = [int(variables[v].cardinality) for v in plan_vars]
     n_plan = math.prod(plan_cards)
-    write_rows = n_plan <= max_rows
+    n_maps = len({tuple(e[1]) for e in entries.values()})
+    write_rows = n_plan * n_maps <= max_rows
 
     arrays: Dict[str, np.ndarray] = {}
     factors: List[dict] = []
@@ -142,15 +156,15 @@ def export_factored_sets(
     param_ids: Dict[int, str] = {}
     row_maps: Dict[Tuple[str, ...], str] = {}     # one row map per distinct parent tuple
     events: List[Tuple[str, float, str]] = []      # (id, delta, guarantee)
-    for fid, (node, parents, obj, counts) in entries.items():
-        parents = tuple(parents)
-        missing = [p for p in parents if p not in plan_vars]
+    for fid, (node, f_parents, obj, counts) in entries.items():
+        f_parents = tuple(f_parents)
+        missing = [p for p in f_parents if p not in plan_vars]
         if missing:
-            raise ValueError(f"Factor {node} <- {parents}: parents {missing} are not state or action variables.")
+            raise ValueError(f"Factor {node} <- {f_parents}: parents {missing} are not state or action variables.")
         k = int(variables[node].cardinality)
         record: Dict[str, Any] = {
-            "id": fid, "node": node, "parents": list(parents),
-            "parent_cards": [int(variables[p].cardinality) for p in parents], "n_classes": k,
+            "id": fid, "node": node, "parents": list(f_parents),
+            "parent_cards": [int(variables[p].cardinality) for p in f_parents], "n_classes": k,
         }
         if isinstance(obj, NoiseParameterSet):
             pid = param_ids.get(id(obj))
@@ -165,7 +179,7 @@ def export_factored_sets(
             idx = _np(obj.index[node]).astype(np.int64)
             if idx.shape != (math.prod(record["parent_cards"]), k):
                 raise ValueError(f"Noise index of '{node}' has shape {idx.shape}; its parents "
-                                 f"{parents} and {k} classes give {(math.prod(record['parent_cards']), k)}.")
+                                 f"{f_parents} and {k} classes give {(math.prod(record['parent_cards']), k)}.")
             arrays[f"{fid}/index"] = idx
         else:
             ps = obj.set if isinstance(obj, AgreementSet) else obj
@@ -191,28 +205,36 @@ def export_factored_sets(
         lower, upper = ps.bounds()                  # once per factor
         n_expected = math.prod(record["parent_cards"])
         if lower.shape != (n_expected, k):
-            raise ValueError(f"The set of '{node}' has shape {tuple(lower.shape)}; its parents {parents} "
+            raise ValueError(f"The set of '{node}' has shape {tuple(lower.shape)}; its parents {f_parents} "
                              f"and {k} classes give {(n_expected, k)} (wrong set or wrong parent order).")
-        unseen = ps.unseen if ps.unseen.numel() == n_expected else torch.zeros(
-            n_expected, dtype=torch.bool, device=lower.device)          # e.g. bootstrap sets: no unseen info
+        if ps.unseen.numel() == 0:                  # e.g. bootstrap sets: no unseen info
+            unseen = torch.zeros(n_expected, dtype=torch.bool, device=lower.device)
+        elif ps.unseen.numel() == n_expected:
+            unseen = ps.unseen.reshape(-1)
+        else:
+            raise ValueError(f"The set of '{node}' has an unseen mask of {ps.unseen.numel()} rows, "
+                             f"not {n_expected}.")
         lo, hi = _np(lower), _np(upper)
         arrays[f"{fid}/lower"] = lo
         arrays[f"{fid}/upper"] = hi
-        if exact:
-            arrays[f"{fid}/lower_num"], arrays[f"{fid}/upper_num"] = _outward(lo, hi, denominator)
-        arrays[f"{fid}/unseen"] = _np(unseen).astype(bool)
+        unseen_np = _np(unseen).astype(bool)
+        arrays[f"{fid}/unseen"] = unseen_np
         if counts is not None:
             arrays[f"{fid}/counts"] = _np(counts.sum(-1))
-        rows_ok = _graph_preserving_rows(lower, upper) & ~unseen.to(lower.device)
+        rows_ok = _graph_preserving_rows_np(lo, hi) & ~unseen_np
+        if exact:
+            lo_num, hi_num = _outward(lo, hi, denominator)
+            arrays[f"{fid}/lower_num"], arrays[f"{fid}/upper_num"] = lo_num, hi_num
+            rows_ok &= _graph_preserving_rows_np(lo_num, hi_num)      # rounding can floor a tiny lower to 0
         record["graph_preserving"] = bool(rows_ok.all())
         record["n_rows"] = int(lower.shape[0])
         record["row_index"] = None
         if write_rows:
-            key = row_maps.get(parents)
+            key = row_maps.get(f_parents)
             if key is None:
                 key = f"row_index/{len(row_maps)}"
-                row_maps[parents] = key
-                arrays[key] = _row_index(parents, plan_vars, plan_cards)
+                row_maps[f_parents] = key
+                arrays[key] = _row_index(f_parents, plan_vars, plan_cards)
             record["row_index"] = key
         factors.append(record)
 
@@ -242,8 +264,7 @@ def export_factored_sets(
             "delta_total": delta_total,
             "level": max(0.0, 1.0 - delta_total),
             "guarantees": guarantees,
-            "note": ("All listed sets hold together with probability >= level (union bound); "
-                     "'bayesian' or 'asymptotic' sets carry no frequentist statement."),
+            "note": _composition_note(isinstance(sets, FactorSets)),
         },
         "quantifiers": QUANTIFIERS,
         "exact": {"denominator": int(denominator)} if exact else None,
@@ -351,9 +372,22 @@ def joint_row_bounds(
 # ---------------------------------------------------------------------------
 
 
-def _collect(sets: PlanningSets, source: Any):
+def _composition_note(hypothesis_set: bool) -> str:
+    note = ("All listed sets hold together with probability >= level (union bound); "
+            "'bayesian' or 'asymptotic' sets carry no frequentist statement.")
+    if hypothesis_set:
+        note += (" For a hypothesis set, a factor's set bounds the true conditional only if its "
+                 "parents contain the true parents; a factor that misses one bounds a "
+                 "policy-dependent average. So the level speaks for the hypotheses whose factors "
+                 "are all supersets of the true parents (which ones is the structural question).")
+    return note
+
+
+def _collect(sets: PlanningSets, source: Any, parents_override: Mapping[str, Sequence[str]] | None = None):
     """Factor entries {id: (node, parents, set, counts)}, hypotheses list, candidates."""
     entries: Dict[str, tuple] = {}
+    if parents_override is not None and isinstance(sets, FactorSets):
+        raise ValueError("parents applies to a mapping of sets; a FactorSets carries its own parents.")
     if isinstance(sets, FactorSets):
         hs = sets.hypothesis_set
         if source is not None and source is not hs and not isinstance(source, Mapping):
@@ -375,9 +409,21 @@ def _collect(sets: PlanningSets, source: Any):
                 raise ValueError(f"The agreement set for '{obj.node}' is listed under '{node}'.")
         elif isinstance(obj, (ProbabilitySet, NoiseParameterSet)):
             dag = getattr(source, "dag", None)
-            if dag is None:
-                raise ValueError(f"The parents of '{node}' come from a model's DAG: pass the model as source.")
-            parents = tuple(dag.parents(node))
+            given = None if parents_override is None else parents_override.get(node)
+            if isinstance(given, str):
+                raise TypeError(f"parents['{node}'] must be a tuple of names, not {given!r}.")
+            if given is not None and isinstance(obj, NoiseParameterSet):
+                raise ValueError(f"parents['{node}']: a noise polytope's index follows the model's DAG.")
+            if given is not None:
+                parents = tuple(given)
+                if dag is not None and sorted(parents) != sorted(dag.parents(node)):
+                    raise ValueError(f"parents['{node}'] = {parents} are not the DAG's parents "
+                                     f"{tuple(dag.parents(node))}.")
+            elif dag is None:
+                raise ValueError(f"The parents of '{node}' come from a model's DAG: pass the model as "
+                                 f"source, or give them in parents.")
+            else:
+                parents = tuple(dag.parents(node))
             if isinstance(obj, NoiseParameterSet) and node not in obj.index:
                 raise ValueError(f"'{node}' is not tied to this noise polytope.")
         else:
@@ -438,13 +484,15 @@ def _outward(lo: np.ndarray, hi: np.ndarray, denominator: int) -> Tuple[np.ndarr
     The float product ``x * D`` is within half an ulp of the exact value, so
     stepping one ulp outward before floor / ceil is always on the safe side
     (an exact integer product loses at most 1 / D of tightness).  Probability
-    bounds lie in [0, 1], so clamping to [0, D] keeps soundness.
+    bounds lie in [0, 1], so clamping to [0, D] keeps soundness.  The end
+    points 0 and 1 are exact in both bounds: an upper bound of 0 (an
+    impossible transition) stays 0, and a lower bound of 1 stays ``D``.
     """
     d = float(denominator)
     num_lo = np.floor(np.nextafter(lo * d, -np.inf))
     num_hi = np.ceil(np.nextafter(hi * d, np.inf))
-    num_lo = np.where(lo <= 0.0, 0.0, np.maximum(num_lo, 0.0))
-    num_hi = np.where(hi >= 1.0, d, np.minimum(num_hi, d))
+    num_lo = np.where(lo <= 0.0, 0.0, np.where(lo >= 1.0, d, np.clip(num_lo, 0.0, d)))
+    num_hi = np.where(hi >= 1.0, d, np.where(hi <= 0.0, 0.0, np.clip(num_hi, 0.0, d)))
     return num_lo.astype(np.int64), num_hi.astype(np.int64)
 
 
@@ -473,9 +521,14 @@ def _check_target(out: Path, overwrite: bool) -> None:
         present = {p.name for p in out.iterdir()}
         if present and not overwrite:
             raise FileExistsError(f"{out} is not empty; pass overwrite=True to replace a previous export.")
-        others = present - {"manifest.json", "arrays.npz"}
+        others = {p for p in present - {"manifest.json", "arrays.npz"} if not _os_metadata(p)}
         if others:
             raise FileExistsError(f"{out} holds other files {sorted(others)}; refusing to overwrite.")
+
+
+def _os_metadata(name: str) -> bool:
+    """Files a desktop creates by itself (Finder, Explorer); an overwrite may drop them."""
+    return name in (".DS_Store", "Thumbs.db", "desktop.ini") or name.startswith("._")
 
 
 def _write_atomically(out: Path, manifest: dict, arrays: Dict[str, np.ndarray]) -> None:
@@ -486,6 +539,16 @@ def _write_atomically(out: Path, manifest: dict, arrays: Dict[str, np.ndarray]) 
 
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix=f".{out.name}.", dir=out.parent))
+    # mkdtemp makes a 0700 directory; give the export the mode a plain mkdir
+    # would (or the previous export's), so other users and tools can read it.
+    if out.exists():
+        mode = out.stat().st_mode & 0o7777
+    else:                                       # what mkdir gives under the umask (thread-safe probe)
+        probe = tmp / "probe"
+        probe.mkdir()
+        mode = probe.stat().st_mode & 0o7777
+        probe.rmdir()
+    os.chmod(tmp, mode)
     try:
         (tmp / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=False))
         np.savez_compressed(tmp / "arrays.npz", **arrays)
@@ -506,7 +569,7 @@ def _write_atomically(out: Path, manifest: dict, arrays: Dict[str, np.ndarray]) 
             shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _graph_preserving_rows(lower: torch.Tensor, upper: torch.Tensor) -> torch.Tensor:
+def _graph_preserving_rows_np(lower: np.ndarray, upper: np.ndarray) -> np.ndarray:
     """Rows whose every entry is either fixed at zero or bounded away from zero."""
     return ((upper <= 0) | (lower > 0)).all(-1)
 

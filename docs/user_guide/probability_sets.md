@@ -229,7 +229,8 @@ lower, upper, nodes = joint_row_bounds(ex, h, row=5)   # bounds on P(s' | s, a) 
   - per factor: node, parents, set type, guarantee, level, sampling,
     declared assumptions, and `graph_preserving`. That flag is false when an
     entry can be zero in one member and positive in another, for example on
-    unseen rows; some interval-MDP solvers assume it;
+    unseen rows; some interval-MDP solvers assume it. With `exact=True` it
+    holds for the rational bounds too;
   - the parameter blocks, the hypotheses, the composition (union bound over
     all listed sets, with the total level), and the two quantifiers. Robust
     planning is "for all kernels, max policy"; parameter synthesis is
@@ -237,10 +238,15 @@ lower, upper, nodes = joint_row_bounds(ex, h, row=5)   # bounds on P(s' | s, a) 
 - **`arrays.npz`** holds, per factor, `lower` / `upper` `[R, K]`, `unseen`,
   `center` / `radius` for L1 balls, `samples`, `counts` (visits per factor
   row), and one row map per distinct parent tuple (the factor row of each
-  planning row; omitted above `max_rows`, where `factor_row` computes it from
-  the layout). With `exact=True` it also holds rational bounds
+  planning row; omitted when their total size, `|S||A|` times the number of
+  distinct parent tuples, is above `max_rows`, where `factor_row` computes it
+  from the layout). With `exact=True` it also holds rational bounds
   `lower_num / D <= lower` and `upper_num / D >= upper`, rounded outward
-  exactly, for the factor boxes and the noise-polytope constraints.
+  exactly (0 and 1 stay exact), for the factor boxes and the noise-polytope
+  constraints.
+- A `ProbabilitySet` has no parent names: they come from the model's DAG,
+  in its order, unless `parents={node: (...)}` names the order the table was
+  counted in.
 - Turning factor sets into joint rows is the tool's job. A joint row is the
   product of its factor rows (multilinear in the factor parameters), and
   `joint_row_bounds` gives the entry-wise box of that product.
