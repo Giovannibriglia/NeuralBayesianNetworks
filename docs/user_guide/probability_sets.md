@@ -179,6 +179,9 @@ print("joint values visited / with a set:", res.flat_visited, "/", res.flat_with
 
 The gain is `res.n_rows_gained`: joint input values that no dataset visited
 but that still get a set, because each survivor visited its own parent values.
+When the inputs encode constrained actions (for example one-hot flags of a
+single action), pass the feasible rows as `coverage_rows`. Otherwise the
+counts include flag combinations that never occur.
 If every candidate is refuted, the bound `d` is contradicted
 (`res.assumption_refuted`), and the result falls back to the flat model (all
 inputs as parents). Declared assumptions (in `res.assumptions`): `|Pa| <= d`,
