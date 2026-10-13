@@ -335,8 +335,12 @@ rows.refuted        # configurations where the data contradict the instrument as
    - `"sensitivity"`: rows under a marginal sensitivity model with parameter
      `lam`.
    - `"auto"`: the LP when it is small and SciPy is installed
-     (`pip install "nbn[bounds]"`), else the intersection, labelled with the
-     reason (`"intersection (no LP: ...)"`).
+     (`pip install "nbn[bounds]"`), and the whole call needs at most
+     `max_lp_solves` LP solves (default 2000; `2 |A| |X'|` per visited
+     configuration, `2 |A|` for a binary child); else the intersection,
+     labelled with the reason (`"intersection (no LP: ...)"`).
+     `method="lp"` ignores the budget; its failures raise `LPFailure` or
+     `ProgramTooLarge` (both in `nbn.uncertainty`).
 
    Declared regimes are used by the LP only; the other methods note in
    `rows.notes` that a declaration went unused.

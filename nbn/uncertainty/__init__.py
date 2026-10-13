@@ -32,6 +32,8 @@ from nbn.uncertainty.builders import (
 from nbn.uncertainty.confounded import (
     ConfoundedSet,
     GateDecision,
+    LPFailure,
+    ProgramTooLarge,
     RefutedAssumption,
     confounded_interval_set,
     confounding_gate,
@@ -76,4 +78,6 @@ __all__ = [
     "ConfoundedSet",
     "GateDecision",
     "RefutedAssumption",
+    "LPFailure",
+    "ProgramTooLarge",
 ]

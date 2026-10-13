@@ -562,3 +562,65 @@ def test_lp_unavailable_reason_names_the_limit():
     if HAS_SCIPY:
         assert "max_vars" in lp_ok_reason(2, 10, 20, max_types=20_000, max_vars=1_000)
         assert "max_types" in lp_ok_reason(3, 10, 2, max_types=100, max_vars=200_000)
+
+
+# --- third review round (#324) ----------------------------------------------------------------
+def test_gate_accepts_numpy_and_torch_booleans():
+    for flag in (np.bool_(True), torch.tensor(True), np.all([True, True])):
+        assert confounding_gate(flag).use_confounded_rows is False
+    assert confounding_gate(torch.tensor(False)).use_confounded_rows is True
+    with pytest.raises(TypeError, match="not a collection"):
+        confounding_gate([0, 1])
+    with pytest.raises(TypeError, match="not a collection"):
+        confounding_gate(torch.tensor([True, False]))
+    with pytest.raises(TypeError, match="must be a bool"):
+        confounding_gate(1)
+
+
+def test_lp_exceptions_are_exported():
+    from nbn.uncertainty import LPFailure, ProgramTooLarge, RefutedAssumption  # noqa: F401
+
+
+@needs_scipy
+def test_binary_child_bounds_follow_from_the_y0_solves():
+    from nbn.uncertainty.confounded import IVProgram as Program
+
+    rng = np.random.default_rng(3)
+    for _ in range(10):
+        K, nA = int(rng.integers(1, 4)), int(rng.integers(2, 4))
+        P, _ = random_iv_instance(rng, nA, 2, K)
+        comp = P.sum(-1, keepdims=True) - P
+        w = rng.uniform(0, 0.05, size=P.shape)
+        box = RegimeBox(np.clip(P - w, 0, 1), np.clip(P + w, 0, 1), np.clip(comp - w, 0, 1),
+                        np.clip(comp + w, 0, 1), np.full(K, 100.0))
+        prog = Program(box)
+        lo, hi = prog.rows()
+        for a in range(nA):
+            full_lo, full_hi = prog.bounds(prog.indicator(a, 1))   # the solve the shortcut skips
+            assert lo[a, 1] == pytest.approx(np.clip(full_lo, 0, 1), abs=1e-7)
+            assert hi[a, 1] == pytest.approx(np.clip(full_hi, 0, 1), abs=1e-7)
+
+
+def test_closed_form_tightening_matches_the_formula():
+    from nbn.uncertainty.confounded import _closed_form
+
+    rng = np.random.default_rng(5)
+    lo = rng.uniform(0, 0.4, size=(6, 3, 4))
+    hi = np.clip(lo + rng.uniform(0, 0.5, size=lo.shape), 0, 1)
+    t_lo, t_hi, _, _ = _closed_form(lo, hi)
+    np.testing.assert_allclose(t_lo, np.clip(np.maximum(lo, 1 - (hi.sum(-1, keepdims=True) - hi)), 0, 1))
+    np.testing.assert_allclose(t_hi, np.clip(np.minimum(hi, 1 - (lo.sum(-1, keepdims=True) - lo)), 0, 1))
+
+
+@needs_scipy
+def test_auto_stays_within_the_lp_budget():
+    rng = np.random.default_rng(0)
+    mdp = random_confounded_mdp(rng, n_states=3, n_actions=2, n_regimes=3)
+    data = as_data(*pooled(mdp, rng))
+    small = confounded_interval_set(model_for(3, 2), data, "s'", "a", "k", method="auto", max_lp_solves=1)
+    inter = confounded_interval_set(model_for(3, 2), data, "s'", "a", "k", method="intersection")
+    labels = set(small.method_used) - {"unvisited"}
+    assert len(labels) == 1 and "max_lp_solves=1" in labels.pop()
+    assert torch.equal(small.set.lower, inter.set.lower) and torch.equal(small.set.upper, inter.set.upper)
+    lp = confounded_interval_set(model_for(3, 2), data, "s'", "a", "k", method="lp", max_lp_solves=1)
+    assert "lp" in set(lp.method_used)                   # an explicit "lp" ignores the budget

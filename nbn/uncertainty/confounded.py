@@ -82,7 +82,7 @@ from nbn.core.variables import DiscreteVariable
 from nbn.uncertainty.binomial import IntervalMethod, binomial_interval
 from nbn.uncertainty.builders import Sampling, per_interval_delta
 from nbn.uncertainty.counts import count_table_for, parent_grid, parent_row_index
-from nbn.uncertainty.sets import IntervalSet
+from nbn.uncertainty.sets import IntervalSet, tighten_box_to_simplex
 from nbn.utils.device import to_device
 
 Method = Literal["auto", "lp", "intersection", "manski", "sensitivity"]
@@ -175,9 +175,8 @@ def _closed_form(lo: np.ndarray, hi: np.ndarray) -> Tuple[np.ndarray, np.ndarray
     empty = (lo > hi + TOL).any(-1).any(-1)
     hi = np.maximum(hi, lo)
     miss = ((lo.sum(-1) > 1 + TOL) | (hi.sum(-1) < 1 - TOL)).any(-1)
-    t_lo = np.clip(np.maximum(lo, 1.0 - (hi.sum(-1, keepdims=True) - hi)), 0, 1)
-    t_hi = np.clip(np.minimum(hi, 1.0 - (lo.sum(-1, keepdims=True) - lo)), 0, 1)
-    return t_lo, t_hi, empty, miss
+    t_lo, t_hi = tighten_box_to_simplex(torch.from_numpy(lo), torch.from_numpy(hi))   # float64, CPU
+    return t_lo.numpy(), t_hi.numpy(), empty, miss
 
 
 def _scipy():
@@ -292,12 +291,15 @@ class IVProgram:
         if box.shape != (self.K, self.nA, self.nY):
             raise ValueError("rebind needs a box of the same shape.")
         b: List[float] = []
-        t_all = np.arange(self.nT)
+        has_comp = self.__dict__.get("_has_comp")
+        if has_comp is None:                    # same structure for every box: compute once
+            has_comp = (self.types[:, :, None] != np.arange(self.nY)).any(0)      # [nA, nY]
+            self._has_comp = has_comp
         for k in range(self.K):
             for a in range(self.nA):
                 for y in range(self.nY):
                     b += [box.cell_hi[k, a, y], -box.cell_lo[k, a, y]]
-                    if len(t_all[self.types[:, a] != y]):
+                    if has_comp[a, y]:
                         b += [box.comp_hi[k, a, y], -box.comp_lo[k, a, y]]
         clone = object.__new__(IVProgram)
         clone.__dict__.update(self.__dict__)
@@ -325,11 +327,19 @@ class IVProgram:
         return (self.types[:, a] == y).astype(float)
 
     def rows(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Per-entry bounds ``[|A|, |X'|]`` on ``P(X' | do(a))`` for every action."""
+        """Per-entry bounds ``[|A|, |X'|]`` on ``P(X' | do(a))`` for every action.
+
+        For a binary child, ``P(X'=1 | do(a)) = 1 - P(X'=0 | do(a))`` for every
+        feasible ``mu`` (the response types' indicators add up to one), so the
+        bounds for ``y = 1`` follow from those for ``y = 0``: half the solves.
+        """
         lo, hi = np.zeros((self.nA, self.nY)), np.zeros((self.nA, self.nY))
+        solved = range(1) if self.nY == 2 else range(self.nY)
         for a in range(self.nA):
-            for y in range(self.nY):
+            for y in solved:
                 lo[a, y], hi[a, y] = self.bounds(self.indicator(a, y))
+            if self.nY == 2:
+                lo[a, 1], hi[a, 1] = 1.0 - hi[a, 0], 1.0 - lo[a, 0]
         return np.clip(lo, 0, 1), np.clip(hi, 0, 1)
 
 
@@ -399,7 +409,7 @@ def sensitivity_row_box(box: RegimeBox, k: int, a: int, lam: float) -> Tuple[np.
             r[nY + y], r[y] = 1, -g_hi
             A_ub.append(r)
             b_ub.append(0.0)
-    A_eq, b_eq = [np.ones(2 * nY)], [1.0]
+    A_ub_arr, A_eq_arr, b_eq = np.array(A_ub), np.ones((1, 2 * nY)), [1.0]
     b = np.array(b_ub) + 1e-12
     lo, hi = np.zeros(nY), np.zeros(nY)
     for y in range(nY):
@@ -407,7 +417,7 @@ def sensitivity_row_box(box: RegimeBox, k: int, a: int, lam: float) -> Tuple[np.
         c[y] = c[nY + y] = 1
         vals = []
         for sign in (1.0, -1.0):
-            res = linprog(sign * c, A_ub=np.array(A_ub), b_ub=b, A_eq=np.array(A_eq), b_eq=b_eq,
+            res = linprog(sign * c, A_ub=A_ub_arr, b_ub=b, A_eq=A_eq_arr, b_eq=b_eq,
                           bounds=(0, None), method="highs")
             if res.status != 0:
                 return fallback
@@ -528,6 +538,7 @@ def confounded_interval_set(
     on_refuted: Literal["flag", "raise"] = "flag",
     max_types: int = 20_000,
     max_vars: int = 200_000,
+    max_lp_solves: int = 2_000,
 ) -> ConfoundedSet:
     """Sound interval rows on ``P(node | do(action), u)`` from several logging regimes.
 
@@ -559,6 +570,15 @@ def confounded_interval_set(
     on_refuted:
         ``"flag"`` (the configuration gets the simplex and ``refuted=True``)
         or ``"raise"``.
+    max_types, max_vars:
+        Size limits of one response-type LP.
+    max_lp_solves:
+        With ``method="auto"``, the LP is used only if the whole call needs
+        at most this many LP solves (``2 |A| |X'|`` per visited
+        configuration, ``2 |A|`` for a binary child; each takes a few ms to
+        tens of ms).  Above it the intersection rows are used (sound,
+        possibly wider) and ``method_used`` says why.  ``method="lp"``
+        ignores it.
 
     Returns
     -------
@@ -639,6 +659,12 @@ def confounded_interval_set(
 
     want_lp = method in ("auto", "lp")
     lp_ok = want_lp and _lp_available(n_a, n_y, K, max_types, max_vars, method)
+    n_solves = int(visited_np.sum()) * 2 * n_a * (1 if n_y == 2 else n_y)
+    budget_reason = ""
+    if method == "auto" and lp_ok and n_solves > max_lp_solves:
+        lp_ok = False
+        budget_reason = f"no LP: {n_solves} LP solves > max_lp_solves={max_lp_solves}"
+
     if method in ("intersection", "manski") or (method == "auto" and not lp_ok):
         # 2. Closed form, vectorised over configurations.  An unvisited regime has
         # the box [0, 1], whose Manski row [0, 1] is neutral in the intersection.
@@ -646,7 +672,7 @@ def confounded_interval_set(
         t_lo, t_hi, empty, miss = _closed_form(n_lo, n_hi)
         label = "manski" if method == "manski" else "intersection"
         if method == "auto":
-            label = f"intersection ({lp_ok_reason(n_a, n_y, K, max_types, max_vars)})"
+            label = f"intersection ({budget_reason or lp_ok_reason(n_a, n_y, K, max_types, max_vars)})"
         for u in np.flatnonzero(visited_np).tolist():
             if empty[u] or miss[u]:
                 why = "empty intersection of per-regime rows" if empty[u] else "box does not meet the simplex"
@@ -770,11 +796,18 @@ def confounding_gate(node_declared_unconfounded: bool, invariance=None, alpha: f
     suspicion and forces the confounded rows even for a declared node; a
     non-rejection never certifies a node (no test for confounding exists).
     """
-    if not isinstance(node_declared_unconfounded, bool):
-        raise TypeError(
-            "node_declared_unconfounded must be a bool for the node; a list of regimes belongs to "
-            "confounded_interval_set(declared_unconfounded=...)."
-        )
+    flag = node_declared_unconfounded
+    scalar_tensor = isinstance(flag, torch.Tensor) and flag.dtype == torch.bool and flag.dim() == 0
+    if scalar_tensor or isinstance(flag, np.bool_):
+        flag = bool(flag)
+    if not isinstance(flag, bool):
+        if isinstance(flag, (list, tuple, set, np.ndarray, torch.Tensor)):
+            raise TypeError(
+                "node_declared_unconfounded must be one bool for the node, not a collection; a list of "
+                "regimes belongs to confounded_interval_set(declared_unconfounded=...)."
+            )
+        raise TypeError(f"node_declared_unconfounded must be a bool; got {type(flag).__name__}.")
+    node_declared_unconfounded = flag
     rejected = invariance is not None and bool(invariance.rejected(alpha))
     if rejected:
         return GateDecision(True, f"context invariance rejected (p = {invariance.p_value:.3g} < {alpha}): "
