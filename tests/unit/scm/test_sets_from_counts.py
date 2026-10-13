@@ -145,3 +145,32 @@ def test_count_table_for_validates_parents():
         count_table_for(model.variables, data, "y", ("a", "a"))
     with pytest.raises(KeyError):
         count_table_for(model.variables, data, "y", ("z",))
+
+
+@pytest.mark.parametrize("device", available_devices())
+def test_pac_builders_reject_weighted_counts_dirichlet_accepts_them(device):
+    data = _data(device)
+    model = _model(("a",), device)
+    w = torch.full((300,), 0.5, device=device)
+    weighted, _ = count_table_for(model.variables, data, "y", ("a",), weights=w)
+    with pytest.raises(ValueError, match="whole numbers"):
+        interval_set_from_counts(weighted)
+    with pytest.raises(ValueError, match="whole numbers"):
+        l1_ball_set_from_counts(weighted)
+    posterior = dirichlet_set_from_counts(weighted, n_samples=50)
+    assert posterior.guarantee == "bayesian"
+
+
+@pytest.mark.parametrize("device", available_devices())
+def test_low_precision_tables_are_upcast(device):
+    counts = torch.tensor([[40000.0, 40000.0], [3.0, 1.0]], device=device).half()  # row sum overflows fp16
+    ball = l1_ball_set_from_counts(counts, delta=0.1)
+    assert ball.center.dtype != torch.float16
+    assert torch.allclose(ball.center[0].float().cpu(), torch.tensor([0.5, 0.5]))
+    assert bool(torch.isfinite(ball.radius).all()) and float(ball.radius[0]) > 0
+
+
+def test_count_table_for_rejects_a_bare_string():
+    model = _model(("a",), "cpu")
+    with pytest.raises(TypeError, match="sequence of names"):
+        count_table_for(model.variables, _data("cpu"), "y", "ab")

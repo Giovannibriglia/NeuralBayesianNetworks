@@ -98,7 +98,10 @@ def count_table_for(
     node, parents:
         The child and the parent tuple to count against.
     weights:
-        Optional per-row weights (replication semantics).
+        Optional per-row weights (replication semantics).  Weighted tables
+        suit fitting and Bayesian sets; the PAC builders
+        (``interval_set_from_counts``, ``l1_ball_set_from_counts``) reject
+        them, since a weight is not a number of independent draws.
 
     Returns
     -------
@@ -106,6 +109,9 @@ def count_table_for(
         As in :func:`count_table`, with ``parent_cards`` in the order of
         ``parents``.
     """
+    if isinstance(parents, str):
+        raise TypeError(f"parents must be a sequence of names, not the string {parents!r}; "
+                        f"write ({parents!r},) for one parent.")
     parents = tuple(parents)
     if node not in variables:
         raise KeyError(f"Unknown variable '{node}'.")
