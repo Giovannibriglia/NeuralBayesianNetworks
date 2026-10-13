@@ -129,8 +129,8 @@ def test_from_counts_accepts_integer_tables():
     _equal_sets(box, interval_set_from_counts(counts.double(), delta=0.1))
 
 
-@pytest.mark.parametrize("bad", [torch.ones(3), torch.ones(2, 0), torch.tensor([[1.0, -1.0]]),
-                                 torch.tensor([[1.0, float("nan")]])])
+@pytest.mark.parametrize("bad", [torch.ones(3), torch.ones(2, 0), torch.zeros(0, 3),
+                                 torch.tensor([[1.0, -1.0]]), torch.tensor([[1.0, float("nan")]])])
 def test_from_counts_rejects_bad_tables(bad):
     with pytest.raises(ValueError):
         interval_set_from_counts(bad)
@@ -148,7 +148,7 @@ def test_count_table_for_validates_parents():
 
 
 @pytest.mark.parametrize("device", available_devices())
-def test_pac_builders_reject_weighted_counts_dirichlet_accepts_them(device):
+def test_pac_builders_reject_fractional_counts_dirichlet_accepts_them(device):
     data = _data(device)
     model = _model(("a",), device)
     w = torch.full((300,), 0.5, device=device)
@@ -174,3 +174,18 @@ def test_count_table_for_rejects_a_bare_string():
     model = _model(("a",), "cpu")
     with pytest.raises(TypeError, match="sequence of names"):
         count_table_for(model.variables, _data("cpu"), "y", "ab")
+
+
+
+def test_negative_counts_are_not_reported_as_weighted():
+    with pytest.raises(ValueError, match="non-negative"):
+        interval_set_from_counts(torch.tensor([[1.0, -1.0]]))
+
+
+def test_count_table_for_checks_weights_and_columns():
+    model = _model(("a",), "cpu")
+    data = _data("cpu")
+    with pytest.raises(ValueError):
+        count_table_for(model.variables, data, "y", ("a",), weights=torch.ones(500))
+    with pytest.raises(KeyError, match="No data column"):
+        count_table_for(model.variables, {k: v for k, v in data.items() if k != "b"}, "y", ("b",))
