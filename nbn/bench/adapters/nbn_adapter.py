@@ -15,7 +15,6 @@ structural changes:
 The old adapter at nbn/bench/baselines/nbn_adapter.py is untouched
 and continues to serve the v0.12 runner.
 
-Reference: docs/v0.13-benchmark-redesign.md §4.1
 Old (functional) adapter: nbn/bench/baselines/nbn_adapter.py
 """
 from __future__ import annotations
@@ -591,7 +590,7 @@ class NBNAdapter:
         """Library-level batching via the nbn engine's ``query_batch`` API.
 
         Assumes all queries share (targets, frozenset(evidence_keys)) —
-        the selector contract per design doc §1.2.  Heterogeneous batches
+        the selector contract.  Heterogeneous batches
         (different targets or evidence keys, or mixed concrete/None
         evidence values) fall back to the sequential default helper.
 
@@ -601,8 +600,6 @@ class NBNAdapter:
             Posterior(samples=...) for continuous targets — per-row
                 multinomial resample of the engine's weighted particles
                 (the 2-D generalisation of the B=1 path in ``query()``)
-
-        See docs/v0.14-batched-queries-design.md §3.1.
         """
         if not queries:
             return []

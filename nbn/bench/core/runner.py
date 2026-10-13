@@ -16,8 +16,6 @@ Cell lifecycle per (problem, baseline):
 
 JSONL output is written row-by-row (streaming, crash-resilient) via
 ``JsonlWriter``.
-
-Reference: docs/v0.13-benchmark-redesign.md §3, §4.1, §6
 """
 from __future__ import annotations
 
@@ -318,8 +316,7 @@ def _fit_failure_rows(
 # its remaining seeds are skipped — they are recorded as skip sentinels rather
 # than re-run. Speed-benchmark-only: gated on cfg.batch_sizes being set (no
 # other benchmark sweeps batch sizes, so every accuracy run is untouched).
-# Mirrors PR #189's reporting rule ("any failed seed -> config failed"); see
-# docs/v0.14-batched-queries-design.md.
+# Mirrors PR #189's reporting rule ("any failed seed -> config failed").
 
 _FAILURE_STATUSES = ("oom", "timeout", "error")
 
@@ -1028,8 +1025,7 @@ class Runner:
         # subprocess via cell_worker._run_cell.  A SIGKILL (e.g. the
         # barley 612 GB OOM) therefore takes down only the worker; the
         # parent records a status row and continues.  Same code paths,
-        # same row semantics — just isolated.  See
-        # docs/v0.13-runner-subprocess-isolation.md §5.
+        # same row semantics — just isolated.
         from nbn.bench.core.cell_runner import run_cell_in_subprocess
 
         # v0.14 fit-once query-many (#174): the batch_sizes this cell sweeps.
@@ -1064,7 +1060,7 @@ class Runner:
         # cannot self-limit (C-level loop, allocator thrash).  It must be
         # generous enough not to fire on legitimate cells. The worker fits
         # ONCE (fit_budget_s) then runs one measure() pass per batch_size,
-        # each bounded by per_cell_timeout_s (design doc §4.1 / §8.4) — so a
+        # each bounded by per_cell_timeout_s — so a
         # swept cell of N batch_sizes needs N × per_cell_timeout_s of query
         # budget. The fixed buffer absorbs unbounded metrics time on top.
         cell_timeout_s = (

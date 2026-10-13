@@ -70,9 +70,6 @@ exclude_patterns = [
     "v0.13-[!o]*.md",
     "v0.14-*.md",
     "v0.18-*.md",
-    # Added by PR #301 (VE memory model); a follow-up links it from the
-    # "Devices, batching and memory" page.
-    "ve-memory-model.md",
 ]
 
 # -- MyST / notebooks --------------------------------------------------------

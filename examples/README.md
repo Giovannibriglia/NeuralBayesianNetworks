@@ -59,6 +59,7 @@ pip install -e ".[all,dev]"
 MPLBACKEND=Agg pytest --nbmake examples/
 ```
 
-Note: node names must not collide with `torch.nn.Module` attributes
-(e.g. `train`, `eval`, `to`): NBN stores one mechanism per node in an
-`nn.ModuleDict`.  The examples use `exercise` instead of `train`.
+Note: any string is a valid node name, including names of `torch.nn.Module`
+attributes (e.g. `train`, `eval`, `to`) and names with dots (`pm2.5`): NBN
+stores such nodes under an escaped alias and every call keeps the original
+name.

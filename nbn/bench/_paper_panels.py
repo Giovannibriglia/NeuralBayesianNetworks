@@ -2,8 +2,7 @@
 
 One PDF per (benchmark, metric), a single row of panels with one panel per
 data family, all families sharing one legend. Aggregation is the seed-level
-``all`` / ``common`` contract of :mod:`nbn.bench._paper_agg`
-(``docs/v0.18-bar-reporting-all-common.md``); this module only decides
+``all`` / ``common`` contract of :mod:`nbn.bench._paper_agg`; this module only decides
 **which methods are shown** and how the panels are laid out.
 
 Shown methods, per (benchmark, family): every non-nbn baseline applicable to

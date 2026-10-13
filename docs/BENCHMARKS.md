@@ -195,8 +195,8 @@ A figure is written only when at least one seed was solved for its metric in
 that family. If a plot you expect is missing, `nbn-bench plot -v` logs
 `skip ...` with the reason, and `run.log` in the run directory has the
 per-cell error. To combine a full run with a partial rerun, use
-`nbn-bench merge`. The aggregation contract is specified in
-[`v0.18-bar-reporting-all-common.md`](v0.18-bar-reporting-all-common.md).
+`nbn-bench merge`. The aggregation contract (the `all` and `common` seed
+views) is specified in the docstring of `nbn/bench/_paper_agg.py`.
 
 ## Configuration
 
@@ -271,9 +271,8 @@ nbn-bench param-learning --config nbn/bench/configs/synthetic/complete/parameter
 On a GPU with little memory, lower the `BATCH_SIZE_FIT` anchor at the top of
 a copy of the config (the NBN training minibatch, default 1024).
 
-[`v0.6c-d/run_summary.md`](v0.6c-d/run_summary.md) has the full headline
-tables and status counts, including an audit caveat on two pairs of
-parameter-learning rows. [`v0.6c-d/dnf_cells.md`](v0.6c-d/dnf_cells.md)
-categorises every cell that did not finish. Numerical values vary within
+The README ("Benchmark highlights") summarises the headline numbers of the
+paper run at tag `v0.6c-d`; its full run summary and the list of cells that
+did not finish are kept in the git history at that tag. Numerical values vary within
 Monte-Carlo noise across hardware; status counts and the qualitative findings
 (speed-up, quality gap) are stable.
