@@ -475,3 +475,21 @@ class KNNConditionalMechanism(Mechanism):
             grids = grids.unsqueeze(-1)
         probs = self._categorical_probs(grids.float().to(self._train_pa.device), grids.shape[0])
         return torch.log(probs.clamp_min(1e-38)).reshape(*parent_cards, self._n_classes)
+
+    def tabulate_working_bytes(self, parent_cards: list[int] | None = None) -> int | list[int]:
+        """Enumerating P parent configurations, buffer by buffer: the int64
+        grid and its standardised float copies (and their cached copy), one
+        ``query_chunk x N`` distance block with its top-k, the neighbour
+        indices / labels, and the count / probability tables."""
+        if not self.discrete_child:
+            return super().tabulate_working_bytes(parent_cards)
+        es = self._train_pa.element_size() if self._train_pa is not None else 4
+        if self._d_pa == 0 or not parent_cards:
+            return [self._n_classes * es] * 4
+        p, d = math.prod(parent_cards), len(parent_cards)
+        n = int(self._train_y.shape[0])
+        k, q, kc = int(self._k_eff), min(p, int(self.query_chunk)), self._n_classes
+        return ([p * d * 8, p * d] + [p * d * es] * 6       # grid, mask, float copies
+                + [q * n * es] * 2 + [q * k * es, q * k * 8]  # distances, top-k
+                + [p * k * 8, p * k * 8, p * k * es]          # indices, labels, ones
+                + [p * kc * es] * 5)                          # counts, probabilities

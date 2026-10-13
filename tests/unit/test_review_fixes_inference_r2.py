@@ -112,7 +112,9 @@ def test_r5_direct_ve_rejects_only_beyond_capacity(monkeypatch):
     nodes = list(model.dag.topological_order())
     t, ev = nodes[-1], {nodes[0]: torch.tensor(1)}
     eng = TensorVariableElimination()
-    peak = eng.estimate_peak_bytes(model, t, tuple(ev))
+    # Priced with the call's values (#178 review: the estimate depends on
+    # them, and on whether the CPTs are already tabulated).
+    peak = eng.estimate_peak_bytes(model, t, ev)
     assert peak > 0
     # Capacity between the router's 0.75 share and the full peak: direct VE
     # answers exactly (the plan fits the machine), the router prefers LW.
@@ -122,8 +124,10 @@ def test_r5_direct_ve_rejects_only_beyond_capacity(monkeypatch):
     router = HybridRouter(n_samples=64)
     router.query(model, [t], ev)
     assert router.last_engine == "likelihood_weighting"
-    # Beyond the whole capacity, direct VE refuses up front.
-    monkeypatch.setattr(tensor_ve, "device_capacity_bytes", lambda d: int(peak / 2))
+    # Beyond the whole capacity, direct VE refuses up front (now with the
+    # CPTs cached, so the warm estimate is what the guard compares).
+    warm = eng.estimate_peak_bytes(model, t, ev)
+    monkeypatch.setattr(tensor_ve, "device_capacity_bytes", lambda d: int(warm / 2))
     with pytest.raises(torch.cuda.OutOfMemoryError, match="pre-allocation guard"):
         eng.query(model, [t], ev)
 

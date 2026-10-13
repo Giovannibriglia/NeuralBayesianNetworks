@@ -20,8 +20,8 @@ import nbn.inference.tensor_ve as ve_mod
 from nbn.inference.tensor_ve import (
     TensorVariableElimination,
     _estimate_peak_bytes,
-    _memory_budget_message,
 )
+from tests.unit.test_ve_memory_model import _cpu_peak
 
 
 def _all_nodes(graph, target, evidence=None):
@@ -79,128 +79,61 @@ def test_estimator_predicts_smaller_peak_for_min_fill_than_topological() -> None
     )
 
 
-def test_guard_includes_broadcast_liveset_multiplier() -> None:
-    """Issue #177: ``_estimate_peak_bytes`` scales the bare per-step
-    max-factor walk by ``_LIVESET_MULTIPLIER`` (3.0) to model the
-    broadcast live-set — ``_log_factor_product_batched`` holds
-    ``a_aligned`` + ``b_aligned`` + their sum simultaneously, plus
-    conditioned factors that persist across steps.
-
-    Without this multiplier the guard under-estimates actual peak by
-    ~2.85× (measured 2026-06-08), letting queries that will OOM in
-    execution pass the pre-allocation check.
-    """
+def _n20():
     bn = make_synthetic_bn(
         family="discrete", n_nodes=20,
         cardinality=4, max_in_degree=4, edge_density=0.20,
         n_train=200, n_test=50, n_reference=500,
         seed=0, device="cpu",
     )
-    eng = TensorVariableElimination()
-    target = "X2"
-    ev_keys = ("X0", "X10")
-    factors = eng._extract_factors(bn.true_model)
-    with patch.object(ve_mod, "relevant_subnetwork", _all_nodes):
-        plan = eng._plan(bn.true_model, target, ev_keys, order="min_fill")
-
-    scaled = _estimate_peak_bytes(plan, factors, evidence_keys=ev_keys, B=16)
-    # The multiplier is read as a module global at call time, so patching
-    # it to 1.0 recovers the bare per-step max-factor estimate.
-    with patch.object(ve_mod, "_LIVESET_MULTIPLIER", 1.0):
-        bare = _estimate_peak_bytes(plan, factors, evidence_keys=ev_keys, B=16)
-
-    assert bare > 0, "non-trivial plan should predict a positive peak"
-    assert ve_mod._LIVESET_MULTIPLIER >= 2.85, (
-        "multiplier must cover the measured 2.85× under-estimate"
-    )
-    assert scaled == pytest.approx(ve_mod._LIVESET_MULTIPLIER * bare, rel=1e-6), (
-        f"scaled peak {scaled} should be {ve_mod._LIVESET_MULTIPLIER}× the "
-        f"bare per-step max {bare}"
-    )
+    return bn.true_model
 
 
-def test_guard_rejects_query_that_would_oom_without_multiplier() -> None:
-    """Issue #177 safety property: a query whose *actual* peak would
-    exceed free GPU memory must be rejected by the pre-allocation guard.
-
-    The 2026-06-08 investigation measured a borderline case (B=256): the
-    bare per-step estimate sat *below* the 90% threshold (so the pre-#177
-    guard would have let it through), while the realised peak was ~3×
-    larger and would crash mid-execution.  The 3.0× liveset multiplier
-    lifts the estimate above the threshold so the query is rejected.
-
-    This test reconstructs that band: free memory is mocked so that the
-    *bare* estimate passes the guard but the *scaled* estimate (×3.0)
-    exceeds it.  With the multiplier (current code) the guard rejects;
-    with the multiplier patched to 1.0 (pre-#177 behaviour) it does not —
-    proving the test exercises the multiplier's safety contribution, not
-    just its arithmetic.
-
-    Exercised through ``_memory_budget_message`` — the guard-decision
-    helper ``query_batch`` delegates to — so it runs on CPU in CI without
-    a real cuda device (the end-to-end cuda path is covered by
-    ``test_query_batch_oom_guard_raises_on_constrained_cuda_device``).
-    """
-    bn = make_synthetic_bn(
-        family="discrete", n_nodes=20,
-        cardinality=4, max_in_degree=4, edge_density=0.20,
-        n_train=200, n_test=50, n_reference=500,
-        seed=0, device="cpu",
-    )
-    eng = TensorVariableElimination()
-    target = "X2"
-    ev_keys = ("X0", "X10")
+def test_estimate_bounds_the_measured_peak_on_the_n20_case() -> None:
+    """#178 (replacing #177's ``_LIVESET_MULTIPLIER`` test, and a later
+    arbitrary "<= 3x the largest tensor" pin): on the n=20 case the guard's
+    estimate is an upper bound of the CPU peak measured with the profiler,
+    and a tight one (within the 10 % margin plus allocator rounding)."""
+    model = _n20()
     B = 16
-    factors = eng._extract_factors(bn.true_model)
+    ev = {"X0": torch.zeros(B, dtype=torch.long), "X10": torch.ones(B, dtype=torch.long)}
+    eng = TensorVariableElimination(memory_budget=float("inf"))
     with patch.object(ve_mod, "relevant_subnetwork", _all_nodes):
-        plan = eng._plan(bn.true_model, target, ev_keys, order="min_fill")
-
-    # Bare estimate = what the guard would have compared against pre-#177.
-    with patch.object(ve_mod, "_LIVESET_MULTIPLIER", 1.0):
-        bare = _estimate_peak_bytes(plan, factors, evidence_keys=ev_keys, B=B)
-    assert bare > 0, "design check: non-trivial plan must predict a positive peak"
-
-    # Mock free memory into the band: bare passes (bare <= 0.9·free) but
-    # the 3× scaled estimate exceeds the budget (3·bare > 0.9·free).
-    safety = 0.9
-    free_bytes = int(bare / safety * 1.5)  # -> 0.9·free = 1.5·bare
-    assert bare <= safety * free_bytes, "design check: bare must pass the guard"
-    assert 3 * bare > safety * free_bytes, "design check: scaled must fail the guard"
-
-    fake_device = torch.device("cuda:0")
-
-    def _call() -> str | None:
-        return _memory_budget_message(
-            plan, factors, evidence_keys=ev_keys, B=B,
-            device=fake_device, order="min_fill", safety=safety,
-        )
-
-    # #264: the guard also counts PyTorch's reusable cached blocks
-    # (reserved - allocated) as headroom; pin them to 0 so CUDA work done
-    # earlier in this worker cannot lift the budget above the mock (#298).
-    with patch("torch.cuda.mem_get_info",
-               return_value=(free_bytes, free_bytes)), \
-         patch("torch.cuda.memory_reserved", return_value=0), \
-         patch("torch.cuda.memory_allocated", return_value=0):
-        # Current code (multiplier=3.0): the query is rejected.
-        msg = _call()
-        assert msg is not None and "pre-allocation guard" in msg, (
-            "with the liveset multiplier, a query whose actual peak exceeds "
-            "free memory must be rejected"
-        )
-
-        # Pre-#177 behaviour (multiplier=1.0): the same query passes —
-        # this is precisely the crash the multiplier prevents.
-        with patch.object(ve_mod, "_LIVESET_MULTIPLIER", 1.0):
-            assert _call() is None, (
-                "without the multiplier the guard would let this query "
-                "through, then it would OOM in execution — the regression "
-                "this fix guards against"
-            )
+        eng.query_batch(model, ["X2"], ev)  # tabulate the CPTs
+        est = eng.estimate_peak_bytes(model, "X2", ev, B=B)
+        measured = _cpu_peak(lambda: eng.query_batch(model, ["X2"], ev))
+    assert measured > 0
+    assert measured <= est <= 1.25 * measured
 
 
-def test_estimator_returns_zero_when_plan_is_empty() -> None:
-    """Trivial query (no variables to eliminate): peak is 0."""
+def test_guard_rejects_query_whose_live_set_exceeds_the_budget() -> None:
+    """#177 safety property, now from the live-set model (#178), through the
+    real guard path: a one-row query whose largest single tensor fits the
+    budget but whose live set does not is refused before any allocation —
+    the pre-#177 guard compared the single factor and let it through, then
+    it OOMed mid-elimination.  (Was exercised through the private
+    ``_memory_budget_message`` helper, which the engine never called.)"""
+    model = _n20()
+    ev = {"X0": torch.zeros(1, dtype=torch.long), "X10": torch.ones(1, dtype=torch.long)}
+    probe = TensorVariableElimination()
+    with patch.object(ve_mod, "relevant_subnetwork", _all_nodes):
+        probe._extract_factors(model)
+        pm = probe._peak_model(model, "X2", ev, B=1)
+        largest = max(pm.cost.tensor) * 4
+        est = pm.bytes(1)
+        budget = (largest + est) / 2
+        assert largest < budget < est, "design check: the band exists"
+        eng = TensorVariableElimination(memory_budget=budget)
+        eng._extract_factors(model)
+        with pytest.raises(torch.cuda.OutOfMemoryError, match="pre-allocation guard"):
+            eng.query_batch(model, ["X2"], ev)
+
+
+def test_estimator_prices_the_final_product_of_an_empty_plan() -> None:
+    """Nothing to eliminate still multiplies the remaining factors into one
+    table (#178): with three unconditioned factors that table is their full
+    joint, so the peak is at least its size.  (Before #178 this test pinned
+    an estimate of 0, which the guard then waved through.)"""
     bn = make_synthetic_bn(
         family="discrete", n_nodes=3, cardinality=4, max_in_degree=2,
         edge_density=0.50,
@@ -212,7 +145,7 @@ def test_estimator_returns_zero_when_plan_is_empty() -> None:
     peak = _estimate_peak_bytes(
         plan=[], factors=factors, evidence_keys=(), B=1,
     )
-    assert peak == 0
+    assert peak >= 4 * 4 ** 3  # the joint over three card-4 variables
 
 
 # Needs a real CUDA device: the guard's ``device.type == 'cuda'`` branch sits
@@ -228,7 +161,7 @@ def test_query_batch_oom_guard_raises_on_constrained_cuda_device() -> None:
 
     PR C (batch chunking): the guard's contract changed — a batch whose
     full-B peak exceeds the budget but whose per-row peak fits is now
-    CHUNKED instead of rejected (``_max_chunk_rows``), so this test mocks
+    CHUNKED instead of rejected (``_max_fitting_rows``), so this test mocks
     free memory low enough that B=1 does not fit either, which is the only
     regime where the guard still raises."""
     bn = make_synthetic_bn(
@@ -257,9 +190,8 @@ def test_query_batch_oom_guard_raises_on_constrained_cuda_device() -> None:
     # OOM rather than guarding it).
     #
     # PR 11 (#226): query_batch defaults to order="min_fill"; the realised
-    # min-fill peak for this scale is ~48 MiB (= ~16 MiB bare × 3.0
-    # _LIVESET_MULTIPLIER from #179, after #131 pruning shrank the old ~256 MiB
-    # topological-shaped estimate).
+    # min-fill peak for this scale is tens of MiB (#178's live-set estimate,
+    # after #131 pruning shrank the old ~256 MiB topological-shaped one).
     #
     # PR C (batch chunking): 32 MiB free (the previous mock) now triggers
     # CHUNKING, not rejection — the ~3 MiB per-row peak fits the 28.8 MiB

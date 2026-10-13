@@ -15,6 +15,7 @@ The v0.3.1 work introduces:
 from __future__ import annotations
 
 import logging
+import math
 from typing import Dict, List, Mapping
 
 import torch
@@ -32,6 +33,18 @@ from nbn.inference._memory import (
     device_capacity_bytes,
     device_headroom_bytes,
 )
+from nbn.inference._ve_memory import (
+    _estimate_peak_bytes,  # noqa: F401  (re-exported: plan-level helper)
+    _factor_dtype_bytes,
+    _max_fitting_rows,
+    _PeakModel,
+    _plan_cost,
+    _PlanCost,
+    _Scope,
+    embed_tape,
+    evidence_prelude,
+    tables_tape,
+)
 from nbn.inference._validation import check_discrete_values
 from nbn.inference._pruning import relevant_subnetwork, requisite_nodes
 from nbn.inference.base import InferenceEngine
@@ -39,24 +52,8 @@ from nbn.utils.device import to_device_dtype
 
 logger = logging.getLogger(__name__)
 
-# Empirical broadcast live-set multiplier (issue #177).
-#
-# The per-step max-factor estimate in ``_estimate_peak_bytes`` captures
-# only one union-scope tensor, but ``_log_factor_product_batched``
-# materialises three simultaneously (``a_aligned`` + ``b_aligned`` +
-# their sum), and conditioned factors persist across elimination steps.
-# Measurement (2026-06-08, nbn-neuralcat-ve, B=16..128) found
-# actual/predicted = 2.85× rock-stable across batch sizes; 3.0 rounds
-# conservative. See #177 for the measurement and #178 for the deeper
-# live-set model that would replace this scalar.
-#
-# The same factor holds on CPU and MPS (R5 re-measurement, 2026-10-11,
-# Apple M-series, 30-node in-degree-4 card-4 nets, bare peaks 0.07-4.3 GB):
-# CPU peak-RSS growth / bare = 2.8-3.4 and MPS driver-allocated growth /
-# bare = 3.0 once the plan is large enough to dominate allocator
-# granularity.  So one multiplier serves every device; what differs per
-# device is the budget it is compared with (``memory_budget_bytes``).
-_LIVESET_MULTIPLIER = 3.0
+# The guard's peak-memory model lives in ``nbn.inference._ve_memory`` (#178):
+# a tape of every allocation the elimination makes, replayed per device.
 
 # Plans whose estimated peak is below this fraction of the stable memory
 # budget skip the live-headroom check that sizes chunks (it reads memory
@@ -117,9 +114,14 @@ class TensorVariableElimination(InferenceEngine):
         self.memory_budget = memory_budget
         self.memory_safety = float(memory_safety)
         self.host_memory_fraction = float(host_memory_fraction)
-        # Memoised per-plan peak profile ``(batch_free, per_row)`` element
-        # counts, keyed like ``_plan_cache`` (see ``_peak_profile``).
-        self._cost_cache: Dict[tuple, tuple] = {}
+        # Memoised per-plan memory profile (``_PlanCost``), keyed like
+        # ``_plan_cache`` (see ``_plan_cost``).
+        self._cost_cache: Dict[tuple, _PlanCost] = {}
+        # ``(id(model), factors | None)`` validated by this call's guard and
+        # consumed by its ``_extract_factors`` (see there).
+        self._validated: tuple | None = None
+        # ``id(factors) -> (factors, widest element size)``; one entry.
+        self._dtype_memo: dict[int, tuple] = {}
         # Memoised log-CPT factors per model: ``{id(model): entry}``, see
         # ``nbn.inference._cache`` and ``_extract_factors`` for validation.
         self._factor_cache: Dict[int, tuple] = {}
@@ -170,13 +172,37 @@ class TensorVariableElimination(InferenceEngine):
     # Factor and plan extraction (cached)
     # ------------------------------------------------------------------ #
 
-    def _extract_factors(self, model) -> Dict[str, LogFactor]:
+    def _cached_factors(self, model) -> Dict[str, LogFactor] | None:
+        """The model's tabulated factors if the cache holds a valid entry."""
         version = (structure_version(model), str(model.device))
         hit = cache_get(self._factor_cache, id(model), model, version)
         if hit is not None:
             tensors, versions, factors = hit
             if versions is not None and tensor_versions(tensors) == versions:
                 return factors
+        return None
+
+    def _cached_dtype_bytes(self, factors: Dict[str, LogFactor]) -> int:
+        """Bytes per element of the widest cached factor: the products take the
+        widest dtype (a ``DeterministicMechanism`` tabulates float32 even in a
+        float64 model, #301 review 3).  Memoised per cached factor dict."""
+        hit = self._dtype_memo.get(id(factors))
+        if hit is None or hit[0] is not factors:
+            hit = (factors, max(f.log_values.element_size() for f in factors.values()))
+            self._dtype_memo = {id(factors): hit}
+        return hit[1]
+
+    def _extract_factors(self, model) -> Dict[str, LogFactor]:
+        # The guard of this same call may just have validated the cache
+        # (``_peak_model``): reuse that answer instead of re-reading every
+        # parameter's version counter (#301 review D).  Single use.
+        token, self._validated = self._validated, None
+        if token is not None and token[0] == id(model) and token[1] is not None:
+            return token[1]
+        cached = self._cached_factors(model)
+        if cached is not None:
+            return cached
+        version = (structure_version(model), str(model.device))
         factors: Dict[str, LogFactor] = {}
         for node in model.dag.topological_order():
             mech = model.mechanisms[node]
@@ -378,20 +404,20 @@ class TensorVariableElimination(InferenceEngine):
             budget = cap if budget is None else min(budget, cap)
         return budget
 
-    def _peak_profile(
+    def _cached_plan_cost(
         self,
         model,
-        target: str,
+        target,
         evidence_keys: tuple[str, ...],
         do_keys: tuple[str, ...],
         order: str,
-    ) -> tuple[int, int]:
-        """``(batch_free, per_row)`` peak element counts of this query's plan.
+    ) -> _PlanCost:
+        """The plan's allocation tape (``_ve_memory._plan_cost``), memoised.
 
         Computed from the DAG and cardinalities alone — no CPT is tabulated —
-        so the router can price a query before committing to VE.  The peak
-        in bytes for any ``B`` follows from the pair (see
-        ``_peak_bytes_from_profile``); memoised per plan.
+        so the router can price a query before committing to VE.  The walk
+        sees the factors in the order the engine builds them (topological,
+        intervened CPTs dropped), so product chains are priced as they run.
         """
         key = (id(model), target, evidence_keys, do_keys, order)
         hit = self._cache_get(self._cost_cache, key, model)
@@ -401,24 +427,95 @@ class TensorVariableElimination(InferenceEngine):
             model, target, evidence_keys, do_keys=do_keys, order=order,
         )
         scopes = {}
-        for node in relevant:
-            if node in do_keys:
-                continue  # graph surgery: the intervened CPT is dropped
-            var_scope = list(model.dag.parents(node)) + [node]
-            scopes[node] = _Scope(
-                var_scope, {n: model.mechanisms[n].n_classes for n in var_scope},
-            )
-        prof = _peak_profile(
+        for node in model.dag.topological_order():
+            if node in relevant and node not in do_keys:
+                # (graph surgery: an intervened CPT is dropped)
+                var_scope = list(model.dag.parents(node)) + [node]
+                scopes[node] = _Scope(
+                    var_scope, {n: model.mechanisms[n].n_classes for n in var_scope},
+                )
+        targets = (target,) if isinstance(target, str) else tuple(target)
+        cost = _plan_cost(
             plan, scopes, evidence_keys=tuple(evidence_keys) + tuple(do_keys),
+            targets=targets,
+            target_cards={t: model.mechanisms[t].n_classes for t in targets},
+            joint=not isinstance(target, str),
         )
-        if not isinstance(target, str):
-            # A joint query ends by materialising the joint table over its
-            # free targets (per row), which can exceed every elimination step.
-            joint = 1
-            for t in target:
-                joint *= model.mechanisms[t].n_classes
-            prof = (prof[0], max(prof[1], joint))
-        return self._cache_put(self._cost_cache, key, model, prof)
+        return self._cache_put(self._cost_cache, key, model, cost)
+
+    def _peak_profile(
+        self,
+        model,
+        target,
+        evidence_keys: tuple[str, ...],
+        do_keys: tuple[str, ...],
+        order: str,
+    ) -> tuple[int, int]:
+        """``(batch_free, per_row)`` elements of the plan's largest tensor.
+
+        With ``c`` rows the largest single tensor has
+        ``max(batch_free, c * per_row)`` elements — what the MPS element cap
+        is checked against.  Memory is priced by ``_peak_model``.
+        """
+        return self._cached_plan_cost(model, target, evidence_keys, do_keys, order).tensor
+
+    def _peak_model(
+        self,
+        model,
+        target,
+        evidence=(),
+        do=(),
+        *,
+        B: int = 1,
+        order: str = "min_fill",
+        price_evidence: bool = True,
+        remember: bool = False,
+    ) -> _PeakModel | None:
+        """Peak-bytes model of this query (``None``: nothing to eliminate).
+
+        ``target`` is a node name or a sequence of names (joint query).
+        ``evidence`` / ``do`` are the call's values (``{node: value}``) —
+        what they cost depends on whether the engine must materialise or
+        copy them (``_ve_memory.evidence_prelude``) — or bare node names,
+        priced as lists of floats, the most expensive input.  On a cold
+        factor cache the model also prices tabulating every CPT.  ``query``
+        passes ``price_evidence=False``: it reads one Python int per node.
+        ``remember`` (``query`` / ``query_batch`` only) hands the cache check
+        to the same call's ``_extract_factors``; read-only callers
+        (``estimate_peak_bytes``, ``fits_memory``) must not leave it behind,
+        or an in-place parameter edit before the next extraction would be
+        served stale factors (#301 review 3).
+        """
+        values = {**_as_values(evidence), **_as_values(do)}
+        do_set = set(_as_values(do))
+        ev = tuple(sorted(k for k in _as_values(evidence) if k not in do_set))
+        do_t = tuple(sorted(do_set))
+        plan_target = _plan_target(target, set(ev) | do_set)
+        if plan_target is None:
+            return None  # every target clamped: a point mass, nothing eliminated
+        cost = self._cached_plan_cost(model, plan_target, ev, do_t, order)
+        names = (target,) if isinstance(target, str) else tuple(target)
+        cards = [model.mechanisms[t].n_classes for t in names]
+        clamped = [t in ev or t in do_set for t in names]
+        persistent, transient = (evidence_prelude(values, B, model.device)
+                                 if price_evidence else ((), ()))
+        cached = self._cached_factors(model)
+        if remember:
+            self._validated = (id(model), cached)
+        dtype_bytes = (self._cached_dtype_bytes(cached) if cached
+                       else _factor_dtype_bytes(model))
+        return _PeakModel(
+            cost,
+            dtype_bytes=dtype_bytes,
+            device_type=torch.device(model.device).type,
+            prelude=persistent,
+            transient=transient,
+            tables=tables_tape(model) if cached is None else (),
+            embed=embed_tape(cards, clamped) if not isinstance(target, str) and any(clamped)
+            else (),
+            out_per_row=math.prod(cards),
+            n_nodes=len(values),
+        )
 
     def estimate_peak_bytes(
         self,
@@ -433,13 +530,22 @@ class TensorVariableElimination(InferenceEngine):
         """Estimated peak bytes of answering this query (``B`` rows) by VE.
 
         ``target`` is a node name, or a sequence of names for a joint query.
+        An upper bound of the memory the call makes the device hold
+        (``nbn.inference._ve_memory``).
+
+        ``evidence_keys`` / ``do_keys`` are the ``{node: value}`` mappings of
+        the call, or bare node names.  The difference matters (#178): with
+        values, the evidence is priced exactly — int64 tensors already on the
+        model's device cost nothing, other tensors an int64 copy, Python
+        lists the materialised tensor plus the copy.  With names alone each
+        node is priced as the costliest input, a list of ``B`` floats (4 + 8
+        bytes per row, plus the validation temporaries), which can be many
+        times the real peak on evidence-heavy, factor-light queries (e.g. 16x
+        on a naive Bayes with 29 observed children and ``B=20000``).  Pass
+        the values whenever they are known.
         """
-        ev = tuple(sorted(k for k in evidence_keys if k not in set(do_keys)))
-        target = _plan_target(target, set(ev) | set(do_keys))
-        if target is None:
-            return 0  # every target clamped: a point mass, nothing eliminated
-        prof = self._peak_profile(model, target, ev, tuple(sorted(do_keys)), order)
-        return _peak_bytes_from_profile(prof, B)
+        pm = self._peak_model(model, target, evidence_keys, do_keys, B=B, order=order)
+        return 0 if pm is None else pm.bytes(B)
 
     def _chunk_budget_bytes(self, device, budget: float) -> float:
         """Budget for sizing row-chunks: the stable budget, capped by live headroom.
@@ -453,6 +559,18 @@ class TensorVariableElimination(InferenceEngine):
         head = device_headroom_bytes(device)
         return budget if head is None else min(budget, self.memory_safety * head)
 
+    def _stable_budget_bytes(self, device, budget: float) -> float:
+        """The part of ``budget`` that does not move with live usage: all of it
+        on CPU / MPS; on CUDA only an explicit ``memory_budget``."""
+        if torch.device(device).type != "cuda":
+            return budget
+        return float("inf") if self.memory_budget is None else float(self.memory_budget)
+
+    def _live_room_bytes(self, device) -> float:
+        """``memory_safety`` x what is free on ``device`` now (inf: unknown)."""
+        head = device_headroom_bytes(device)
+        return float("inf") if head is None else self.memory_safety * head
+
     def fits_memory(self, model, target, evidence_keys=(), do_keys=(), *,
                     order: str = "min_fill",
                     host_fraction: float | None = None) -> bool:
@@ -461,22 +579,14 @@ class TensorVariableElimination(InferenceEngine):
         On MPS a row must also keep every intermediate factor under
         ``_MPS_MAX_ELEMENTS`` (beyond it MPS reductions are wrong).
         """
+        pm = self._peak_model(model, target, evidence_keys, do_keys, order=order)
+        if pm is None:
+            return True  # answered as a point mass, no elimination
         elem_cap = _max_tensor_elements(model.device)
-        if elem_cap is not None:
-            ev = tuple(sorted(k for k in evidence_keys if k not in set(do_keys)))
-            plan_target = _plan_target(target, set(ev) | set(do_keys))
-            if plan_target is not None and _rows_within_elements(
-                self._peak_profile(model, plan_target, ev, tuple(sorted(do_keys)),
-                                   order),
-                elem_cap,
-            ) == 0:
-                return False
+        if elem_cap is not None and _rows_within_elements(pm.cost.tensor, elem_cap) == 0:
+            return False
         budget = self.memory_budget_bytes(model.device, host_fraction=host_fraction)
-        if budget is None:
-            return True
-        return self.estimate_peak_bytes(
-            model, target, evidence_keys, do_keys, B=1, order=order,
-        ) <= budget
+        return budget is None or pm.bytes(1) <= budget
 
     # ------------------------------------------------------------------ #
     # do-operator
@@ -531,6 +641,7 @@ class TensorVariableElimination(InferenceEngine):
         ``host_fraction`` overrides ``host_memory_fraction`` for this call
         (``HybridRouter`` passes its ``ve_host_fraction``).
         """
+        self._validated = None  # never reuse another call's cache check
         # do-specific errors first (they name the offending do-target), then
         # the whole-model discreteness check, then the shape of the row.
         self._validate_do(model, dict(do or {}), evidence)
@@ -573,21 +684,19 @@ class TensorVariableElimination(InferenceEngine):
         # Pre-allocation guard (single row), on every device — see
         # ``memory_budget_bytes``.  Raised before tabulating any CPT.
         budget = self.memory_budget_bytes(device, host_fraction=host_fraction)
-        if budget is not None:
-            peak = self.estimate_peak_bytes(
-                model, target, tuple(ev_int), tuple(do_int), B=1, order=order,
-            )
-            if peak > budget:
+        elem_cap = _max_tensor_elements(device)
+        if budget is not None or elem_cap is not None:
+            pm = self._peak_model(model, target, ev_int, do_int,
+                                  order=order, price_evidence=False, remember=True)
+            assert pm is not None  # the target is not clamped (handled above)
+            peak = pm.bytes(1)
+            if budget is not None and peak > budget:
                 raise OutOfMemoryError(
                     _guard_message(peak, budget, device, order)
                 )
-        elem_cap = _max_tensor_elements(device)
-        if elem_cap is not None:
-            prof = self._peak_profile(
-                model, target, tuple(sorted(ev_int)), tuple(sorted(do_int)), order,
-            )
-            if _rows_within_elements(prof, elem_cap) == 0:
-                raise MPSTensorLimitError(_mps_limit_message(prof, elem_cap))
+            if elem_cap is not None and _rows_within_elements(pm.cost.tensor,
+                                                              elem_cap) == 0:
+                raise MPSTensorLimitError(_mps_limit_message(pm.cost.tensor, elem_cap))
 
         factors = self._extract_factors(model)
 
@@ -622,21 +731,17 @@ class TensorVariableElimination(InferenceEngine):
                     f = f.condition({ev_node: ev_val})
             conditioned.append(f)
         for var in to_eliminate:
-            relevant = [f for f in conditioned if var in f.variables]
-            rest = [f for f in conditioned if var not in f.variables]
-            if not relevant:
+            rel = [f for f in conditioned if var in f.variables]
+            if not rel:
                 continue
-            product = relevant[0]
-            for f in relevant[1:]:
-                product = _log_factor_product(product, f)
-            product = product.marginalise(var)
-            conditioned = rest + [product]
+            conditioned = [f for f in conditioned if var not in f.variables]
+            # ``_multiply`` consumes ``rel``, so each input is released as
+            # soon as it is multiplied in — the live set ``_plan_cost`` prices.
+            conditioned.append(_multiply(rel).marginalise(var))
 
         if not conditioned:
             raise RuntimeError("No factors remaining after elimination.")
-        result = conditioned[0]
-        for f in conditioned[1:]:
-            result = _log_factor_product(result, f)
+        result = _multiply(conditioned)
 
         k = model.mechanisms[target].n_classes
         if target not in result.variables:
@@ -652,6 +757,7 @@ class TensorVariableElimination(InferenceEngine):
                 result.cardinalities,
             )
         lv = result.log_values
+        del result  # each reduction below may free its input
         while lv.dim() > 1:
             lv = torch.logsumexp(lv, dim=0)
         return torch.softmax(lv, dim=0).to(device)
@@ -689,6 +795,7 @@ class TensorVariableElimination(InferenceEngine):
         ``[B, K_1, …, K_n]`` (axes in ``targets`` order, each row summing to
         1): all targets are kept and every other variable eliminated.
         """
+        self._validated = None  # never reuse another call's cache check
         targets = list(targets)
         if not targets or len(set(targets)) != len(targets):
             raise ValueError(f"targets must be distinct node names, got {targets}.")
@@ -735,25 +842,29 @@ class TensorVariableElimination(InferenceEngine):
         plan_target = tuple(free) if joint else target
 
         # Pre-allocation memory-budget guard (v0.6b round-2; every device
-        # since B5).  The peak intermediate-factor size is estimated by
-        # walking the plan algebraically (``_peak_profile``, same algebra as
-        # ``nbn/bench/diagnostics/ve_profile_n20.py``) and compared with the
-        # device budget (``memory_budget_bytes``).  Rejecting up front beats
-        # letting the allocator fail mid-elimination: a partial CUDA OOM
+        # since B5).  The query's peak is priced from a tape of every
+        # allocation the elimination makes, replayed through the device's
+        # allocator (``nbn.inference._ve_memory``, #178), and compared with
+        # the device budget (``memory_budget_bytes``).  Rejecting up front
+        # beats letting the allocator fail mid-elimination: a partial CUDA OOM
         # fragments the heap, a CPU one can summon the OS OOM killer.  The
         # runner's ``run_with_guard`` classifies the raised
         # ``OutOfMemoryError`` as ``status='oom'``; ``HybridRouter`` answers
         # the query with LW instead.
         #
-        # It runs before any CPT is tabulated or any tensor touches
-        # ``device``: conditioning is itself an allocation, so a query that
-        # will not fit must be refused before it.
+        # It runs before any CPT is tabulated: conditioning is itself an
+        # allocation, so a query that will not fit must be refused before it.
+        # (The evidence is already normalised by then; its copies are priced.)
         #
-        # PR C: the peak is linear in B in the regime where the guard fires
-        # (the peak step carries the batch axis), so rather than rejecting
-        # the whole batch it is split into the largest row-chunks that fit
-        # the same budget (``_LIVESET_MULTIPLIER`` unchanged — separately
-        # calibrated, #177/#178).
+        # PR C: rather than rejecting a batch whose single row fits, split it
+        # into the largest row-chunks that fit the same budget.  Next to every
+        # chunk stay the batch's evidence tensors (chunks index views of
+        # them), the finished answers and their final concatenation: that
+        # reserve is subtracted from the budget the chunks are sized for.  If
+        # not even one-row chunks fit the stable budget next to it, the batch
+        # is refused (#301 review: it ran 1-row chunks over budget).  On a
+        # cold cache the CPTs are tabulated first, so every chunk is priced
+        # warm; chunks then run in a loop, not by re-entering this guard.
         #
         # N1: the *reject* decision uses the stable budget (so whether VE can
         # answer at all does not depend on momentary memory pressure), but the
@@ -761,35 +872,76 @@ class TensorVariableElimination(InferenceEngine):
         # exact, so smaller chunks change only the speed, never the answer —
         # whereas sizing chunks to total RAM on a busy machine meant swap or
         # the OOM killer.
-        budget = self.memory_budget_bytes(device, host_fraction=host_fraction)
-        elem_cap = _max_tensor_elements(device)
+        guarded = kwargs.pop("_guarded", False)   # a chunk the caller already sized
+        budget = None if guarded else self.memory_budget_bytes(
+            device, host_fraction=host_fraction)
+        elem_cap = None if guarded else _max_tensor_elements(device)
         if budget is not None or elem_cap is not None:
-            ev_keys = tuple(sorted(k for k in ev_norm if k not in do))
-            do_keys = tuple(sorted(do))
-            prof = self._peak_profile(model, plan_target, ev_keys, do_keys, order)
-            peak_1 = _peak_bytes_from_profile(prof, 1)
-            if budget is not None and peak_1 > budget:
-                # Even a single row exceeds the budget: chunking cannot help.
-                raise OutOfMemoryError(
-                    _guard_message(peak_1, budget, device, order)
-                )
-            chunk, reason = B, None
+            pm = self._peak_model(
+                model, tuple(targets) if joint else target,
+                {k: v for k, v in evidence.items() if k not in do}, do,
+                B=B, order=order, remember=True,
+            )
+            assert pm is not None  # a free target exists (point masses returned above)
+            peak_b = pm.bytes(B)
+            chunk, reason, sizer = B, None, None
             if elem_cap is not None:
-                rows = _rows_within_elements(prof, elem_cap)
+                rows = _rows_within_elements(pm.cost.tensor, elem_cap)
                 if rows == 0:
-                    raise MPSTensorLimitError(_mps_limit_message(prof, elem_cap))
+                    raise MPSTensorLimitError(_mps_limit_message(pm.cost.tensor, elem_cap))
                 if rows < chunk:
                     chunk, reason = rows, f"the MPS {elem_cap}-element tensor limit"
-            if budget is not None:
-                peak_b = _peak_bytes_from_profile(prof, B)
-                # Live headroom costs a syscall / cgroup usage read; a plan this
-                # small next to the stable budget cannot need chunking.
-                if peak_b > _HEADROOM_CHECK_FRACTION * budget:
-                    chunk_budget = self._chunk_budget_bytes(device, budget)
-                    if peak_b > chunk_budget:
+            # Live headroom costs a syscall / cgroup usage read; a plan this
+            # small next to the stable budget cannot need chunking.
+            if budget is not None and peak_b > _HEADROOM_CHECK_FRACTION * budget:
+                chunk_budget = self._chunk_budget_bytes(device, budget)
+                tabulated = 0
+                if peak_b > chunk_budget and pm.tables and B > 1:
+                    # Cold cache: tabulate the CPTs once, here, if they fit next
+                    # to the batch's evidence; then every chunk is warm and
+                    # priced as such (#301 review B: each chunk re-entered cold,
+                    # re-chunked ~150 levels deep, and the batch was refused).
+                    if pm.tables_bytes() + pm.reserve_bytes(B) > budget:
+                        raise OutOfMemoryError(_guard_message(
+                            pm.tables_bytes() + pm.reserve_bytes(B), budget, device, order))
+                    tabulated = pm.tables_bytes(resident=True)  # now held by this call
+                    self._extract_factors(model)
+                    pm = self._peak_model(
+                        model, tuple(targets) if joint else target,
+                        {k: v for k, v in evidence.items() if k not in do}, do,
+                        B=B, order=order, remember=True,
+                    )
+                    peak_b = pm.bytes(B) + tabulated
+                if peak_b > chunk_budget:   # chunk_budget <= budget
+                    child = pm.child(rows=B)
+                    held = pm.reserve_bytes(B) + tabulated
+                    one_row = peak_b if B == 1 else held + child.bytes(1)
+                    if one_row > budget:
+                        if peak_b > budget:
+                            # Not even one-row chunks fit the stable budget.
+                            raise OutOfMemoryError(
+                                _guard_message(one_row, budget, device, order))
+                        # Only live headroom is short and chunking would cost
+                        # more than one pass: attempt the pass (N1).
+                    else:
                         # At least one row per chunk: a row that fits the
-                        # stable budget is always attempted.
-                        rows = max(1, _max_chunk_rows(peak_b, peak_1, B, chunk_budget))
+                        # stable budget is always attempted (N1).  Chunks are
+                        # re-sized against live headroom as the batch runs.
+                        stable = self._stable_budget_bytes(device, budget)
+                        outputs = 2 * pm.output_bytes(B)
+
+                        def sizer(limit, child=child, held=held, stable=stable,
+                                  outputs=outputs):
+                            # The stable budget does not see what this call
+                            # already holds (evidence, tabulated CPTs) or will
+                            # hold (finished answers, their concatenation):
+                            # subtract it.  Live headroom already reflects
+                            # what is allocated; only the answers still to
+                            # come are subtracted from it (#301 review 3).
+                            room = min(stable - held,
+                                       self._live_room_bytes(device) - outputs)
+                            return max(1, _max_fitting_rows(child.bytes, limit, room))
+                        rows = sizer(B - 1)
                         if rows < chunk:
                             chunk = rows
                             reason = (f"the {chunk_budget / 1024 ** 3:.2f} GiB chunk "
@@ -803,7 +955,7 @@ class TensorVariableElimination(InferenceEngine):
                 return self._query_batch_chunked(
                     model, targets, ev_norm, B=B, chunk=chunk,
                     order=order, do_keys=tuple(do),
-                    host_fraction=host_fraction, **kwargs,
+                    host_fraction=host_fraction, sizer=sizer, **kwargs,
                 )
 
         factors = self._extract_factors(model)
@@ -823,28 +975,29 @@ class TensorVariableElimination(InferenceEngine):
 
         # Condition each factor batchwise.
         # `conditioned` holds tuples `(log_values_tensor, vars, has_batch)`.
-        conditioned: list[tuple[torch.Tensor, list[str], bool]] = []
-        for f in factors.values():
-            lv, vars_, has_b = _condition_factor_batched(
-                f.log_values, f.variables, ev_norm,
-            )
-            conditioned.append((lv, vars_, has_b))
+        # Built by a comprehension so no loop variable keeps a factor alive
+        # after elimination consumes it (``_plan_cost`` prices that).
+        conditioned: list[tuple[torch.Tensor, list[str], bool]] = [
+            _condition_factor_batched(f.log_values, f.variables, ev_norm)
+            for f in factors.values()
+        ]
+        del factors
 
         for var in to_eliminate:
-            relevant = [f for f in conditioned if var in f[1]]
-            rest = [f for f in conditioned if var not in f[1]]
-            if not relevant:
+            rel = [f for f in conditioned if var in f[1]]
+            if not rel:
                 continue
-            prod_lv, prod_vars, prod_has_b = relevant[0]
-            for lv2, vars2, has_b2 in relevant[1:]:
-                prod_lv, prod_vars, prod_has_b = _log_factor_product_batched(
-                    prod_lv, prod_vars, prod_has_b, lv2, vars2, has_b2,
-                )
-            # Marginalise
+            conditioned = [f for f in conditioned if var not in f[1]]
+            # ``_multiply_batched`` consumes ``rel``: each input is released as
+            # soon as it is multiplied in.
+            prod_lv, prod_vars, prod_has_b = _multiply_batched(rel)
             dim = prod_vars.index(var) + (1 if prod_has_b else 0)
-            prod_lv = torch.logsumexp(prod_lv, dim=dim)
-            prod_vars = [v for v in prod_vars if v != var]
-            conditioned = rest + [(prod_lv, prod_vars, prod_has_b)]
+            conditioned.append((
+                torch.logsumexp(prod_lv, dim=dim),
+                [v for v in prod_vars if v != var],
+                prod_has_b,
+            ))
+            del prod_lv  # the product dies here, not at the next step
 
         if joint:
             return _joint_from_factors(conditioned, targets, free, ev_norm,
@@ -854,11 +1007,7 @@ class TensorVariableElimination(InferenceEngine):
         if not conditioned:
             return torch.full((B, model.mechanisms[target].n_classes),
                               1.0 / model.mechanisms[target].n_classes, device=device)
-        prod_lv, prod_vars, prod_has_b = conditioned[0]
-        for lv2, vars2, has_b2 in conditioned[1:]:
-            prod_lv, prod_vars, prod_has_b = _log_factor_product_batched(
-                prod_lv, prod_vars, prod_has_b, lv2, vars2, has_b2,
-            )
+        prod_lv, prod_vars, prod_has_b = _multiply_batched(conditioned)
 
         k = model.mechanisms[target].n_classes
         # Move target axis to last.
@@ -888,6 +1037,7 @@ class TensorVariableElimination(InferenceEngine):
         order: str,
         do_keys: tuple[str, ...] = (),
         host_fraction: float | None = None,
+        sizer=None,
         **kwargs,
     ) -> torch.Tensor:
         """Run ``query_batch`` over row-chunks of ``ev_norm`` and concatenate.
@@ -898,20 +1048,24 @@ class TensorVariableElimination(InferenceEngine):
         back in as ``do=``, not as evidence — re-entering with them merged
         into ``evidence`` silently turned ``P(Y | do(X))`` into the
         observational ``P(Y | X)`` on exactly the large-B CUDA batches that
-        get chunked (A8).  Each chunk re-enters ``query_batch`` — plan/factor
-        caches hit, and the guard re-checks each chunk against live free
-        memory (shrinking further or raising if the budget collapsed
-        mid-batch).  Output is ``[B, K]``, row-identical to the single-pass
-        result.
+        get chunked (A8).  Chunks run without the guard, in a loop (no
+        recursion): the caller sized them, and ``sizer(limit)``, when given,
+        re-sizes each against live headroom before it runs.  Output is
+        ``[B, K]``, row-identical to the single-pass result.
         """
         outs = []
-        for i in range(0, B, chunk):
-            rows = {k: v[i:i + chunk] for k, v in ev_norm.items()}
+        i = 0
+        while i < B:
+            c = min(chunk, B - i)
+            if sizer is not None:
+                c = min(c, sizer(c))
+            rows = {k: v[i:i + c] for k, v in ev_norm.items()}
             do_rows = {k: rows.pop(k) for k in do_keys}
             outs.append(self.query_batch(
                 model, targets, rows, do=do_rows, order=order,
-                host_fraction=host_fraction, **kwargs,
+                host_fraction=host_fraction, _guarded=True, **kwargs,
             ))
+            i += c
         return torch.cat(outs, dim=0)
 
 
@@ -923,7 +1077,7 @@ def _max_tensor_elements(device) -> int | None:
 def _rows_within_elements(profile: tuple[int, int], cap: int) -> int:
     """Rows per chunk keeping every intermediate factor below ``cap`` elements.
 
-    ``profile`` is ``(batch_free, per_row)`` from ``_peak_profile``: with ``c``
+    ``profile`` is ``(batch_free, per_row)``, ``_PlanCost.tensor``: with ``c``
     rows the largest factor has ``max(batch_free, c * per_row)`` elements.
     0 when not even one row fits.
     """
@@ -973,6 +1127,11 @@ def _require_single_row(evidence, do) -> None:
                 )
 
 
+def _as_values(x) -> dict:
+    """``{node: value}`` from a mapping, or ``{node: None}`` from bare names."""
+    return dict(x) if isinstance(x, Mapping) else dict.fromkeys(x)
+
+
 def _plan_target(target, clamped: set):
     """Plan key for ``target`` (name or names) with clamped targets removed.
 
@@ -996,11 +1155,7 @@ def _joint_from_factors(conditioned, targets, free, ev_norm, cards, B, device):
     one-hot axes, so the output always has one axis per requested target.
     """
     if conditioned:
-        prod_lv, prod_vars, prod_has_b = conditioned[0]
-        for lv2, vars2, has_b2 in conditioned[1:]:
-            prod_lv, prod_vars, prod_has_b = _log_factor_product_batched(
-                prod_lv, prod_vars, prod_has_b, lv2, vars2, has_b2,
-            )
+        prod_lv, prod_vars, prod_has_b = _multiply_batched(conditioned)
         offset = 1 if prod_has_b else 0
         # Defensive: sum out anything that is not a free target.
         for i in range(len(prod_vars) - 1, -1, -1):
@@ -1045,174 +1200,6 @@ def _delta_probs(k: int, value: int, device) -> torch.Tensor:
     out = torch.zeros(k, device=device)
     out[int(value)] = 1.0
     return out
-
-
-# ---------------------------------------------------------------------- #
-# Memory-budget estimator (v0.6b round-2)
-# ---------------------------------------------------------------------- #
-
-
-def _max_chunk_rows(
-    peak_at_B: int, peak_at_1: int, B: int, budget: float,
-) -> int:
-    """Largest per-chunk row count whose estimated peak fits ``budget``.
-
-    Pure arithmetic over two ``_estimate_peak_bytes`` evaluations (at the
-    requested ``B`` and at ``B=1``) so the chunk decision is unit-testable
-    without a cuda device.  ``_estimate_peak_bytes`` is
-    ``max(A, B·R)·_LIVESET_MULTIPLIER·dtype_bytes`` where ``A`` is the
-    largest batch-free step and ``R`` the largest per-row batched step; in
-    the regime where the guard fires with ``peak_at_1 <= budget``, the peak
-    is batch-dominated (``peak_at_B == B·R``), so the per-row cost is
-    exactly ``peak_at_B / B``.
-
-    Returns
-    -------
-    ``B`` when the full batch already fits (single pass, unchanged
-    behaviour); ``0`` when even a single row exceeds the budget (caller
-    raises the pre-existing guard error); otherwise the largest fitting
-    chunk size in ``[1, B - 1]``.
-    """
-    if peak_at_B <= budget:
-        return B
-    if B <= 1 or peak_at_1 > budget:
-        return 0
-    per_row = peak_at_B / B
-    return max(1, min(int(budget // per_row), B - 1))
-
-
-class _Scope:
-    """Scope-only stand-in for a ``LogFactor`` (variables + cardinalities).
-
-    The peak estimate needs only factor scopes, so it can be computed from
-    the DAG before any CPT is tabulated.
-    """
-
-    __slots__ = ("variables", "cardinalities")
-
-    def __init__(self, variables, cardinalities) -> None:
-        self.variables = list(variables)
-        self.cardinalities = dict(cardinalities)
-
-
-def _peak_profile(
-    plan: list[str],
-    factors: Mapping[str, object],
-    *,
-    evidence_keys: tuple[str, ...],
-) -> tuple[int, int]:
-    """Largest elimination-step factor, split by whether it carries the B axis.
-
-    Returns ``(batch_free, per_row)`` element counts: the peak for a batch
-    of ``B`` rows is ``max(batch_free, B · per_row)`` elements (before the
-    live-set multiplier), so one walk prices every ``B``.  ``factors`` maps
-    node → anything with ``variables`` / ``cardinalities`` (``LogFactor`` or
-    ``_Scope``).
-    """
-    ev_set = set(evidence_keys)
-    state: list[tuple[set[str], bool, Dict[str, int]]] = []
-    for f in factors.values():
-        # _condition_factor_batched drops evidence vars from the scope
-        # and prepends a B-axis if any evidence touched the factor.
-        scope: set[str] = set(f.variables) - ev_set
-        has_b = any(v in ev_set for v in f.variables)
-        state.append((scope, has_b, dict(f.cardinalities)))
-
-    batch_free = per_row = 0
-    for var in plan:
-        relevant = [s for s in state if var in s[0]]
-        rest = [s for s in state if var not in s[0]]
-        if not relevant:
-            continue
-        union_scope: set[str] = set().union(*(s[0] for s in relevant))
-        prod_has_b = any(s[1] for s in relevant)
-        cards: Dict[str, int] = {}
-        for s in relevant:
-            cards.update(s[2])
-        elements = 1
-        for v in union_scope:
-            elements *= cards.get(v, 1)
-        if prod_has_b:
-            per_row = max(per_row, elements)
-        else:
-            batch_free = max(batch_free, elements)
-        # Marginalise: drop var from the surviving factor.
-        union_scope.discard(var)
-        state = rest + [(union_scope, prod_has_b, cards)]
-    return batch_free, per_row
-
-
-def _peak_bytes_from_profile(
-    profile: tuple[int, int], B: int, dtype_bytes: int = 4,
-) -> int:
-    """Peak bytes for ``B`` rows from a ``_peak_profile`` pair (see there)."""
-    batch_free, per_row = profile
-    peak = max(batch_free, B * per_row) * dtype_bytes
-    # Scale by the broadcast live-set multiplier (#177): the bare ``peak``
-    # is the largest single union-scope factor, but the realised peak holds
-    # ~3 such tensors plus persistent conditioned factors.
-    return int(peak * _LIVESET_MULTIPLIER)
-
-
-def _estimate_peak_bytes(
-    plan: list[str],
-    factors: Dict[str, LogFactor],
-    *,
-    evidence_keys: tuple[str, ...],
-    B: int,
-    dtype_bytes: int = 4,
-) -> int:
-    """Predict the peak intermediate-factor size in bytes.
-
-    Walks the elimination ``plan`` algebraically — the same algebra as
-    the inner loop of :meth:`TensorVariableElimination.query_batch` and
-    of the diagnostic in
-    ``nbn/bench/diagnostics/ve_profile_n20.py::_walk_elimination_shapes``,
-    but tracks only ``(scope_set, has_b, cardinalities)`` triples and
-    never allocates a tensor.
-
-    The bare per-step walk returns the largest single union-scope
-    factor.  That is *not* the realised peak: ``_log_factor_product_batched``
-    holds ~3 union-scope tensors live at once and conditioned factors
-    persist across steps, so the measured peak runs ~2.85× the bare walk
-    (2026-06-08, nbn-neuralcat-ve, B=16..128).  The result is therefore
-    scaled by ``_LIVESET_MULTIPLIER`` (#177) before return so the guard
-    compares against a realistic peak; #178 tracks a principled live-set
-    model that would replace the scalar.
-    """
-    return _peak_bytes_from_profile(
-        _peak_profile(plan, factors, evidence_keys=evidence_keys),
-        B, dtype_bytes,
-    )
-
-
-def _memory_budget_message(
-    plan: list[str],
-    factors: Dict[str, LogFactor],
-    *,
-    evidence_keys: tuple[str, ...],
-    B: int,
-    device: torch.device,
-    order: str,
-    safety: float = 0.9,
-) -> str | None:
-    """Return the pre-allocation guard's rejection message, or ``None``.
-
-    The guard's *decision* as a pure helper (#177): the estimated peak
-    (which includes the ``_LIVESET_MULTIPLIER``) versus ``safety`` × the
-    device headroom (``nbn.inference._memory.device_headroom_bytes`` — on
-    CUDA driver-free memory plus PyTorch's reusable cached blocks, #264).
-
-    Returns ``None`` (query allowed) when the headroom is unknown or the
-    estimate fits; otherwise the formatted guard message.
-    """
-    estimated_peak = _estimate_peak_bytes(
-        plan, factors, evidence_keys=evidence_keys, B=B,
-    )
-    head = device_headroom_bytes(device)
-    if head is None or estimated_peak <= safety * head:
-        return None
-    return _guard_message(estimated_peak, safety * head, device, order)
 
 
 def _guard_message(peak: float, budget: float, device, order: str) -> str:
@@ -1313,6 +1300,30 @@ def _log_factor_product_batched(
     a_aligned = _align(a_lv, a_vars, a_has_b)
     b_aligned = _align(b_lv, b_vars, b_has_b)
     return a_aligned + b_aligned, all_vars, out_has_b
+
+
+def _multiply_batched(factors: list) -> tuple[torch.Tensor, list[str], bool]:
+    """Product of batched log-factors, *consuming* ``factors``.
+
+    Each input is popped before it is multiplied in, so (with no other
+    reference held by the caller) it is freed as soon as it has been used —
+    the live set ``_plan_cost`` prices.  Iterating over a list the caller
+    kept held every input until the elimination step ended.
+    """
+    factors.reverse()
+    prod = factors.pop()
+    while factors:
+        prod = _log_factor_product_batched(*prod, *factors.pop())
+    return prod
+
+
+def _multiply(factors: list[LogFactor]) -> LogFactor:
+    """Single-row ``_multiply_batched``: consumes ``factors``."""
+    factors.reverse()
+    prod = factors.pop()
+    while factors:
+        prod = _log_factor_product(prod, factors.pop())
+    return prod
 
 
 def _log_factor_product(a: LogFactor, b: LogFactor) -> LogFactor:

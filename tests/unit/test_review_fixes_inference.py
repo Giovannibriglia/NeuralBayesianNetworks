@@ -536,10 +536,12 @@ def test_a8_guard_chunking_end_to_end_keeps_do_on_cpu():
     g = torch.Generator().manual_seed(1)
     do_v, ev_v = torch.randint(0, 3, (B,), generator=g), torch.randint(0, 3, (B,), generator=g)
     probe = TensorVariableElimination()
-    p1 = probe.estimate_peak_bytes(model, y, (e,), (x,), B=1)
-    pb = probe.estimate_peak_bytes(model, y, (e,), (x,), B=B)
+    probe._extract_factors(model)  # chunking prices chunks warm (#301 review B)
+    p1 = probe.estimate_peak_bytes(model, y, {e: ev_v[:1]}, {x: do_v[:1]}, B=1)
+    pb = probe.estimate_peak_bytes(model, y, {e: ev_v}, {x: do_v}, B=B)
     assert pb > p1 > 0
     eng = TensorVariableElimination(memory_budget=(p1 + pb) / 2)
+    eng._extract_factors(model)  # the budget is sized for the plan, not the tabulation
     with mock.patch.object(eng, "_query_batch_chunked",
                            wraps=eng._query_batch_chunked) as spy:
         out = eng.query_batch(model, [y], {e: ev_v}, do={x: do_v})
@@ -569,22 +571,25 @@ def test_264_guard_does_not_chunk_when_cache_is_reusable():
     from unittest import mock
 
     from nbn import TensorVariableElimination
-    from nbn.inference.tensor_ve import _max_chunk_rows
+    from nbn.inference.tensor_ve import _max_fitting_rows
 
     model = _random_discrete()
     nodes = list(model.dag.topological_order())
     eng = TensorVariableElimination()
     B = 4096
-    pb = eng.estimate_peak_bytes(model, nodes[-1], (nodes[0],), B=B)
-    p1 = eng.estimate_peak_bytes(model, nodes[-1], (nodes[0],), B=1)
+
+    def peak(c):
+        return eng.estimate_peak_bytes(model, nodes[-1], (nodes[0],), B=c)
+
+    pb = peak(B)
     gib = 1024 ** 3
     with mock.patch("torch.cuda.mem_get_info", return_value=(pb // 4, 8 * gib)), \
          mock.patch("torch.cuda.memory_reserved", return_value=7 * gib), \
          mock.patch("torch.cuda.memory_allocated", return_value=1 * gib):
         budget = eng.memory_budget_bytes(torch.device("cuda:0"))
-    assert _max_chunk_rows(pb, p1, B, budget) == B  # single pass
+    assert _max_fitting_rows(peak, B, budget) == B  # single pass
     # Driver-free memory alone (the old reading) would have chunked.
-    assert _max_chunk_rows(pb, p1, B, 0.9 * (pb // 4)) < B
+    assert _max_fitting_rows(peak, B, 0.9 * (pb // 4)) < B
 
 
 @pytest.mark.parametrize("exc,expected", [

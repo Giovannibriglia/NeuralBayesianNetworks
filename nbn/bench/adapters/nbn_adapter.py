@@ -72,6 +72,53 @@ _CONTINUOUS_MECH: dict[str, str] = {
     "flexcode":  "flexcode",
 }
 
+# Dirichlet pseudo-count each mechanism's discrete *tables* use when the
+# config sets no ``alpha`` (#160).  A mechanism absent here has no table for
+# alpha to act on: its discrete nodes are all neural.
+_DEFAULT_TABLE_ALPHA: dict[str, float] = {
+    mech: (1.0 if spec == "smoothed_empirical_categorical" else 0.0)
+    for mech, spec in _DISCRETE_MECH.items()
+    if spec in ("categorical_table", "smoothed_empirical_categorical")
+}
+
+
+def _yaml_alpha(alpha: Any) -> Any:
+    """A numeric string as a float: PyYAML (YAML 1.1) reads ``1e-5`` — an
+    exponent without a dot — as the *string* ``'1e-5'``."""
+    if isinstance(alpha, str):
+        try:
+            return float(alpha.strip())
+        except ValueError:
+            return alpha  # rejected, with its value, by validate_dirichlet_alpha
+    return alpha
+
+
+def table_alpha(mechanism: str, alpha: Any = None) -> float | None:
+    """The Dirichlet pseudo-count the tables of ``mechanism`` get: ``alpha``
+    if set, else the mechanism's default (``None``: it has no tables).
+
+    The fit-once-save-reload identity uses it, so ``alpha`` unset and set to
+    its default share one base fit."""
+    alpha = _yaml_alpha(alpha)
+    if alpha is None:
+        return _DEFAULT_TABLE_ALPHA.get(mechanism)
+    try:
+        return float(alpha)
+    except (TypeError, ValueError):
+        return None
+
+
+def _alpha_tag(alpha: float) -> str:
+    """``alpha`` for a baseline label: positional, no exponent, no ``-``.
+
+    Labels are split on ``-`` downstream (``_paper_agg.approach``), so
+    ``1e-05`` would break them; ``0.00001`` cannot.
+    """
+    import numpy as np
+
+    return "alpha" + np.format_float_positional(alpha, trim="-")
+
+
 # Maps the `engine` arg to the engine_spec string used internally
 _ENGINE_SPEC: dict[str, str] = {
     "lw":     "lw",
@@ -108,6 +155,16 @@ class NBNAdapter:
         adapter = NBNAdapter(mechanism="cat", engine="lw")  # device auto-detects
 
     The ``name`` attribute is derived: ``"nbn-{mechanism}-{engine}"``.
+
+    Dirichlet prior (#160): ``alpha`` (YAML: ``extra_kwargs: {alpha: 0.5}``)
+    is the symmetric pseudo-count of every count-table CPT the adapter builds
+    (``CategoricalTableMechanism`` for ``cat`` and the table fallbacks of the
+    continuous mechanisms, ``SmoothedEmpiricalCategoricalMechanism`` for
+    ``cat-bayes``).  Unset keeps each mechanism's default (0 for ``cat``, 1
+    for ``cat-bayes``) and the historical label.  Any other value is tagged
+    into the label after the mechanism — ``nbn-cat-alpha0.5-ve`` — so runs
+    with different priors never share a label, a fit cache, or a seed.
+    ``neuralcat`` has no table, so setting ``alpha`` for it is an error.
     """
 
     # v0.14 (#148) §5.6: this adapter has a real library-batched
@@ -150,6 +207,7 @@ class NBNAdapter:
         engine: str | None,
         device: str | None = None,
         n_samples: int = 1024,
+        alpha: float | None = None,
         **kwargs: Any,
     ) -> None:
         if mechanism not in _DISCRETE_MECH:
@@ -157,6 +215,23 @@ class NBNAdapter:
                 f"Unknown mechanism {mechanism!r}. "
                 f"Valid: {sorted(_DISCRETE_MECH)}"
             )
+        # Dirichlet pseudo-count of the count-table CPTs (#160); None keeps
+        # the mechanism's default.  Validated here, at construction, so a bad
+        # YAML value fails when the runner first builds the adapter.
+        default_alpha = _DEFAULT_TABLE_ALPHA.get(mechanism)
+        alpha = _yaml_alpha(alpha)
+        if alpha is not None:
+            if default_alpha is None:
+                raise ValueError(
+                    f"alpha (Dirichlet pseudo-count) applies to count-table "
+                    f"CPTs, but mechanism {mechanism!r} has none; drop alpha "
+                    f"or use one of {sorted(_DEFAULT_TABLE_ALPHA)}."
+                )
+            from nbn.mechanisms.parametric.categorical_table import (
+                validate_dirichlet_alpha,
+            )
+            alpha = validate_dirichlet_alpha(alpha)
+        self.alpha: float | None = default_alpha if alpha is None else alpha
         # engine=None is the fit-only / parameter-learning construction (#109):
         # the adapter is fit and scored via score_data, never queried, so it
         # carries no inference engine and an engine-less name (e.g. "nbn-cat").
@@ -169,9 +244,15 @@ class NBNAdapter:
         # None / "auto" -> cuda-if-available-else-cpu; concrete passes through.
         self.device = torch.device(resolve_device(device))
         self.n_samples = int(n_samples)
+        # A non-default alpha is tagged into the label so results stay
+        # distinguishable; ``is_applicable`` strips the tag again.
+        self._alpha_label = ""
+        if self.alpha is not None and self.alpha != default_alpha:
+            self._alpha_label = f"-{_alpha_tag(self.alpha)}"
+        mech_label = f"{mechanism}{self._alpha_label}"
         self.name = (
-            f"nbn-{mechanism}-{engine}" if engine is not None
-            else f"nbn-{mechanism}"
+            f"nbn-{mech_label}-{engine}" if engine is not None
+            else f"nbn-{mech_label}"
         )
 
         # State populated by fit()
@@ -240,11 +321,14 @@ class NBNAdapter:
             discrete_mech = _DISCRETE_MECH[self.mechanism]
             if discrete_mech == "neural_categorical":
                 return NeuralCategoricalMechanism(n_classes=k or 2)
+            # A table mechanism: self.alpha is its default unless the config
+            # set it (#160) — Laplace (1.0) for cat-bayes, MLE parity (0.0)
+            # otherwise.
+            assert self.alpha is not None
             if discrete_mech == "smoothed_empirical_categorical":
-                # Laplace default (alpha=1.0) — the point of the label.
                 from nbn.mechanisms import SmoothedEmpiricalCategoricalMechanism
-                return SmoothedEmpiricalCategoricalMechanism()
-            return CategoricalTableMechanism()
+                return SmoothedEmpiricalCategoricalMechanism(alpha=self.alpha)
+            return CategoricalTableMechanism(alpha=self.alpha)
 
         # Continuous node
         continuous_mech = _CONTINUOUS_MECH[self.mechanism]
@@ -632,7 +716,7 @@ class NBNAdapter:
         """Return True if this adapter can handle problem.family.
 
         Delegates to the existing _BASELINE_APPLICABILITY table using
-        self.name as the lookup key.
+        ``self.name`` (minus any alpha tag) as the lookup key.
 
         Family derivation: BenchmarkProblem has no .family attribute in
         Phase 1b; family is inferred from variable kinds:
@@ -656,7 +740,11 @@ class NBNAdapter:
         else:
             family = "hybrid"
 
-        entry = _BASELINE_APPLICABILITY.get(self.name)
+        # An alpha tag does not change applicability: look up the label
+        # without it.
+        label = self.name.replace(self._alpha_label, "", 1) if self._alpha_label \
+            else self.name
+        entry = _BASELINE_APPLICABILITY.get(label)
         if entry is None:
             return False
         return family in entry.families

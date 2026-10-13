@@ -211,3 +211,7 @@ class DeterministicMechanism(Mechanism):
         )
         log_cpt[idx] = 0.0
         return log_cpt
+
+    def tabulate_working_bytes(self, parent_cards: list[int] | None = None) -> int:
+        """``tabulate`` fills its ``[K]`` output in place: no working memory."""
+        return 0

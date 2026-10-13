@@ -40,8 +40,7 @@ class SmoothedEmpiricalCategoricalMechanism(CategoricalTableMechanism):
     """
 
     def __init__(self, alpha: float = 1.0) -> None:
-        if alpha < 0:
-            raise ValueError(f"alpha (Lidstone pseudo-count) must be >= 0, got {alpha}")
+        # The base class validates alpha (finite, >= 0).
         super().__init__(alpha=alpha)
 
 

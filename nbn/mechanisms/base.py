@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from abc import ABC, abstractmethod
 
 import torch
@@ -265,6 +267,27 @@ class Mechanism(nn.Module, ABC):
             f"{type(self).__name__}.tabulate() is only defined for "
             f"discrete mechanisms."
         )
+
+    def tabulate_working_bytes(self, parent_cards: list[int] | None = None) -> int | list[int]:
+        """Bytes ``tabulate(parent_cards)`` holds *besides* the table it returns.
+
+        An ``int``, or the sizes of the individual buffers (a caching
+        allocator prices each in its own size class).  Exact variable
+        elimination prices the tabulation of every CPT on a cold factor
+        cache with it (#178), so it must not under-state the peak.  The
+        default assumes four table-sized temporaries in the parameters'
+        dtype; mechanisms that enumerate parent configurations through a
+        network or a neighbour search override it with their own buffers.
+        """
+        n_rows = math.prod(parent_cards or [])
+        table = n_rows * max(int(getattr(self, "n_classes", 1) or 1), 1)
+        return [table * _element_size(self)] * 4
+
+
+def _element_size(module: nn.Module, default: int = 4) -> int:
+    """Bytes per element of ``module``'s floating-point parameters."""
+    sizes = [p.element_size() for p in module.parameters() if p.is_floating_point()]
+    return max(sizes, default=default)
 
 
 # ----------------------------------------------------------------------

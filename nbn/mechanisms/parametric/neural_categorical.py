@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Tuple
 
 import torch
@@ -9,7 +10,7 @@ from torch.distributions import Categorical
 from nbn.learning.warm_start import check_branch, check_shapes
 from nbn.learning.weighting import select, validate_weights, weighted_mean
 from nbn.utils.device import accum_dtype
-from nbn.mechanisms.base import Mechanism
+from nbn.mechanisms.base import Mechanism, _element_size
 from nbn.mechanisms.parametric.mdn import _build_mlp
 from nbn.update import online_laplace
 from nbn.utils.batching import ensure_2d, flatten_samples
@@ -331,6 +332,24 @@ class NeuralCategoricalMechanism(Mechanism):
             if was_training:
                 self.train()
         return logits_flat.reshape(*parent_cards, self.n_classes)
+
+    def tabulate_working_bytes(self, parent_cards: list[int] | None = None) -> list[int]:
+        """Enumerating P parent configurations, buffer by buffer: the int64
+        grids, their stack and float copy, the embeddings and their
+        concatenation, and every MLP layer's output and activation (all
+        counted at once, though each is freed after the next layer runs)."""
+        if self._d_pa == 0 or not parent_cards:
+            return []  # the root's logits parameter itself
+        p, d = math.prod(parent_cards), len(parent_cards)
+        es = _element_size(self)
+        buffers = [p * 8] * d + [p * d * 8, p * d * es]
+        if self.embeddings is not None:
+            dims = [e.embedding_dim for e in self.embeddings]
+            buffers += [p * k * es for k in dims] + [p * sum(dims) * es]
+        for m in self.net.modules():
+            if isinstance(m, nn.Linear):
+                buffers += [p * m.out_features * es] * 2
+        return buffers
 
     def log_prob(self, x: torch.Tensor, parents: torch.Tensor | None) -> torch.Tensor:
         squeeze_s = False
