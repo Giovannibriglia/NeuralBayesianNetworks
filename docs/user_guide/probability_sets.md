@@ -133,7 +133,10 @@ chosen = hs.model_for(next(hs.hypotheses()), sets.counts)   # fitted, no pass ov
   are counted one by one.
 - **Budget.** `delta` is split over the **distinct factors** (union bound).
   A factor's set is the same event in every hypothesis, so on one event of
-  probability at least `1 - delta` the sets of **all** hypotheses hold at once.
+  probability at least `1 - delta` every factor set holds. For a factor whose
+  parents contain the true ones this bounds the true conditional; a factor
+  that misses a true parent only describes the data's average over it (see
+  below), so the level speaks for the superset factors.
 - **Which hypotheses are right.** In a 2-slice model with no intra-slice
   edges, a candidate that contains the true parents, or a superset of them,
   gives the true conditional for any input distribution, including one set by

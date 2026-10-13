@@ -1,11 +1,12 @@
 """Factor cache vs one model per hypothesis (#312): time and stored table cells.
 
-A 2-slice model with ``d`` binary-or-ternary state variables, one action and
-``c`` candidate parent sets per next-state variable spans ``K = c ** d``
-hypotheses and ``d * c`` factors.  The baseline builds one model per
-hypothesis and counts / builds the interval set of every node of it; the
-factor cache counts once per node (union table, then marginalise) and builds
-one set per factor.
+A 2-slice model with ``d`` ternary state variables, one ternary action and
+``c`` candidate parent sets (2 or 3 parents each) per next-state variable
+spans ``K = c ** d`` hypotheses and ``d * c`` factors.  The baseline counts
+and builds the interval set of every node **per hypothesis**
+(``count_table_for`` + ``interval_set_from_counts``, no model construction);
+the factor cache counts once per node (union table, then marginalise) and
+builds one set per factor.
 
 Usage::
 
@@ -19,9 +20,8 @@ import time
 
 import torch
 
-from nbn import NeuralBayesianNetwork
 from nbn.structure import HypothesisSet
-from nbn.uncertainty import count_table, interval_set_from_counts
+from nbn.uncertainty import count_table_for, interval_set_from_counts
 
 
 def spec(d: int, c: int):
@@ -68,9 +68,8 @@ def main() -> None:
         t0 = time.perf_counter()
         cells_base = 0
         for h in hs.hypotheses():
-            model = NeuralBayesianNetwork(hs.edges(h), dict(hs.variables), device=args.device)
             for node in hs.targets:
-                counts, _ = count_table(model, data, node)
+                counts, _ = count_table_for(hs.variables, data, node, h[node])
                 interval_set_from_counts(counts, delta=0.05 / hs.n_factors)
                 cells_base += counts.numel()
         sync(args.device)

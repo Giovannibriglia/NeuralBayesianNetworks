@@ -418,3 +418,50 @@ def test_large_table_warns_before_allocating():
         finally:
             ct._CARDINALITY_WARN_THRESHOLD = old
     assert mech._counts.shape == (3, 2)
+
+
+
+def test_strings_are_not_split_into_candidates():
+    v, _ = _small()
+    with pytest.raises(TypeError, match="list of parent tuples"):
+        HypothesisSet(v, {"x'": ("x", "a")})
+    hs = HypothesisSet(v, {"x'": [("x",)]})
+    with pytest.raises(TypeError, match="tuple of names"):
+        hs.edges({"x'": "x"})
+
+
+def test_results_compare_by_identity():
+    v, data = _small()
+    hs = HypothesisSet(v, {"x'": [("x",)]})
+    a, b = hs.counts(data), hs.counts(data)
+    assert a != b and a == a                       # no tensor comparison, no crash
+
+
+def test_dirichlet_draws_scale_with_the_split_level():
+    import warnings
+
+    v, data = _small()
+    hs = HypothesisSet(v, {"x'": [("x",), ("x", "a"), ("a",)]})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        fs = hs.factor_sets(data, builder="dirichlet", delta=0.1)
+        for s in fs.sets.values():
+            s.bounds()                               # would warn with too few draws
+    assert all(s.samples.shape[0] >= 4000 for s in fs.sets.values())
+
+
+def test_factor_sets_skip_marginals_and_model_for_asks_for_them():
+    v, data = _small()
+    hs = HypothesisSet(v, {"x'": [("x",), ("x", "a")]})
+    fs = hs.factor_sets(data)
+    assert fs.counts.input_marginals == {}
+    with pytest.raises(ValueError, match="input_marginals"):
+        hs.model_for({"x'": ("x",)}, fs.counts)
+    assert set(hs.counts(data).input_marginals) == {"x", "a"}
+
+
+def test_unknown_builder_fails_before_counting():
+    v, data = _small()
+    hs = HypothesisSet(v, {"x'": [("x",)]})
+    with pytest.raises(ValueError, match="Unknown builder"):
+        hs.factor_sets({}, builder="Interval")      # no data needed to fail

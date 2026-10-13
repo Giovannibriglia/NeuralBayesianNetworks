@@ -27,9 +27,10 @@ Confidence budget
 :meth:`HypothesisSet.factor_sets` splits ``delta`` over the **distinct
 factors** by a union bound: a factor's set is the same event in every
 hypothesis that uses it, so all sets hold jointly with probability at least
-``1 - delta``, and therefore the sets of *every* hypothesis hold at once,
-including the hypotheses that contain the true parents (or a superset of
-them).  The book's PAC bound splits over the families of one DAG (K&F,
+``1 - delta``.  For every factor whose parents contain the true parents (or a
+superset of them) the set then bounds the true conditional; a factor that
+misses a true parent has no fixed conditional to bound (its set describes the
+data's average over the missing parent; see below).  The book's PAC bound splits over the families of one DAG (K&F,
 Thms 17.3–17.4, pp. 774–775); the split over all distinct factors is the
 natural extension.
 
@@ -121,9 +122,14 @@ class HypothesisSet:
         self.variables: Dict[str, Variable] = {
             name: _build_variable(name, spec) for name, spec in variables.items()
         }
-        cands: Dict[str, List[Tuple[str, ...]]] = {
-            node: [tuple(c) for c in cs] for node, cs in candidates.items()
-        }
+        cands: Dict[str, List[Tuple[str, ...]]] = {}
+        for node, cs in candidates.items():
+            if isinstance(cs, str) or any(isinstance(c, str) for c in cs):
+                raise TypeError(
+                    f"candidates['{node}'] must be a list of parent tuples, e.g. [('x', 'a')]; "
+                    f"got {cs!r}."
+                )
+            cands[node] = [tuple(c) for c in cs]
         for node, cs in cands.items():
             self._check_node(node, cs)  # duplicates in the user's own list are an error
         for parent, child in fixed_edges:
@@ -169,27 +175,17 @@ class HypothesisSet:
             seen.add(key)
 
     def _check_acyclic(self) -> None:
-        edges = {(p, node) for node, cs in self.candidates.items() for c in cs for p in c}
-        children: Dict[str, set] = {v: set() for v in self.variables}
-        indeg = dict.fromkeys(self.variables, 0)
-        for p, c in edges:
-            children[p].add(c)
-            indeg[c] += 1
-        queue = [v for v, d in indeg.items() if d == 0]
-        visited = 0
-        while queue:
-            v = queue.pop()
-            visited += 1
-            for c in children[v]:
-                indeg[c] -= 1
-                if indeg[c] == 0:
-                    queue.append(c)
-        if visited != len(self.variables):
+        from nbn.core.dag import DAG
+
+        edges = sorted({(p, node) for node, cs in self.candidates.items() for c in cs for p in c})
+        try:
+            DAG(edges, extra_nodes=list(self.variables))
+        except ValueError as err:
             raise ValueError(
                 "The union of all candidate edges has a cycle, so some hypotheses "
                 "would not be DAGs.  In a 2-slice model take candidates from the "
                 "previous slice only."
-            )
+            ) from err
 
     def _require_discrete(self) -> None:
         involved = set(self.targets) | {p for cs in self.candidates.values() for c in cs for p in c}
@@ -235,6 +231,8 @@ class HypothesisSet:
                 f"A hypothesis picks one candidate for each of {self.targets}; got {sorted(hypothesis)}."
             )
         for node, parents in hypothesis.items():
+            if isinstance(parents, str):
+                raise TypeError(f"The parents of '{node}' must be a tuple of names, not {parents!r}.")
             if tuple(parents) not in self.candidates[node]:
                 same = [c for c in self.candidates[node] if frozenset(c) == frozenset(parents)]
                 if same:
@@ -253,6 +251,7 @@ class HypothesisSet:
         data: Mapping[str, torch.Tensor],
         weights: torch.Tensor | None = None,
         max_union_cells: int = DEFAULT_MAX_UNION_CELLS,
+        input_marginals: bool = True,
     ) -> FactorCounts:
         """Count tables ``[R, K]`` for every factor (and the inputs' marginals).
 
@@ -260,7 +259,9 @@ class HypothesisSet:
         candidates' parents and summed down to each candidate; if the union
         table has more than ``max_union_cells`` cells, the candidates are
         counted one by one.  Tables stay on the data's device, in the widest
-        float the device supports.
+        float the device supports.  ``input_marginals`` also counts the
+        marginal of every input that some candidate uses (needed only by
+        :meth:`model_for`).
         """
         self._require_discrete()
         first = data[self.targets[0]]
@@ -289,13 +290,13 @@ class HypothesisSet:
                 full, _ = count_table_for(self.variables, data, node, union, weights)
                 full = full.reshape(*union_cards, k)
                 for c in cs:
-                    keep = [union.index(p) for p in c]
-                    drop = [d for d in range(len(union)) if d not in keep]
+                    drop = [d for d, p in enumerate(union) if p not in c]
                     t = full.sum(dim=drop) if drop else full
-                    # remaining axes are in union order; reorder to the candidate's order
-                    order = sorted(range(len(keep)), key=lambda i: keep[i])
-                    t = t.permute(*[order.index(i) for i in range(len(keep))], len(keep))
-                    tables[(node, c)] = t.reshape(-1, k).contiguous()
+                    in_union_order = tuple(p for p in union if p in c)   # axes left after the sum
+                    tables[(node, c)] = _reorder_parents(
+                        t.reshape(-1, k), [int(self.variables[p].cardinality) for p in in_union_order],
+                        in_union_order, c,
+                    ).contiguous()
                     cards[(node, c)] = [int(self.variables[p].cardinality) for p in c]
             else:
                 for c in cs:
@@ -303,9 +304,11 @@ class HypothesisSet:
                         self.variables, data, node, c, weights,
                     )
         marginals: Dict[str, torch.Tensor] = {}
-        for v in self.inputs:
-            if self.variables[v].is_discrete and v in data:
-                marginals[v], _ = count_table_for(self.variables, data, v, (), weights)
+        if input_marginals:
+            used = {p for cs in self.candidates.values() for c in cs for p in c}
+            for v in self.inputs:
+                if v in used and v in data:
+                    marginals[v], _ = count_table_for(self.variables, data, v, (), weights)
         return FactorCounts(
             hypothesis_set=self, tables=tables, parent_cards=cards,
             input_marginals=marginals, union_used=union_used, weighted=weights is not None,
@@ -324,7 +327,7 @@ class HypothesisSet:
         method: IntervalMethod = "kl",
         weights: torch.Tensor | None = None,
         prior: float = 1.0,
-        n_samples: int = 4000,
+        n_samples: int | None = None,
     ) -> FactorSets:
         """One probability set per factor, all holding jointly at ``1 - delta``.
 
@@ -332,8 +335,20 @@ class HypothesisSet:
         (union bound); each factor's set is then built by the matching
         ``*_from_counts`` builder of :mod:`nbn.uncertainty` at level
         ``1 - delta / n_factors``.  For ``builder="dirichlet"`` the level is a
-        posterior credibility, not a frequentist guarantee.
+        posterior credibility, not a frequentist guarantee, and ``n_samples``
+        (default: enough draws for the per-entry quantiles at the split level,
+        at least 4000, at most 200 000) is chosen per factor.
+
+        **What the level means.**  For a factor whose parents contain the true
+        parents (or a superset), the set bounds the true conditional.  For a
+        factor that misses a true parent there is no fixed conditional to
+        bound: the set describes the data's average over the missing parent,
+        which depends on the behaviour policies (and with trajectory data is
+        not even stationary).  So ``level`` speaks for the superset factors
+        only; which factors those are is the structural question S3 answers.
         """
+        if builder not in ("interval", "l1", "dirichlet"):
+            raise ValueError(f"Unknown builder '{builder}'; use 'interval', 'l1' or 'dirichlet'.")
         if not 0.0 < delta < 1.0:
             raise ValueError(f"delta must be in (0, 1); got {delta}.")
         if builder in ("interval", "l1") and (
@@ -351,7 +366,7 @@ class HypothesisSet:
                 raise ValueError("weights apply when counting; pass them to counts().")
             fc = data_or_counts
         else:
-            fc = self.counts(data_or_counts, weights=weights)
+            fc = self.counts(data_or_counts, weights=weights, input_marginals=False)
         per_factor = delta / self.n_factors
         sets: Dict[Factor, ProbabilitySet] = {}
         for f in self.factors:
@@ -360,10 +375,9 @@ class HypothesisSet:
                 sets[f] = interval_set_from_counts(table, delta=per_factor, method=method, sampling=sampling)
             elif builder == "l1":
                 sets[f] = l1_ball_set_from_counts(table, delta=per_factor, sampling=sampling)
-            elif builder == "dirichlet":
-                sets[f] = dirichlet_set_from_counts(table, delta=per_factor, prior=prior, n_samples=n_samples)
             else:
-                raise ValueError(f"Unknown builder '{builder}'; use 'interval', 'l1' or 'dirichlet'.")
+                draws = n_samples if n_samples is not None else _auto_draws(per_factor, table.numel())
+                sets[f] = dirichlet_set_from_counts(table, delta=per_factor, prior=prior, n_samples=draws)
         return FactorSets(
             hypothesis_set=self, sets=sets, counts=fc, builder=builder, level=1.0 - delta,
             delta_per_factor=per_factor, sampling=sampling,
@@ -401,7 +415,11 @@ class HypothesisSet:
         roots = [v for v in self.inputs if v in used]
         missing = [v for v in roots if v not in counts.input_marginals]
         if missing:
-            raise ValueError(f"No marginal counts for the inputs {missing}: absent from the data.")
+            raise ValueError(
+                f"No marginal counts for the inputs {missing}: they were absent from the data, "
+                "or the counts were built with input_marginals=False (factor_sets does that); "
+                "call hs.counts(data) and pass the result."
+            )
         if device is None:
             first = next(iter(counts.tables.values()))
             device = str(first.device)
@@ -430,7 +448,7 @@ class HypothesisSet:
         )
 
 
-@dataclass
+@dataclass(eq=False)
 class FactorCounts:
     """Count tables per factor, from :meth:`HypothesisSet.counts`."""
 
@@ -453,7 +471,7 @@ class FactorCounts:
         return {n: self.tables[(n, tuple(p))] for n, p in hypothesis.items()}
 
 
-@dataclass
+@dataclass(eq=False)
 class FactorSets:
     """Probability sets per factor, all holding jointly at :attr:`level`."""
 
@@ -491,4 +509,10 @@ def _reorder_parents(
     k = table.shape[-1]
     axes = [current.index(p) for p in target]
     return table.reshape(*cards, k).permute(*axes, len(cards)).reshape(-1, k).contiguous()
+
+
+def _auto_draws(delta: float, n_entries: int) -> int:
+    """Posterior draws so that >= 5 fall beyond each simultaneous quantile (capped)."""
+    per_entry = delta / max(n_entries, 1)
+    return int(min(200_000, max(4000, math.ceil(10.0 / per_entry))))
 
