@@ -17,6 +17,7 @@ below are organised by the module that defines each object.
    nbn.update
    nbn.sampling
    nbn.scm
+   nbn.structure
    nbn.uncertainty
    nbn.utils
    nbn.config

@@ -93,6 +93,54 @@ parent. `interval_set(model, data, node)` is exactly
 candidate parent set, or one per next-state variable), split `delta` between
 them by a union bound.
 
+## Structure uncertainty: several candidate parent sets
+
+When the parents of a node are not known, `nbn.structure.HypothesisSet` takes a
+list of **candidate parent sets** per node. A *hypothesis* picks one candidate
+per node, so there are `prod_j |P_j|` hypotheses. A *factor* is one pair
+`(node, parents)`, and there are only `sum_j |P_j|` factors. Counts,
+fitted tables and probability sets depend on one family only, so they are
+computed **once per factor** and shared by every hypothesis that uses it
+(with complete data the likelihood is a product of one term per family:
+Koller & Friedman 2009, §17.2.2, Prop. 17.1).
+
+```python
+from nbn.structure import HypothesisSet
+
+hs = HypothesisSet(
+    model.variables,
+    candidates={"health'": [("health", "exercise"), ("health", "tired", "exercise")]},
+)
+print(hs)                                   # factors=2, hypotheses=2
+sets = hs.factor_sets(data, builder="interval", delta=0.1)
+print(sets.level, sets.delta_per_factor)    # 0.9 jointly; 0.05 per factor
+for h in hs.hypotheses():
+    s = sets.sets_for(h)["health'"]         # a view into the cache, no copy
+    print(h["health'"], tuple(s.lower.shape), "unseen:", int(s.unseen.sum()))
+chosen = hs.model_for(next(hs.hypotheses()), sets.counts)   # fitted, no pass over the data
+```
+
+- **The factor cache.** `hs.counts(data)` counts each node once over the
+  union of its candidates' parents, then sums out the parents a candidate does
+  not use. This is exact, and it is the usual way to share sufficient statistics
+  across families (K&F, Box 18.A). Above `max_union_cells` the candidates
+  are counted one by one.
+- **Budget.** `delta` is split over the **distinct factors** (union bound).
+  A factor's set is the same event in every hypothesis, so on one event of
+  probability at least `1 - delta` the sets of **all** hypotheses hold at once.
+- **Which hypotheses are right.** In a 2-slice model with no intra-slice
+  edges, a candidate that contains the true parents, or a superset of them,
+  gives the true conditional for any input distribution, including one set by
+  behaviour policies (wherever the parent value has data). A candidate that
+  misses a true parent is biased toward an average weighted by the data.
+  Supersets cost data: more rows, fewer counts per row, wider sets.
+- `model_for(h, counts)` returns a fitted `NeuralBayesianNetwork` with
+  table mechanisms set from the cached counts, equal to fitting that DAG
+  directly.
+- Scope: discrete nodes and parents. Continuous and mixed factors are planned
+  (issue #318); so is an agreement rule that combines the candidates of a
+  node into one set (issue #313).
+
 ## How the guarantee is built
 
 Binomial intervals come from the Chernoff (KL) inequality, inverted by

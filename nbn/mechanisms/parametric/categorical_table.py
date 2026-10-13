@@ -187,16 +187,6 @@ class CategoricalTableMechanism(Mechanism):
             )  # [N]
             n_parent_states = int(stride)
 
-        total_states = n_parent_states * k
-        if total_states > _CARDINALITY_WARN_THRESHOLD:
-            warnings.warn(
-                f"CategoricalTableMechanism: CPT has {total_states:,} entries "
-                f"({n_parent_states} parent states × {k} classes). "
-                "Consider NeuralCategoricalMechanism for large parent spaces.",
-                UserWarning,
-                stacklevel=2,
-            )
-
         # class_values is the contiguous range 0..K-1, so labels are already
         # their own indices.
         x_idx = x  # [N]
@@ -212,7 +202,67 @@ class CategoricalTableMechanism(Mechanism):
         contrib = torch.ones(n, device=device, dtype=acc) if w is None else w
         counts = torch.zeros(n_parent_states * k, device=device, dtype=acc)
         counts.scatter_add_(0, flat_idx, contrib)
-        counts = counts.reshape(n_parent_states, k).to(torch.float)
+        self._set_counts(counts.reshape(n_parent_states, k))
+        return {
+            "n_classes": k, "n_parent_states": n_parent_states,
+            "warm_started": False,
+        }
+
+    def fit_from_counts(self, counts: torch.Tensor, parent_cards: List[int]) -> dict:
+        """Set the CPT from a raw count table ``[R, K]`` instead of data rows.
+
+        ``counts[r, k]`` is the (weighted) number of rows with parent
+        configuration ``r`` (C order, last parent fastest, as
+        :func:`nbn.uncertainty.count_table_for` returns it) and class ``k``.
+        The result is the table ``fit_local`` builds from the same rows
+        (same smoothing, same persisted sufficient statistics, so
+        ``update_local`` works afterwards); a structure layer that caches
+        counts per candidate parent set uses it to build a model for one
+        hypothesis without counting again.
+        """
+        if counts.dim() != 2:
+            raise ValueError(f"counts must be [R, K]; got shape {tuple(counts.shape)}.")
+        parent_cards = [int(c) for c in parent_cards]
+        n_parent_states = math.prod(parent_cards) if parent_cards else 1
+        if counts.shape[0] != n_parent_states:
+            raise ValueError(
+                f"counts has {counts.shape[0]} rows but the parent cardinalities "
+                f"{parent_cards} give {n_parent_states}."
+            )
+        if counts.numel() and (not bool(torch.isfinite(counts).all()) or float(counts.min()) < 0):
+            raise ValueError("counts must be finite and non-negative.")
+        k = int(counts.shape[1])
+        if k < 1:
+            raise ValueError("counts needs at least one class (K >= 1).")
+        device = counts.device
+        self._n_classes = k
+        self._class_values = torch.arange(k, device=device)
+        self._parent_cards = list(parent_cards)
+        strides = []
+        stride = 1
+        for c in reversed(parent_cards):
+            strides.append(stride)
+            stride *= c
+        self._parent_strides = list(reversed(strides))
+        self._set_counts(counts)
+        return {
+            "n_classes": k, "n_parent_states": n_parent_states,
+            "warm_started": False,
+        }
+
+    def _set_counts(self, counts: torch.Tensor) -> None:
+        """Persist raw counts and the smoothed logits (shared by both fits)."""
+        n_parent_states, k = counts.shape
+        total_states = n_parent_states * k
+        if total_states > _CARDINALITY_WARN_THRESHOLD:
+            warnings.warn(
+                f"CategoricalTableMechanism: CPT has {total_states:,} entries "
+                f"({n_parent_states} parent states × {k} classes). "
+                "Consider NeuralCategoricalMechanism for large parent spaces.",
+                UserWarning,
+                stacklevel=3,
+            )
+        counts = counts.to(torch.float)
 
         # Persist the *raw* count table as the sufficient statistics for
         # incremental update (posterior-as-prior).  Smoothing (the #127
@@ -228,10 +278,6 @@ class CategoricalTableMechanism(Mechanism):
         probs = smoothed / smoothed.sum(dim=-1, keepdim=True).clamp_min(1e-12)
         logits_data = torch.log(probs.clamp_min(1e-12))
         self._logits = nn.Parameter(logits_data)
-        return {
-            "n_classes": k, "n_parent_states": n_parent_states,
-            "warm_started": False,
-        }
 
     def _smooth(self, counts: torch.Tensor) -> torch.Tensor:
         """Presentation smoothing applied to raw accumulated counts.
