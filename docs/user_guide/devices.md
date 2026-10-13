@@ -89,6 +89,10 @@ working set).
   `HybridRouter(memory_budget=bytes)` cap the budget further, for example on
   a shared machine.
 
+How the peak is estimated (the live set of factors, allocator rounding and
+caching per device, and its validation on CPU, MPS and CUDA) is described in
+{doc}`/ve-memory-model`.
+
 The notebook {doc}`../examples/07_batching_devices_persistence` times
 `query_batch` against a loop from 1 to 4096 queries and moves a model between
 devices.

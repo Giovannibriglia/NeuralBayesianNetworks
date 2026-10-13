@@ -6,4 +6,5 @@
 contributing
 testing
 release
+/ve-memory-model
 ```

@@ -7,7 +7,7 @@ factored out); a method solves a seed for a metric when every row of that
 metric in the cell is ``ok`` and no failure sentinel (``metric == "status"``
 with timeout / oom / error) was emitted for the cell.
 
-Two views share one contract (``docs/v0.18-bar-reporting-all-common.md``):
+Two views share one contract:
 
 * ``all``    — each method is aggregated over the seeds *it* solved. The
                table / bar annotation reports ``f/n`` (failed / total seeds at

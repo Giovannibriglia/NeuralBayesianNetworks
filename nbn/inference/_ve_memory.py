@@ -342,8 +342,7 @@ def _cuda_conf(text: str | None) -> _CudaConf:
 # (c10/core/AllocatorConfig.h), documented as "the primary environment
 # variable is PYTORCH_ALLOC_CONF; PYTORCH_CUDA_ALLOC_CONF is also supported
 # with lower priority" — and its reader (AllocatorConfig.cpp) is not shipped,
-# so the precedence between the two cannot be confirmed (with both set,
-# torch 2.14's settings getter even fails an internal assert).  Hence no
+# so the precedence between the two cannot be confirmed.  Hence no
 # precedence is assumed: every set variable is a candidate (``cuda_allocator_confs``).
 _ALLOC_CONF_VARS = ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_HIP_ALLOC_CONF", "PYTORCH_ALLOC_CONF")
 
@@ -357,7 +356,7 @@ def _live_allocator_settings() -> str:
         return ""
     try:
         return getter() or ""
-    except Exception:  # noqa: BLE001  — e.g. torch 2.14 with two variables set
+    except Exception:  # noqa: BLE001  — e.g. a malformed value (torch's internal assert)
         return ""
 
 
