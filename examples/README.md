@@ -31,6 +31,7 @@ For `nbn.scm` and `nbn.uncertainty` (user guide:
 | [`11_continuous_noise_and_counterfactuals.ipynb`](11_continuous_noise_and_counterfactuals.ipynb) | Fit an MLP location with mixture noise (`AdditiveNoiseMechanism`), compare it with Gaussian noise, bound `P(a < X <= b \| pa)` with a DKW band, and compute counterfactuals by exact abduction. |
 | [`12_mdp_trajectories_factored_sets.ipynb`](12_mdp_trajectories_factored_sets.ipynb) | Turn episodes into transitions, fit one mechanism per next-state variable, and build trajectory-valid probability sets for a factored transition kernel, with the budget split across variables. |
 | [`13_discrete_counterfactuals.ipynb`](13_discrete_counterfactuals.ipynb) | Two declared couplings (Gumbel-max, monotone) giving different counterfactuals from one kernel, sharp bounds over every compatible SCM and over a confidence box, and calibration with a randomized-PIT band and conformal sets. |
+| [`14_structure_uncertainty_hypothesis_sets.ipynb`](14_structure_uncertainty_hypothesis_sets.ipynb) | Several candidate parent sets per node on a four-machine ring logged by two policies: `HypothesisSet`, the factor cache (12 factors for 81 hypotheses), one trajectory-valid set per factor with the budget split over factors, why supersets are right but wider and a missing parent is biased, and `model_for`. |
 
 ## Running them
 
