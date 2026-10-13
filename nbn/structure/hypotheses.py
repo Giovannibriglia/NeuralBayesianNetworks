@@ -191,6 +191,10 @@ class HypothesisSet:
                 "previous slice only."
             ) from err
 
+    def _has_continuous(self) -> bool:
+        involved = set(self.targets) | {p for cs in self.candidates.values() for c in cs for p in c}
+        return any(not self.variables[v].is_discrete for v in involved)
+
     def _require_discrete(self) -> None:
         involved = set(self.targets) | {p for cs in self.candidates.values() for c in cs for p in c}
         continuous = sorted(v for v in involved if not self.variables[v].is_discrete)
@@ -373,6 +377,7 @@ class HypothesisSet:
                 "PAC sets need counts of independent draws; weighted counts do not carry the "
                 "guarantee (use builder='dirichlet' for weighted pseudo-counts)."
             )
+        mixed = self._has_continuous()
         if isinstance(data_or_counts, FactorCounts):
             if data_or_counts.hypothesis_set is not self:
                 raise ValueError("These counts were built by another HypothesisSet.")
@@ -380,10 +385,16 @@ class HypothesisSet:
                 raise ValueError("weights apply when counting; pass them to counts().")
             fc = data_or_counts
         else:
-            fc = self.counts(data_or_counts, weights=weights, input_marginals=False)
+            fc = self.counts(data_or_counts, weights=weights, input_marginals=False, discrete_only=mixed)
+        # Split over ALL factors (also the continuous ones calibrated elsewhere), so the
+        # sets here and calibrated_sets(level = 1 - delta) hold together at 1 - delta.
         per_factor = delta / self.n_factors
         sets: Dict[Factor, ProbabilitySet] = {}
+        skipped: Dict[Factor, str] = {}
         for f in self.factors:
+            if f not in fc.tables:
+                skipped[f] = "continuous or mixed factor: use HypothesisSet.fit and calibrated_sets"
+                continue
             table = fc.tables[f]
             if builder == "interval":
                 sets[f] = interval_set_from_counts(table, delta=per_factor, method=method, sampling=sampling)
@@ -394,7 +405,7 @@ class HypothesisSet:
                 sets[f] = dirichlet_set_from_counts(table, delta=per_factor, prior=prior, n_samples=draws)
         return FactorSets(
             hypothesis_set=self, sets=sets, counts=fc, builder=builder, level=1.0 - delta,
-            delta_per_factor=per_factor, sampling=sampling,
+            delta_per_factor=per_factor, sampling=sampling, skipped=skipped,
         )
 
     # ------------------------------------------------------------------
@@ -466,7 +477,10 @@ class HypothesisSet:
         if isinstance(counts, FactorMechanisms):
             if counts.hypothesis_set is not self:
                 raise ValueError("These mechanisms were fitted by another HypothesisSet.")
-            return model_from_fitted(self, counts, hypothesis)
+            if alpha != 0.0:
+                raise ValueError("The smoothing of fitted table factors is set at fit time: "
+                                 "HypothesisSet.fit(..., alpha=...).")
+            return model_from_fitted(self, counts, hypothesis, device=device)
         if counts.hypothesis_set is not self:
             raise ValueError("These counts were built by another HypothesisSet.")
         self._check_hypothesis(hypothesis)
@@ -539,6 +553,8 @@ class FactorSets:
     # The union-bound split: every factor's set is built at 1 - delta_per_factor.
     delta_per_factor: float = 0.05
     sampling: str = "iid"
+    # Factors without a count-based set (continuous or mixed; see calibrated_sets).
+    skipped: Dict[Factor, str] = field(default_factory=dict)
 
     @property
     def n_factors(self) -> int:
@@ -551,6 +567,9 @@ class FactorSets:
     def sets_for(self, hypothesis: Mapping[str, Sequence[str]]) -> Dict[str, ProbabilitySet]:
         """The set of every target under one hypothesis (views into the cache, no copy)."""
         self.hypothesis_set._check_hypothesis(hypothesis)
+        missing = [(n, tuple(p)) for n, p in hypothesis.items() if (n, tuple(p)) in self.skipped]
+        if missing:
+            raise KeyError(f"No count-based set for {missing}: {self.skipped[missing[0]]}.")
         return {n: self.sets[(n, tuple(p))] for n, p in hypothesis.items()}
 
 

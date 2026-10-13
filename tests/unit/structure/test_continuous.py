@@ -126,7 +126,7 @@ def test_mlp_fit_kinds_quality_and_device(device):
     mech = fm[("x'", ("x", "a"))]
     assert isinstance(mech, AdditiveNoiseMechanism) and mech.location_kind == "mlp"
     assert next(mech.net.parameters()).device.type == torch.device(device).type
-    assert float(mech.noise.scale.reshape(-1)[0]) == pytest.approx(NOISE_SD, rel=0.25)
+    assert float(mech.noise.scale.detach().reshape(-1)[0]) == pytest.approx(NOISE_SD, rel=0.25)
 
 
 def test_mlp_location_matches_a_separate_additive_noise_fit_in_quality():
@@ -187,7 +187,7 @@ def test_calibrated_sets_split_the_level_and_declare_guarantees():
     hs = HypothesisSet(VARS, CANDS)
     fm = hs.fit(data, location="linear")
     cs = hs.calibrated_sets(fm, cal, method="cqr", level=0.9)
-    assert len(cs.sets) == 5 and cs.per_factor == pytest.approx(0.1 / 5)
+    assert len(cs.sets) == 5 and cs.per_factor == pytest.approx(0.1 / 6)    # split over all 6 factors
     assert set(cs.guarantees.values()) == {"marginal"}
     assert ("d'", ("a",)) in cs.skipped
     pit = hs.calibrated_sets(fm, cal, method="pit", level=0.9)
@@ -228,3 +228,94 @@ def test_joint_coverage_across_factors():
             ok &= (test["x'"] >= lo) & (test["x'"] <= hi)
         hits += int(ok.float().mean() >= level - 3 * math.sqrt(level * (1 - level) / 200))
     assert hits / reps >= 0.8
+
+
+
+# ---------------------------------------------------------------------------
+# Review regressions (#323)
+# ---------------------------------------------------------------------------
+
+
+def test_table_factors_are_structural_so_counterfactuals_work():
+    from nbn.scm.categorical import StructuralCategoricalTable
+
+    data = simulate(2000)
+    hs = HypothesisSet(VARS, CANDS)
+    fm = hs.fit(data, location="linear")
+    assert isinstance(fm[("d'", ("a",))], StructuralCategoricalTable)
+    assert isinstance(fm.roots["a"], StructuralCategoricalTable)
+    m = hs.model_for({"x'": ("x", "a"), "d'": ("a",)}, fm)
+    noise = m.abduct({k: v[:5] for k, v in data.items()})
+    assert set(noise) >= {"x'", "d'"}                       # every structural node is abducted
+
+
+def test_mixed_factor_sets_and_calibrated_sets_share_one_budget():
+    data, cal = simulate(2000), simulate(800, seed=1)
+    hs = HypothesisSet(VARS, CANDS)
+    fs = hs.factor_sets(data, delta=0.1)                      # count-based factors only
+    assert set(fs.sets) == {("d'", ("a",))} and len(fs.skipped) == 5
+    cs = hs.calibrated_sets(hs.fit(data, location="linear"), cal, level=0.9)
+    assert fs.delta_per_factor == pytest.approx(cs.per_factor) == pytest.approx(0.1 / 6)
+    with pytest.raises(KeyError, match="No count-based set"):
+        fs.sets_for({"x'": ("x", "a"), "d'": ("a",)})
+
+
+@pytest.mark.parametrize("location", ["mlp"])
+def test_a_candidates_fit_does_not_depend_on_its_siblings(location):
+    data = simulate(1000)
+    one = HypothesisSet(VARS, {"x'": [("x", "a")]}).fit(data, location=location, epochs=20)
+    many = HypothesisSet(VARS, {"x'": [("y",), ("x", "a"), ("a",)]}).fit(data, location=location, epochs=20)
+    a, b = one[("x'", ("x", "a"))], many[("x'", ("x", "a"))]
+    for p, q in zip(a.net.parameters(), b.net.parameters()):
+        torch.testing.assert_close(p, q, rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.parametrize("location", ["linear", "mlp"])
+def test_multi_dimensional_parents(location):
+    g = torch.Generator().manual_seed(4)
+    n = 1500
+    u = torch.randn(n, 2, generator=g)
+    x1 = u[:, 0] - 2 * u[:, 1] + 0.1 * torch.randn(n, generator=g)
+    v = {"u": ("continuous", 2), "z": ("continuous", 1), "x'": ("continuous", 1)}
+    data = {"u": u, "z": torch.randn(n, generator=g), "x'": x1}
+    hs = HypothesisSet(v, {"x'": [("u",), ("u", "z")]})
+    fm = hs.fit(data, location=location, epochs=60)
+    mech = fm[("x'", ("u",))]
+    resid = mech.residual(x1.reshape(-1, 1), u)
+    assert float(resid.detach().std()) < 0.3
+    if location == "linear":
+        ref = AdditiveNoiseMechanism(location="linear")
+        ref.fit_local(x1.reshape(-1, 1), u)
+        torch.testing.assert_close(mech.net.weight, ref.net.weight, rtol=1e-4, atol=1e-5)
+    w = torch.ones(n)
+    hs.fit(data, location="linear", weights=w)              # weights of length N are accepted
+
+
+def test_model_for_fitted_honours_device_and_rejects_alpha():
+    data = simulate(500)
+    hs = HypothesisSet(VARS, CANDS)
+    fm = hs.fit(data, location="linear")
+    m = hs.model_for({"x'": ("x", "a"), "d'": ("a",)}, fm, device="cpu")
+    assert m.device.type == "cpu"
+    with pytest.raises(ValueError, match="fit time"):
+        hs.model_for({"x'": ("x", "a"), "d'": ("a",)}, fm, alpha=1.0)
+
+
+def test_categorical_factors_are_consolidated_for_updates():
+    data = simulate(1500)
+    hs = HypothesisSet(VARS, {"d'": [("x",)]})
+    fm = hs.fit(data, epochs=10)
+    mech = fm[("d'", ("x",))]
+    assert mech._ewc_mu is not None and not mech.training
+    m = hs.model_for({"d'": ("x",)}, fm)
+    m.update({k: v[:300] for k, v in simulate(300, seed=5).items() if k in ("x", "d'")})
+
+
+def test_train_loss_is_the_full_data_loss():
+    data = simulate(1000)
+    hs = HypothesisSet(VARS, {"x'": [("x", "a")]})
+    fm = hs.fit(data, location="mlp", epochs=20, batch_size=128)
+    mech = fm[("x'", ("x", "a"))]
+    pa = torch.stack([data["x"], data["a"]], -1)
+    mse = float((mech.location(pa)[:, 0] - data["x'"]).pow(2).mean().detach())
+    assert fm.train_loss[("x'", ("x", "a"))] == pytest.approx(mse, rel=1e-4)
