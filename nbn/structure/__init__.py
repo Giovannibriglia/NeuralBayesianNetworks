@@ -8,10 +8,14 @@
 * :meth:`HypothesisSet.factor_sets` — one probability set per factor, the
   budget split over the distinct factors;
 * :meth:`HypothesisSet.model_for` — a fitted network for one hypothesis,
-  from the cached counts.
+  from the cached counts;
+* :func:`agreement_set` — one valid set per row of a node whose parents are
+  uncertain (KWIK agreement rule, under a declared bound on the number of
+  parents).
 
 User guide: https://nbn.readthedocs.io/en/latest/user_guide/probability_sets.html
 """
+from nbn.structure.agreement import AgreementSet, agreement_set
 from nbn.structure.hypotheses import (
     DEFAULT_MAX_UNION_CELLS,
     FactorCounts,
@@ -19,4 +23,7 @@ from nbn.structure.hypotheses import (
     HypothesisSet,
 )
 
-__all__ = ["HypothesisSet", "FactorCounts", "FactorSets", "DEFAULT_MAX_UNION_CELLS"]
+__all__ = [
+    "HypothesisSet", "FactorCounts", "FactorSets", "DEFAULT_MAX_UNION_CELLS",
+    "agreement_set", "AgreementSet",
+]
