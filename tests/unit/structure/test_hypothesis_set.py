@@ -450,14 +450,17 @@ def test_dirichlet_draws_scale_with_the_split_level():
     assert all(s.samples.shape[0] >= 4000 for s in fs.sets.values())
 
 
-def test_factor_sets_skip_marginals_and_model_for_asks_for_them():
+def test_model_for_works_from_factor_set_counts_without_marginals():
     v, data = _small()
     hs = HypothesisSet(v, {"x'": [("x",), ("x", "a")]})
     fs = hs.factor_sets(data)
-    assert fs.counts.input_marginals == {}
-    with pytest.raises(ValueError, match="input_marginals"):
-        hs.model_for({"x'": ("x",)}, fs.counts)
-    assert set(hs.counts(data).input_marginals) == {"x", "a"}
+    assert fs.counts.input_marginals == {}                # not counted again
+    full = hs.counts(data)
+    assert set(full.input_marginals) == {"x", "a"}
+    for h in hs.hypotheses():
+        a, b = hs.model_for(h, fs.counts), hs.model_for(h, full)
+        for node in a.dag.nodes():                         # marginals summed from factor tables = direct
+            assert torch.equal(a.mechanisms[node]._counts, b.mechanisms[node]._counts)
 
 
 def test_unknown_builder_fails_before_counting():

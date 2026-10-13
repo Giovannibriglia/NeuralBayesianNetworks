@@ -413,13 +413,10 @@ class HypothesisSet:
         self._check_hypothesis(hypothesis)
         used = set(self.targets) | {p for parents in hypothesis.values() for p in parents}
         roots = [v for v in self.inputs if v in used]
-        missing = [v for v in roots if v not in counts.input_marginals]
-        if missing:
-            raise ValueError(
-                f"No marginal counts for the inputs {missing}: they were absent from the data, "
-                "or the counts were built with input_marginals=False (factor_sets does that); "
-                "call hs.counts(data) and pass the result."
-            )
+        marginals = {v: counts.input_marginals.get(v) for v in roots}
+        for v in roots:
+            if marginals[v] is None:
+                marginals[v] = _marginal_from_factors(counts, v)
         if device is None:
             first = next(iter(counts.tables.values()))
             device = str(first.device)
@@ -436,7 +433,7 @@ class HypothesisSet:
                 )
                 mech.fit_from_counts(table, [int(self.variables[p].cardinality) for p in dag_parents])
             else:
-                mech.fit_from_counts(counts.input_marginals[node], [])
+                mech.fit_from_counts(marginals[node], [])
             model.set_mechanism(node, mech)
         model.to(model.device)
         return model
@@ -515,4 +512,20 @@ def _auto_draws(delta: float, n_entries: int) -> int:
     """Posterior draws so that >= 5 fall beyond each simultaneous quantile (capped)."""
     per_entry = delta / max(n_entries, 1)
     return int(min(200_000, max(4000, math.ceil(10.0 / per_entry))))
+
+
+def _marginal_from_factors(counts: FactorCounts, v: str) -> torch.Tensor:
+    """Counts ``[1, K_v]`` of input ``v``, summed from a factor table that has ``v`` as a parent.
+
+    A factor table counts the same rows (with the same weights) as a direct
+    count of ``v``, so summing out the child and the other parents is exact.
+    """
+    for (node, parents), table in counts.tables.items():
+        if v in parents:
+            cards = counts.parent_cards[(node, parents)]
+            full = table.reshape(*cards, table.shape[-1])
+            i = parents.index(v)
+            drop = [d for d in range(full.dim()) if d != i]
+            return full.sum(dim=drop).reshape(1, -1)
+    raise ValueError(f"No counts for the input '{v}': it is a parent of no factor.")
 
