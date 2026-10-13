@@ -242,3 +242,54 @@ def test_no_budget_share_is_reserved_when_the_flat_model_is_a_family():
     data = ring_data(n_episodes=50)
     res = agreement_set(VARIABLES, data, "m0'", ["m0", "m3", "rep0"], max_parents=5, delta=0.1)
     assert res.n_families == 1 and res.delta_per_family == pytest.approx(0.1)
+
+
+# ---------------------------------------------------------------------------
+# Third review round (#320)
+# ---------------------------------------------------------------------------
+
+
+def test_refuted_without_a_flat_table_reports_no_gain():
+    data = ring_data()
+    res = agreement_set(VARIABLES, data, "m0'", INPUTS, max_parents=2, delta=0.1, max_rows=200,
+                        coverage_rows=FEASIBLE)
+    assert res.assumption_refuted and res.parents == ()
+    assert res.flat_visited is not None and res.flat_with_set is None
+    assert res.n_rows_gained is None                       # was -80: no set is compared
+
+
+def test_coverage_rows_do_not_merge_when_the_joint_index_would_overflow():
+    names = [f"u{i}" for i in range(66)]
+    variables = dict.fromkeys([*names, "y"], ("discrete", 2))
+    gen = torch.Generator().manual_seed(0)
+    data = {v: torch.randint(0, 2, (400,), generator=gen) for v in variables}
+    data["y"] = data["u0"].clone()
+    rows = torch.zeros(3, 66, dtype=torch.long)
+    rows[1, 0] = 1                                         # differs from row 0 in u0 only
+    rows[2] = torch.stack([data[v][0] for v in names])     # a visited row
+    res = agreement_set(variables, data, "y", names, candidates=[("u0",)], delta=0.1, coverage_rows=rows)
+    assert res.survivors == [("u0",)]
+    assert res.flat_rows == 3                              # 2^66 rows: index-based dedup merged rows 0 and 1
+    assert res.flat_visited == 1
+    assert res.flat_with_set == 3                          # every row projects onto a visited u0
+
+
+def test_repeated_inputs_are_an_error():
+    data = ring_data(n_episodes=20)
+    with pytest.raises(ValueError, match="repeated"):
+        agreement_set(VARIABLES, data, "m0'", [*INPUTS, "m0"], max_parents=2)
+
+
+def test_explicit_candidates_need_no_max_parents_and_record_none():
+    data = ring_data(n_episodes=50)
+    res = agreement_set(VARIABLES, data, "m0'", INPUTS, candidates=[TRUE_PARENTS], delta=0.1)
+    assert res.max_parents is None
+    with pytest.raises(ValueError, match="max_parents is required"):
+        agreement_set(VARIABLES, data, "m0'", INPUTS)
+
+
+def test_union_tables_are_kept_only_on_request():
+    data = ring_data(n_episodes=20)
+    hs = HypothesisSet(VARIABLES, {"m0'": [("m0",), ("m0", "m3")]})
+    assert hs.counts(data).union_tables == {}
+    assert set(hs.counts(data, keep_union_tables=True).union_tables) == {"m0'"}

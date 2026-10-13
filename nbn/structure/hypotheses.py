@@ -259,6 +259,7 @@ class HypothesisSet:
         data: Mapping[str, torch.Tensor],
         weights: torch.Tensor | None = None,
         max_union_cells: int = DEFAULT_MAX_UNION_CELLS,
+        keep_union_tables: bool = False,
     ) -> FactorCounts:
         """Count tables ``[R, K]`` for every factor.
 
@@ -272,7 +273,10 @@ class HypothesisSet:
         :attr:`FactorCounts.union_used` records the choice.  Tables stay on
         the data's device, in the widest float the device supports.  The
         inputs' marginals are not counted: :attr:`FactorCounts.input_marginals`
-        sums them out of the factor tables, exactly.
+        sums them out of the factor tables, exactly.  ``keep_union_tables``
+        keeps each node's dense union table in
+        :attr:`FactorCounts.union_tables` (memory: one table per node);
+        by default it is freed once the candidates' tables are summed.
         """
         self._require_discrete()
         first = data[self.targets[0]]
@@ -300,7 +304,8 @@ class HypothesisSet:
             union_used[node] = use_union
             if use_union:
                 full, _ = count_table_for(self.variables, data, node, union, weights)
-                union_tables[node] = (union, full)
+                if keep_union_tables:
+                    union_tables[node] = (union, full)
                 full = full.reshape(*union_cards, k)
                 for c in cs:
                     drop = [d for d, p in enumerate(union) if p not in c]

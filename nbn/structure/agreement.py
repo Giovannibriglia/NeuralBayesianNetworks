@@ -98,7 +98,8 @@ class AgreementSet:
     # Discarded candidate -> evidence: the extension it disagrees with, the
     # number of rows where the balls are disjoint, and the largest gap.
     discarded: Dict[Family, dict] = field(default_factory=dict)
-    max_parents: int = 0
+    # The declared bound d, or None with explicit candidates (not used then).
+    max_parents: int | None = 0
     epsilon: float = 0.0
     level: float = 0.95
     n_families: int = 0
@@ -125,7 +126,9 @@ class AgreementSet:
         """Joint input values never visited that still get a set ("structure buys coverage").
 
         Counted against the flat model, which has a set only on visited joint
-        values of all inputs; ``None`` when that row space was too large.
+        values of all inputs; ``None`` when that row space was too large, or
+        when every candidate was refuted and the flat fallback could not be
+        built (then no set is compared).
         """
         if self.flat_with_set is None or self.flat_visited is None:
             return None
@@ -137,7 +140,7 @@ def agreement_set(
     data: Mapping[str, torch.Tensor],
     node: str,
     inputs: Sequence[str],
-    max_parents: int,
+    max_parents: int | None = None,
     delta: float = 0.05,
     epsilon: float = 0.1,
     sampling: Sampling = "iid",
@@ -162,7 +165,9 @@ def agreement_set(
     inputs:
         The variables allowed as parents; the true parents must be among them.
     max_parents:
-        Declared bound ``d`` on the number of true parents.
+        Declared bound ``d`` on the number of true parents; required unless
+        ``candidates`` is given (then it is not used, and
+        :attr:`AgreementSet.max_parents` is ``None``).
     delta:
         Failure probability of the whole result (all families at once).
         Split it across nodes when several nodes must hold together.
@@ -197,12 +202,16 @@ def agreement_set(
         raise ValueError(f"delta must be in (0, 1); got {delta}.")
     if isinstance(inputs, str):
         raise TypeError(f"inputs must be a sequence of names, not the string {inputs!r}.")
-    inputs = tuple(dict.fromkeys(inputs))
+    inputs = tuple(inputs)
+    if len(set(inputs)) != len(inputs):
+        raise ValueError(f"inputs has repeated names: {list(inputs)}.")
     if node in inputs:
         raise ValueError(f"'{node}' cannot be one of its own inputs.")
-    if max_parents < 0:
+    if candidates is None and max_parents is None:
+        raise ValueError("max_parents is required when candidates is not given.")
+    if max_parents is not None and max_parents < 0:
         raise ValueError(f"max_parents must be >= 0; got {max_parents}.")
-    d = min(int(max_parents), len(inputs))
+    d = len(inputs) if max_parents is None else min(int(max_parents), len(inputs))
     if candidates is None:
         # candidates plus their distinct one-variable extensions (deduplicated as sets)
         n_default = math.comb(len(inputs), d) + (math.comb(len(inputs), d + 1) if d < len(inputs) else 0)
@@ -243,7 +252,7 @@ def agreement_set(
     # A one-node HypothesisSet gives the factor cache (count once, marginalise).
     spec = {v: variables[v] for v in (*inputs, node)}
     hs = HypothesisSet(spec, {node: fam_list})
-    counts = hs.counts(data)
+    counts = hs.counts(data, keep_union_tables=True)
     cards = {v: int(hs.variables[v].cardinality) for v in (*inputs, node)}
     k = cards[node]
     flat_rows = math.prod(cards[p] for p in inputs)
@@ -299,16 +308,20 @@ def agreement_set(
         coverage_rows = torch.as_tensor(coverage_rows, device=device).long()
         if coverage_rows.dim() != 2 or coverage_rows.shape[1] != len(inputs):
             raise ValueError(f"coverage_rows must be [n, {len(inputs)}] (columns in the order of inputs).")
-        cov_index = torch.unique(parent_row_index(coverage_rows, input_cards))   # repeated rows count once
-        coverage_rows = _digits(cov_index, input_cards)
+        bad = (coverage_rows < 0) | (coverage_rows >= torch.tensor(input_cards, device=device))
+        if coverage_rows.numel() and bool(bad.any()):
+            raise ValueError("coverage_rows has values outside the inputs' declared states.")
+        # Repeated rows count once.  Rows, not flat indices: the joint index of
+        # all inputs can overflow int64 when the flat table is not built.
+        coverage_rows = torch.unique(coverage_rows, dim=0)
         if flat_counts is not None:
             visited_flat = flat_counts.sum(-1) > 0
-            flat_visited: int | None = int(visited_flat[cov_index].sum())
+            flat_visited: int | None = int(visited_flat[parent_row_index(coverage_rows, input_cards)].sum())
         else:
-            data_index = parent_row_index(
-                torch.stack([data[p].reshape(-1).long() for p in inputs], -1), input_cards)
-            flat_visited = int(torch.isin(cov_index, data_index).sum())
-        n_coverage: int | None = int(cov_index.numel())
+            data_rows = torch.unique(torch.stack([data[p].reshape(-1).long() for p in inputs], -1), dim=0)
+            _, seen_twice = torch.unique(torch.cat([coverage_rows, data_rows]), dim=0, return_counts=True)
+            flat_visited = int((seen_twice == 2).sum())      # both lists are free of repeats
+        n_coverage: int | None = int(coverage_rows.shape[0])
     else:
         flat_visited = int((flat_counts.sum(-1) > 0).sum()) if flat_counts is not None else None
         n_coverage = flat_rows if flat_ok else None
@@ -337,7 +350,8 @@ def agreement_set(
         *ASSUMPTIONS[1:],
     )
     common = dict(
-        node=node, candidates=cands, discarded=discarded, max_parents=d, epsilon=epsilon,
+        node=node, candidates=cands, discarded=discarded,
+        max_parents=d if candidates is None else None, epsilon=epsilon,
         level=1.0 - delta, n_families=len(fam_list), delta_per_family=per_family,
         sampling=sampling, flat_rows=n_coverage, flat_visited=flat_visited, assumptions=assumptions,
     )
@@ -367,7 +381,8 @@ def agreement_set(
             known=(~fallback.unseen) & (fallback.radius <= epsilon),
             covered_jointly=joint_counts(union).sum(-1) > 0, survivors=[],
             assumption_refuted=True,
-            flat_with_set=with_set_on_coverage(fallback.unseen, union),
+            # Without the flat table there is no fallback set to compare.
+            flat_with_set=with_set_on_coverage(fallback.unseen, union) if flat_counts is not None else None,
             **common,
         )
 
@@ -415,13 +430,3 @@ def agreement_set(
         **common,
     )
 
-
-def _digits(index: torch.Tensor, cards: List[int]) -> torch.Tensor:
-    """Rows ``[n, len(cards)]`` of the C-order configurations with flat ``index``."""
-    out = []
-    rest = index
-    for c in reversed(cards):
-        out.append(rest % c)
-        rest = rest // c
-    return torch.stack(out[::-1], -1) if out else torch.zeros(index.shape[0], 0, dtype=torch.long,
-                                                              device=index.device)
