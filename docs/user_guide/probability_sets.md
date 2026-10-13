@@ -129,8 +129,11 @@ chosen = hs.model_for(next(hs.hypotheses()), sets.counts)   # fitted, no pass ov
 - **The factor cache.** `hs.counts(data)` counts each node once over the
   union of its candidates' parents, then sums out the parents a candidate does
   not use. This is exact, and it is the usual way to share sufficient statistics
-  across families (K&F, Box 18.A). Above `max_union_cells` the candidates
-  are counted one by one.
+  across families (K&F, Box 18.A). The candidates are counted one by one
+  instead when the union table has more than `max_union_cells` cells, or when
+  summing it once per candidate would cost more than one pass over the data
+  per candidate (many candidates, few rows); `counts.union_used` records the
+  choice. The inputs' marginals are summed out of the factor tables.
 - **Budget.** `delta` is split over the **distinct factors** (union bound).
   A factor's set is the same event in every hypothesis, so on one event of
   probability at least `1 - delta` every factor set holds. For a factor whose
@@ -257,7 +260,11 @@ over all intervals by a union bound (`union_bound`).
 and depend on earlier draws, so each interval is made valid for every sample
 size at once with `delta_n = delta / (n (n + 1))` (`anytime_delta`; the
 coupling argument of Agarwal et al., *RL: Theory and Algorithms*, Lemma 6.2,
-with a summable schedule instead of a finite range).
+with a summable schedule instead of a finite range). This assumes the table's
+parents make the child Markov along the episode. For a table counted against a
+candidate parent set (`count_table_for`), the candidate must contain the true
+parents and every observed variable the logging policies read; otherwise the
+set bounds a policy-dependent average and the declared level does not hold.
 
 **Factored next states.** Build one set per next-state variable and split
 `delta` across them; this is the learning scheme of Schnitzer, Abate and

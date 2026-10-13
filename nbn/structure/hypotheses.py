@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import warnings
 from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Literal, Mapping, Sequence, Tuple, Union
 
@@ -139,6 +140,13 @@ class HypothesisSet:
             unique: Dict[frozenset, Tuple[str, ...]] = {}
             for c in merged:
                 unique.setdefault(frozenset(c), c)
+            if len(unique) < len(merged):
+                warnings.warn(
+                    f"fixed edge ({parent!r}, {child!r}) makes {len(merged) - len(unique)} candidate(s) of "
+                    f"{child!r} the same family as another one; they are merged, so {child!r} has "
+                    f"{len(unique)} candidates, not {len(merged)}. Candidates before the edge: {cands[child]}.",
+                    UserWarning, stacklevel=2,
+                )
             cands[child] = list(unique.values())
         if not cands:
             raise ValueError("A HypothesisSet needs at least one node with candidate parent sets.")
@@ -251,17 +259,24 @@ class HypothesisSet:
         data: Mapping[str, torch.Tensor],
         weights: torch.Tensor | None = None,
         max_union_cells: int = DEFAULT_MAX_UNION_CELLS,
-        input_marginals: bool = True,
+        keep_union_tables: bool = False,
     ) -> FactorCounts:
-        """Count tables ``[R, K]`` for every factor (and the inputs' marginals).
+        """Count tables ``[R, K]`` for every factor.
 
-        For each target node the table is counted once over the union of its
-        candidates' parents and summed down to each candidate; if the union
-        table has more than ``max_union_cells`` cells, the candidates are
-        counted one by one.  Tables stay on the data's device, in the widest
-        float the device supports.  ``input_marginals`` also counts the
-        marginal of every input that some candidate uses (needed only by
-        :meth:`model_for`).
+        For each target node, either the table is counted once over the union
+        of its candidates' parents and summed down to each candidate, or each
+        candidate is counted directly.  The union is used when the node has
+        more than one candidate, its table has at most ``max_union_cells``
+        cells, and its estimated cost (one pass over the ``N`` rows plus one
+        sum of the union table per candidate) is below that of counting
+        directly (one pass per candidate plus the candidates' tables);
+        :attr:`FactorCounts.union_used` records the choice.  Tables stay on
+        the data's device, in the widest float the device supports.  The
+        inputs' marginals are not counted: :attr:`FactorCounts.input_marginals`
+        sums them out of the factor tables, exactly.  ``keep_union_tables``
+        keeps each node's dense union table in
+        :attr:`FactorCounts.union_tables` (memory: one table per node);
+        by default it is freed once the candidates' tables are summed.
         """
         self._require_discrete()
         first = data[self.targets[0]]
@@ -280,16 +295,17 @@ class HypothesisSet:
             direct_cells = sum(
                 math.prod(int(self.variables[p].cardinality) for p in c) * k for c in cs
             )
-            # One pass over the data plus a dense union table, against one pass per
-            # candidate: the union pays off unless its table dwarfs the data.
+            # Union: one pass over the data, then one sum of the union table per
+            # candidate.  Direct: one pass per candidate, plus its own table.
             use_union = (
                 len(cs) > 1 and cells <= max_union_cells
-                and cells <= direct_cells + (len(cs) - 1) * n_rows
+                and n_rows + len(cs) * cells <= len(cs) * n_rows + direct_cells
             )
             union_used[node] = use_union
             if use_union:
                 full, _ = count_table_for(self.variables, data, node, union, weights)
-                union_tables[node] = (union, full)
+                if keep_union_tables:
+                    union_tables[node] = (union, full)
                 full = full.reshape(*union_cards, k)
                 for c in cs:
                     drop = [d for d, p in enumerate(union) if p not in c]
@@ -305,15 +321,9 @@ class HypothesisSet:
                     tables[(node, c)], cards[(node, c)] = count_table_for(
                         self.variables, data, node, c, weights,
                     )
-        marginals: Dict[str, torch.Tensor] = {}
-        if input_marginals:
-            used = {p for cs in self.candidates.values() for c in cs for p in c}
-            for v in self.inputs:
-                if v in used and v in data:
-                    marginals[v], _ = count_table_for(self.variables, data, v, (), weights)
         return FactorCounts(
             hypothesis_set=self, tables=tables, parent_cards=cards,
-            input_marginals=marginals, union_used=union_used, weighted=weights is not None,
+            union_used=union_used, weighted=weights is not None,
             union_tables=union_tables,
         )
 
@@ -339,8 +349,13 @@ class HypothesisSet:
         ``*_from_counts`` builder of :mod:`nbn.uncertainty` at level
         ``1 - delta / n_factors``.  For ``builder="dirichlet"`` the level is a
         posterior credibility, not a frequentist guarantee, and ``n_samples``
-        (default: enough draws for the per-entry quantiles at the split level,
-        at least 4000, at most 200 000) is chosen per factor.
+        is chosen per factor by default: enough draws for at least 5 beyond
+        each per-entry quantile at the split level, at least 4000.  If that
+        needs more than 200 000 draws, or more than ``2**26`` sampled values
+        for one factor, a ``ValueError`` says so instead of returning sets
+        narrower than the level; pass ``n_samples`` to override, or use a PAC
+        builder.  ``sampling`` and ``method`` do not apply to the Dirichlet
+        posterior, and :attr:`FactorSets.sampling` is ``None`` for it.
 
         **What the level means.**  For a factor whose parents contain the true
         parents (or a superset), the set bounds the true conditional.  For a
@@ -369,7 +384,7 @@ class HypothesisSet:
                 raise ValueError("weights apply when counting; pass them to counts().")
             fc = data_or_counts
         else:
-            fc = self.counts(data_or_counts, weights=weights, input_marginals=False)
+            fc = self.counts(data_or_counts, weights=weights)
         per_factor = delta / self.n_factors
         sets: Dict[Factor, ProbabilitySet] = {}
         for f in self.factors:
@@ -379,11 +394,11 @@ class HypothesisSet:
             elif builder == "l1":
                 sets[f] = l1_ball_set_from_counts(table, delta=per_factor, sampling=sampling)
             else:
-                draws = n_samples if n_samples is not None else _auto_draws(per_factor, table.numel())
+                draws = n_samples if n_samples is not None else _auto_draws(per_factor, table.numel(), f)
                 sets[f] = dirichlet_set_from_counts(table, delta=per_factor, prior=prior, n_samples=draws)
         return FactorSets(
             hypothesis_set=self, sets=sets, counts=fc, builder=builder, level=1.0 - delta,
-            delta_per_factor=per_factor, sampling=sampling,
+            delta_per_factor=per_factor, sampling=None if builder == "dirichlet" else sampling,
         )
 
     # ------------------------------------------------------------------
@@ -416,10 +431,7 @@ class HypothesisSet:
         self._check_hypothesis(hypothesis)
         used = set(self.targets) | {p for parents in hypothesis.values() for p in parents}
         roots = [v for v in self.inputs if v in used]
-        marginals = {v: counts.input_marginals.get(v) for v in roots}
-        for v in roots:
-            if marginals[v] is None:
-                marginals[v] = _marginal_from_factors(counts, v)
+        marginals = {v: _marginal_from_factors(counts, v) for v in roots}
         if device is None:
             first = next(iter(counts.tables.values()))
             device = str(first.device)
@@ -437,8 +449,7 @@ class HypothesisSet:
                 mech.fit_from_counts(table, [int(self.variables[p].cardinality) for p in dag_parents])
             else:
                 mech.fit_from_counts(marginals[node], [])
-            model.set_mechanism(node, mech)
-        model.to(model.device)
+            model.set_mechanism(node, mech)          # moves the mechanism to the model's device
         return model
 
     def __repr__(self) -> str:
@@ -455,7 +466,6 @@ class FactorCounts:
     hypothesis_set: HypothesisSet = field(repr=False)
     tables: Dict[Factor, torch.Tensor] = field(repr=False)
     parent_cards: Dict[Factor, List[int]] = field(repr=False)
-    input_marginals: Dict[str, torch.Tensor] = field(repr=False)
     # Per target: whether the union-and-marginalise path was used.
     union_used: Dict[str, bool] = field(default_factory=dict)
     # Whether the tables are weighted (then they carry no PAC guarantee).
@@ -466,6 +476,16 @@ class FactorCounts:
     def __getitem__(self, factor: Factor) -> torch.Tensor:
         node, parents = factor
         return self.tables[(node, tuple(parents))]
+
+    @property
+    def input_marginals(self) -> Dict[str, torch.Tensor]:
+        """Counts ``[1, K]`` of every input that some factor has as a parent.
+
+        Summed out of a factor table (same rows, same weights), so exact and
+        without another pass over the data.
+        """
+        used = {p for (_, parents) in self.tables for p in parents}
+        return {v: _marginal_from_factors(self, v) for v in self.hypothesis_set.inputs if v in used}
 
     def for_hypothesis(self, hypothesis: Mapping[str, Sequence[str]]) -> Dict[str, torch.Tensor]:
         """The count table of every target under one hypothesis (no copy)."""
@@ -484,7 +504,8 @@ class FactorSets:
     level: float = 0.95
     # The union-bound split: every factor's set is built at 1 - delta_per_factor.
     delta_per_factor: float = 0.05
-    sampling: str = "iid"
+    # How the data were collected, for the PAC builders; None for "dirichlet".
+    sampling: str | None = "iid"
 
     @property
     def n_factors(self) -> int:
@@ -513,10 +534,28 @@ def _reorder_parents(
     return table.reshape(*cards, k).permute(*axes, len(cards)).reshape(-1, k).contiguous()
 
 
-def _auto_draws(delta: float, n_entries: int) -> int:
-    """Posterior draws so that >= 5 fall beyond each simultaneous quantile (capped)."""
+_MAX_AUTO_DRAWS = 200_000
+_MAX_SAMPLED_VALUES = 2**26
+
+
+def _auto_draws(delta: float, n_entries: int, factor: Factor | None = None) -> int:
+    """Posterior draws so that >= 5 fall beyond each simultaneous quantile.
+
+    Raises when that needs more than ``_MAX_AUTO_DRAWS`` draws or more than
+    ``_MAX_SAMPLED_VALUES`` sampled values: fewer draws would make the
+    sample quantiles narrower than the declared level.
+    """
     per_entry = delta / max(n_entries, 1)
-    return int(min(200_000, max(4000, math.ceil(10.0 / per_entry))))
+    needed = max(4000, math.ceil(10.0 / per_entry))
+    cap = min(_MAX_AUTO_DRAWS, _MAX_SAMPLED_VALUES // max(n_entries, 1))
+    if needed > cap:
+        raise ValueError(
+            f"Dirichlet set{'' if factor is None else f' for {factor}'}: {needed} posterior draws are "
+            f"needed for {n_entries} entries at per-entry level 1 - {per_entry:.2e}, above the cap of "
+            f"{cap} ({_MAX_AUTO_DRAWS} draws, {_MAX_SAMPLED_VALUES} sampled values). Pass n_samples "
+            f"to choose the draws yourself, or use builder='interval' or 'l1'."
+        )
+    return int(needed)
 
 
 def _marginal_from_factors(counts: FactorCounts, v: str) -> torch.Tensor:

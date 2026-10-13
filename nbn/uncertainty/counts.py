@@ -18,6 +18,8 @@ def parent_row_index(parents: torch.Tensor, parent_cards: list[int]) -> torch.Te
     per-parent axes.  Raises on values outside the declared cardinalities.
     """
     index = torch.zeros(parents.shape[:-1], dtype=torch.long, device=parents.device)
+    if parents.is_floating_point() and parents.numel() and bool((parents != parents.round()).any()):
+        raise ValueError("Parent values must be whole numbers (state indices); got fractional values.")
     for d, card in enumerate(parent_cards):
         values = parents[..., d].long()
         if values.numel() and (int(values.min()) < 0 or int(values.max()) >= card):
@@ -49,9 +51,13 @@ def scatter_counts(
     """``[n_rows, n_classes]`` (weighted) counts of ``values`` per row index.
 
     Accumulates in the widest float the device supports.  Raises on values
-    outside ``0 .. n_classes - 1`` instead of spilling them into the next row.
+    outside ``0 .. n_classes - 1`` instead of spilling them into the next row,
+    and on fractional values instead of truncating them.
     """
-    values = values.reshape(-1).long()
+    values = values.reshape(-1)
+    if values.is_floating_point() and values.numel() and bool((values != values.round()).any()):
+        raise ValueError("Child values must be whole numbers (state indices); got fractional values.")
+    values = values.long()
     if values.numel() and (int(values.min()) < 0 or int(values.max()) >= n_classes):
         raise ValueError(f"Child values outside the {n_classes} declared states.")
     dtype = accum_dtype(values.device)
@@ -114,7 +120,8 @@ def count_table_for(
         The child and the parent tuple to count against.
     weights:
         Optional ``[N]`` per-row weights (replication semantics), validated
-        like ``fit``'s.  Weighted tables suit fitting and Bayesian sets, not
+        like ``fit``'s, except that an all-zero vector is allowed (it gives an
+        all-zero table, as before weights were validated).  Weighted tables suit fitting and Bayesian sets, not
         the PAC builders (``interval_set_from_counts``,
         ``l1_ball_set_from_counts``): a weight is not a number of independent
         draws.
@@ -149,9 +156,14 @@ def count_table_for(
     absent = [v for v in (node, *parents) if v not in data]
     if absent:
         raise KeyError(f"No data column for {absent}.")
+    n_cells = math.prod(parent_cards) * int(variable.cardinality)
+    if n_cells >= 2**62:
+        raise ValueError(f"The table of '{node}' against {parents} has {n_cells:.3e} cells; "
+                         f"the row index would overflow. Use fewer or smaller parents.")
 
     x = data[node].reshape(-1)
-    weights = validate_weights(weights, x.shape[0], where="count_table_for", device=x.device)
+    weights = validate_weights(weights, x.shape[0], where="count_table_for", device=x.device,
+                               allow_zero_total=True)
     if parents:
         pa = torch.stack([data[p].reshape(-1) for p in parents], dim=-1)
     else:

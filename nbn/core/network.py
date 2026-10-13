@@ -1192,13 +1192,7 @@ class NeuralBayesianNetwork(nn.Module):
                 torch.log(torch.tensor(flat, dtype=torch.float).clamp_min(1e-9))
             )
             mech._n_classes = k
-            mech._parent_cards = parent_cards
-            strides = []
-            stride = 1
-            for c in reversed(parent_cards):
-                strides.append(stride)
-                stride *= c
-            mech._parent_strides = list(reversed(strides))
+            mech._set_parent_layout(parent_cards)
             mech._class_values = torch.arange(k, dtype=torch.float)
             mech.output_dim = 1
             nbn_model.set_mechanism(node, mech)
