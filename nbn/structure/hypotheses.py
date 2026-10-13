@@ -284,6 +284,7 @@ class HypothesisSet:
         tables: Dict[Factor, torch.Tensor] = {}
         cards: Dict[Factor, List[int]] = {}
         union_used: Dict[str, bool] = {}
+        union_tables: Dict[str, Tuple[Tuple[str, ...], torch.Tensor]] = {}
         for node in self.targets:
             cs = self.candidates[node]
             if discrete_only:
@@ -308,6 +309,7 @@ class HypothesisSet:
             union_used[node] = use_union
             if use_union:
                 full, _ = count_table_for(self.variables, data, node, union, weights)
+                union_tables[node] = (union, full)
                 full = full.reshape(*union_cards, k)
                 for c in cs:
                     drop = [d for d, p in enumerate(union) if p not in c]
@@ -332,6 +334,7 @@ class HypothesisSet:
         return FactorCounts(
             hypothesis_set=self, tables=tables, parent_cards=cards,
             input_marginals=marginals, union_used=union_used, weighted=weights is not None,
+            union_tables=union_tables,
         )
 
     # ------------------------------------------------------------------
@@ -539,6 +542,8 @@ class FactorCounts:
     union_used: Dict[str, bool] = field(default_factory=dict)
     # Whether the tables are weighted (then they carry no PAC guarantee).
     weighted: bool = False
+    # Per target counted on the union path: (union parents, [R_union, K] table).
+    union_tables: Dict[str, Tuple[Tuple[str, ...], torch.Tensor]] = field(default_factory=dict, repr=False)
 
     def __getitem__(self, factor: Factor) -> torch.Tensor:
         node, parents = factor

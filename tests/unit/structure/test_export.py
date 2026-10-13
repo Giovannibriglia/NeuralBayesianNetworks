@@ -285,3 +285,54 @@ def test_sample_set_bounds_are_computed_once(tmp_path):
         warnings.simplefilter("always")
         export_factored_sets(tmp_path / "d", fs, hs, STATE, [f"rep{i}" for i in range(N)])
     assert sum("does not support the declared level" in str(w.message) for w in caught) == 1
+
+
+# --- review round 2 regressions (#321) ------------------------------------------------------
+def test_a_failed_overwrite_keeps_the_previous_export(tmp_path):
+    out, sets = _export_ring(tmp_path)
+    before = sorted(p.name for p in out.iterdir())
+    with pytest.raises(ValueError, match="not state or action"):
+        export_factored_sets(out, sets, VARIABLES, STATE[:3], [f"rep{i}" for i in range(N)], overwrite=True)
+    assert sorted(p.name for p in out.iterdir()) == before
+    assert load_factored_sets(out).manifest["schema"] == "nbn.factored_sets/1"
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".")]      # no temp dirs left
+
+
+def test_wrong_row_count_is_rejected(tmp_path):
+    v = {"x": ("discrete", 2), "a": ("discrete", 2), "x'": ("discrete", 2)}
+    model = NeuralBayesianNetwork([("x", "x'"), ("a", "x'")], v, device="cpu")
+    box = IntervalSet(level=0.9, guarantee="pac", unseen=torch.zeros(2, dtype=torch.bool),
+                      lower=torch.zeros(2, 2), upper=torch.ones(2, 2))          # 2 rows, parents give 4
+    with pytest.raises(ValueError, match="give"):
+        export_factored_sets(tmp_path / "w", {"x'": box}, model, ["x"], ["a"])
+
+
+def test_sample_sets_without_unseen_info_and_unseen_rows_in_joint_bounds(tmp_path):
+    from nbn.uncertainty import SampleSet
+
+    v = {"x": ("discrete", 2), "a": ("discrete", 2), "x'": ("discrete", 2)}
+    model = NeuralBayesianNetwork([("x", "x'"), ("a", "x'")], v, device="cpu")
+    draws = torch.distributions.Dirichlet(torch.ones(4, 2) * 5).sample((400,))
+    boot = SampleSet(level=0.9, guarantee="asymptotic", unseen=torch.zeros(0, dtype=torch.bool),
+                     samples=draws, simultaneous=False)
+    ex = load_factored_sets(export_factored_sets(tmp_path / "b", {"x'": boot}, model, ["x"], ["a"]))
+    assert ex.array("f0", "unseen").shape == (4,) and ex.array("f0", "samples").dtype == np.float32
+    # A Dirichlet factor with an unseen row: the joint bounds give [0, 1] there.
+    hs = HypothesisSet(v, {"x'": [("x", "a")]})
+    data = {"x": torch.tensor([0, 0, 1]), "a": torch.tensor([0, 1, 0]), "x'": torch.tensor([1, 0, 1])}
+    fs = hs.factor_sets(data, builder="dirichlet", delta=0.1, n_samples=4000)
+    ex = load_factored_sets(export_factored_sets(tmp_path / "d", fs, hs, ["x"], ["a"]))
+    (h,) = ex.hypotheses()
+    unseen_row = int(np.flatnonzero(ex.array("f0", "unseen"))[0])          # (x=1, a=1)
+    lo, hi, _ = joint_row_bounds(ex, h, unseen_row)
+    assert np.all(lo == 0) and np.all(hi == 1)
+
+
+def test_parameter_block_lists_only_exported_nodes_and_row_maps_are_compact(tmp_path):
+    from nbn.scm import noise_parameter_set
+
+    model, data = _health_model()
+    poly = noise_parameter_set(model, data, ["h'", "g'"], delta=0.1)
+    ex = load_factored_sets(export_factored_sets(tmp_path / "p", {"h'": poly}, model, ["h"], ["e"]))
+    assert ex.manifest["parameters"][0]["nodes"] == ["h'"]
+    assert ex.array("f0", "row_index").dtype == np.int32

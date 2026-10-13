@@ -66,7 +66,7 @@ import torch
 from nbn.core.variables import Variable
 from nbn.structure.hypotheses import HypothesisSet, _reorder_parents
 from nbn.uncertainty.builders import Sampling, l1_ball_set_from_counts
-from nbn.uncertainty.counts import count_table_for, parent_grid, parent_row_index
+from nbn.uncertainty.counts import count_table_for, parent_row_index
 from nbn.uncertainty.sets import L1BallSet
 
 Family = Tuple[str, ...]
@@ -105,6 +105,8 @@ class AgreementSet:
     delta_per_family: float = 0.0
     sampling: str = "iid"
     assumption_refuted: bool = False
+    # Declared assumptions; with explicit candidates the first one is "some
+    # given candidate contains Pa(node)" instead of the bound on max_parents.
     assumptions: Tuple[str, ...] = ASSUMPTIONS
     # Coverage against the flat model (one row per joint value of all inputs),
     # on `coverage_rows` if given, else on every joint value (when there are at
@@ -202,7 +204,8 @@ def agreement_set(
         raise ValueError(f"max_parents must be >= 0; got {max_parents}.")
     d = min(int(max_parents), len(inputs))
     if candidates is None:
-        n_default = math.comb(len(inputs), d) * (1 + len(inputs) - d)
+        # candidates plus their distinct one-variable extensions (deduplicated as sets)
+        n_default = math.comb(len(inputs), d) + (math.comb(len(inputs), d + 1) if d < len(inputs) else 0)
         if n_default > max_families:
             raise ValueError(
                 f"{len(inputs)} inputs with max_parents={d} give about {n_default} families "
@@ -245,9 +248,10 @@ def agreement_set(
     k = cards[node]
     flat_rows = math.prod(cards[p] for p in inputs)
     flat_ok = flat_rows <= max_rows
-    # One share of the budget is always kept for the flat fallback (all inputs as
-    # parents), so the level does not depend on the memory guard max_rows.
-    per_family = delta / (len(fam_list) + 1)
+    flat_is_family = frozenset(inputs) in families
+    # One share of the budget is kept for the flat fallback (all inputs as parents)
+    # whenever it is not already a family; it does not depend on max_rows.
+    per_family = delta / (len(fam_list) + (0 if flat_is_family else 1))
     balls: Dict[Family, L1BallSet] = {
         f: l1_ball_set_from_counts(counts[(node, f)], delta=per_family, sampling=sampling)
         for f in fam_list
@@ -279,19 +283,32 @@ def agreement_set(
     discarded = {c: worst[c] for c in cands if c in worst}
 
     device = data[node].device
+    input_cards = [cards[p] for p in inputs]
     flat_counts = None
     if flat_ok:
-        flat_counts, _ = count_table_for(hs.variables, data, node, inputs)
-    input_cards = [cards[p] for p in inputs]
+        if flat_is_family:
+            flat_counts = counts[(node, families[frozenset(inputs)])]
+            flat_counts = _reorder_parents(flat_counts, [cards[p] for p in families[frozenset(inputs)]],
+                                           families[frozenset(inputs)], inputs)
+        elif node in counts.union_tables and frozenset(counts.union_tables[node][0]) == frozenset(inputs):
+            u_names, u_table = counts.union_tables[node]          # counted once already
+            flat_counts = _reorder_parents(u_table, [cards[p] for p in u_names], u_names, inputs)
+        else:
+            flat_counts, _ = count_table_for(hs.variables, data, node, inputs)
     if coverage_rows is not None:
         coverage_rows = torch.as_tensor(coverage_rows, device=device).long()
         if coverage_rows.dim() != 2 or coverage_rows.shape[1] != len(inputs):
             raise ValueError(f"coverage_rows must be [n, {len(inputs)}] (columns in the order of inputs).")
-        cov_index = parent_row_index(coverage_rows, input_cards)
-        data_index = parent_row_index(
-            torch.stack([data[p].reshape(-1).long() for p in inputs], -1), input_cards)
-        flat_visited: int | None = int(torch.isin(cov_index, data_index).sum())
-        n_coverage: int | None = int(coverage_rows.shape[0])
+        cov_index = torch.unique(parent_row_index(coverage_rows, input_cards))   # repeated rows count once
+        coverage_rows = _digits(cov_index, input_cards)
+        if flat_counts is not None:
+            visited_flat = flat_counts.sum(-1) > 0
+            flat_visited: int | None = int(visited_flat[cov_index].sum())
+        else:
+            data_index = parent_row_index(
+                torch.stack([data[p].reshape(-1).long() for p in inputs], -1), input_cards)
+            flat_visited = int(torch.isin(cov_index, data_index).sum())
+        n_coverage: int | None = int(cov_index.numel())
     else:
         flat_visited = int((flat_counts.sum(-1) > 0).sum()) if flat_counts is not None else None
         n_coverage = flat_rows if flat_ok else None
@@ -315,10 +332,14 @@ def agreement_set(
             return (full.sum(dim=drop) if drop else full).reshape(-1, k)
         return count_table_for(hs.variables, data, node, union)[0]
 
+    assumptions = ASSUMPTIONS if candidates is None else (
+        "some given candidate contains Pa(node) (explicit candidates: max_parents is not used)",
+        *ASSUMPTIONS[1:],
+    )
     common = dict(
         node=node, candidates=cands, discarded=discarded, max_parents=d, epsilon=epsilon,
         level=1.0 - delta, n_families=len(fam_list), delta_per_family=per_family,
-        sampling=sampling, flat_rows=n_coverage, flat_visited=flat_visited,
+        sampling=sampling, flat_rows=n_coverage, flat_visited=flat_visited, assumptions=assumptions,
     )
 
     if not survivors:
@@ -331,14 +352,15 @@ def agreement_set(
             fallback.guarantee = "pac_under_model"
             fallback.level = 1.0 - delta
         else:
-            union = cands[0]
-            n_rows = math.prod(cards[p] for p in union)
+            # The flat table is too large to build: no information (one simplex row,
+            # no parents), never a refuted candidate's row space.
+            union = ()
             dtype = balls[cands[0]].center.dtype
             fallback = L1BallSet(
                 level=1.0 - delta, guarantee="pac_under_model",
-                unseen=torch.ones(n_rows, dtype=torch.bool, device=device),
-                center=torch.full((n_rows, k), 1.0 / k, dtype=dtype, device=device),
-                radius=torch.full((n_rows,), 2.0, dtype=dtype, device=device),
+                unseen=torch.ones(1, dtype=torch.bool, device=device),
+                center=torch.full((1, k), 1.0 / k, dtype=dtype, device=device),
+                radius=torch.full((1,), 2.0, dtype=dtype, device=device),
             )
         return AgreementSet(
             parents=union, parent_cards=[cards[p] for p in union], set=fallback,
@@ -358,20 +380,27 @@ def agreement_set(
             f"The survivors' parents {union} span {n_rows} rows (> max_rows={max_rows}); "
             "lower max_parents, restrict inputs, or raise max_rows."
         )
-    grid = parent_grid(union_cards, device)
-    centers, radii, seen = [], [], []
+    # Two streaming passes over the survivors: memory O(R K), whatever their number.
+    def lifted(s: Family, table: torch.Tensor) -> torch.Tensor:
+        """A survivor's [R_s, C] table broadcast to the union rows [R, C]."""
+        in_u = tuple(p for p in union if p in s)
+        t = _reorder_parents(table, [cards[p] for p in s], s, in_u)
+        shape = [cards[p] if p in s else 1 for p in union] + [t.shape[-1]]
+        return t.reshape(shape).expand(*union_cards, t.shape[-1]).reshape(n_rows, t.shape[-1])
+
+    mean = torch.zeros(n_rows, k, dtype=balls[survivors[0]].center.dtype, device=device)
+    all_seen = torch.ones(n_rows, dtype=torch.bool, device=device)
     for s in survivors:
-        cols = [union.index(p) for p in s]
-        rows = parent_row_index(grid[:, cols], [cards[p] for p in s])
         b = balls[s]
-        centers.append(b.center[rows])
-        radii.append(b.radius[rows])
-        seen.append(~b.unseen[rows])
-    center_stack = torch.stack(centers)                    # [S, R, K]
-    radius_stack = torch.stack(radii)                      # [S, R]
-    all_seen = torch.stack(seen).all(0)                    # [R]
-    mean = center_stack.mean(0)
-    radius = ((center_stack - mean).abs().sum(-1) + radius_stack).amax(0).clamp_max(2.0)
+        mean += lifted(s, b.center)
+        all_seen &= lifted(s, (~b.unseen).unsqueeze(-1).to(mean.dtype))[:, 0] > 0.5
+    mean /= len(survivors)
+    radius = torch.zeros(n_rows, dtype=mean.dtype, device=device)
+    for s in survivors:
+        b = balls[s]
+        spread = (lifted(s, b.center) - mean).abs().sum(-1) + lifted(s, b.radius.unsqueeze(-1))[:, 0]
+        radius = torch.maximum(radius, spread)
+    radius = radius.clamp_max(2.0)
     mean = torch.where(all_seen.unsqueeze(-1), mean, torch.full_like(mean, 1.0 / k))
     radius = torch.where(all_seen, radius, torch.full_like(radius, 2.0))
     result_set = L1BallSet(
@@ -385,3 +414,14 @@ def agreement_set(
         flat_with_set=with_set_on_coverage(~all_seen, union),
         **common,
     )
+
+
+def _digits(index: torch.Tensor, cards: List[int]) -> torch.Tensor:
+    """Rows ``[n, len(cards)]`` of the C-order configurations with flat ``index``."""
+    out = []
+    rest = index
+    for c in reversed(cards):
+        out.append(rest % c)
+        rest = rest // c
+    return torch.stack(out[::-1], -1) if out else torch.zeros(index.shape[0], 0, dtype=torch.long,
+                                                              device=index.device)
