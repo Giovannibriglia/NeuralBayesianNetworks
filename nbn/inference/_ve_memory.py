@@ -180,7 +180,13 @@ _CUDA_NO_EFFECT = frozenset({
     "pinned_use_background_threads", "pinned_reserve_segment_size_mb",
     "graph_capture_record_stream_reuse", "per_process_memory_fraction",
 })
-_ROUNDUP_INTERVALS = 17   # buckets from 1 MiB to 64 GiB, by powers of two
+# roundup_power2_divisions buckets: the power-of-two "size intervals between
+# 1MB and 64GB" (c10/core/AllocatorConfig.h, torch 2.14), i.e. [1, 2) MiB ..
+# [32, 64) GiB = 16, larger sizes in the last one.  The constant itself
+# (kRoundUpPowerOfTwoIntervals) is defined in AllocatorConfig.cpp, which is not
+# shipped with the wheel, so this follows the header's description; 16 vs 17
+# only changes requests of 32 GiB and more.
+_ROUNDUP_INTERVALS = 16
 
 
 class _CudaConf(NamedTuple):
@@ -327,21 +333,63 @@ def _cuda_conf(text: str | None) -> _CudaConf:
     return _parse_cuda_conf(text)
 
 
-def cuda_allocator_conf() -> str:
-    """The allocator configuration the CUDA estimate follows: the
-    ``PYTORCH_CUDA_ALLOC_CONF`` environment variable (what torch reads at
-    start-up; ``torch.cuda.memory._set_allocator_settings`` cannot be read
-    back, so callers who use it should set the variable too), plus the
-    backend torch reports."""
-    text = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "") or ""
+# Environment variables torch reads for the caching allocator's settings.
+# torch 2.14 (installed headers): ``CUDAAllocatorConfig::instance()``
+# (c10/cuda/CUDAAllocatorConfig.h) reads PYTORCH_CUDA_ALLOC_CONF, then —
+# on ROCm only — PYTORCH_HIP_ALLOC_CONF, then PYTORCH_ALLOC_CONF; but the
+# settings this module models (max_split_size_mb, roundup_power2_divisions,
+# expandable_segments, ...) live in ``AcceleratorAllocatorConfig``
+# (c10/core/AllocatorConfig.h), documented as "the primary environment
+# variable is PYTORCH_ALLOC_CONF; PYTORCH_CUDA_ALLOC_CONF is also supported
+# with lower priority" — and its reader (AllocatorConfig.cpp) is not shipped,
+# so the precedence between the two cannot be confirmed (with both set,
+# torch 2.14's settings getter even fails an internal assert).  Hence no
+# precedence is assumed: every set variable is a candidate (``cuda_allocator_confs``).
+_ALLOC_CONF_VARS = ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_HIP_ALLOC_CONF", "PYTORCH_ALLOC_CONF")
+
+
+def _live_allocator_settings() -> str:
+    """The settings string torch last parsed (``getAllocatorSettings``): what
+    it read from the environment at start-up, or the last
+    ``torch._C._accelerator_setAllocatorSettings`` call.  "" when unavailable."""
+    getter = getattr(torch._C, "_accelerator_getAllocatorSettings", None)
+    if getter is None:
+        return ""
+    try:
+        return getter() or ""
+    except Exception:  # noqa: BLE001  — e.g. torch 2.14 with two variables set
+        return ""
+
+
+def cuda_allocator_confs() -> tuple[str, ...]:
+    """Every configuration the CUDA allocator may be running under.
+
+    The estimate prices the *largest* reserve over them, so it can never be
+    optimistic about which one is in effect:
+
+    * the default ("") — torch reads the environment once, when the
+      allocator is first configured, so a variable set (or changed) after
+      that, e.g. from a notebook, is not in effect (#301 review 4);
+    * each set variable of ``_ALLOC_CONF_VARS`` (the HIP one on ROCm only) —
+      their precedence is not fixed here (see ``_ALLOC_CONF_VARS``);
+    * the settings string torch reports (``_live_allocator_settings``).
+
+    ``torch.cuda.memory._set_allocator_settings`` updates are seen only as
+    their last string; callers who use it should set the variable too.  The
+    backend torch reports is prefixed to every candidate.
+    """
+    names = [v for v in _ALLOC_CONF_VARS
+             if v != "PYTORCH_HIP_ALLOC_CONF" or getattr(torch.version, "hip", None)]
+    texts = {""} | {os.environ.get(v, "") for v in names} | {_live_allocator_settings()}
+    backend = "native"
     if torch.cuda.is_available():
         try:
             backend = torch.cuda.get_allocator_backend()
         except Exception:  # noqa: BLE001  — no device, driver error
             backend = "native"
-        if backend != "native":
-            text = f"backend:{backend},{text}" if text else f"backend:{backend}"
-    return text
+    if backend != "native":
+        texts = {f"backend:{backend},{t}" if t else f"backend:{backend}" for t in texts}
+    return tuple(sorted(texts))
 
 
 class _Segment:
@@ -525,11 +573,13 @@ def _expandable_peak(sizes: Sequence[float], sign: Sequence[int], ref: Sequence[
 
 
 def _cuda_reserved_peak(sizes: Sequence[float], sign: Sequence[int],
-                        ref: Sequence[int], *, conf: str | None = None) -> float:
+                        ref: Sequence[int], *,
+                        conf: str | tuple[str, ...] | None = None) -> float:
     """Peak reserved bytes of ``CUDACachingAllocator`` replaying the tape.
 
-    ``conf`` is a ``PYTORCH_CUDA_ALLOC_CONF`` string (default: the process's,
-    ``cuda_allocator_conf``).  Default configuration: a request rounded up to
+    ``conf`` is an allocator settings string, or several (the largest reserve
+    over them is returned); default: every configuration the process may be
+    running under (``cuda_allocator_confs``).  Default configuration: a request rounded up to
     512 B takes the smallest cached free block of its pool (<= 1 MiB: small
     pool, else large) that fits, splitting it when the rest is >= 512 B
     (small) or > 1 MiB (large); without one, a new segment of 2 MiB (small),
@@ -539,7 +589,16 @@ def _cuda_reserved_peak(sizes: Sequence[float], sign: Sequence[int],
     one mapping per pool (``_expandable_peak``).  Under another backend or an
     unknown setting no free is credited: every allocation is priced as new.
     """
-    c = _cuda_conf(cuda_allocator_conf() if conf is None else conf)
+    texts = cuda_allocator_confs() if conf is None else conf
+    if not isinstance(texts, str):
+        confs = {_cuda_conf(t) for t in texts}
+        return max(_cuda_one_peak(sizes, sign, ref, c) for c in confs)
+    return _cuda_one_peak(sizes, sign, ref, _cuda_conf(texts))
+
+
+def _cuda_one_peak(sizes: Sequence[float], sign: Sequence[int], ref: Sequence[int],
+                   c: _CudaConf) -> float:
+    """``_cuda_reserved_peak`` under one parsed configuration."""
     if not c.known:
         keep = [i for i, g in enumerate(sign) if g > 0]
         return _segment_peak([sizes[i] for i in keep], [1] * len(keep),
@@ -571,7 +630,7 @@ def _mps_heap_peak(sizes: Sequence[float], sign: Sequence[int],
 
 
 def _replay(tape: tuple, B: int, dtype_bytes: int, device_type: str,
-            conf: str | None = None) -> tuple[float, float]:
+            conf: str | tuple[str, ...] | None = None) -> tuple[float, float]:
     """``(peak, end)`` bytes the device holds replaying ``tape`` at ``B`` rows.
 
     CPU: the running sum of live bytes (64 B aligned) — ``end`` is what is
@@ -622,7 +681,7 @@ class _PlanCost(NamedTuple):
     def peak(self, B: int, dtype_bytes: int, device_type: str, embed: tuple = ()) -> float:
         """Peak bytes of the plan (and a joint answer's embedding) at ``B``
         rows, memoised: repeated queries of one shape replay it once."""
-        conf = cuda_allocator_conf() if device_type == "cuda" else None
+        conf = cuda_allocator_confs() if device_type == "cuda" else None
         key = (B, dtype_bytes, device_type, embed, conf)
         if key not in self.memo:
             tape = _concat([self.tape, embed]) if embed else self.tape
@@ -634,7 +693,7 @@ class _PlanCost(NamedTuple):
         """Peak bytes of running the plan once per entry of ``rows``, in
         order, on one allocator: what a chunked batch leaves cached for the
         next chunk is replayed, not assumed reusable.  Memoised like ``peak``."""
-        conf = cuda_allocator_conf() if device_type == "cuda" else None
+        conf = cuda_allocator_confs() if device_type == "cuda" else None
         key = (rows, dtype_bytes, device_type, embed, conf)
         if key not in self.memo:
             one = _concat([self.tape, embed]) if embed else self.tape
@@ -903,10 +962,18 @@ class _PeakModel:
         its request by more than ``max_non_split_rounding_mb`` — so a chunk
         priced alone under-estimated the call (#301 CUDA phase).  CPU chunks
         do not interact; MPS credits no free and prices every chunk as new.
+
+        Two chunks plus the remainder is *not* a bound on its own once a
+        batch has more than three chunks: every finished chunk's answer stays
+        alive until the final concatenation.  The bound holds together with
+        the ``held`` reserve the chunk sizer subtracts first (``reserve_bytes``:
+        the batch's evidence, the finished answers and their concatenation),
+        which ``test_cuda_sequence_of_two_chunks_and_remainder_plus_held_covers_k_chunks``
+        checks against an explicit replay of twelve chunks (#301 review 4).
         """
         if B not in self._memo:
             dt, dev = self.dtype_bytes, self.device_type
-            conf = cuda_allocator_conf() if dev == "cuda" else None
+            conf = cuda_allocator_confs() if dev == "cuda" else None
             if dev == "cuda" and self.rows > B:
                 rem = self.rows % B
                 seq = (B, B) + ((rem,) if rem else ())

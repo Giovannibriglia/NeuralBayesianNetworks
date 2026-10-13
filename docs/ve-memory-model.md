@@ -49,7 +49,7 @@ element counts, so one tape prices every `B`.
 |---|---|
 | CPU | the running sum of live bytes, 64 B aligned |
 | MPS | a simulation of Metal heaps under PyTorch's MPS allocator, with the same segment machinery as CUDA. Heap classes: buffers up to 1 MiB use 8 MiB heaps; up to 10 MiB, 32 MiB heaps; up to 512 MiB, 1 GiB heaps; larger buffers get an exact heap rounded to 16 MiB. Buffers are rounded to 256 B, or to 1/64 of the next power of two above 1 MiB. With a sync after every op, freed buffers return their space to the heap, holes coalesce, and a request that no single hole fits opens a new heap. In a real call no free is credited at all: MPS runs asynchronously, and a buffer freed while queued GPU work still uses it cannot be reused yet. Measured on barley q2 at B=64: 73 MiB of driver growth unsynchronised, 33 MiB synchronised. Everything here was measured on Apple unified memory with torch 2.14. |
-| CUDA | a simulation of `CUDACachingAllocator`. A request is rounded to 512 B. It takes the best-fitting cached free block of its pool (requests up to 1 MiB use the small pool), and that block is split when the rest is at least 512 B (small pool) or more than 1 MiB (large pool). Otherwise a new segment is created: 2 MiB, 20 MiB for requests under 10 MiB, or the request rounded up to 2 MiB. Freed blocks merge with free neighbours and stay cached. The estimate is the peak *reserved* bytes, which includes freed segments that later requests cannot reuse. The settings of `PYTORCH_CUDA_ALLOC_CONF` that change the reserve are followed (`_cuda_policy`): `max_split_size_mb` (oversize blocks are neither split nor reused for smaller requests, and an oversize request accepts a cached block at most `max_non_split_rounding_mb` larger), `roundup_power2_divisions` (requests round up to power-of-two divisions, single value or per-bucket list), `expandable_segments` (one mapping per pool that grows in place by 20 MiB / 2 MiB units, reusing the free block at its end) and `large_segment_size_mb`. `garbage_collection_threshold` and the host-memory, lock and graph-capture keys do not change what a call reserves. `backend:cudaMallocAsync` or a key the model does not know falls back to crediting no free, as on MPS. The variable is read at each estimate; `torch.cuda.memory._set_allocator_settings` cannot be read back. |
+| CUDA | a simulation of `CUDACachingAllocator`. A request is rounded to 512 B. It takes the best-fitting cached free block of its pool (requests up to 1 MiB use the small pool), and that block is split when the rest is at least 512 B (small pool) or more than 1 MiB (large pool). Otherwise a new segment is created: 2 MiB, 20 MiB for requests under 10 MiB, or the request rounded up to 2 MiB. Freed blocks merge with free neighbours and stay cached. The estimate is the peak *reserved* bytes, which includes freed segments that later requests cannot reuse. The settings of `PYTORCH_CUDA_ALLOC_CONF` that change the reserve are followed (`_cuda_policy`): `max_split_size_mb` (oversize blocks are neither split nor reused for smaller requests, and an oversize request accepts a cached block at most `max_non_split_rounding_mb` larger), `roundup_power2_divisions` (requests round up to power-of-two divisions, single value or per-bucket list), `expandable_segments` (one mapping per pool that grows in place by 20 MiB / 2 MiB units, reusing the free block at its end) and `large_segment_size_mb`. `garbage_collection_threshold` and the host-memory, lock and graph-capture keys do not change what a call reserves. `backend:cudaMallocAsync` or a key the model does not know falls back to crediting no free, as on MPS. Which configuration is in effect is not assumed: see "CUDA allocator configuration" below. |
 
 The result is multiplied by `_LIVESET_SAFETY = 1.10`.
 
@@ -163,6 +163,41 @@ Out of scope:
   one simulated allocator (what identical chunks leave cached is reused, what
   a smaller remainder cannot reuse is counted); a chunk size that shrinks
   mid-batch (live headroom) is not replayed;
-- the CUDA simulation follows `PYTORCH_CUDA_ALLOC_CONF`; settings applied
-  with `torch.cuda.memory._set_allocator_settings` alone are invisible to it
-  (set the variable as well).
+- on CUDA, the two full chunks plus the remainder are not a bound on their
+  own for more than three chunks, because finished answers stay alive. The
+  bound holds together with the `held` reserve the sizer subtracts (the
+  batch's evidence, the finished answers and their concatenation). A test
+  replays twelve chunks against it;
+- runtime settings (`torch._C._accelerator_setAllocatorSettings` /
+  `torch.cuda.memory._set_allocator_settings`) are seen only through torch's
+  last settings string; set the variable as well.
+
+### CUDA allocator configuration
+
+torch 2.14 reads the allocator settings from three variables. According to the
+installed headers:
+
+- `CUDAAllocatorConfig::instance()` (`c10/cuda/CUDAAllocatorConfig.h`) reads
+  `PYTORCH_CUDA_ALLOC_CONF`, then `PYTORCH_HIP_ALLOC_CONF` (ROCm builds
+  only), then `PYTORCH_ALLOC_CONF`.
+- The settings modelled here, however, belong to `AcceleratorAllocatorConfig`
+  (`c10/core/AllocatorConfig.h`). Its documentation names `PYTORCH_ALLOC_CONF`
+  as the primary variable and `PYTORCH_CUDA_ALLOC_CONF` as the lower-priority
+  one.
+- Its reader is in `AllocatorConfig.cpp`, which is not shipped, so the
+  precedence cannot be confirmed. With both variables set, torch 2.14's
+  settings getter even fails an internal assert.
+
+So no precedence is assumed. The CUDA estimate is the **largest** reserve over
+every configuration the process may be running under
+(`_ve_memory.cuda_allocator_confs`):
+
+- the default configuration. torch reads the variables once, when the
+  allocator is first configured, so a variable set or changed later (say from
+  a notebook) is not in effect. With `expandable_segments` alone the estimate
+  could otherwise be 0.82x of the default one;
+- each set variable (the HIP one on ROCm only);
+- the settings string torch reports (`torch._C._accelerator_getAllocatorSettings`).
+
+When nothing is set, this is the default configuration alone, and the
+estimates are unchanged.

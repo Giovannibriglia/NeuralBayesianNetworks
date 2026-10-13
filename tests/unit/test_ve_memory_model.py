@@ -35,6 +35,18 @@ from nbn.inference._ve_memory import (
 MiB = 1 << 20
 
 
+@pytest.fixture(autouse=True)
+def _no_allocator_conf(monkeypatch):
+    """The CUDA estimate prices every allocator configuration the process may
+    run under (``cuda_allocator_confs``): isolate these tests from the
+    caller's environment and from torch's live settings (#301 review 4)."""
+    from nbn.inference import _ve_memory
+
+    for var in ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_HIP_ALLOC_CONF", "PYTORCH_ALLOC_CONF"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(_ve_memory, "_live_allocator_settings", lambda: "", raising=False)
+
+
 def _fit(edges, cards, seed=0, mechs=None):
     g = torch.Generator().manual_seed(seed)
     m = NBN(edges, variables={n: ("discrete", k) for n, k in cards.items()}, device="cpu")
@@ -556,9 +568,9 @@ def test_cuda_allocator_conf_is_parsed_like_torch():
                          "large_segment_size_mb:64")
     assert (c.max_split, c.non_split_rounding, c.expandable, c.large_segment, c.known) == (
         128 * MiB, 40 * MiB, True, 64 * MiB, True)
-    assert _parse_cuda_conf("roundup_power2_divisions:4").divisions == (4,) * 17
+    assert _parse_cuda_conf("roundup_power2_divisions:4").divisions == (4,) * 16
     d = _parse_cuda_conf("roundup_power2_divisions:[64:8,256:4,>:1]").divisions
-    assert d[:7] == (8,) * 7 and d[7] == 0 and d[8:] == (1,) * 9   # ">" fills from the last bucket on
+    assert d[:7] == (8,) * 7 and d[7] == 0 and d[8:] == (1,) * 8   # ">" fills from the last bucket on
     assert _parse_cuda_conf("backend:native,pinned_use_background_threads:True").known
     assert not _parse_cuda_conf("backend:cudaMallocAsync").known
     assert not _parse_cuda_conf("some_future_key:1").known
@@ -572,15 +584,15 @@ def test_cuda_rounding_follows_power2_divisions():
 
     assert _cuda_round(1) == 512
     assert _cuda_round(513) == 1024
-    four = (4,) * 17
+    four = (4,) * 16
     assert _cuda_round(5 * MiB, four) == 5 * MiB           # 4 MiB floor, 1 MiB steps
     assert _cuda_round(4.5 * MiB, four) == 5 * MiB
     assert _cuda_round(2.1 * MiB, four) == 2.5 * MiB       # 2 MiB floor, 512 KiB steps
     assert _cuda_round(3 * MiB, four) == 3 * MiB
     assert _cuda_round(2 * MiB, four) == 2 * MiB            # powers of two are kept
     assert _cuda_round(1000, four) == 1024                   # size <= 512 * divisions: 512 B rounding
-    assert _cuda_round(4.5 * MiB, (1,) * 17) == 4.5 * MiB   # divisions 1: plain rounding
-    assert _cuda_round(3 * MiB + 1, (2,) * 17) == 4 * MiB   # 2 divisions: 1 MiB steps above 2 MiB
+    assert _cuda_round(4.5 * MiB, (1,) * 16) == 4.5 * MiB   # divisions 1: plain rounding
+    assert _cuda_round(3 * MiB + 1, (2,) * 16) == 4 * MiB   # 2 divisions: 1 MiB steps above 2 MiB
 
 
 def test_cuda_max_split_size_blocks_oversize_reuse():
@@ -656,7 +668,7 @@ def test_cuda_estimate_follows_the_process_allocator_conf(monkeypatch, models):
     pm = eng._peak_model(model36, "V18", ev, B=B)
     pm.device_type = "cuda"
     assert pm.bytes(B) >= 339_738_624
-    assert _ve_memory.cuda_allocator_conf().endswith("roundup_power2_divisions:4")
+    assert "roundup_power2_divisions:4" in _ve_memory.cuda_allocator_confs()
 
 
 def test_cuda_chunks_are_priced_as_a_sequence(monkeypatch):
@@ -687,3 +699,102 @@ def test_cuda_chunks_are_priced_as_a_sequence(monkeypatch):
     for dev in ("cpu", "mps"):
         pm.device_type = dev
         assert pm.child(rows=B).bytes(18) == pm.child().bytes(18)
+
+
+# --------------------------------------------------------------------------- #
+# Review round 4: which allocator configuration is in effect
+# --------------------------------------------------------------------------- #
+
+def _wide30_chunk_model():
+    model = _wide(30, 3, 4, seed=1)
+    B = 64
+    ev = _evidence(model, [f"V{i}" for i in range(24, 30)], B)
+    eng = TensorVariableElimination()
+    eng._extract_factors(model)
+    pm = eng._peak_model(model, "V12", ev, B=B)
+    pm.device_type = "cuda"
+    return pm
+
+
+def test_cuda_estimate_reads_pytorch_alloc_conf(monkeypatch):
+    """#301 review 4: torch >= 2.9 also reads ``PYTORCH_ALLOC_CONF`` (the
+    device-generic variable).  With only it set to ``max_split_size_mb:128``
+    the wide30 18-row chunk was priced 899,678,209 B against a measured
+    reserve of 1,149,239,296 B."""
+    monkeypatch.setenv("PYTORCH_ALLOC_CONF", "max_split_size_mb:128")
+    assert _wide30_chunk_model().child(rows=64).bytes(18) >= 1_149_239_296
+
+
+def test_cuda_estimate_covers_every_set_variable(monkeypatch):
+    """Two variables set and disagreeing: their precedence differs between
+    torch's two config classes, so the estimate is the larger of both."""
+    from nbn.inference import _ve_memory
+
+    def priced():
+        return _wide30_chunk_model().child(rows=64).bytes(18)
+
+    singles = []
+    for var, conf in (("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"),
+                      ("PYTORCH_ALLOC_CONF", "max_split_size_mb:128")):
+        monkeypatch.setenv(var, conf)
+        singles.append(priced())
+        monkeypatch.delenv(var)
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    monkeypatch.setenv("PYTORCH_ALLOC_CONF", "max_split_size_mb:128")
+    assert priced() == max(singles)
+    # The HIP variable counts on ROCm builds only.
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF")
+    monkeypatch.delenv("PYTORCH_ALLOC_CONF")
+    monkeypatch.setenv("PYTORCH_HIP_ALLOC_CONF", "max_split_size_mb:128")
+    monkeypatch.setattr(torch.version, "hip", None)
+    assert "max_split_size_mb:128" not in _ve_memory.cuda_allocator_confs()
+    monkeypatch.setattr(torch.version, "hip", "6.2")
+    assert "max_split_size_mb:128" in _ve_memory.cuda_allocator_confs()
+
+
+def test_cuda_estimate_never_below_the_default_configuration(monkeypatch):
+    """#301 review 4: torch reads the variable once, when the allocator is
+    configured; one set later (a notebook) is not in effect.  The estimate
+    therefore also prices the default configuration: ``expandable_segments``
+    alone can be 0.82x of it (link q3, B=4096)."""
+    from nbn.inference._ve_memory import _replay
+
+    pm = _wide30_chunk_model()
+    default = pm.bytes(64)
+    tape = pm.cost.tape
+    expandable = _replay(tape, 64, 4, "cuda", "expandable_segments:True")[0]
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    pm._memo = {}
+    assert pm.bytes(64) >= default
+    assert pm.bytes(64) >= expandable
+    # So does a setting applied at run time, seen through torch's settings string.
+    from nbn.inference import _ve_memory
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF")
+    monkeypatch.setattr(_ve_memory, "_live_allocator_settings",
+                        lambda: "max_split_size_mb:128")
+    assert pm.child(rows=64).bytes(18) >= 1_149_239_296
+
+
+@pytest.mark.parametrize("conf", ["", "max_split_size_mb:128", "expandable_segments:True"])
+def test_cuda_sequence_of_two_chunks_and_remainder_plus_held_covers_k_chunks(conf):
+    """#301 review 4: a chunk model prices two full chunks and the remainder;
+    with k > 3 chunks the finished chunks' answers stay alive as well.  That
+    is covered by the ``held`` reserve the sizer subtracts (finished answers
+    and their concatenation, 2.2x the batch's answer): replay twelve chunks
+    explicitly and check chunk estimate + held bounds it."""
+    from nbn.inference._ve_memory import _LIVESET_SAFETY, _concat, _fold, _replay
+
+    cards = {"Y": 64, **{f"X{i}": 3 for i in range(10)}}
+    model = _fit([("Y", f"X{i}") for i in range(10)], cards)
+    c, k = 40_000, 12
+    B = c * (k - 1) + c // 2
+    ev = _evidence(model, [f"X{i}" for i in range(10)], 8)
+    eng = TensorVariableElimination()
+    eng._extract_factors(model)
+    pm = eng._peak_model(model, "Y", {n: v[:1].expand(B) for n, v in ev.items()}, B=B)
+    pm.device_type = "cuda"
+    rows = (c,) * (k - 1) + (B - c * (k - 1),)
+    full = _replay(_concat([_fold(pm.cost.tape, n) for n in rows]), 1, 4, "cuda", conf)[0]
+    with mock.patch("nbn.inference._ve_memory.cuda_allocator_confs", return_value=(conf,)):
+        priced = pm.child(rows=B).bytes(c) + pm.reserve_bytes(B)
+    assert priced >= _LIVESET_SAFETY * full, (priced, full)
