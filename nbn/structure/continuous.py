@@ -78,6 +78,8 @@ class FactorMechanisms:
     # Final training loss per factor (MLP kinds), for diagnostics.
     train_loss: Dict[Factor, float] = field(default_factory=dict)
     config: dict = field(default_factory=dict)
+    # The device the mechanisms were fitted on (calibration data is moved there).
+    device: torch.device = field(default_factory=lambda: torch.device("cpu"))
 
     def __getitem__(self, factor: Factor) -> nn.Module:
         node, parents = factor
@@ -129,7 +131,10 @@ def fit_factors(
 
     ``alpha`` is the Dirichlet smoothing of the table factors and discrete
     roots; ``consolidate`` stores the online-update state of the neural
-    categorical factors (so ``model.update`` works), as ``fit`` does.  Each
+    categorical factors (so ``model.update`` works), as ``fit`` does: one
+    per-sample Fisher pass per neural candidate (up to 4096 rows each), which
+    can cost more than the batched training itself; pass
+    ``consolidate=False`` when no online update is needed.  Each
     candidate's initial weights come from a generator seeded by ``seed`` and
     the factor itself, so adding or reordering candidates does not change
     another candidate's fit.
@@ -184,12 +189,12 @@ def fit_factors(
                 for i, c in enumerate(neural_cands):
                     mech = StructuralNeuralCategorical(n_classes=k, hidden=categorical_hidden,
                                                        activation="relu", coupling=coupling)
-                    mech.set_network(net.export(i, order=_cols_in_candidate_order(col_of, c)),
+                    mech.set_network(net.export(i, order=orders[i]),
                                      d_pa=sum(len(col_of[p]) for p in c))
                     mech.noise.n_classes = k
                     mech.to(dev)
                     if consolidate:
-                        pa_c = z[:, _cols_in_candidate_order(col_of, c)]
+                        pa_c = z[:, orders[i]]
                         online_laplace.consolidate(mech, y, pa_c, weights=w)
                     mechs[(node, c)], kinds[(node, c)] = mech, "categorical_mlp"
                     losses[(node, c)] = final[i]
@@ -225,7 +230,7 @@ def fit_factors(
                 batch_size=batch_size, order_generator=torch.Generator().manual_seed(_seed(seed, node, ())),
             )
             for i, c in enumerate(with_parents):
-                cols = _cols_in_candidate_order(col_of, c)
+                cols = orders[i]
                 mech = AdditiveNoiseMechanism(location="mlp", noise=noise, hidden=hidden)
                 mech.set_mlp_location(net.export(i, order=cols),
                                       mean[cols], std[cols], output_dim=x.shape[1])
@@ -233,9 +238,10 @@ def fit_factors(
                 mechs[(node, c)], kinds[(node, c)] = mech, "mlp"
                 losses[(node, c)] = final[i]
 
-    root_mechs = _fit_roots(hs, data, w, noise, alpha, coupling)
+    root_mechs = _fit_roots(hs, data, w, noise, alpha, coupling, counts)
     return FactorMechanisms(
         hypothesis_set=hs, mechanisms=mechs, roots=root_mechs, kinds=kinds, train_loss=losses,
+        device=dev,
         config={"location": location, "noise": noise, "hidden": hidden, "seed": seed,
                 "categorical_hidden": list(categorical_hidden), "coupling": coupling, "alpha": alpha},
     )
@@ -281,21 +287,27 @@ def _fit_linear_subblocks(x, pa_union, col_of, cands, w, noise) -> Dict[Tuple[st
     return out
 
 
-def _fit_roots(hs, data, w, noise, alpha: float = 0.0, coupling: str = "gumbel_max") -> Dict[str, nn.Module]:
-    """A fitted root mechanism for every input that some candidate uses."""
+def _fit_roots(hs, data, w, noise, alpha: float = 0.0, coupling: str = "gumbel_max",
+               counts=None) -> Dict[str, nn.Module]:
+    """A fitted root mechanism for every input that some candidate uses.
+
+    A discrete input's marginal is summed out of the factor tables in
+    ``counts`` when one has it as a parent (no extra pass), else counted.
+    """
     from nbn.scm.categorical import StructuralCategoricalTable
     from nbn.scm.mechanisms import AdditiveNoiseMechanism
     from nbn.uncertainty.counts import count_table_for
 
     used = {p for cs in hs.candidates.values() for c in cs for p in c}
     roots: Dict[str, nn.Module] = {}
+    cached = counts.input_marginals if counts is not None else {}
     for v in hs.inputs:
         if v not in used or v not in data:
             continue
         var = hs.variables[v]
         if var.is_discrete:
             mech = StructuralCategoricalTable(alpha=alpha, coupling=coupling)
-            table, _ = count_table_for(hs.variables, data, v, (), w)
+            table = cached[v] if v in cached else count_table_for(hs.variables, data, v, (), w)[0]
             mech.fit_from_counts(table, [])
         else:
             mech = AdditiveNoiseMechanism(location="linear", noise=noise)
@@ -334,6 +346,11 @@ def calibrate_factors(
     if fitted.hypothesis_set is not hs:
         raise ValueError("These mechanisms were fitted by another HypothesisSet.")
     eligible = [f for f in hs.factors if fitted.kinds[f] != "table"]
+    multi = sorted({f[0] for f in eligible
+                    if not hs.variables[f[0]].is_discrete and int(hs.variables[f[0]].dim) != 1})
+    if multi:
+        raise ValueError(f"calibrated_sets needs 1-D continuous children; {multi} are multi-dimensional "
+                         "(quantiles, CDFs and conformal scores are per scalar child).")
     skipped = {f: "count-based table: use factor_sets (PAC)" for f in hs.factors if fitted.kinds[f] == "table"}
     if not eligible:
         raise ValueError("No continuous or neural factor to calibrate; use factor_sets.")
@@ -341,7 +358,7 @@ def calibrate_factors(
     # calibrated sets here and the PAC table sets of factor_sets(delta = 1 - level)
     # hold together at `level` (union bound over every factor).
     per_factor = (1.0 - level) / hs.n_factors
-    calibration_data = to_device(dict(calibration_data), _device_of(fitted))
+    calibration_data = to_device(dict(calibration_data), fitted.device)
     sets: Dict[Factor, Any] = {}
     guarantees: Dict[Factor, str] = {}
     models: Dict[Factor, Any] = {}
@@ -372,19 +389,12 @@ def _factor_model(hs, fitted: FactorMechanisms, node: str, parents: Tuple[str, .
     from nbn.scm import StructuralCausalModel
 
     variables = {v: hs.variables[v] for v in (*parents, node)}
-    model = StructuralCausalModel([(p, node) for p in parents], variables, device=str(_device_of(fitted)))
+    model = StructuralCausalModel([(p, node) for p in parents], variables, device=str(fitted.device))
     model.set_mechanism(node, fitted.mechanisms[(node, parents)])
     for p in parents:
         if p in fitted.roots:
             model.set_mechanism(p, fitted.roots[p])
     return model
-
-
-def _device_of(fitted: FactorMechanisms) -> torch.device:
-    for m in fitted.mechanisms.values():
-        for t in list(m.parameters()) + list(m.buffers()):
-            return t.device
-    return torch.device("cpu")
 
 
 def model_from_fitted(hs: HypothesisSet, fitted: FactorMechanisms, hypothesis: Mapping[str, Any],
@@ -395,7 +405,7 @@ def model_from_fitted(hs: HypothesisSet, fitted: FactorMechanisms, hypothesis: M
     hs._check_hypothesis(hypothesis)
     used = set(hs.targets) | {p for parents in hypothesis.values() for p in parents}
     variables = {v: spec for v, spec in hs.variables.items() if v in used}
-    model = StructuralCausalModel(hs.edges(hypothesis), variables, device=str(_device_of(fitted)))
+    model = StructuralCausalModel(hs.edges(hypothesis), variables, device=str(fitted.device))
     for node in model.dag.nodes():
         if node in hs.candidates:
             parents = tuple(hypothesis[node])

@@ -384,3 +384,63 @@ def test_mixed_set_edge_cases():
     only_continuous = HypothesisSet(VARS, {"x'": [("x",)]})
     with pytest.raises(ValueError, match="No count-based factor"):
         only_continuous.factor_sets(data)
+
+
+# ---------------------------------------------------------------------------
+# Third review round (#323)
+# ---------------------------------------------------------------------------
+
+VARS_2D = {"u": ("continuous", 1), "a": ("discrete", 2), "x'": ("continuous", 2), "d'": ("discrete", 2)}
+
+
+def _data_2d(n=200, seed=0):
+    g = torch.Generator().manual_seed(seed)
+    u = torch.randn(n, generator=g)
+    a = torch.randint(0, 2, (n,), generator=g)
+    x2 = torch.stack([u, -u], -1) + 0.1 * torch.randn(n, 2, generator=g)
+    return {"u": u, "a": a, "x'": x2, "d'": a.clone()}
+
+
+def test_weighted_fit_with_a_multidimensional_first_target():
+    hs = HypothesisSet(VARS_2D, {"x'": [("u",)], "d'": [("a",)]})
+    fm = hs.fit(_data_2d(), location="linear", weights=torch.ones(200))     # was: 400 rows expected
+    assert fm.kinds[("x'", ("u",))] == "linear" and fm.kinds[("d'", ("a",))] == "table"
+
+
+def test_calibrated_sets_refuse_multidimensional_children_up_front():
+    hs = HypothesisSet(VARS_2D, {"x'": [("u",)], "d'": [("a",)]})
+    fm = hs.fit(_data_2d(), location="linear")
+    with pytest.raises(ValueError, match="1-D continuous"):
+        hs.calibrated_sets(fm, _data_2d(seed=1))
+
+
+def test_mixed_factor_sets_count_every_factor_in_the_split():
+    data = simulate(1000)
+    hs = HypothesisSet(VARS, {**CANDS, "d'": [("a",), ("x",)]})
+    fs = hs.factor_sets(data, delta=0.1)
+    assert fs.n_factors == hs.n_factors and fs.n_sets == len(fs.sets) < fs.n_factors
+    assert fs.level == pytest.approx(1 - fs.n_factors * fs.delta_per_factor)
+
+
+def test_counts_name_the_factors_they_did_not_count():
+    data = simulate(500)
+    hs = HypothesisSet(VARS, CANDS)
+    fc = hs.counts(data, discrete_only=True)
+    assert ("x'", ("x", "a")) in fc.not_counted and ("d'", ("x",)) in fc.not_counted
+    assert torch.equal(fc[("d'", ("a",))], fc.tables[("d'", ("a",))])
+    with pytest.raises(KeyError, match="not counted"):
+        fc[("x'", ("x", "a"))]
+    with pytest.raises(KeyError, match="not counted"):
+        fc.for_hypothesis({"x'": ("x", "a"), "d'": ("a",)})
+
+
+@pytest.mark.parametrize("device", available_devices())
+def test_fitted_mechanisms_record_their_device_and_roots_reuse_the_counts(device):
+    from nbn.uncertainty import count_table_for
+
+    data = simulate(500, device=device)
+    hs = HypothesisSet(VARS, CANDS)
+    fm = hs.fit(data, location="linear")
+    assert fm.device.type == torch.device(device).type
+    direct, _ = count_table_for(hs.variables, data, "a", ())
+    torch.testing.assert_close(fm.roots["a"]._counts.to(direct), direct)

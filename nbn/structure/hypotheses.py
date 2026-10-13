@@ -294,17 +294,20 @@ class HypothesisSet:
         if not discrete_only:
             self._require_discrete()
         first = data[self.targets[0]]
-        n_rows = first.reshape(-1).shape[0]
+        n_rows = int(first.shape[0]) if first.dim() > 0 else 1   # rows; a column may be [N, D]
         weights = validate_weights(weights, n_rows, where="HypothesisSet.counts", device=first.device)
         tables: Dict[Factor, torch.Tensor] = {}
         cards: Dict[Factor, List[int]] = {}
         union_used: Dict[str, bool] = {}
         union_tables: Dict[str, Tuple[Tuple[str, ...], torch.Tensor]] = {}
+        not_counted: List[Factor] = []
         for node in self.targets:
             cs = self.candidates[node]
             if discrete_only:
                 if not self.variables[node].is_discrete:
+                    not_counted += [(node, c) for c in cs]
                     continue
+                not_counted += [(node, c) for c in cs if not all(self.variables[p].is_discrete for p in c)]
                 cs = [c for c in cs if all(self.variables[p].is_discrete for p in c)]
                 if not cs:
                     continue
@@ -344,7 +347,7 @@ class HypothesisSet:
         return FactorCounts(
             hypothesis_set=self, tables=tables, parent_cards=cards,
             union_used=union_used, weighted=weights is not None,
-            union_tables=union_tables,
+            union_tables=union_tables, not_counted=not_counted,
         )
 
     # ------------------------------------------------------------------
@@ -555,10 +558,19 @@ class FactorCounts:
     weighted: bool = False
     # Per target counted on the union path: (union parents, [R_union, K] table).
     union_tables: Dict[str, Tuple[Tuple[str, ...], torch.Tensor]] = field(default_factory=dict, repr=False)
+    # Factors left out by counts(discrete_only=True): continuous or mixed.
+    not_counted: List[Factor] = field(default_factory=list)
 
     def __getitem__(self, factor: Factor) -> torch.Tensor:
         node, parents = factor
+        self._require_counted([(node, tuple(parents))])
         return self.tables[(node, tuple(parents))]
+
+    def _require_counted(self, factors: List[Factor]) -> None:
+        missing = [f for f in factors if f in self.not_counted]
+        if missing:
+            raise KeyError(f"No count table for {missing}: continuous or mixed factors are not counted "
+                           f"(discrete_only=True); fit them with HypothesisSet.fit.")
 
     @property
     def input_marginals(self) -> Dict[str, torch.Tensor]:
@@ -573,6 +585,7 @@ class FactorCounts:
     def for_hypothesis(self, hypothesis: Mapping[str, Sequence[str]]) -> Dict[str, torch.Tensor]:
         """The count table of every target under one hypothesis (no copy)."""
         self.hypothesis_set._check_hypothesis(hypothesis)
+        self._require_counted([(n, tuple(p)) for n, p in hypothesis.items()])
         return {n: self.tables[(n, tuple(p))] for n, p in hypothesis.items()}
 
 
@@ -594,6 +607,16 @@ class FactorSets:
 
     @property
     def n_factors(self) -> int:
+        """Factors in the union-bound split: all of the hypothesis set's, skipped ones included.
+
+        ``level = 1 - n_factors * delta_per_factor``; :attr:`n_sets` counts
+        the factors that have a set here.
+        """
+        return self.hypothesis_set.n_factors
+
+    @property
+    def n_sets(self) -> int:
+        """Factors with a count-based set here (the others are in :attr:`skipped`)."""
         return len(self.sets)
 
     def __getitem__(self, factor: Factor) -> ProbabilitySet:
