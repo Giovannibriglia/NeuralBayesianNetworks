@@ -137,6 +137,7 @@ chosen = hs.model_for(next(hs.hypotheses()), sets.counts)   # fitted, no pass ov
 - `model_for(h, counts)` returns a fitted `NeuralBayesianNetwork` with
   table mechanisms set from the cached counts, equal to fitting that DAG
   directly.
+- Worked example: {doc}`../examples/14_structure_uncertainty_hypothesis_sets`.
 - Scope: discrete nodes and parents. Continuous and mixed factors are planned
   (issue #318); so is an agreement rule that combines the candidates of a
   node into one set (issue #313).

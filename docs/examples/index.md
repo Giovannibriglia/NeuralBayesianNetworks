@@ -32,6 +32,7 @@ force the CPU.
 | {doc}`11_continuous_noise_and_counterfactuals` | An MLP location with mixture noise, a DKW band on `P(a < X <= b | pa)`, and counterfactuals by exact abduction. |
 | {doc}`12_mdp_trajectories_factored_sets` | From logged episodes to a factored transition model with trajectory-valid probability sets, the budget split across variables. |
 | {doc}`13_discrete_counterfactuals` | Two declared couplings giving different counterfactuals from one kernel, sharp bounds over every compatible SCM, and calibration with a PIT band and conformal sets. |
+| {doc}`14_structure_uncertainty_hypothesis_sets` | Candidate parent sets per node with `HypothesisSet`: the factor cache, one set per factor with the budget split over factors, supersets against a missing parent, and `model_for`. |
 
 ```{toctree}
 :hidden:
@@ -50,4 +51,5 @@ force the CPU.
 11_continuous_noise_and_counterfactuals
 12_mdp_trajectories_factored_sets
 13_discrete_counterfactuals
+14_structure_uncertainty_hypothesis_sets
 ```
