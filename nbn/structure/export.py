@@ -117,7 +117,7 @@ def export_factored_sets(
     The output directory.
     """
     out = Path(path)
-    _prepare_dir(out, overwrite)
+    _check_target(out, overwrite)            # nothing is deleted before the export is complete
     if isinstance(state_vars, str) or isinstance(action_vars, str):
         raise TypeError("state_vars and action_vars must be sequences of names.")
     state_vars, action_vars = tuple(state_vars), tuple(action_vars)
@@ -162,7 +162,11 @@ def export_factored_sets(
             ps: ProbabilitySet = obj.table_set(node)
             record.update(set_type="noise_polytope", parameter=pid, guarantee=obj.guarantee,
                           level=obj.level, delta=None, sampling=None, assumptions=[])
-            arrays[f"{fid}/index"] = _np(obj.index[node]).astype(np.int64)
+            idx = _np(obj.index[node]).astype(np.int64)
+            if idx.shape != (math.prod(record["parent_cards"]), k):
+                raise ValueError(f"Noise index of '{node}' has shape {idx.shape}; its parents "
+                                 f"{parents} and {k} classes give {(math.prod(record['parent_cards']), k)}.")
+            arrays[f"{fid}/index"] = idx
         else:
             ps = obj.set if isinstance(obj, AgreementSet) else obj
             set_type = ("l1" if isinstance(ps, L1BallSet) else
@@ -180,20 +184,26 @@ def export_factored_sets(
                 arrays[f"{fid}/center"] = _np(ps.center)
                 arrays[f"{fid}/radius"] = _np(ps.radius)
             if isinstance(ps, SampleSet):
-                arrays[f"{fid}/samples"] = _np(ps.samples)
+                arrays[f"{fid}/samples"] = ps.samples.detach().cpu().numpy()     # keep the draws' dtype
             events.append((fid, float(1.0 - ps.level), ps.guarantee))
         if record.get("sampling") is None and isinstance(sets, FactorSets):
             record["sampling"] = sets.sampling
         lower, upper = ps.bounds()                  # once per factor
+        n_expected = math.prod(record["parent_cards"])
+        if lower.shape != (n_expected, k):
+            raise ValueError(f"The set of '{node}' has shape {tuple(lower.shape)}; its parents {parents} "
+                             f"and {k} classes give {(n_expected, k)} (wrong set or wrong parent order).")
+        unseen = ps.unseen if ps.unseen.numel() == n_expected else torch.zeros(
+            n_expected, dtype=torch.bool, device=lower.device)          # e.g. bootstrap sets: no unseen info
         lo, hi = _np(lower), _np(upper)
         arrays[f"{fid}/lower"] = lo
         arrays[f"{fid}/upper"] = hi
         if exact:
             arrays[f"{fid}/lower_num"], arrays[f"{fid}/upper_num"] = _outward(lo, hi, denominator)
-        arrays[f"{fid}/unseen"] = _np(ps.unseen).astype(bool)
+        arrays[f"{fid}/unseen"] = _np(unseen).astype(bool)
         if counts is not None:
             arrays[f"{fid}/counts"] = _np(counts.sum(-1))
-        rows_ok = _graph_preserving_rows(lower, upper) & ~ps.unseen.to(lower.device)
+        rows_ok = _graph_preserving_rows(lower, upper) & ~unseen.to(lower.device)
         record["graph_preserving"] = bool(rows_ok.all())
         record["n_rows"] = int(lower.shape[0])
         record["row_index"] = None
@@ -238,9 +248,9 @@ def export_factored_sets(
         "quantifiers": QUANTIFIERS,
         "exact": {"denominator": int(denominator)} if exact else None,
     }
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=False))
-    np.savez_compressed(out / "arrays.npz", **arrays)
+    for prm in params:                         # list only the tied nodes that are exported
+        prm["nodes"] = sorted(f["node"] for f in factors if f.get("parameter") == prm["id"])
+    _write_atomically(out, manifest, arrays)
     return out
 
 
@@ -250,12 +260,16 @@ class FactoredSetsExport:
 
     manifest: dict
     arrays: Dict[str, np.ndarray] = field(repr=False)
+    _by_id: Dict[str, dict] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        self._by_id = {f["id"]: f for f in self.manifest["factors"]}
 
     def factor(self, fid: str) -> dict:
-        for f in self.manifest["factors"]:
-            if f["id"] == fid:
-                return f
-        raise KeyError(f"No factor '{fid}'.")
+        try:
+            return self._by_id[fid]
+        except KeyError:
+            raise KeyError(f"No factor '{fid}'.") from None
 
     def array(self, fid: str, name: str) -> np.ndarray:
         if name == "row_index":
@@ -273,11 +287,8 @@ class FactoredSetsExport:
             return int(self.arrays[f["row_index"]][row])
         space = self.manifest["planning_space"]
         plan_vars = space["state_vars"] + space["action_vars"]
-        digits = dict(zip(plan_vars, np.unravel_index(int(row), space["cards"])))
-        index = 0
-        for p, card in zip(f["parents"], f["parent_cards"]):
-            index = index * card + int(digits[p])
-        return index
+        return int(_layout_rows(np.array([int(row)]), plan_vars, space["cards"], f["parents"],
+                                f["parent_cards"])[0])
 
     @property
     def n_hypotheses(self) -> int:
@@ -317,8 +328,9 @@ def joint_row_bounds(
     probability of ``(x'_1, .., x'_n)`` is the product of the factor rows the
     planning row uses, so its bounds are products of the factor bounds (all
     non-negative).  Returns ``lower``, ``upper`` with one axis per node (C
-    order) and the node order.  Unseen factor rows contribute ``[0, 1]``.
-    Works with or without stored row maps.
+    order) and the node order.  Unseen factor rows contribute ``[0, 1]``
+    whatever their stored bounds (e.g. a prior-only Dirichlet row).  Works
+    with or without stored row maps.
     """
     nodes = list(hypothesis)
     lower = np.ones(())
@@ -326,8 +338,11 @@ def joint_row_bounds(
     for node in nodes:
         fid = hypothesis[node]
         r = export.factor_row(fid, row)
-        lower = np.multiply.outer(lower, export.array(fid, "lower")[r])
-        upper = np.multiply.outer(upper, export.array(fid, "upper")[r])
+        lo, hi = export.array(fid, "lower")[r], export.array(fid, "upper")[r]
+        if bool(export.array(fid, "unseen")[r]):
+            lo, hi = np.zeros_like(lo), np.ones_like(hi)
+        lower = np.multiply.outer(lower, lo)
+        upper = np.multiply.outer(upper, hi)
     return lower, np.minimum(upper, 1.0), nodes
 
 
@@ -433,19 +448,25 @@ def _outward(lo: np.ndarray, hi: np.ndarray, denominator: int) -> Tuple[np.ndarr
     return num_lo.astype(np.int64), num_hi.astype(np.int64)
 
 
+def _layout_rows(rows: np.ndarray, plan_vars, plan_cards, parents, parent_cards) -> np.ndarray:
+    """Factor row of each planning row: C-order digits of ``rows``, re-raveled over ``parents``."""
+    digits = np.unravel_index(rows, list(plan_cards)) if len(plan_cards) else ()
+    if not parents:
+        return np.zeros(rows.shape, dtype=np.int64)
+    cols = [digits[list(plan_vars).index(p)] for p in parents]
+    return np.ravel_multi_index(cols, list(parent_cards)).astype(np.int64)
+
+
 def _row_index(parents: Tuple[str, ...], plan_vars: Tuple[str, ...], plan_cards: List[int]) -> np.ndarray:
-    """Factor row of every planning row, computed digit by digit (no dense grid)."""
+    """Factor row of every planning row (int32 when it fits)."""
     n_plan = math.prod(plan_cards)
-    strides = [math.prod(plan_cards[i + 1:]) for i in range(len(plan_cards))]
-    rows = np.arange(n_plan, dtype=np.int64)
-    index = np.zeros(n_plan, dtype=np.int64)
-    for p in parents:
-        i = plan_vars.index(p)
-        index = index * plan_cards[i] + (rows // strides[i]) % plan_cards[i]
-    return index
+    cards = [plan_cards[plan_vars.index(p)] for p in parents]
+    index = _layout_rows(np.arange(n_plan, dtype=np.int64), plan_vars, plan_cards, parents, cards)
+    return index.astype(np.int32) if math.prod(cards) < 2**31 else index
 
 
-def _prepare_dir(out: Path, overwrite: bool) -> None:
+def _check_target(out: Path, overwrite: bool) -> None:
+    """Refuse a non-export target up front; nothing is deleted here."""
     if out.exists() and not out.is_dir():
         raise FileExistsError(f"{out} exists and is not a directory; the export is a directory.")
     if out.is_dir():
@@ -455,8 +476,34 @@ def _prepare_dir(out: Path, overwrite: bool) -> None:
         others = present - {"manifest.json", "arrays.npz"}
         if others:
             raise FileExistsError(f"{out} holds other files {sorted(others)}; refusing to overwrite.")
-        for name in present:
-            (out / name).unlink()
+
+
+def _write_atomically(out: Path, manifest: dict, arrays: Dict[str, np.ndarray]) -> None:
+    """Write into a temporary sibling directory, then swap it in (an old export survives a failure)."""
+    import os
+    import shutil
+    import tempfile
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=f".{out.name}.", dir=out.parent))
+    try:
+        (tmp / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=False))
+        np.savez_compressed(tmp / "arrays.npz", **arrays)
+        if out.exists():
+            backup = Path(tempfile.mkdtemp(prefix=f".{out.name}.old.", dir=out.parent))
+            backup.rmdir()
+            os.replace(out, backup)
+            try:
+                os.replace(tmp, out)
+            except BaseException:
+                os.replace(backup, out)                  # put the old export back
+                raise
+            shutil.rmtree(backup, ignore_errors=True)
+        else:
+            os.replace(tmp, out)
+    finally:
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _graph_preserving_rows(lower: torch.Tensor, upper: torch.Tensor) -> torch.Tensor:
