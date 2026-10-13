@@ -18,6 +18,8 @@ no data, whose bounds are the whole simplex).
 | `l1_ball_set(model, data, node, delta)` | `L1BallSet` | one ball `||P_row - P_hat_row||_1 <= r` per row | PAC | counts |
 | `nbn.scm.noise_parameter_set(model, data, nodes, delta)` | `NoiseParameterSet` | a polytope on a shared noise law `q`; every row of every tied node is a linear image of `q` | PAC under the noise model | pooled counts per distinct expression |
 | `dirichlet_set(model, data, node, delta)` | `SampleSet` | Dirichlet posterior draws and their quantile box | Bayesian | counts |
+| `interval_set_from_counts(counts, delta)`, `l1_ball_set_from_counts(counts, delta)` | `IntervalSet`, `L1BallSet` | as above, from a count table `[R, K]` | PAC (unweighted counts only) | any count table, e.g. `count_table_for(variables, data, node, parents)` |
+| `dirichlet_set_from_counts(counts, delta)` | `SampleSet` | as above, from a count table | Bayesian | counts or weighted pseudo-counts |
 | `bootstrap_set(model, data, statistic, groups)` | `SampleSet` | episode-bootstrap refits of any statistic | asymptotic | refits |
 | `nbn.scm.cdf_band_set(model, data, node, delta)` | `CDFBandSet` | a band on the noise CDF of a continuous additive mechanism | PAC given the location `g` | residuals |
 
@@ -68,6 +70,35 @@ print("true noise law inside the polytope:", polytope.contains(TRUE_NOISE.double
 Pooling the shared noise law gives much tighter bounds than one interval per
 entry: the 64 entries of the table are linear images of 3 noise probabilities.
 
+### Sets from a count table
+
+The count-based builders only need the table of counts `n(u, x)` of a node per
+parent value `u`. Each has a `*_from_counts` twin that takes the table itself,
+and `count_table_for` counts a node against **any** tuple of discrete parents,
+not only its parents in a model's DAG. This is the building block for comparing
+several candidate parent sets of the same node:
+
+```python
+from nbn.uncertainty import count_table_for, interval_set_from_counts
+
+candidates = [("health", "exercise"), ("health", "tired", "exercise")]
+for parents in candidates:
+    counts, cards = count_table_for(model.variables, data, "health'", parents)
+    candidate = interval_set_from_counts(counts, delta=0.1 / len(candidates))  # both hold at 90%
+    print(parents, tuple(counts.shape), "unseen rows:", int(candidate.unseen.sum()))
+```
+
+Rows are in C order (last parent fastest), the layout of
+`CategoricalTableMechanism`, so `counts.reshape(*cards, K)` gives one axis per
+parent. `interval_set(model, data, node)` is exactly
+`interval_set_from_counts(count_table(model, data, node)[0])`, and likewise for
+`l1_ball_set` and `dirichlet_set`. When several sets must hold at once (one per
+candidate parent set, or one per next-state variable), split `delta` between
+them by a union bound. The PAC builders hold only for unweighted counts of
+independent draws (a weight is not a number of draws): they reject fractional
+entries, but a table built with whole-number weights looks like real counts,
+so that check is yours. The Dirichlet builder accepts weighted pseudo-counts.
+
 ## How the guarantee is built
 
 Binomial intervals come from the Chernoff (KL) inequality, inverted by
@@ -81,7 +112,11 @@ over all intervals by a union bound (`union_bound`).
 and depend on earlier draws, so each interval is made valid for every sample
 size at once with `delta_n = delta / (n (n + 1))` (`anytime_delta`; the
 coupling argument of Agarwal et al., *RL: Theory and Algorithms*, Lemma 6.2,
-with a summable schedule instead of a finite range).
+with a summable schedule instead of a finite range). This assumes the table's
+parents make the child Markov along the episode. For a table counted against a
+candidate parent set (`count_table_for`), the candidate must contain the true
+parents and every observed variable the logging policies read; otherwise the
+set bounds a policy-dependent average and the declared level does not hold.
 
 **Factored next states.** Build one set per next-state variable and split
 `delta` across them; this is the learning scheme of Schnitzer, Abate and

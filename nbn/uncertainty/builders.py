@@ -1,8 +1,11 @@
 """Build probability sets for the table of a discrete node.
 
 Each builder reads counts from data (see :func:`count_table`), so it does not
-depend on how the node's mechanism was fitted.  ``sampling`` declares how the
-data were collected:
+depend on how the node's mechanism was fitted.  Every count-based builder
+(intervals, L1 balls, Dirichlet) has a ``*_from_counts`` twin that takes the
+count table itself, for tables counted against any parent tuple
+(:func:`count_table_for`), not only a model's DAG.  ``sampling`` declares how
+the data were collected:
 
 ``"iid"``
     Independent rows.  Given the parent values, the child values of a parent
@@ -10,7 +13,13 @@ data were collected:
 ``"trajectory"``
     Rows are transitions of episodes.  The number of visits of a parent
     configuration depends on earlier draws, so every interval is made valid
-    for all sample sizes at once (:func:`anytime_delta`).
+    for all sample sizes at once (:func:`anytime_delta`).  This needs the
+    table's parents to make the next value Markov: the child's law given
+    the counted parents must not change along an episode.  For a table
+    counted against a candidate parent set, that holds when the candidate
+    contains the true parents and every observed variable the logging
+    policies read; a candidate that leaves out a real parent bounds a
+    policy-dependent average, and the declared level does not hold for it.
 
 Factored next states
 --------------------
@@ -41,6 +50,7 @@ from nbn.uncertainty.binomial import (
 )
 from nbn.uncertainty.counts import count_table
 from nbn.uncertainty.sets import IntervalSet, L1BallSet, SampleSet
+from nbn.utils.device import accum_dtype
 
 Sampling = Literal["iid", "trajectory"]
 
@@ -56,9 +66,34 @@ def interval_set(
     """Entry-wise intervals for ``P(node | parents)``, valid for all entries at once.
 
     The budget ``delta`` is split over all ``R * K`` entries (union bound);
-    the result is then tightened to the simplex.
+    the result is then tightened to the simplex.  Same as
+    :func:`interval_set_from_counts` on :func:`count_table`.
     """
     counts, _ = count_table(model, data, node)
+    return _interval_set(counts, delta, method, sampling)  # valid by construction
+
+
+def interval_set_from_counts(
+    counts: torch.Tensor,
+    delta: float = 0.05,
+    method: IntervalMethod = "kl",
+    sampling: Sampling = "iid",
+) -> IntervalSet:
+    """:func:`interval_set` from a count table ``[R, K]`` (rows = parent values).
+
+    Use it when the counts do not come from one model's DAG, e.g. a table
+    counted against a candidate parent set (:func:`count_table_for`).  The
+    PAC guarantee holds only for **counts of independent draws**: pass
+    unweighted counts.  A weight is not a number of draws, so a weighted
+    table makes the set overconfident.  Fractional entries are rejected; a
+    table built with whole-number weights cannot be told apart from real
+    counts, so that check is the caller's.
+    """
+    return _interval_set(_check_counts(counts, integer=True), delta, method, sampling)
+
+
+def _interval_set(counts: torch.Tensor, delta: float, method: IntervalMethod,
+                  sampling: Sampling) -> IntervalSet:
     trials = counts.sum(dim=-1, keepdim=True).expand_as(counts)
     per_entry = per_interval_delta(delta, counts.numel(), trials, sampling)
     lower, upper = binomial_interval(counts, trials, per_entry, method=method)
@@ -83,9 +118,27 @@ def l1_ball_set(
     HP Labs report HPL-2003-97, original not checked; the same radius,
     ``sqrt(2 (ln(2^a - 2) - ln delta) / n)``, is used by Schnitzer et al.,
     AAAI 2026, §4.1), solved for ``eps``.  Rows without data get radius
-    2, i.e. the whole simplex.
+    2, i.e. the whole simplex.  Same as :func:`l1_ball_set_from_counts` on
+    :func:`count_table`.
     """
     counts, _ = count_table(model, data, node)
+    return _l1_ball_set(counts, delta, sampling)
+
+
+def l1_ball_set_from_counts(
+    counts: torch.Tensor,
+    delta: float = 0.05,
+    sampling: Sampling = "iid",
+) -> L1BallSet:
+    """:func:`l1_ball_set` from a count table ``[R, K]`` (rows = parent values).
+
+    Like :func:`interval_set_from_counts`, the PAC guarantee holds only for
+    unweighted counts of independent draws (fractional entries are rejected).
+    """
+    return _l1_ball_set(_check_counts(counts, integer=True), delta, sampling)
+
+
+def _l1_ball_set(counts: torch.Tensor, delta: float, sampling: Sampling) -> L1BallSet:
     trials = counts.sum(dim=-1)
     n_rows, k = counts.shape
     per_row = per_interval_delta(delta, n_rows, trials, sampling)
@@ -115,9 +168,28 @@ def dirichlet_set(
 
     Bayesian credibility, not a frequentist guarantee; useful as genuine
     posterior weights and as a sanity check of the PAC sets.  Seed with
-    ``torch.manual_seed`` for reproducible draws.
+    ``torch.manual_seed`` for reproducible draws.  Same as
+    :func:`dirichlet_set_from_counts` on :func:`count_table`.
     """
     counts, _ = count_table(model, data, node)
+    return _dirichlet_set(counts, delta, prior, n_samples)
+
+
+def dirichlet_set_from_counts(
+    counts: torch.Tensor,
+    delta: float = 0.05,
+    prior: float = 1.0,
+    n_samples: int = 4000,
+) -> SampleSet:
+    """:func:`dirichlet_set` from a count table ``[R, K]`` (rows = parent values).
+
+    Fractional (weighted) counts are accepted and act as pseudo-counts; the
+    result is a posterior under that choice, with no frequentist guarantee.
+    """
+    return _dirichlet_set(_check_counts(counts), delta, prior, n_samples)
+
+
+def _dirichlet_set(counts: torch.Tensor, delta: float, prior: float, n_samples: int) -> SampleSet:
     # MPS has no float64 Dirichlet sampler; float32 draws are plenty here.
     posterior = Dirichlet((counts + prior).to(torch.float32))
     return SampleSet(
@@ -173,6 +245,33 @@ def bootstrap_set(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _check_counts(counts: torch.Tensor, integer: bool = False) -> torch.Tensor:
+    """A count table must be ``[R, K]`` with finite, non-negative entries.
+
+    Returned in the accumulation dtype of its device (float64, or float32 on
+    MPS), whatever it came in, so low-precision tables cannot overflow or
+    round the sums.  With ``integer=True`` the entries must also be whole
+    numbers (counts of draws).  One host sync for all checks.
+    """
+    if not isinstance(counts, torch.Tensor):
+        counts = torch.as_tensor(counts)
+    if counts.dim() != 2:
+        raise ValueError(f"A count table is [R, K]; got shape {tuple(counts.shape)}.")
+    if counts.shape[0] < 1 or counts.shape[1] < 1:
+        raise ValueError(f"A count table needs R >= 1 rows and K >= 1 values; got {tuple(counts.shape)}.")
+    counts = counts.to(accum_dtype(counts.device))
+    valid = (torch.isfinite(counts) & (counts >= 0)).all()
+    flags = (torch.stack([valid, (counts == counts.round()).all()]) if integer else valid.reshape(1)).tolist()
+    if not flags[0]:
+        raise ValueError("Counts must be finite and non-negative.")
+    if integer and not flags[1]:
+        raise ValueError(
+            "Counts must be whole numbers (counts of independent draws): fractional entries "
+            "mean a weighted table, for which the PAC sets do not hold."
+        )
+    return counts
 
 
 def per_interval_delta(
