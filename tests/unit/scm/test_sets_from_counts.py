@@ -237,3 +237,14 @@ def test_from_counts_accept_lists_and_numpy_tables():
         assert torch.equal(s.lower, ref.lower) and torch.equal(s.upper, ref.upper)
         l1_ball_set_from_counts(given, delta=0.1)
         dirichlet_set_from_counts(given, n_samples=50)
+
+
+def test_count_table_for_takes_kind_dim_specs():
+    model = _model(("a", "b"), "cpu")
+    data = _data("cpu")
+    specs = {v: ("discrete", c) for v, c in CARDS.items()}
+    a, ca = count_table_for(specs, data, "y", ("b", "a"))
+    b, cb = count_table_for(model.variables, data, "y", ("b", "a"))
+    assert torch.equal(a, b) and ca == cb
+    with pytest.raises(ValueError, match="continuous"):
+        count_table_for({**specs, "a": ("continuous", 1)}, data, "y", ("a",))
