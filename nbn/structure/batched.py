@@ -113,16 +113,13 @@ class StackedMLP(nn.Module):
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         """``z`` ``[N, D_in]`` (union inputs) -> ``[C, N, out]``."""
-        # Plain contiguous bmm plus an explicit bias add: baddbmm on a stride-0
-        # (expanded) input with a broadcast bias gave wrong outputs on the MPS of
-        # the macOS CI runner (a paravirtualised GPU), in training and inference.
-        h = z.unsqueeze(0).expand(self.n_candidates, -1, -1).contiguous()
+        h = z.unsqueeze(0).expand(self.n_candidates, -1, -1)
         n_layers = len(self.weights)
         for li in range(n_layers):
             w = self.weights[li]
             if li == 0:
                 w = w * self.mask.unsqueeze(-1)       # unused inputs: no value, no gradient
-            h = torch.bmm(h, w.contiguous()) + self.biases[li].unsqueeze(1)
+            h = torch.baddbmm(self.biases[li].unsqueeze(1), h, w)
             if li < n_layers - 1:
                 h = self.act(h)
         return h
@@ -131,12 +128,15 @@ class StackedMLP(nn.Module):
         """Candidate ``c`` as an ``nn.Sequential`` over its own inputs.
 
         Inputs are in union order, or in ``order`` (a permutation of the active
-        union columns) when given.  The layers are assembled on CPU from
-        contiguous copies and then moved to the parameters' device: strided
-        copies (row selection, transposes) gave wrong weights on some MPS builds.
+        union columns) when given.  Each parameter tensor is copied to the CPU
+        **whole** and only then indexed by candidate, and the layers are moved
+        to the device at the end: on the MPS of the macOS CI runner, copying a
+        per-candidate view (a non-zero storage offset) gave wrong weights.
         """
         device = self.weights[0].device
-        active = torch.nonzero(self.mask[c].detach().cpu()).reshape(-1).tolist()
+        weights = [p.detach().cpu() for p in self.weights]          # whole tensors, offset 0
+        biases = [p.detach().cpu() for p in self.biases]
+        active = torch.nonzero(self.mask.detach().cpu()[c]).reshape(-1).tolist()
         if order is None:
             order = active
         elif sorted(order) != active:
@@ -144,11 +144,11 @@ class StackedMLP(nn.Module):
         layers: List[nn.Module] = []
         n_layers = len(self.weights)
         for li in range(n_layers):
-            w = self.weights[li][c].detach().cpu().clone()
+            w = weights[li][c].clone()
             if li == 0:
                 w = w.index_select(0, torch.tensor(list(order), dtype=torch.long))
             weight = w.t().contiguous()
-            bias = self.biases[li][c].detach().cpu().clone().contiguous()
+            bias = biases[li][c].clone().contiguous()
             lin = nn.Linear(weight.shape[1], weight.shape[0])
             with torch.no_grad():
                 lin.weight.copy_(weight)
