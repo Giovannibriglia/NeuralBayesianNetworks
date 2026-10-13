@@ -129,8 +129,11 @@ chosen = hs.model_for(next(hs.hypotheses()), sets.counts)   # fitted, no pass ov
 - **The factor cache.** `hs.counts(data)` counts each node once over the
   union of its candidates' parents, then sums out the parents a candidate does
   not use. This is exact, and it is the usual way to share sufficient statistics
-  across families (K&F, Box 18.A). Above `max_union_cells` the candidates
-  are counted one by one.
+  across families (K&F, Box 18.A). The candidates are counted one by one
+  instead when the union table has more than `max_union_cells` cells, or when
+  summing it once per candidate would cost more than one pass over the data
+  per candidate (many candidates, few rows); `counts.union_used` records the
+  choice. The inputs' marginals are summed out of the factor tables.
 - **Budget.** `delta` is split over the **distinct factors** (union bound).
   A factor's set is the same event in every hypothesis, so on one event of
   probability at least `1 - delta` every factor set holds. For a factor whose
