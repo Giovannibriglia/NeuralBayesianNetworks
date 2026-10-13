@@ -229,10 +229,11 @@ def test_model_for_equals_fitting_the_hypothesis(device, alpha):
     fc = hs.counts(data)
     for h in itertools.islice(hs.hypotheses(), 4):
         cached = hs.model_for(h, fc, alpha=alpha)
-        direct = NeuralBayesianNetwork(hs.edges(h), dict(hs.variables), device=device)
+        used = {v: hs.variables[v] for v in cached.variables}       # the hypothesis' variables
+        direct = NeuralBayesianNetwork(hs.edges(h), used, device=device)
         for node in direct.dag.nodes():
             direct.set_mechanism(node, CategoricalTableMechanism(alpha=alpha))
-        direct.fit(data)
+        direct.fit({v: data[v] for v in used})
         for node in direct.dag.nodes():
             torch.testing.assert_close(
                 cached.mechanisms[node]._logits, direct.mechanisms[node]._logits, rtol=0, atol=1e-6,
@@ -244,7 +245,7 @@ def test_model_for_equals_fitting_the_hypothesis(device, alpha):
                                    rtol=0, atol=1e-6)
 
 
-def test_model_for_reorders_parents_when_the_dag_does():
+def test_model_for_tables_follow_the_dag_parent_order():
     v = {"x": ("discrete", 2), "a": ("discrete", 3), "x'": ("discrete", 2)}
     hs = HypothesisSet(v, {"x'": [("a", "x")]})
     gen = torch.Generator().manual_seed(0)
@@ -313,3 +314,107 @@ def test_reorder_parents_matches_counting_in_the_other_order(device):
         assert torch.equal(_reorder_parents(t, cards, ("x", "a", "y"), target), expected)
     with pytest.raises(ValueError):
         _reorder_parents(t, cards, ("x", "a", "y"), ("x", "a"))
+
+
+
+# ---------------------------------------------------------------------------
+# Review regressions (#319)
+# ---------------------------------------------------------------------------
+
+
+def test_fit_from_counts_refuses_subclasses_with_their_own_fit_local():
+    from nbn.mechanisms.parametric.binning_categorical import BinningCategoricalTable
+    from nbn.mechanisms.non_parametric.smoothed_empirical_categorical import (
+        SmoothedEmpiricalCategoricalMechanism,
+    )
+    from nbn.scm.categorical import StructuralCategoricalTable
+
+    counts = torch.tensor([[3.0, 1.0], [0.0, 2.0]])
+    binning = BinningCategoricalTable.__new__(BinningCategoricalTable)  # the guard runs first
+    for mech in (binning, StructuralCategoricalTable()):
+        with pytest.raises(NotImplementedError, match="fit_local"):
+            mech.fit_from_counts(counts, [2])
+    SmoothedEmpiricalCategoricalMechanism().fit_from_counts(counts, [2])  # no fit_local override
+
+
+def _small():
+    v = {"x": ("discrete", 2), "a": ("discrete", 2), "x'": ("discrete", 2)}
+    gen = torch.Generator().manual_seed(0)
+    data = {k: torch.randint(0, 2, (200,), generator=gen) for k in v}
+    return v, data
+
+
+def test_counts_validate_weights_like_fit():
+    v, data = _small()
+    hs = HypothesisSet(v, {"x'": [("x",), ("x", "a")]})
+    col = torch.ones(200, 1)                                # [N, 1] is accepted, as in fit
+    torch.testing.assert_close(hs.counts(data, weights=col)[("x'", ("x",))],
+                               hs.counts(data)[("x'", ("x",))])
+    with pytest.raises(ValueError):
+        hs.counts(data, weights=-torch.ones(200))
+    with pytest.raises(ValueError):
+        hs.counts(data, weights=torch.ones(10))
+
+
+def test_weighted_counts_give_no_pac_sets():
+    v, data = _small()
+    hs = HypothesisSet(v, {"x'": [("x",), ("x", "a")]})
+    w = torch.full((200,), 2.0)
+    with pytest.raises(ValueError, match="independent draws"):
+        hs.factor_sets(data, builder="interval", weights=w)
+    with pytest.raises(ValueError, match="independent draws"):
+        hs.factor_sets(hs.counts(data, weights=w), builder="l1")
+    assert hs.factor_sets(data, builder="dirichlet", weights=w, n_samples=20).builder == "dirichlet"
+
+
+def test_fixed_edge_that_merges_two_candidates_keeps_one():
+    v, _ = _small()
+    hs = HypothesisSet(v, {"x'": [("a",), ()]}, fixed_edges=[("a", "x'")])
+    assert hs.candidates["x'"] == [("a",)]
+
+
+def test_same_family_in_another_order_gets_a_clear_message():
+    v, data = _small()
+    hs = HypothesisSet(v, {"x'": [("x", "a")]})
+    fs = hs.factor_sets(data)
+    with pytest.raises(ValueError, match="another order"):
+        fs.sets_for({"x'": ("a", "x")})
+
+
+def test_empty_hypothesis_set_is_rejected():
+    v, _ = _small()
+    with pytest.raises(ValueError, match="at least one node"):
+        HypothesisSet(v, {})
+
+
+def test_union_path_is_skipped_when_its_table_dwarfs_the_data():
+    v = {f"p{i}": ("discrete", 10) for i in range(6)}
+    v["y"] = ("discrete", 2)
+    gen = torch.Generator().manual_seed(0)
+    data = {k: torch.randint(0, c[1], (50,), generator=gen) for k, c in v.items()}
+    hs = HypothesisSet(v, {"y": [("p0", "p1", "p2"), ("p3", "p4", "p5")]})   # union 10^6 x 2 cells, 50 rows
+    assert hs.counts(data).union_used == {"y": False}
+
+
+def test_model_for_ignores_inputs_no_target_uses():
+    v, data = _small()
+    v = {**v, "reward": ("continuous", 1)}
+    hs = HypothesisSet(v, {"x'": [("x",), ("x", "a")]})
+    fc = hs.counts({**data, "reward": torch.randn(200)})
+    m = hs.model_for({"x'": ("x",)}, fc)
+    assert set(m.variables) == {"x", "x'"}
+
+
+def test_large_table_warns_before_allocating():
+    from nbn.mechanisms.parametric import categorical_table as ct
+
+    mech = CategoricalTableMechanism()
+    with pytest.warns(UserWarning, match="CPT has"):
+        old = ct._CARDINALITY_WARN_THRESHOLD
+        ct._CARDINALITY_WARN_THRESHOLD = 4
+        try:
+            mech.fit_local(torch.tensor([0, 1, 1]), torch.tensor([[0], [1], [2]]), parent_cards=[3],
+                           n_classes=2)
+        finally:
+            ct._CARDINALITY_WARN_THRESHOLD = old
+    assert mech._counts.shape == (3, 2)

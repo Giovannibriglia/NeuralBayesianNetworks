@@ -60,6 +60,7 @@ from typing import Dict, Iterator, List, Literal, Mapping, Sequence, Tuple, Unio
 import torch
 
 from nbn.core.variables import Variable
+from nbn.learning.weighting import validate_weights
 from nbn.uncertainty.builders import (
     Sampling,
     dirichlet_set_from_counts,
@@ -123,9 +124,18 @@ class HypothesisSet:
         cands: Dict[str, List[Tuple[str, ...]]] = {
             node: [tuple(c) for c in cs] for node, cs in candidates.items()
         }
+        for node, cs in cands.items():
+            self._check_node(node, cs)  # duplicates in the user's own list are an error
         for parent, child in fixed_edges:
             cands.setdefault(child, [()])
-            cands[child] = [c if parent in c else (*c, parent) for c in cands[child]]
+            merged = [c if parent in c else (*c, parent) for c in cands[child]]
+            # A fixed edge can make two candidates the same family ((a,) and () + a): keep one.
+            unique: Dict[frozenset, Tuple[str, ...]] = {}
+            for c in merged:
+                unique.setdefault(frozenset(c), c)
+            cands[child] = list(unique.values())
+        if not cands:
+            raise ValueError("A HypothesisSet needs at least one node with candidate parent sets.")
         for node, cs in cands.items():
             self._check_node(node, cs)
         self.candidates: Dict[str, List[Tuple[str, ...]]] = cands
@@ -226,6 +236,12 @@ class HypothesisSet:
             )
         for node, parents in hypothesis.items():
             if tuple(parents) not in self.candidates[node]:
+                same = [c for c in self.candidates[node] if frozenset(c) == frozenset(parents)]
+                if same:
+                    raise ValueError(
+                        f"{tuple(parents)} is the candidate {same[0]} of '{node}' in another order; "
+                        f"use {same[0]} (table rows follow that order)."
+                    )
                 raise ValueError(f"{tuple(parents)} is not a candidate of '{node}'.")
 
     # ------------------------------------------------------------------
@@ -247,6 +263,9 @@ class HypothesisSet:
         float the device supports.
         """
         self._require_discrete()
+        first = data[self.targets[0]]
+        n_rows = first.reshape(-1).shape[0]
+        weights = validate_weights(weights, n_rows, where="HypothesisSet.counts", device=first.device)
         tables: Dict[Factor, torch.Tensor] = {}
         cards: Dict[Factor, List[int]] = {}
         union_used: Dict[str, bool] = {}
@@ -256,7 +275,15 @@ class HypothesisSet:
             union_cards = [int(self.variables[p].cardinality) for p in union]
             k = int(self.variables[node].cardinality)
             cells = math.prod(union_cards) * k
-            use_union = len(cs) > 1 and cells <= max_union_cells
+            direct_cells = sum(
+                math.prod(int(self.variables[p].cardinality) for p in c) * k for c in cs
+            )
+            # One pass over the data plus a dense union table, against one pass per
+            # candidate: the union pays off unless its table dwarfs the data.
+            use_union = (
+                len(cs) > 1 and cells <= max_union_cells
+                and cells <= direct_cells + (len(cs) - 1) * n_rows
+            )
             union_used[node] = use_union
             if use_union:
                 full, _ = count_table_for(self.variables, data, node, union, weights)
@@ -281,7 +308,7 @@ class HypothesisSet:
                 marginals[v], _ = count_table_for(self.variables, data, v, (), weights)
         return FactorCounts(
             hypothesis_set=self, tables=tables, parent_cards=cards,
-            input_marginals=marginals, union_used=union_used,
+            input_marginals=marginals, union_used=union_used, weighted=weights is not None,
         )
 
     # ------------------------------------------------------------------
@@ -309,6 +336,14 @@ class HypothesisSet:
         """
         if not 0.0 < delta < 1.0:
             raise ValueError(f"delta must be in (0, 1); got {delta}.")
+        if builder in ("interval", "l1") and (
+            weights is not None
+            or (isinstance(data_or_counts, FactorCounts) and data_or_counts.weighted)
+        ):
+            raise ValueError(
+                "PAC sets need counts of independent draws; weighted counts do not carry the "
+                "guarantee (use builder='dirichlet' for weighted pseudo-counts)."
+            )
         if isinstance(data_or_counts, FactorCounts):
             if data_or_counts.hypothesis_set is not self:
                 raise ValueError("These counts were built by another HypothesisSet.")
@@ -347,9 +382,12 @@ class HypothesisSet:
     ):
         """A fitted :class:`~nbn.core.network.NeuralBayesianNetwork` for one hypothesis.
 
-        Every node gets a :class:`CategoricalTableMechanism` whose table is set
-        from the cached counts (no pass over the data): the targets from their
-        factor tables, the inputs from their marginal counts.  The result is
+        The network has the hypothesis' variables only: the targets and the
+        inputs that are parents of some target (inputs used by no target are
+        left out).  Every node gets a :class:`CategoricalTableMechanism` whose
+        table is set from the cached counts (no pass over the data): the
+        targets from their factor tables, the inputs from their marginal
+        counts.  The result is
         the model that fitting this hypothesis' DAG directly with table
         mechanisms of smoothing ``alpha`` would give.
         """
@@ -359,13 +397,16 @@ class HypothesisSet:
         if counts.hypothesis_set is not self:
             raise ValueError("These counts were built by another HypothesisSet.")
         self._check_hypothesis(hypothesis)
-        missing = [v for v in self.inputs if v not in counts.input_marginals]
+        used = set(self.targets) | {p for parents in hypothesis.values() for p in parents}
+        roots = [v for v in self.inputs if v in used]
+        missing = [v for v in roots if v not in counts.input_marginals]
         if missing:
-            raise ValueError(f"No marginal counts for the inputs {missing}: absent from the data, or continuous.")
+            raise ValueError(f"No marginal counts for the inputs {missing}: absent from the data.")
         if device is None:
             first = next(iter(counts.tables.values()))
             device = str(first.device)
-        model = NeuralBayesianNetwork(self.edges(hypothesis), dict(self.variables), device=device)
+        variables = {v: spec for v, spec in self.variables.items() if v in used}
+        model = NeuralBayesianNetwork(self.edges(hypothesis), variables, device=device)
         for node in model.dag.topological_order():
             mech = CategoricalTableMechanism(alpha=alpha)
             if node in self.candidates:
@@ -399,6 +440,8 @@ class FactorCounts:
     input_marginals: Dict[str, torch.Tensor] = field(repr=False)
     # Per target: whether the union-and-marginalise path was used.
     union_used: Dict[str, bool] = field(default_factory=dict)
+    # Whether the tables are weighted (then they carry no PAC guarantee).
+    weighted: bool = False
 
     def __getitem__(self, factor: Factor) -> torch.Tensor:
         node, parents = factor
