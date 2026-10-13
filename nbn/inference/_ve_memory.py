@@ -92,6 +92,12 @@ class _Tape:
                 tuple(self.sign), tuple(self.ref))
 
 
+def _fold(tape: tuple, rows: int) -> tuple:
+    """``tape`` with its row count fixed at ``rows`` (sizes become constants)."""
+    a, r, es, sign, ref = tape
+    return tuple(x + rows * y for x, y in zip(a, r)), (0,) * len(a), es, sign, ref
+
+
 def _concat(tapes: Sequence[tuple]) -> tuple:
     """Concatenate frozen tapes, re-basing the free -> alloc references."""
     a, r, es, sign, ref = [], [], [], [], []
@@ -623,6 +629,19 @@ class _PlanCost(NamedTuple):
             self.memo[key] = _replay(tape, B, dtype_bytes, device_type, conf)[0]
         return self.memo[key]
 
+    def peak_rows(self, rows: tuple, dtype_bytes: int, device_type: str,
+                  embed: tuple = ()) -> float:
+        """Peak bytes of running the plan once per entry of ``rows``, in
+        order, on one allocator: what a chunked batch leaves cached for the
+        next chunk is replayed, not assumed reusable.  Memoised like ``peak``."""
+        conf = cuda_allocator_conf() if device_type == "cuda" else None
+        key = (rows, dtype_bytes, device_type, embed, conf)
+        if key not in self.memo:
+            one = _concat([self.tape, embed]) if embed else self.tape
+            tape = _concat([_fold(one, n) for n in rows])
+            self.memo[key] = _replay(tape, 1, dtype_bytes, device_type, conf)[0]
+        return self.memo[key]
+
 
 class _Factor(NamedTuple):
     scope: frozenset
@@ -847,11 +866,12 @@ class _PeakModel:
     """A query's estimated peak bytes as a function of the row count."""
 
     __slots__ = ("cost", "dtype_bytes", "device_type", "prelude", "transient",
-                 "tables", "embed", "out_per_row", "n_nodes", "_memo")
+                 "tables", "embed", "out_per_row", "n_nodes", "rows", "_memo")
 
     def __init__(self, cost: _PlanCost, *, dtype_bytes: int = 4, device_type: str = "cpu",
                  prelude: tuple = (), transient: tuple = (), tables: tuple = (),
-                 embed: tuple = (), out_per_row: int = 0, n_nodes: int = 0) -> None:
+                 embed: tuple = (), out_per_row: int = 0, n_nodes: int = 0,
+                 rows: int = 0) -> None:
         self.cost = cost
         self.dtype_bytes = dtype_bytes
         self.device_type = device_type
@@ -861,6 +881,7 @@ class _PeakModel:
         self.embed = embed            # one-hot axes of clamped joint targets
         self.out_per_row = out_per_row
         self.n_nodes = n_nodes        # evidence + do nodes
+        self.rows = rows              # a chunk model: rows of the whole batch (0: one call)
         self._memo: dict[int, int] = {}
 
     def bytes(self, B: int) -> int:
@@ -874,11 +895,24 @@ class _PeakModel:
         simulated heaps / segments are added, as separate pools — an upper
         bound of sharing them.
 
+        A chunk model on CUDA (``rows`` > ``B``) prices the plan as a
+        *sequence*: two ``B``-row chunks and the batch's remainder chunk, on
+        one allocator.  Identical chunks reuse each other's cached blocks, but
+        the smaller remainder may not — under ``max_split_size_mb`` an
+        oversize cached block is neither split for it nor allowed to exceed
+        its request by more than ``max_non_split_rounding_mb`` — so a chunk
+        priced alone under-estimated the call (#301 CUDA phase).  CPU chunks
+        do not interact; MPS credits no free and prices every chunk as new.
         """
         if B not in self._memo:
             dt, dev = self.dtype_bytes, self.device_type
             conf = cuda_allocator_conf() if dev == "cuda" else None
-            plan = self.cost.peak(B, dt, dev, self.embed)
+            if dev == "cuda" and self.rows > B:
+                rem = self.rows % B
+                seq = (B, B) + ((rem,) if rem else ())
+                plan = self.cost.peak_rows(seq, dt, dev, self.embed)
+            else:
+                plan = self.cost.peak(B, dt, dev, self.embed)
             tab_peak, tab_end = (_replay(self.tables, B, dt, dev, conf) if self.tables
                                  else (0.0, 0.0))
             if dev in ("cuda", "mps"):
@@ -914,14 +948,15 @@ class _PeakModel:
             prelude = float(((a + B * r) * es * sign).sum())
         return math.ceil(_LIVESET_SAFETY * (prelude + 2 * self.output_bytes(B)))
 
-    def child(self) -> _PeakModel:
-        """The model of one chunk: views of the evidence, validated again,
-        CPTs already tabulated by then, no answer to concatenate yet."""
+    def child(self, *, rows: int = 0) -> _PeakModel:
+        """The model of one chunk of a ``rows``-row batch: views of the
+        evidence, validated again, CPTs already tabulated by then, no answer
+        to concatenate yet; on CUDA the chunks are priced as a sequence."""
         return _PeakModel(self.cost, dtype_bytes=self.dtype_bytes,
                           device_type=self.device_type,
                           transient=chunk_validation(self.n_nodes),
                           embed=self.embed, out_per_row=self.out_per_row,
-                          n_nodes=self.n_nodes)
+                          n_nodes=self.n_nodes, rows=rows)
 
 
 def _max_fitting_rows(peak, limit: int, budget: float) -> int:

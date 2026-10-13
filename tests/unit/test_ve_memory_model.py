@@ -658,3 +658,32 @@ def test_cuda_estimate_follows_the_process_allocator_conf(monkeypatch, models):
     assert pm.bytes(B) >= 339_738_624
     assert _ve_memory.cuda_allocator_conf().endswith("roundup_power2_divisions:4")
 
+
+def test_cuda_chunks_are_priced_as_a_sequence(monkeypatch):
+    """CUDA phase (RTX 4070, torch 2.11, ``max_split_size_mb:128``): the
+    ``wide30 chunked`` case ran three 18-row chunks that reused each other's
+    blocks and a 10-row remainder that could not (oversize cached blocks are
+    neither split for smaller requests nor allowed to exceed them by more
+    than 20 MiB), so the call reserved 1,149,239,296 B against a budget of
+    950,198,599 B.  A CUDA chunk model prices two full chunks plus the
+    remainder on one allocator; in the default configuration the remainder
+    splits cached blocks and the sequence costs no more than one chunk."""
+    model = _wide(30, 3, 4, seed=1)
+    B = 64
+    ev = _evidence(model, [f"V{i}" for i in range(24, 30)], B)
+    eng = TensorVariableElimination()
+    eng._extract_factors(model)
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128")
+    pm = eng._peak_model(model, "V12", ev, B=B)
+    pm.device_type = "cuda"
+    alone, seq = pm.child().bytes(18), pm.child(rows=B).bytes(18)
+    assert seq >= 1_149_239_296 > alone
+    assert pm.child(rows=B).bytes(16) == pm.child().bytes(16)   # 64 = 4 x 16: no remainder
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF")
+    pm = eng._peak_model(model, "V12", ev, B=B)
+    pm.device_type = "cuda"
+    assert pm.child(rows=B).bytes(18) == pm.child().bytes(18)
+    # CPU chunks do not interact; MPS prices every chunk as new already.
+    for dev in ("cpu", "mps"):
+        pm.device_type = dev
+        assert pm.child(rows=B).bytes(18) == pm.child().bytes(18)

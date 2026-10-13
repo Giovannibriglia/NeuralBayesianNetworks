@@ -49,7 +49,7 @@ element counts, so one tape prices every `B`.
 |---|---|
 | CPU | the running sum of live bytes, 64 B aligned |
 | MPS | a simulation of Metal heaps under PyTorch's MPS allocator, with the same segment machinery as CUDA. Heap classes: buffers up to 1 MiB use 8 MiB heaps; up to 10 MiB, 32 MiB heaps; up to 512 MiB, 1 GiB heaps; larger buffers get an exact heap rounded to 16 MiB. Buffers are rounded to 256 B, or to 1/64 of the next power of two above 1 MiB. With a sync after every op, freed buffers return their space to the heap, holes coalesce, and a request that no single hole fits opens a new heap. In a real call no free is credited at all: MPS runs asynchronously, and a buffer freed while queued GPU work still uses it cannot be reused yet. Measured on barley q2 at B=64: 73 MiB of driver growth unsynchronised, 33 MiB synchronised. Everything here was measured on Apple unified memory with torch 2.14. |
-| CUDA | a simulation of `CUDACachingAllocator` in its default configuration. A request is rounded to 512 B. It takes the best-fitting cached free block of its pool (requests up to 1 MiB use the small pool), and that block is split when the rest is at least 512 B (small pool) or more than 1 MiB (large pool). Otherwise a new segment is created: 2 MiB, 20 MiB for requests under 10 MiB, or the request rounded up to 2 MiB. Freed blocks merge with free neighbours and stay cached. The estimate is the peak *reserved* bytes, which includes freed segments that later requests cannot reuse. |
+| CUDA | a simulation of `CUDACachingAllocator`. A request is rounded to 512 B. It takes the best-fitting cached free block of its pool (requests up to 1 MiB use the small pool), and that block is split when the rest is at least 512 B (small pool) or more than 1 MiB (large pool). Otherwise a new segment is created: 2 MiB, 20 MiB for requests under 10 MiB, or the request rounded up to 2 MiB. Freed blocks merge with free neighbours and stay cached. The estimate is the peak *reserved* bytes, which includes freed segments that later requests cannot reuse. The settings of `PYTORCH_CUDA_ALLOC_CONF` that change the reserve are followed (`_cuda_policy`): `max_split_size_mb` (oversize blocks are neither split nor reused for smaller requests, and an oversize request accepts a cached block at most `max_non_split_rounding_mb` larger), `roundup_power2_divisions` (requests round up to power-of-two divisions, single value or per-bucket list), `expandable_segments` (one mapping per pool that grows in place by 20 MiB / 2 MiB units, reusing the free block at its end) and `large_segment_size_mb`. `garbage_collection_threshold` and the host-memory, lock and graph-capture keys do not change what a call reserves. `backend:cudaMallocAsync` or a key the model does not know falls back to crediting no free, as on MPS. The variable is read at each estimate; `torch.cuda.memory._set_allocator_settings` cannot be read back. |
 
 The result is multiplied by `_LIVESET_SAFETY = 1.10`.
 
@@ -110,7 +110,9 @@ excluded; torch 2.14.1, macOS 26, Apple M-series, 32 GB, 2026-10-12):
 | CPU | exact: profiler allocation events (49 cases) | **1.10 / 1.10 / 2.47** | 0.00 / 1.20 / 1.25 |
 | MPS | heap level: `driver_allocated_memory` growth (41 cases) | **1.15 / 1.65 / 11.5** | 0.00 / 0.26 / 2.12 |
 | MPS, element cap lifted | heap level, 2 to 8 GiB plans | **1.26 / 1.38 / 3.31** | |
-| CUDA | `max_memory_allocated` and reserved growth | to be re-run (#301 phase 2) | |
+| CUDA | exact: `max_memory_allocated` (50 cases, RTX 4070 Laptop 8 GiB, torch 2.11.0+cu130, 2026-10-13) | **1.11 / 1.38 / 16.3** | 0.00 / 1.19 / 1.25 |
+| CUDA | reserved: `max_memory_reserved` growth (45 cases with growth) | **1.10 / 1.12 / 3.30** | |
+| CUDA, `max_split_size_mb:128` / `roundup_power2_divisions:4` / `expandable_segments:True` | reserved growth, 32 quick cases each | **1.11 / 1.15 / 3.30**, **1.10 / 1.15 / 3.30**, **1.11 / 1.15 / 3.30** | |
 
 Barley q7 on MPS, with driver growth measured in a fresh process (the
 round-2 review's counterexample):
@@ -136,6 +138,11 @@ Notes on the table:
 - **Budget-forced cases.** They either ran within budget or were refused:
   - CPU: 760 MiB <= 845 MiB, and 45 MiB <= 54 MiB;
   - MPS heap level: 1024 MiB <= 2722 MiB, and 96 MiB <= 158 MiB;
+  - CUDA reserved: 776 MiB <= 906 MiB, and 62 MiB <= 67 MiB; under
+    `max_split_size_mb:128` the sizer picks 16-row chunks (no remainder) and
+    reserves 698 MiB (a chunk priced alone let the 10-row remainder of 18-row
+    chunks grow the reserve to 1096 MiB: oversize cached blocks are neither
+    split for it nor reused);
   - refused: naive Bayes with float evidence at 0.15x and 0.25x.
 
 Reproduce:
@@ -152,5 +159,10 @@ Out of scope:
 - mechanisms that do not override `tabulate_working_bytes` get a default of
   four table-sized float32 temporaries;
 - MPS heap packing was measured, not read from source;
-- the CUDA simulation assumes the default allocator configuration (no
-  `max_split_size`, no `garbage_collection_threshold`).
+- on CUDA a chunked batch is priced as two full chunks plus the remainder on
+  one simulated allocator (what identical chunks leave cached is reused, what
+  a smaller remainder cannot reuse is counted); a chunk size that shrinks
+  mid-batch (live headroom) is not replayed;
+- the CUDA simulation follows `PYTORCH_CUDA_ALLOC_CONF`; settings applied
+  with `torch.cuda.memory._set_allocator_settings` alone are invisible to it
+  (set the variable as well).

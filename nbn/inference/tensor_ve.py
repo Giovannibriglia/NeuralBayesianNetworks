@@ -913,7 +913,7 @@ class TensorVariableElimination(InferenceEngine):
                     )
                     peak_b = pm.bytes(B) + tabulated
                 if peak_b > chunk_budget:   # chunk_budget <= budget
-                    child = pm.child()
+                    child = pm.child(rows=B)
                     held = pm.reserve_bytes(B) + tabulated
                     one_row = peak_b if B == 1 else held + child.bytes(1)
                     if one_row > budget:
