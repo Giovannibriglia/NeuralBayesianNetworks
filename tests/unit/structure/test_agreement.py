@@ -6,6 +6,7 @@ random actions), so many joint input values are never visited.
 """
 from __future__ import annotations
 
+import itertools
 import math
 
 import pytest
@@ -25,7 +26,7 @@ def p_up(up, left, rep):
     return torch.where(rep == 1, 0.95, torch.where(up == 1, stay, 0.05))
 
 
-def _collect(half, n_episodes, horizon, seed):
+def _collect(half, n_episodes, horizon, seed, explore=0.2):
     gen = torch.Generator().manual_seed(seed)
     up = torch.ones(n_episodes, horizon + 1, N, dtype=torch.long)
     out = {k: [] for k in INPUTS + [f"m{i}'" for i in range(N)]}
@@ -33,8 +34,8 @@ def _collect(half, n_episodes, horizon, seed):
         broken = (up[:, t, list(half)] == 0).float()
         pick = torch.multinomial(broken + 1e-9, 1, generator=gen).squeeze(-1)
         a = torch.where(broken.sum(-1) > 0, torch.tensor(half)[pick] + 1, 0)
-        explore = torch.rand(n_episodes, generator=gen) < 0.2
-        a = torch.where(explore, torch.randint(0, N + 1, (n_episodes,), generator=gen), a)
+        rand = torch.rand(n_episodes, generator=gen) < explore
+        a = torch.where(rand, torch.randint(0, N + 1, (n_episodes,), generator=gen), a)
         rep = torch.stack([(a == i + 1).long() for i in range(N)], -1)
         up[:, t + 1] = torch.bernoulli(p_up(up[:, t], up[:, t].roll(1, -1), rep), generator=gen).long()
         for i in range(N):
@@ -44,13 +45,15 @@ def _collect(half, n_episodes, horizon, seed):
     return {k: torch.cat(v) for k, v in out.items()}
 
 
-def ring_data(n_episodes=300, horizon=30, seed=0, device="cpu"):
-    left = _collect((0, 1), n_episodes, horizon, seed * 2 + 1)
-    right = _collect((2, 3), n_episodes, horizon, seed * 2 + 2)
+def ring_data(n_episodes=300, horizon=30, seed=0, device="cpu", explore=0.2):
+    left = _collect((0, 1), n_episodes, horizon, seed * 2 + 1, explore)
+    right = _collect((2, 3), n_episodes, horizon, seed * 2 + 2, explore)
     return {k: torch.cat([left[k], right[k]]).to(device) for k in left}
 
 
 VARIABLES = dict.fromkeys(INPUTS + [f"m{i}'" for i in range(N)], ("discrete", 2))
+# The rep_i flags encode one 5-valued action: at most one machine is repaired per step.
+FEASIBLE = torch.tensor([r for r in itertools.product(range(2), repeat=len(INPUTS)) if sum(r[N:]) <= 1])
 
 
 def truth_on(parents, device="cpu"):
@@ -78,9 +81,7 @@ def test_true_parents_survive_and_rows_never_visited_get_valid_sets(device):
     assert any(set(s) >= set(TRUE_PARENTS) for s in res.survivors)
     assert len(res.discarded) > 0                     # the data do refute wrong candidates
     assert _contains_truth(res)
-    # structure buys coverage: joint input values never visited still get a set
-    assert res.flat_rows == 2 ** len(INPUTS)
-    assert res.flat_with_set > res.flat_visited and res.n_rows_gained > 0
+    assert res.flat_rows == 2 ** len(INPUTS)       # default: every joint value of the inputs
     assert res.level == pytest.approx(0.9)
     assert res.set.guarantee == "pac_under_model"
     assert res.set.center.device.type == torch.device(device).type
@@ -184,3 +185,21 @@ def test_flat_with_set_matches_a_dense_projection():
     full = _grid([2] * len(INPUTS), "cpu")
     proj = parent_row_index(full[:, [INPUTS.index(p) for p in res.parents]], res.parent_cards)
     assert res.flat_with_set == int((~res.set.unseen.cpu())[proj].sum())
+
+
+
+def test_structure_buys_coverage_on_feasible_rows():
+    """Little exploration: some feasible (state, action) rows are never visited, yet get a set."""
+    data = ring_data(n_episodes=100, explore=0.02)
+    res = agreement_set(VARIABLES, data, "m0'", INPUTS, max_parents=3, delta=0.1,
+                        sampling="trajectory", coverage_rows=FEASIBLE)
+    assert res.flat_rows == FEASIBLE.shape[0] == 80
+    assert res.flat_visited < res.flat_with_set and res.n_rows_gained > 0
+    assert _contains_truth(res)
+
+
+def test_coverage_rows_validation():
+    data = ring_data(n_episodes=10, horizon=5)
+    with pytest.raises(ValueError, match="coverage_rows"):
+        agreement_set(VARIABLES, data, "m0'", INPUTS, max_parents=3, delta=0.1,
+                      coverage_rows=FEASIBLE[:, :3])

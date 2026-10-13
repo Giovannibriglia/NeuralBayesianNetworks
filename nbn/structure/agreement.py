@@ -106,8 +106,9 @@ class AgreementSet:
     sampling: str = "iid"
     assumption_refuted: bool = False
     assumptions: Tuple[str, ...] = ASSUMPTIONS
-    # Against the flat model (one row per joint value of all inputs), when that
-    # row space has at most max_rows rows; else None.
+    # Coverage against the flat model (one row per joint value of all inputs),
+    # on `coverage_rows` if given, else on every joint value (when there are at
+    # most max_rows of them); None when not computed.
     flat_rows: int | None = None
     flat_visited: int | None = None
     flat_with_set: int | None = None
@@ -141,6 +142,7 @@ def agreement_set(
     candidates: Sequence[Sequence[str]] | None = None,
     max_rows: int = 1 << 20,
     max_families: int = 1 << 14,
+    coverage_rows: torch.Tensor | None = None,
 ) -> AgreementSet:
     """One probability set per row of ``node``, valid without knowing its parents.
 
@@ -174,6 +176,12 @@ def agreement_set(
     max_families:
         Largest number of families (candidates plus extensions) to build;
         checked before any counting.
+    coverage_rows:
+        Optional ``[n, len(inputs)]`` joint input values (columns in the order
+        of ``inputs``) on which the coverage counts ``flat_*`` are taken, e.g.
+        the feasible state-action rows when the inputs encode actions with
+        constraints (one-hot repair flags).  Default: every joint value, which
+        can include combinations that never occur.
 
     Returns
     -------
@@ -274,7 +282,30 @@ def agreement_set(
     flat_counts = None
     if flat_ok:
         flat_counts, _ = count_table_for(hs.variables, data, node, inputs)
-    flat_visited = int((flat_counts.sum(-1) > 0).sum()) if flat_counts is not None else None
+    input_cards = [cards[p] for p in inputs]
+    if coverage_rows is not None:
+        coverage_rows = torch.as_tensor(coverage_rows, device=device).long()
+        if coverage_rows.dim() != 2 or coverage_rows.shape[1] != len(inputs):
+            raise ValueError(f"coverage_rows must be [n, {len(inputs)}] (columns in the order of inputs).")
+        cov_index = parent_row_index(coverage_rows, input_cards)
+        data_index = parent_row_index(
+            torch.stack([data[p].reshape(-1).long() for p in inputs], -1), input_cards)
+        flat_visited: int | None = int(torch.isin(cov_index, data_index).sum())
+        n_coverage: int | None = int(coverage_rows.shape[0])
+    else:
+        flat_visited = int((flat_counts.sum(-1) > 0).sum()) if flat_counts is not None else None
+        n_coverage = flat_rows if flat_ok else None
+
+    def with_set_on_coverage(row_set_unseen: torch.Tensor, union: Family) -> int | None:
+        """Coverage rows whose projection onto `union` has a set."""
+        if coverage_rows is None:
+            if not flat_ok:
+                return None
+            n_union = math.prod(cards[p] for p in union)
+            return int((~row_set_unseen).sum()) * (flat_rows // n_union)
+        proj = parent_row_index(coverage_rows[:, [inputs.index(p) for p in union]],
+                                [cards[p] for p in union])
+        return int((~row_set_unseen[proj]).sum())
 
     def joint_counts(union: Family) -> torch.Tensor:
         """Counts over `union`: summed down from the flat table when there is one."""
@@ -287,7 +318,7 @@ def agreement_set(
     common = dict(
         node=node, candidates=cands, discarded=discarded, max_parents=d, epsilon=epsilon,
         level=1.0 - delta, n_families=len(fam_list), delta_per_family=per_family,
-        sampling=sampling, flat_rows=flat_rows if flat_ok else None, flat_visited=flat_visited,
+        sampling=sampling, flat_rows=n_coverage, flat_visited=flat_visited,
     )
 
     if not survivors:
@@ -314,7 +345,7 @@ def agreement_set(
             known=(~fallback.unseen) & (fallback.radius <= epsilon),
             covered_jointly=joint_counts(union).sum(-1) > 0, survivors=[],
             assumption_refuted=True,
-            flat_with_set=int((~fallback.unseen).sum()) if flat_ok else None,
+            flat_with_set=with_set_on_coverage(fallback.unseen, union),
             **common,
         )
 
@@ -347,13 +378,11 @@ def agreement_set(
         level=1.0 - delta, guarantee="pac_under_model", unseen=~all_seen,
         center=mean, radius=radius,
     )
-    # Each union row stands for prod(cards outside the union) joint input values.
-    with_set = int(all_seen.sum())
     return AgreementSet(
         parents=union, parent_cards=union_cards, set=result_set,
         known=all_seen & (radius <= epsilon), covered_jointly=joint_counts(union).sum(-1) > 0,
         survivors=survivors,
-        flat_with_set=with_set * (flat_rows // n_rows) if flat_ok else None,
+        flat_with_set=with_set_on_coverage(~all_seen, union),
         **common,
     )
 
