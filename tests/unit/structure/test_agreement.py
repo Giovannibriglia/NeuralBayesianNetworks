@@ -178,19 +178,18 @@ def test_level_does_not_depend_on_the_memory_guard():
 
 
 def test_flat_with_set_matches_a_dense_projection():
-    from nbn.structure.agreement import _grid
-
     data = ring_data(n_episodes=100)
     res = agreement_set(VARIABLES, data, "m0'", INPUTS, max_parents=3, delta=0.1)
-    full = _grid([2] * len(INPUTS), "cpu")
+    full = torch.cartesian_prod(*[torch.arange(2)] * len(INPUTS))
     proj = parent_row_index(full[:, [INPUTS.index(p) for p in res.parents]], res.parent_cards)
     assert res.flat_with_set == int((~res.set.unseen.cpu())[proj].sum())
 
 
 
-def test_structure_buys_coverage_on_feasible_rows():
+@pytest.mark.parametrize("device", available_devices())
+def test_structure_buys_coverage_on_feasible_rows(device):
     """Little exploration: some feasible (state, action) rows are never visited, yet get a set."""
-    data = ring_data(n_episodes=100, explore=0.02)
+    data = ring_data(n_episodes=100, explore=0.02, device=device)
     res = agreement_set(VARIABLES, data, "m0'", INPUTS, max_parents=3, delta=0.1,
                         sampling="trajectory", coverage_rows=FEASIBLE)
     assert res.flat_rows == FEASIBLE.shape[0] == 80
@@ -203,3 +202,43 @@ def test_coverage_rows_validation():
     with pytest.raises(ValueError, match="coverage_rows"):
         agreement_set(VARIABLES, data, "m0'", INPUTS, max_parents=3, delta=0.1,
                       coverage_rows=FEASIBLE[:, :3])
+
+
+
+# --- review round 2 regressions (#320) ------------------------------------------------------
+def test_explicit_candidates_declare_their_own_assumption():
+    data = ring_data(n_episodes=50)
+    res = agreement_set(VARIABLES, data, "m0'", INPUTS, max_parents=3, delta=0.1,
+                        candidates=[("m0", "m1", "rep0")])
+    assert res.assumptions[0].startswith("some given candidate contains Pa")
+
+
+def test_default_family_count_estimate_is_exact():
+    """16 inputs, d = 4: C(16,4) + C(16,5) = 6188 families, under the 16384 limit."""
+    v = {f"u{i}": ("discrete", 2) for i in range(16)}
+    v["y'"] = ("discrete", 2)
+    g = torch.Generator().manual_seed(0)
+    data = {k: torch.randint(0, 2, (50,), generator=g) for k in v}
+    with pytest.raises(ValueError, match="max_rows"):        # gets past the family guard
+        agreement_set(v, data, "y'", [f"u{i}" for i in range(16)], max_parents=4, delta=0.1, max_rows=10)
+
+
+def test_refuted_fallback_without_a_flat_table_reports_no_parents():
+    data = ring_data()
+    res = agreement_set(VARIABLES, data, "m0'", INPUTS, max_parents=2, delta=0.1, max_rows=200)
+    assert res.assumption_refuted and res.parents == () and bool(res.set.unseen.all())
+
+
+def test_repeated_coverage_rows_count_once():
+    data = ring_data(n_episodes=100, explore=0.02)
+    once = agreement_set(VARIABLES, data, "m0'", INPUTS, max_parents=3, delta=0.1, coverage_rows=FEASIBLE)
+    twice = agreement_set(VARIABLES, data, "m0'", INPUTS, max_parents=3, delta=0.1,
+                          coverage_rows=torch.cat([FEASIBLE, FEASIBLE[:30]]))
+    assert (twice.flat_rows, twice.flat_visited, twice.flat_with_set) == \
+        (once.flat_rows, once.flat_visited, once.flat_with_set)
+
+
+def test_no_budget_share_is_reserved_when_the_flat_model_is_a_family():
+    data = ring_data(n_episodes=50)
+    res = agreement_set(VARIABLES, data, "m0'", ["m0", "m3", "rep0"], max_parents=5, delta=0.1)
+    assert res.n_families == 1 and res.delta_per_family == pytest.approx(0.1)
