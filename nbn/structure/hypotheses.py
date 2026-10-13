@@ -48,8 +48,8 @@ dependent on the loggers.
 Scope
 -----
 Discrete targets and discrete parents (count-based sets).  Continuous and
-mixed factors: issue #318.  Rules that combine the candidates of a node into
-one set (agreement rule): issue #313.
+mixed factors: issue #318.  One set per row that combines the candidates of a
+node: :func:`nbn.structure.agreement_set` (agreement rule).
 """
 from __future__ import annotations
 

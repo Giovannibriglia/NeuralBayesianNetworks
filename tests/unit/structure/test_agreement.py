@@ -63,6 +63,8 @@ def truth_on(parents, device="cpu"):
 
 
 def _contains_truth(res):
+    if not set(TRUE_PARENTS) <= set(res.parents):
+        return False            # the true parents were refuted (the delta-failure event): a miss
     truth = truth_on(res.parents, res.set.center.device).to(res.set.center.dtype)
     seen = ~res.set.unseen
     return bool(res.set.row_contains(truth)[seen].all())
@@ -103,11 +105,11 @@ def test_explicit_candidates_and_the_full_input_set():
     assert res.survivors == [tuple(small)] and res.discarded == {}   # no extension to test against
 
 
-def test_accepts_a_hypothesis_set_for_the_variables():
+def test_a_hypothesis_set_supplies_its_candidates():
     data = ring_data(n_episodes=50)
-    hs = HypothesisSet(VARIABLES, {"m0'": [TRUE_PARENTS]})
+    hs = HypothesisSet(VARIABLES, {"m0'": [TRUE_PARENTS, ("m0", "m1", "rep0")]})
     res = agreement_set(hs, data, "m0'", ["m0", "m3", "rep0", "m1"], max_parents=3, delta=0.1)
-    assert res.node == "m0'"
+    assert res.candidates == [TRUE_PARENTS, ("m0", "m1", "rep0")]
 
 
 @pytest.mark.parametrize("kwargs, err", [
@@ -118,6 +120,8 @@ def test_accepts_a_hypothesis_set_for_the_variables():
     ({"candidates": [("m0", "zzz")]}, ValueError),
     ({"candidates": ["m0"]}, TypeError),
     ({"candidates": []}, ValueError),
+    ({"candidates": [TRUE_PARENTS, ("rep0", "m0", "m3")]}, ValueError),   # same family twice
+    ({"max_families": 10}, ValueError),
 ])
 def test_validation(kwargs, err):
     data = ring_data(n_episodes=10, horizon=5)
@@ -160,3 +164,23 @@ def test_row_layout_matches_parent_row_index():
     res = agreement_set(VARIABLES, data, "m0'", INPUTS, max_parents=3, delta=0.1)
     grid = torch.cartesian_prod(*[torch.arange(c) for c in res.parent_cards]).reshape(-1, len(res.parents))
     assert torch.equal(parent_row_index(grid, res.parent_cards), torch.arange(grid.shape[0]))
+
+
+
+def test_level_does_not_depend_on_the_memory_guard():
+    data = ring_data(n_episodes=100)
+    small = agreement_set(VARIABLES, data, "m0'", INPUTS, max_parents=3, delta=0.1, max_rows=200)
+    big = agreement_set(VARIABLES, data, "m0'", INPUTS, max_parents=3, delta=0.1)
+    assert small.delta_per_family == big.delta_per_family
+    assert small.survivors == big.survivors
+    assert small.flat_rows is None and big.flat_rows == 256
+
+
+def test_flat_with_set_matches_a_dense_projection():
+    from nbn.structure.agreement import _grid
+
+    data = ring_data(n_episodes=100)
+    res = agreement_set(VARIABLES, data, "m0'", INPUTS, max_parents=3, delta=0.1)
+    full = _grid([2] * len(INPUTS), "cpu")
+    proj = parent_row_index(full[:, [INPUTS.index(p) for p in res.parents]], res.parent_cards)
+    assert res.flat_with_set == int((~res.set.unseen.cpu())[proj].sum())

@@ -140,6 +140,7 @@ def agreement_set(
     sampling: Sampling = "iid",
     candidates: Sequence[Sequence[str]] | None = None,
     max_rows: int = 1 << 20,
+    max_families: int = 1 << 14,
 ) -> AgreementSet:
     """One probability set per row of ``node``, valid without knowing its parents.
 
@@ -147,7 +148,8 @@ def agreement_set(
     ----------
     variables:
         Variable specs (as for :class:`HypothesisSet`), or a
-        :class:`HypothesisSet` whose variables are used.
+        :class:`HypothesisSet`: its variables are used and, when ``candidates``
+        is not given, its candidates for ``node``.
     data:
         Columns by name (unweighted counts of independent draws, or
         transitions of episodes with ``sampling="trajectory"``).
@@ -167,13 +169,19 @@ def agreement_set(
         subsets of ``inputs``).  The guarantee then needs a superset of the
         true parents among them.
     max_rows:
-        Largest row space (union of the survivors' parents) built densely.
+        Largest row space (union of the survivors' parents, or all inputs for
+        the flat comparison) built densely.
+    max_families:
+        Largest number of families (candidates plus extensions) to build;
+        checked before any counting.
 
     Returns
     -------
     AgreementSet
     """
     if isinstance(variables, HypothesisSet):
+        if candidates is None and node in variables.candidates:
+            candidates = variables.candidates[node]       # the user's own candidates
         variables = variables.variables
     if not 0.0 < delta < 1.0:
         raise ValueError(f"delta must be in (0, 1); got {delta}.")
@@ -186,22 +194,30 @@ def agreement_set(
         raise ValueError(f"max_parents must be >= 0; got {max_parents}.")
     d = min(int(max_parents), len(inputs))
     if candidates is None:
+        n_default = math.comb(len(inputs), d) * (1 + len(inputs) - d)
+        if n_default > max_families:
+            raise ValueError(
+                f"{len(inputs)} inputs with max_parents={d} give about {n_default} families "
+                f"(> max_families={max_families}); restrict inputs or pass candidates."
+            )
         cands: List[Family] = [tuple(c) for c in itertools.combinations(inputs, d)]
     else:
         cands = []
+        seen_sets: set = set()
         for c in candidates:
             if isinstance(c, str):
                 raise TypeError(f"Each candidate must be a tuple of names, not {c!r}.")
             if not set(c) <= set(inputs):
                 raise ValueError(f"Candidate {tuple(c)} uses variables outside inputs {inputs}.")
+            if frozenset(c) in seen_sets:
+                raise ValueError(f"Candidate {tuple(c)} is listed twice (order does not matter).")
+            seen_sets.add(frozenset(c))
             cands.append(tuple(c))
         if not cands:
             raise ValueError("candidates is empty.")
 
     # Families: candidates and their one-variable extensions, deduplicated as sets.
-    families: Dict[frozenset, Family] = {}
-    for c in cands:
-        families.setdefault(frozenset(c), c)
+    families: Dict[frozenset, Family] = {frozenset(c): c for c in cands}
     extensions: Dict[Family, List[Tuple[str, Family]]] = {}
     for c in cands:
         extensions[c] = []
@@ -211,29 +227,32 @@ def agreement_set(
             e = families.setdefault(frozenset((*c, v)), (*c, v))
             extensions[c].append((v, e))
     fam_list = list(families.values())
+    if len(fam_list) > max_families:
+        raise ValueError(f"{len(fam_list)} families (> max_families={max_families}).")
     # A one-node HypothesisSet gives the factor cache (count once, marginalise).
     spec = {v: variables[v] for v in (*inputs, node)}
     hs = HypothesisSet(spec, {node: fam_list})
     counts = hs.counts(data, input_marginals=False)
     cards = {v: int(hs.variables[v].cardinality) for v in (*inputs, node)}
+    k = cards[node]
     flat_rows = math.prod(cards[p] for p in inputs)
     flat_ok = flat_rows <= max_rows
-    # One share of the budget is kept for the flat fallback (all inputs as parents).
-    n_budget = len(fam_list) + (1 if flat_ok else 0)
-    per_family = delta / n_budget
+    # One share of the budget is always kept for the flat fallback (all inputs as
+    # parents), so the level does not depend on the memory guard max_rows.
+    per_family = delta / (len(fam_list) + 1)
     balls: Dict[Family, L1BallSet] = {
         f: l1_ball_set_from_counts(counts[(node, f)], delta=per_family, sampling=sampling)
         for f in fam_list
     }
-    k = cards[node]
 
-    # 2. Refutation against the one-variable extensions.
-    survivors: List[Family] = []
-    discarded: Dict[Family, dict] = {}
+    # 2. Refutation against the one-variable extensions (one host sync in total).
+    # Tolerance: float32 rounding (MPS) must not refute a ball that just touches.
+    tol = 1e-6
+    pairs: List[Tuple[Family, Family]] = []
+    stats: List[torch.Tensor] = []
     for c in cands:
         bc = balls[c]
         r_c = bc.unseen.numel()
-        worst = None
         for v, e in extensions[c]:
             be = balls[e]
             order = (*c, v)
@@ -241,28 +260,40 @@ def agreement_set(
             center = _reorder_parents(be.center, e_cards, e, order).reshape(r_c, cards[v], k)
             radius = _reorder_parents(be.radius.unsqueeze(-1), e_cards, e, order).reshape(r_c, cards[v])
             gap = (center - bc.center.unsqueeze(1)).abs().sum(-1) - (radius + bc.radius.unsqueeze(1))
-            n_conflicts = int((gap > 1e-12).sum())
-            if n_conflicts:
-                g = float(gap.max())
-                if worst is None or g > worst["gap"]:
-                    worst = {"against": e, "rows": n_conflicts, "gap": g}
-        if worst is None:
-            survivors.append(c)
-        else:
-            discarded[c] = worst
+            stats.append(torch.stack([(gap > tol).sum().to(gap.dtype), gap.max()]))
+            pairs.append((c, e))
+    values = torch.stack(stats).tolist() if stats else []
+    worst: Dict[Family, dict] = {}
+    for (c, e), (n_conflicts, g) in zip(pairs, values):
+        if n_conflicts > 0 and (c not in worst or g > worst[c]["gap"]):
+            worst[c] = {"against": e, "rows": int(n_conflicts), "gap": float(g)}
+    survivors = [c for c in cands if c not in worst]
+    discarded = {c: worst[c] for c in cands if c in worst}
 
-    first = data[node]
-    device = first.device
-    flat_visited_mask = None
+    device = data[node].device
     flat_counts = None
     if flat_ok:
         flat_counts, _ = count_table_for(hs.variables, data, node, inputs)
-        flat_visited_mask = flat_counts.sum(-1) > 0
+    flat_visited = int((flat_counts.sum(-1) > 0).sum()) if flat_counts is not None else None
+
+    def joint_counts(union: Family) -> torch.Tensor:
+        """Counts over `union`: summed down from the flat table when there is one."""
+        if flat_counts is not None and union == tuple(p for p in inputs if p in union):
+            full = flat_counts.reshape(*[cards[p] for p in inputs], k)
+            drop = [i for i, p in enumerate(inputs) if p not in union]
+            return (full.sum(dim=drop) if drop else full).reshape(-1, k)
+        return count_table_for(hs.variables, data, node, union)[0]
+
+    common = dict(
+        node=node, candidates=cands, discarded=discarded, max_parents=d, epsilon=epsilon,
+        level=1.0 - delta, n_families=len(fam_list), delta_per_family=per_family,
+        sampling=sampling, flat_rows=flat_rows if flat_ok else None, flat_visited=flat_visited,
+    )
 
     if not survivors:
-        # Every size-d candidate is contradicted: |Pa| > d, a parent outside the
-        # inputs, or a confounded logger.  If Pa ⊆ inputs still holds, the flat
-        # model (all inputs as parents) is a superset and stays valid.
+        # Every candidate is contradicted: |Pa| > d, a parent outside the inputs,
+        # or a confounded logger.  If Pa ⊆ inputs still holds, the flat model (all
+        # inputs as parents) is a superset and stays valid.
         if flat_counts is not None:
             union: Family = inputs
             fallback = l1_ball_set_from_counts(flat_counts, delta=per_family, sampling=sampling)
@@ -278,18 +309,13 @@ def agreement_set(
                 center=torch.full((n_rows, k), 1.0 / k, dtype=dtype, device=device),
                 radius=torch.full((n_rows,), 2.0, dtype=dtype, device=device),
             )
-        union_cards = [cards[p] for p in union]
-        joint, _ = count_table_for(hs.variables, data, node, union)
         return AgreementSet(
-            node=node, parents=union, parent_cards=union_cards, set=fallback,
+            parents=union, parent_cards=[cards[p] for p in union], set=fallback,
             known=(~fallback.unseen) & (fallback.radius <= epsilon),
-            covered_jointly=joint.sum(-1) > 0, candidates=cands, survivors=[],
-            discarded=discarded, max_parents=d, epsilon=epsilon, level=1.0 - delta,
-            n_families=len(fam_list), delta_per_family=per_family, sampling=sampling,
+            covered_jointly=joint_counts(union).sum(-1) > 0, survivors=[],
             assumption_refuted=True,
-            flat_rows=flat_rows if flat_visited_mask is not None else None,
-            flat_visited=int(flat_visited_mask.sum()) if flat_visited_mask is not None else None,
-            flat_with_set=int((~fallback.unseen).sum()) if flat_visited_mask is not None else None,
+            flat_with_set=int((~fallback.unseen).sum()) if flat_ok else None,
+            **common,
         )
 
     # 3. One set per row of the union of the survivors' parents.
@@ -317,25 +343,18 @@ def agreement_set(
     radius = ((center_stack - mean).abs().sum(-1) + radius_stack).amax(0).clamp_max(2.0)
     mean = torch.where(all_seen.unsqueeze(-1), mean, torch.full_like(mean, 1.0 / k))
     radius = torch.where(all_seen, radius, torch.full_like(radius, 2.0))
-    joint, _ = count_table_for(hs.variables, data, node, union)
-    flat_with_set = None
-    if flat_visited_mask is not None:
-        full = _grid([cards[p] for p in inputs], device)
-        proj = parent_row_index(full[:, [inputs.index(p) for p in union]], union_cards)
-        flat_with_set = int(all_seen[proj].sum())
     result_set = L1BallSet(
         level=1.0 - delta, guarantee="pac_under_model", unseen=~all_seen,
         center=mean, radius=radius,
     )
+    # Each union row stands for prod(cards outside the union) joint input values.
+    with_set = int(all_seen.sum())
     return AgreementSet(
-        node=node, parents=union, parent_cards=union_cards, set=result_set,
-        known=all_seen & (radius <= epsilon), covered_jointly=joint.sum(-1) > 0,
-        candidates=cands, survivors=survivors, discarded=discarded, max_parents=d,
-        epsilon=epsilon, level=1.0 - delta, n_families=len(fam_list),
-        delta_per_family=per_family, sampling=sampling,
-        flat_rows=flat_rows if flat_visited_mask is not None else None,
-        flat_visited=int(flat_visited_mask.sum()) if flat_visited_mask is not None else None,
-        flat_with_set=flat_with_set,
+        parents=union, parent_cards=union_cards, set=result_set,
+        known=all_seen & (radius <= epsilon), covered_jointly=joint_counts(union).sum(-1) > 0,
+        survivors=survivors,
+        flat_with_set=with_set * (flat_rows // n_rows) if flat_ok else None,
+        **common,
     )
 
 
