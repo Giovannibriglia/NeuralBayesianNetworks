@@ -11,9 +11,13 @@ build:
       # setuptools-scm reads the version from the tags; the clone is shallow.
       - git fetch --unshallow --tags || true
     pre_install:
+      # RTD's virtualenv ships pip 23.1, which rejects the typing_extensions
+      # wheel on the PyTorch index (name mismatch) and then fails building it
+      # from source; a current pip installs it (CI upgrades pip too).
+      - python -m pip install --upgrade pip
       # The CPU build of PyTorch is enough to import NBN for the API pages
       # and much smaller than the default CUDA build.
-      - pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 python:
   install:
