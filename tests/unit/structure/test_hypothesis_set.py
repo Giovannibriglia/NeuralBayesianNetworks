@@ -89,10 +89,10 @@ def test_validation(bad, err):
         HypothesisSet(v, bad)
 
 
-def test_continuous_variables_point_to_the_continuous_issue():
+def test_continuous_variables_point_to_fit_and_calibrated_sets():
     v = {"x": ("continuous", 1), "x'": ("discrete", 2)}
     hs = HypothesisSet(v, {"x'": [("x",)]})
-    with pytest.raises(ValueError, match="#318"):
+    with pytest.raises(ValueError, match="HypothesisSet.fit"):
         hs.counts({"x": torch.randn(5), "x'": torch.zeros(5)})
 
 

@@ -12,6 +12,9 @@
 * :func:`agreement_set` — one valid set per row of a node whose parents are
   uncertain (KWIK agreement rule, under a declared bound on the number of
   parents);
+* :meth:`HypothesisSet.fit` / :meth:`HypothesisSet.calibrated_sets` — continuous
+  and mixed factors: all candidates of a node fitted together (linear
+  sub-blocks or a stacked MLP), one calibrated set per factor;
 * :func:`export_factored_sets` / :func:`load_factored_sets` — a documented
   side file (manifest + arrays) with the sets and their sharing, for robust,
   interval and parametric MDP tools.
@@ -19,6 +22,7 @@
 User guide: https://nbn.readthedocs.io/en/latest/user_guide/probability_sets.html
 """
 from nbn.structure.agreement import AgreementSet, agreement_set
+from nbn.structure.continuous import CalibratedFactorSets, FactorMechanisms
 from nbn.structure.export import (
     FactoredSetsExport,
     export_factored_sets,
@@ -36,4 +40,5 @@ __all__ = [
     "HypothesisSet", "FactorCounts", "FactorSets", "DEFAULT_MAX_UNION_CELLS",
     "agreement_set", "AgreementSet",
     "export_factored_sets", "load_factored_sets", "joint_row_bounds", "FactoredSetsExport",
+    "FactorMechanisms", "CalibratedFactorSets",
 ]

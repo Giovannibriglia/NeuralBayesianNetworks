@@ -35,6 +35,7 @@ force the CPU.
 | {doc}`14_structure_uncertainty_hypothesis_sets` | Candidate parent sets per node with `HypothesisSet`: the factor cache, one set per factor with the budget split over factors, supersets against a missing parent, and `model_for`. |
 | {doc}`15_agreement_rule` | One valid set per row under structure uncertainty with `agreement_set`: refutation by one-variable extensions, coverage of never-visited joint values, a coverage check, and a wrong bound. |
 | {doc}`16_export_factored_sets` | Export factored sets with their sharing for robust / interval / parametric MDP tools, read them back, and rebuild the joint bounds of a never-visited row. |
+| {doc}`17_continuous_hypothesis_sets` | Continuous and mixed factors: batched candidate fits, one calibrated set per factor, marginal vs conditional coverage, and `model_for`. |
 
 ```{toctree}
 :hidden:
@@ -56,4 +57,5 @@ force the CPU.
 14_structure_uncertainty_hypothesis_sets
 15_agreement_rule
 16_export_factored_sets
+17_continuous_hypothesis_sets
 ```

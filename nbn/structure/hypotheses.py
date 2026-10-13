@@ -47,8 +47,9 @@ dependent on the loggers.
 
 Scope
 -----
-Discrete targets and discrete parents (count-based sets).  Continuous and
-mixed factors: issue #318.  One set per row that combines the candidates of a
+Count-based sets need discrete targets and parents.  Continuous and mixed
+factors: :meth:`HypothesisSet.fit` and :meth:`HypothesisSet.calibrated_sets`
+(:mod:`nbn.structure.continuous`).  One set per row that combines the candidates of a
 node: :func:`nbn.structure.agreement_set` (agreement rule).
 """
 from __future__ import annotations
@@ -56,11 +57,14 @@ from __future__ import annotations
 import itertools
 import math
 from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, Literal, Mapping, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Dict, Iterator, List, Literal, Mapping, Sequence, Tuple, Union
 
 import torch
 
 from nbn.core.variables import Variable
+
+if TYPE_CHECKING:  # pragma: no cover
+    from nbn.structure.continuous import CalibratedFactorSets, FactorMechanisms
 from nbn.learning.weighting import validate_weights
 from nbn.uncertainty.builders import (
     Sampling,
@@ -193,7 +197,7 @@ class HypothesisSet:
         if continuous:
             raise ValueError(
                 f"Count-based factors need discrete variables; {continuous} are continuous "
-                "(continuous and mixed factors: issue #318)."
+                "(fit continuous and mixed factors with HypothesisSet.fit and calibrated_sets)."
             )
 
     # ------------------------------------------------------------------
@@ -252,6 +256,7 @@ class HypothesisSet:
         weights: torch.Tensor | None = None,
         max_union_cells: int = DEFAULT_MAX_UNION_CELLS,
         input_marginals: bool = True,
+        discrete_only: bool = False,
     ) -> FactorCounts:
         """Count tables ``[R, K]`` for every factor (and the inputs' marginals).
 
@@ -261,9 +266,12 @@ class HypothesisSet:
         counted one by one.  Tables stay on the data's device, in the widest
         float the device supports.  ``input_marginals`` also counts the
         marginal of every input that some candidate uses (needed only by
-        :meth:`model_for`).
+        :meth:`model_for`).  ``discrete_only`` counts only the factors whose
+        node and parents are all discrete (the others are fitted by
+        :meth:`fit`), instead of raising.
         """
-        self._require_discrete()
+        if not discrete_only:
+            self._require_discrete()
         first = data[self.targets[0]]
         n_rows = first.reshape(-1).shape[0]
         weights = validate_weights(weights, n_rows, where="HypothesisSet.counts", device=first.device)
@@ -272,6 +280,12 @@ class HypothesisSet:
         union_used: Dict[str, bool] = {}
         for node in self.targets:
             cs = self.candidates[node]
+            if discrete_only:
+                if not self.variables[node].is_discrete:
+                    continue
+                cs = [c for c in cs if all(self.variables[p].is_discrete for p in c)]
+                if not cs:
+                    continue
             union = tuple(dict.fromkeys(p for c in cs for p in c))
             union_cards = [int(self.variables[p].cardinality) for p in union]
             k = int(self.variables[node].cardinality)
@@ -384,13 +398,49 @@ class HypothesisSet:
         )
 
     # ------------------------------------------------------------------
+    # Continuous and mixed factors (#318)
+    # ------------------------------------------------------------------
+
+    def fit(self, data: Mapping[str, torch.Tensor], **kwargs) -> FactorMechanisms:
+        """Fit one mechanism per factor, all candidates of a node together.
+
+        See :func:`nbn.structure.continuous.fit_factors` for the options
+        (``location="mlp" | "linear"``, ``noise``, ``hidden``, ``epochs``,
+        ``lr``, ``batch_size``, ``weights``, ``seed``, ``coupling``).
+        """
+        from nbn.structure.continuous import fit_factors
+
+        return fit_factors(self, data, **kwargs)
+
+    def calibrated_sets(
+        self,
+        fitted: FactorMechanisms,
+        calibration_data: Mapping[str, torch.Tensor],
+        method: str = "cqr",
+        level: float = 0.9,
+        groups: torch.Tensor | None = None,
+        generator: torch.Generator | None = None,
+    ) -> CalibratedFactorSets:
+        """One calibrated set per continuous or neural factor, on held-out rows.
+
+        The level is split over the factors (union bound).  Conformal results
+        are *marginal* (not per parent value); PIT bands hold for every
+        conditional only under the declared PIT-independence assumption.  See
+        :func:`nbn.structure.continuous.calibrate_factors`.
+        """
+        from nbn.structure.continuous import calibrate_factors
+
+        return calibrate_factors(self, fitted, calibration_data, method=method, level=level,
+                                 groups=groups, generator=generator)
+
+    # ------------------------------------------------------------------
     # A fitted model for one hypothesis
     # ------------------------------------------------------------------
 
     def model_for(
         self,
         hypothesis: Mapping[str, Sequence[str]],
-        counts: FactorCounts,
+        counts: Union[FactorCounts, FactorMechanisms],
         alpha: float = 0.0,
         device: str | None = None,
     ):
@@ -404,10 +454,19 @@ class HypothesisSet:
         counts.  The result is
         the model that fitting this hypothesis' DAG directly with table
         mechanisms of smoothing ``alpha`` would give.
+
+        Given the :class:`FactorMechanisms` of :meth:`fit` instead of counts,
+        it returns a ``StructuralCausalModel`` with copies of the fitted
+        mechanisms (continuous and mixed factors).
         """
         from nbn.core.network import NeuralBayesianNetwork
         from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
+        from nbn.structure.continuous import FactorMechanisms, model_from_fitted
 
+        if isinstance(counts, FactorMechanisms):
+            if counts.hypothesis_set is not self:
+                raise ValueError("These mechanisms were fitted by another HypothesisSet.")
+            return model_from_fitted(self, counts, hypothesis)
         if counts.hypothesis_set is not self:
             raise ValueError("These counts were built by another HypothesisSet.")
         self._check_hypothesis(hypothesis)
