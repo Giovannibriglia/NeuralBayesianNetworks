@@ -88,6 +88,7 @@ def test_export_matches_the_stacked_forward(device):
         active = torch.nonzero(_masks()[c]).reshape(-1).tolist()
         seq = net.export(c)
         assert next(seq.parameters()).device.type == torch.device(device).type
+        assert all(isinstance(m, torch.nn.Linear) for m in seq if not isinstance(m, torch.nn.SiLU))
         torch.testing.assert_close(seq(z[:, active]).cpu(), ref[c], rtol=1e-4, atol=1e-5,
                                    msg=lambda m, c=c: f"export of candidate {c} on {device}: {m}")
         perm = active[::-1]                                  # inputs in another order
@@ -451,3 +452,4 @@ def test_fitted_mechanisms_record_their_device_and_roots_reuse_the_counts(device
     assert fm.device.type == torch.device(device).type
     direct, _ = count_table_for(hs.variables, data, "a", ())
     torch.testing.assert_close(fm.roots["a"]._counts.to(direct), direct)
+
