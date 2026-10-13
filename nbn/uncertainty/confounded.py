@@ -82,7 +82,7 @@ from nbn.core.variables import DiscreteVariable
 from nbn.uncertainty.binomial import IntervalMethod, binomial_interval
 from nbn.uncertainty.builders import Sampling, per_interval_delta
 from nbn.uncertainty.counts import count_table_for, parent_grid, parent_row_index
-from nbn.uncertainty.sets import IntervalSet, tighten_box_to_simplex
+from nbn.uncertainty.sets import IntervalSet
 from nbn.utils.device import to_device
 
 Method = Literal["auto", "lp", "intersection", "manski", "sensitivity"]
@@ -155,9 +155,29 @@ class RegimeBox:
 
 def natural_rows(box: RegimeBox) -> Tuple[np.ndarray, np.ndarray]:
     """Intersection of the per-regime Manski rows, ``[|A|, |X'|]`` each (before the simplex)."""
-    lo = box.cell_lo.max(axis=0)
-    hi = (1.0 - box.comp_lo).min(axis=0)
+    return _natural(box.cell_lo, box.comp_lo)
+
+
+def _natural(cell_lo: np.ndarray, comp_lo: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Manski rows intersected over the regime axis (``-3``), float64, batched over leading axes."""
+    lo = np.asarray(cell_lo, float).max(axis=-3)
+    hi = (1.0 - np.asarray(comp_lo, float)).min(axis=-3)
     return np.clip(lo, 0, 1), np.clip(hi, 0, 1)
+
+
+def _closed_form(lo: np.ndarray, hi: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Refutation masks and simplex-tightened rows, batched: ``[..., |A|, |X'|]``.
+
+    Returns ``(t_lo, t_hi, empty, miss)`` with ``empty`` / ``miss`` over the
+    leading axes: an empty per-entry intersection / a row box that misses the
+    simplex (both refute the instrument assumptions).
+    """
+    empty = (lo > hi + TOL).any(-1).any(-1)
+    hi = np.maximum(hi, lo)
+    miss = ((lo.sum(-1) > 1 + TOL) | (hi.sum(-1) < 1 - TOL)).any(-1)
+    t_lo = np.clip(np.maximum(lo, 1.0 - (hi.sum(-1, keepdims=True) - hi)), 0, 1)
+    t_hi = np.clip(np.minimum(hi, 1.0 - (lo.sum(-1, keepdims=True) - lo)), 0, 1)
+    return t_lo, t_hi, empty, miss
 
 
 def _scipy():
@@ -259,6 +279,30 @@ class IVProgram:
         self.A_ub = sparse.csr_matrix((ub_v, (ub_r, ub_c)), shape=(len(b_ub), n_var))
         self.b_ub = np.array(b_ub) + RHS_SLACK
         self.n_var = n_var
+        self.declared = tuple(declared_unconfounded)
+
+    def rebind(self, box: RegimeBox) -> IVProgram:
+        """The same program for another box of the same shape (no declared regimes).
+
+        The constraint matrices depend only on the shapes; the box enters the
+        right-hand sides, which are recomputed here in the constructor's order.
+        """
+        if self.declared:
+            raise ValueError("rebind is only valid without declared regimes (their coefficients depend on the box).")
+        if box.shape != (self.K, self.nA, self.nY):
+            raise ValueError("rebind needs a box of the same shape.")
+        b: List[float] = []
+        t_all = np.arange(self.nT)
+        for k in range(self.K):
+            for a in range(self.nA):
+                for y in range(self.nY):
+                    b += [box.cell_hi[k, a, y], -box.cell_lo[k, a, y]]
+                    if len(t_all[self.types[:, a] != y]):
+                        b += [box.comp_hi[k, a, y], -box.comp_lo[k, a, y]]
+        clone = object.__new__(IVProgram)
+        clone.__dict__.update(self.__dict__)
+        clone.b_ub = np.array(b) + RHS_SLACK
+        return clone
 
     def bounds(self, c_mu: np.ndarray) -> Tuple[float, float]:
         """Min and max of ``sum_t c_mu[t] mu_t`` over the feasible set (widened outward)."""
@@ -373,17 +417,18 @@ def sensitivity_row_box(box: RegimeBox, k: int, a: int, lam: float) -> Tuple[np.
 
 
 def _tighten(lo: np.ndarray, hi: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Simplex tightening per action row; raises when a row's box misses the simplex."""
-    lo, hi = np.clip(lo, 0, 1), np.clip(hi, 0, 1)
-    if np.any(lo.sum(-1) > 1 + TOL) or np.any(hi.sum(-1) < 1 - TOL):
+    """Simplex tightening per action row; raises when the rows are refuted."""
+    t_lo, t_hi, empty, miss = _closed_form(np.clip(lo, 0, 1), np.clip(hi, 0, 1))
+    if bool(np.any(empty)):
+        raise RefutedAssumption("empty intersection of per-regime rows")
+    if bool(np.any(miss)):
         raise RefutedAssumption("box does not meet the simplex")
-    t_lo, t_hi = tighten_box_to_simplex(torch.as_tensor(lo), torch.as_tensor(hi))
-    return t_lo.numpy(), t_hi.numpy()
+    return t_lo, t_hi
 
 
 def rows_from_box(box: RegimeBox, method: Method = "auto", declared_unconfounded: Sequence[int] = (),
                   lam: float | None = None, max_types: int = 20_000,
-                  max_vars: int = 200_000) -> Tuple[np.ndarray, np.ndarray, str]:
+                  max_vars: int = 200_000, _programs: dict | None = None) -> Tuple[np.ndarray, np.ndarray, str]:
     """All action rows ``[|A|, |X'|]`` of one configuration from its box, and the method used."""
     _check_method(method, lam)
     K, nA, nY = box.shape
@@ -403,7 +448,13 @@ def rows_from_box(box: RegimeBox, method: Method = "auto", declared_unconfounded
         return (*_tighten(nat_lo, nat_hi), "manski")
     if method in ("auto", "lp"):
         try:
-            prog = IVProgram(box, declared_unconfounded, max_types=max_types, max_vars=max_vars)
+            key = (box.shape, tuple(declared_unconfounded))
+            if _programs is not None and not declared_unconfounded and key in _programs:
+                prog = _programs[key].rebind(box)            # same matrices, new right-hand sides
+            else:
+                prog = IVProgram(box, declared_unconfounded, max_types=max_types, max_vars=max_vars)
+                if _programs is not None and not declared_unconfounded:
+                    _programs[key] = prog
             lp_lo, lp_hi = prog.rows()
             # the LP is inside the natural rows up to solver slack; intersecting removes the slack
             lo, hi = np.maximum(lp_lo, nat_lo), np.minimum(lp_hi, nat_hi)
@@ -448,6 +499,9 @@ class ConfoundedSet:
     others: Tuple[str, ...] = ()
     method_used: List[str] = field(default_factory=list)
     refuted: torch.Tensor = field(default=None, repr=False)  # type: ignore[assignment]
+    # Per table row: its configuration was refuted (the row is the simplex and also
+    # `unseen` in the set; this mask keeps the reason, e.g. for the export).
+    refuted_rows: torch.Tensor = field(default=None, repr=False)  # type: ignore[assignment]
     counts: torch.Tensor = field(default=None, repr=False)   # [n_configs, K] visits per regime
     n_regimes: int = 1
     delta: float = 0.05
@@ -528,7 +582,10 @@ def confounded_interval_set(
             raise ValueError(f"'{v}' must be discrete for confounded rows.")
     if regime not in data:
         raise KeyError(f"No regime column '{regime}' in the data.")
-    regimes = data[regime].reshape(-1).long()
+    raw = data[regime].reshape(-1)
+    if raw.numel() and torch.is_floating_point(raw) and not bool((raw == raw.round()).all()):
+        raise ValueError("regime ids must be whole numbers (one integer id per logging policy).")
+    regimes = raw.long()
     if regimes.numel() and int(regimes.min()) < 0:
         raise ValueError("regime ids must be non-negative integers.")
     K = int(n_regimes) if n_regimes is not None else (int(regimes.max()) + 1 if regimes.numel() else 1)
@@ -543,7 +600,8 @@ def confounded_interval_set(
     other_cards = [int(variables[p].cardinality) for p in others]
     n_u = math.prod(other_cards)
     device = getattr(model, "device", None) or data[node].device
-    data = to_device(dict(data), torch.device(device))
+    # Only the columns this node needs go to the device.
+    data = to_device({v: data[v] for v in (node, *parents, regime)}, torch.device(device))
     regimes = data[regime].reshape(-1).long()
 
     # Counts N[u, k, a, y]: count the node against (others, regime, action).
@@ -555,12 +613,16 @@ def confounded_interval_set(
     N = table.reshape(n_u, K, n_a, n_y)
 
     # 1. The box, batched (every cell and complement of every configuration and regime).
-    n_events = n_u * K * 2 * n_a * n_y
+    #    For a binary child the complement of (a, y) is the cell (a, 1 - y): one event each.
+    events_per = n_a * n_y if n_y == 2 else 2 * n_a * n_y
+    n_events = n_u * K * events_per
     trials = N.sum(dim=(2, 3), keepdim=True).expand_as(N)
     d = per_interval_delta(delta, n_events, trials, sampling)
-    comp = N.sum(-1, keepdim=True) - N
     cell_lo, cell_hi = binomial_interval(N, trials, d, method=interval_method)
-    comp_lo, comp_hi = binomial_interval(comp, trials, d, method=interval_method)
+    if n_y == 2:
+        comp_lo, comp_hi = cell_lo.flip(-1), cell_hi.flip(-1)
+    else:
+        comp_lo, comp_hi = binomial_interval(N.sum(-1, keepdim=True) - N, trials, d, method=interval_method)
     visits = N.sum(dim=(2, 3))                                  # [n_u, K]
     visited = visits.sum(-1) > 0                                # [n_u]
 
@@ -568,50 +630,49 @@ def confounded_interval_set(
     refuted = torch.zeros(n_u, dtype=torch.bool)
     notes: List[str] = []
     declared = [int(k) for k in declared_unconfounded]
-    lo = torch.zeros(n_u, n_a, n_y, dtype=cell_lo.dtype, device=cell_lo.device)
-    hi = torch.ones_like(lo)
+    # All row arithmetic in float64 on the CPU (MPS has no float64); one outward cast at the end.
+    to_np = lambda t: t.detach().cpu().double().numpy()  # noqa: E731
+    c_lo, c_hi, m_lo, m_hi = map(to_np, (cell_lo, cell_hi, comp_lo, comp_hi))
+    v_np = to_np(visits)
+    visited_np = v_np.sum(-1) > 0
+    lo_np, hi_np = np.zeros((n_u, n_a, n_y)), np.ones((n_u, n_a, n_y))
 
     want_lp = method in ("auto", "lp")
     lp_ok = want_lp and _lp_available(n_a, n_y, K, max_types, max_vars, method)
     if method in ("intersection", "manski") or (method == "auto" and not lp_ok):
         # 2. Closed form, vectorised over configurations.  An unvisited regime has
         # the box [0, 1], whose Manski row [0, 1] is neutral in the intersection.
-        n_lo = cell_lo.amax(dim=1)                              # [n_u, n_a, n_y]
-        n_hi = (1.0 - comp_lo).amin(dim=1)
-        empty = (n_lo > n_hi + TOL).any(-1).any(-1)
-        miss = ((n_lo.sum(-1) > 1 + TOL) | (n_hi.sum(-1) < 1 - TOL)).any(-1)
-        bad = (empty | miss) & visited
+        n_lo, n_hi = _natural(c_lo, m_lo)                      # [n_u, n_a, n_y]
+        t_lo, t_hi, empty, miss = _closed_form(n_lo, n_hi)
         label = "manski" if method == "manski" else "intersection"
         if method == "auto":
             label = f"intersection ({lp_ok_reason(n_a, n_y, K, max_types, max_vars)})"
-        t_lo, t_hi = tighten_box_to_simplex(n_lo.clamp(0, 1), torch.maximum(n_hi, n_lo).clamp(0, 1))
-        ok = visited & ~bad
-        lo = torch.where(ok[:, None, None], t_lo, lo)
-        hi = torch.where(ok[:, None, None], t_hi, hi)
-        for u in torch.nonzero(visited).reshape(-1).tolist():
-            used[u] = label
-        for u in torch.nonzero(bad).reshape(-1).tolist():
-            msg = f"configuration {u} of {others}: empty intersection of per-regime rows"
-            if on_refuted == "raise":
-                raise RefutedAssumption(msg)
-            used[u], refuted[u] = "refuted", True
-            notes.append(msg)
+        for u in np.flatnonzero(visited_np).tolist():
+            if empty[u] or miss[u]:
+                why = "empty intersection of per-regime rows" if empty[u] else "box does not meet the simplex"
+                msg = f"configuration {u} of {others}: {why}"
+                if on_refuted == "raise":
+                    raise RefutedAssumption(msg)
+                used[u], refuted[u] = "refuted", True
+                notes.append(msg)
+            else:
+                used[u] = label
+                lo_np[u], hi_np[u] = t_lo[u], t_hi[u]
         if declared:
             notes.append(f"declared_unconfounded {declared} not used: only the LP uses declarations "
                          f"(method used: {label}).")
     else:
-        to_np = lambda t: t.detach().cpu().double().numpy()  # noqa: E731
-        c_lo, c_hi, m_lo, m_hi = map(to_np, (cell_lo, cell_hi, comp_lo, comp_hi))
-        v_np = to_np(visits)
-        lo_np, hi_np = np.zeros((n_u, n_a, n_y)), np.ones((n_u, n_a, n_y))
+        programs: dict = {}
         for u in range(n_u):
             seen = np.flatnonzero(v_np[u] > 0)
             if len(seen) == 0:
                 continue
             box = RegimeBox(c_lo[u, seen], c_hi[u, seen], m_lo[u, seen], m_hi[u, seen], v_np[u, seen])
             dec = [int(np.flatnonzero(seen == k)[0]) for k in declared if k in seen]
+            missing_dec = [k for k in declared if k not in seen]
             try:
-                row_lo, row_hi, used[u] = rows_from_box(box, method, dec, lam, max_types, max_vars)
+                row_lo, row_hi, used[u] = rows_from_box(box, method, dec, lam, max_types, max_vars,
+                                                        _programs=programs)
             except RefutedAssumption as err:
                 if on_refuted == "raise":
                     raise RefutedAssumption(f"configuration {u} of {others}: {err}") from err
@@ -619,11 +680,14 @@ def confounded_interval_set(
                 notes.append(f"configuration {u} of {others}: {err}")
                 continue
             if used[u] == "intersection (lp failed)":
-                notes.append(f"configuration {u}: LP solver failed; used the intersection rows (sound, possibly wider)")
+                notes.append(f"configuration {u}: LP solver failed; used the intersection rows (sound, possibly "
+                             f"wider){'; declarations not used' if declared else ''}")
+            elif missing_dec and used[u] == "lp":
+                notes.append(f"configuration {u}: declared regimes {missing_dec} have no data here; not used")
             lo_np[u], hi_np[u] = row_lo, row_hi
         if declared and method == "sensitivity":
             notes.append(f"declared_unconfounded {declared} not used: only the LP uses declarations.")
-        lo, hi = _outward(lo_np, hi_np, cell_lo.dtype, cell_lo.device)
+    lo, hi = _outward(lo_np, hi_np, cell_lo.dtype, cell_lo.device)
 
     # Layout: rows over `parents` in DAG order (C order), as the node's table.
     grid = parent_grid([int(variables[p].cardinality) for p in parents], device=lo.device)
@@ -632,12 +696,13 @@ def confounded_interval_set(
     a_index = grid[:, parents.index(action)]
     action_taken = N.sum(dim=(1, 3)) > 0                       # [n_u, n_a]: some regime took a
     refuted_d = refuted.to(lo.device)
-    unseen = ~action_taken[u_index, a_index] | refuted_d[u_index]
+    refuted_rows = refuted_d[u_index]
+    unseen = ~action_taken[u_index, a_index] | refuted_rows
     result = IntervalSet(level=1.0 - delta, guarantee="pac_under_model", unseen=unseen,
                          lower=lo[u_index, a_index], upper=hi[u_index, a_index])
     return ConfoundedSet(
         node=node, action=action, parents=parents, set=result, others=others, method_used=used,
-        refuted=refuted_d, counts=visits, n_regimes=K, delta=delta, sampling=sampling,
+        refuted=refuted_d, refuted_rows=refuted_rows, counts=visits, n_regimes=K, delta=delta, sampling=sampling,
         interval_method=interval_method, declared_unconfounded=tuple(declared), notes=notes,
     )
 
@@ -661,8 +726,10 @@ def lp_ok_reason(n_a: int, n_y: int, K: int, max_types: int, max_vars: int) -> s
     except ImportError:
         return "no LP: SciPy not installed"
     n_types = n_y ** n_a
-    if n_types > max_types or n_types * (1 + K * n_a) > max_vars:
-        return f"no LP: {n_types} response types too many"
+    if n_types > max_types:
+        return f"no LP: {n_types} response types > max_types={max_types}"
+    if n_types * (1 + K * n_a) > max_vars:
+        return f"no LP: {n_types * (1 + K * n_a)} variables > max_vars={max_vars}"
     return ""
 
 

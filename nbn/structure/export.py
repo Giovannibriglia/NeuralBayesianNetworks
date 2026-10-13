@@ -94,7 +94,9 @@ def export_factored_sets(
         ``node -> set`` for one model: a :class:`ProbabilitySet` (parents from
         ``source``'s DAG), an :class:`AgreementSet` (its own parents), or a
         :class:`NoiseParameterSet` (the node is tied to that shared polytope;
-        nodes given the same object share one parameter block).
+        nodes given the same object share one parameter block), or a
+        :class:`~nbn.uncertainty.ConfoundedSet` (interventional rows of a
+        confounded action; refuted rows are recorded as such).
     source:
         A fitted model (for its DAG and variables), a :class:`HypothesisSet`,
         or a variables mapping (enough for :class:`AgreementSet` values).
@@ -168,13 +170,23 @@ def export_factored_sets(
                                  f"{parents} and {k} classes give {(math.prod(record['parent_cards']), k)}.")
             arrays[f"{fid}/index"] = idx
         else:
-            ps = obj.set if isinstance(obj, AgreementSet) else obj
+            from nbn.uncertainty.confounded import ConfoundedSet
+
+            ps = obj.set if isinstance(obj, (AgreementSet, ConfoundedSet)) else obj
             set_type = ("l1" if isinstance(ps, L1BallSet) else
                         "samples" if isinstance(ps, SampleSet) else "interval")
             record.update(set_type=set_type, guarantee=ps.guarantee, level=float(ps.level),
                           delta=float(1.0 - ps.level),
                           sampling=getattr(obj, "sampling", None),
                           assumptions=list(getattr(obj, "assumptions", ())))
+            if isinstance(obj, ConfoundedSet):
+                record["confounded"] = {
+                    "action": obj.action, "n_regimes": obj.n_regimes, "method_used": list(obj.method_used),
+                    "declared_unconfounded": list(obj.declared_unconfounded),
+                    "refuted_configurations": int(obj.refuted.sum()), "notes": list(obj.notes),
+                }
+                # Refuted rows are the simplex and `unseen`; this keeps the reason.
+                arrays[f"{fid}/refuted"] = _np(obj.refuted_rows).astype(bool)
             if isinstance(obj, AgreementSet):
                 record["agreement"] = {
                     "max_parents": obj.max_parents, "survivors": [list(c) for c in obj.survivors],
@@ -375,10 +387,12 @@ def _collect(sets: PlanningSets, source: Any):
     hypothesis: Dict[str, str] = {}
     for i, (node, obj) in enumerate(sets.items()):
         fid = f"f{i}"
-        if isinstance(obj, AgreementSet):
+        from nbn.uncertainty.confounded import ConfoundedSet
+
+        if isinstance(obj, (AgreementSet, ConfoundedSet)):
             parents = obj.parents
             if obj.node != node:
-                raise ValueError(f"The agreement set for '{obj.node}' is listed under '{node}'.")
+                raise ValueError(f"The set for '{obj.node}' is listed under '{node}'.")
         elif isinstance(obj, (ProbabilitySet, NoiseParameterSet)):
             dag = getattr(source, "dag", None)
             if dag is None:

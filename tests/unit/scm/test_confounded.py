@@ -34,7 +34,13 @@ from tests.unit.scm.confounded_sim import (
     rows_as_sas,
 )
 
-pytest.importorskip("scipy")
+try:
+    import scipy  # noqa: F401
+
+    HAS_SCIPY = True
+except ImportError:  # pragma: no cover - depends on the environment
+    HAS_SCIPY = False
+needs_scipy = pytest.mark.skipif(not HAS_SCIPY, reason="the LP and sensitivity paths need SciPy")
 
 
 def pearl_cells(z0, z1):
@@ -50,6 +56,7 @@ def ace_bounds(P):
     return prog.bounds(prog.indicator(1, 1) - prog.indicator(0, 1))
 
 
+@needs_scipy
 # --- external oracles: Pearl, Causality 2e, Ch. 8 (data and bounds as printed) --------------
 def test_lipid_ace_matches_printed_bounds():
     # data p. 270; 0.392 <= ACE <= 0.780 p. 271
@@ -57,6 +64,7 @@ def test_lipid_ace_matches_printed_bounds():
     assert lo == pytest.approx(0.392, abs=1e-5) and hi == pytest.approx(0.780, abs=1e-5)
 
 
+@needs_scipy
 def test_peptaid_ace_matches_printed_bounds_and_beats_natural():
     # data and -0.23 <= ACE <= -0.15 on p. 272
     P = pearl_cells((0.32, 0.32, 0.04, 0.32), (0.02, 0.17, 0.67, 0.14))
@@ -67,12 +75,14 @@ def test_peptaid_ace_matches_printed_bounds_and_beats_natural():
     assert np.all((n_hi[1] - n_lo[1]) - (s_hi[1] - s_lo[1]) > 0.1)    # the LP is much tighter
 
 
+@needs_scipy
 def test_pearl_table_8_1_collapses_to_a_point():
     # Table 8.1, p. 278; ACE = 0.55 on p. 277
     lo, hi = ace_bounds(pearl_cells((0.55, 0.45, 0.0, 0.0), (0.45, 0.0, 0.0, 0.55)))
     assert lo == pytest.approx(0.55, abs=1e-5) and hi == pytest.approx(0.55, abs=1e-5)
 
 
+@needs_scipy
 def test_instrumental_inequality_violation_is_refuted():
     # max_x sum_y max_z P(y, x | z) = 1.8 > 1 (Pearl, Causality 2e, (8.21), p. 274)
     P = np.zeros((2, 2, 2))
@@ -96,6 +106,7 @@ def random_iv_instance(rng, nA, nY, K):
     return P, truth
 
 
+@needs_scipy
 def test_hand_example_lp_point_vs_intersection_half():
     P = np.zeros((2, 2, 2))
     P[0, 0, 1], P[0, 1, 0] = 0.5, 0.5
@@ -105,6 +116,7 @@ def test_hand_example_lp_point_vs_intersection_half():
     assert natural_rows(RegimeBox.point(P))[1][0, 0] == pytest.approx(0.5)
 
 
+@needs_scipy
 @pytest.mark.parametrize("nA,nY,K", [(2, 2, 2), (2, 3, 3), (3, 2, 2)])
 def test_lp_sound_and_inside_intersection(nA, nY, K):
     rng = np.random.default_rng(0)
@@ -116,6 +128,7 @@ def test_lp_sound_and_inside_intersection(nA, nY, K):
         assert np.all(n_lo <= lo + 1e-5) and np.all(hi <= n_hi + 1e-5)
 
 
+@needs_scipy
 def test_declared_randomised_regime_point_identifies():
     rng = np.random.default_rng(1)
     P, truth = random_iv_instance(rng, 2, 2, 1)
@@ -126,6 +139,7 @@ def test_declared_randomised_regime_point_identifies():
     assert (u_hi[1] - u_lo[1]).max() > 0.05
 
 
+@needs_scipy
 def test_box_union_contains_point_answer_and_soundness_on_random_boxes():
     rng = np.random.default_rng(7)
     for _ in range(25):
@@ -145,6 +159,7 @@ def test_box_union_contains_point_answer_and_soundness_on_random_boxes():
         assert np.all(n_lo <= lo + 1e-9) and np.all(hi <= n_hi + 1e-9)
 
 
+@needs_scipy
 def test_too_large_is_refused():
     with pytest.raises(ProgramTooLarge):
         IVProgram(RegimeBox.point(np.full((2, 3, 10), 1 / 30)), max_types=100)
@@ -169,6 +184,7 @@ def test_sensitivity_limits():
     assert np.allclose(lo, p_ay, atol=1e-6) and np.allclose(hi, 1 - (p_a - p_ay), atol=1e-6)
 
 
+@needs_scipy
 def test_sensitivity_contains_truth_when_lambda_is_right():
     rng = np.random.default_rng(0)
     for _ in range(100):
@@ -190,6 +206,7 @@ def test_sensitivity_contains_truth_when_lambda_is_right():
         assert np.all(b_lo - 1e-7 <= truth) and np.all(truth <= b_hi + 1e-7)
 
 
+@needs_scipy
 def test_sensitivity_box_never_refutes_rare_or_tiny_actions():
     P = np.array([[[1e-7, 2e-7], [0.5, 0.4999997]]])
     lo, hi = sensitivity_row_box(RegimeBox.point(P), 0, 0, 1.5)
@@ -203,6 +220,7 @@ def test_sensitivity_box_never_refutes_rare_or_tiny_actions():
         assert np.all(lo <= t_lo + 1e-9) and np.all(t_hi <= hi + 1e-9)
 
 
+@needs_scipy
 # --- the node-level builder -----------------------------------------------------------------
 @pytest.mark.parametrize("method", ["auto", "intersection"])
 @pytest.mark.parametrize("interval_method", ["kl", "clopper_pearson"])
@@ -262,6 +280,7 @@ def test_regime_acting_on_the_environment_is_refuted():
     assert bool(flagged.set.unseen.reshape(2, 2)[0].all())
 
 
+@needs_scipy
 def test_sensitivity_with_the_exact_lambda_is_sound_and_tighter_than_manski():
     rng = np.random.default_rng(4)
     mdp = random_confounded_mdp(rng, n_states=2, n_actions=2, n_regimes=2, eps=0.3)
@@ -280,6 +299,7 @@ def test_sensitivity_with_the_exact_lambda_is_sound_and_tighter_than_manski():
     assert float(sens.set.width().mean()) <= float(man.set.width().mean()) + 1e-9
 
 
+@needs_scipy
 def test_declared_randomised_logger_narrows_rows_after_dropping_unvisited_regimes():
     rng = np.random.default_rng(9)
     mdp = random_confounded_mdp(rng, n_states=2, n_actions=2, n_regimes=3)
@@ -383,6 +403,7 @@ def _rows(mdp, regimes, method):
     return lo, hi
 
 
+@needs_scipy
 def test_row_level_intersection_strictly_beats_value_level_max():
     S1, S2, GOOD, BAD = range(4)
     env = np.zeros((4, 2, 2, 4))
@@ -410,6 +431,7 @@ def test_row_level_intersection_strictly_beats_value_level_max():
     assert row_level[S1] > value_level[S1] + 0.1
 
 
+@needs_scipy
 @pytest.mark.slow
 @pytest.mark.parametrize("method", ["auto", "intersection"])
 def test_joint_coverage(method):
@@ -436,6 +458,7 @@ def test_declarations_unused_by_non_lp_methods_are_noted():
     assert any("not used" in n for n in res.notes)
 
 
+@needs_scipy
 def test_vectorised_intersection_equals_the_per_configuration_path():
     from nbn.uncertainty.confounded import RegimeBox, rows_from_box
 
@@ -484,3 +507,58 @@ def test_results_live_on_the_model_device(device):
     dev = torch.device(device).type
     assert res.set.lower.device.type == dev and res.refuted.device.type == dev and res.counts.device.type == dev
     _ = res.counts[res.refuted]                                            # same device: no error
+
+
+
+# --- review round 2 regressions (#324) ------------------------------------------------------
+def test_fractional_regime_ids_are_rejected():
+    rng = np.random.default_rng(0)
+    mdp = random_confounded_mdp(rng, n_states=2, n_actions=2, n_regimes=2)
+    data = as_data(*pooled(mdp, rng, n_episodes=5, horizon=5))
+    data["k"] = data["k"].float() * 0.5
+    with pytest.raises(ValueError, match="whole numbers"):
+        confounded_interval_set(model_for(2, 2), data, "s'", "a", "k", method="intersection")
+
+
+def test_binary_child_uses_one_event_per_cell():
+    rng = np.random.default_rng(1)
+    mdp = random_confounded_mdp(rng, n_states=2, n_actions=2, n_regimes=2)
+    data = as_data(*pooled(mdp, rng, n_episodes=80))
+    res = confounded_interval_set(model_for(2, 2), data, "s'", "a", "k", method="intersection",
+                                  sampling="trajectory")
+    assert contains(res, mdp.interventional_kernel(), 2, 2)
+
+
+@needs_scipy
+def test_lp_program_reuse_equals_a_fresh_build():
+    rng = np.random.default_rng(4)
+    P, _ = random_iv_instance(rng, 2, 3, 2)
+    P2, _ = random_iv_instance(rng, 2, 3, 2)
+    prog = IVProgram(RegimeBox.point(P))
+    fresh = IVProgram(RegimeBox.point(P2)).rows()
+    reused = prog.rebind(RegimeBox.point(P2)).rows()
+    np.testing.assert_allclose(fresh[0], reused[0], atol=1e-9)
+    np.testing.assert_allclose(fresh[1], reused[1], atol=1e-9)
+
+
+def test_refuted_rows_are_exported_as_refuted(tmp_path):
+    from nbn.structure import export_factored_sets, load_factored_sets
+
+    n = 400
+    s = np.zeros(2 * n, int)
+    a = np.tile(np.r_[np.zeros(9, int), 1], 2 * n // 10)
+    s2 = np.r_[np.zeros(n, int), np.ones(n, int)]
+    k = np.r_[np.zeros(n, int), np.ones(n, int)]
+    res = confounded_interval_set(model_for(2, 2), as_data(s, a, s2, k), "s'", "a", "k", method="intersection")
+    ex = load_factored_sets(export_factored_sets(tmp_path / "c", {"s'": res}, model_for(2, 2), ["s"], ["a"]))
+    rec = ex.manifest["factors"][0]
+    assert rec["confounded"]["refuted_configurations"] >= 1
+    assert bool(ex.array("f0", "refuted")[:2].all())                      # s = 0 rows: refuted, not just unseen
+
+
+def test_lp_unavailable_reason_names_the_limit():
+    from nbn.uncertainty.confounded import lp_ok_reason
+
+    if HAS_SCIPY:
+        assert "max_vars" in lp_ok_reason(2, 10, 20, max_types=20_000, max_vars=1_000)
+        assert "max_types" in lp_ok_reason(3, 10, 2, max_types=100, max_vars=200_000)

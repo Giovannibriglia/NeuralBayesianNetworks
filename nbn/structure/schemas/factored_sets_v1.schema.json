@@ -211,6 +211,9 @@
               "null"
             ],
             "description": "Key in arrays.npz of the row map shared by factors with the same parents; null above max_rows."
+          },
+          "confounded": {
+            "type": "object"
           }
         }
       }
