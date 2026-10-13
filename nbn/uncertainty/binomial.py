@@ -163,7 +163,7 @@ def _clopper_pearson_interval(
         from scipy.stats import beta
     except ImportError as exc:  # pragma: no cover - depends on the environment
         raise ImportError(
-            "method='clopper_pearson' needs SciPy (pip install scipy; it is part of the 'bench' extra); "
+            "method='clopper_pearson' needs SciPy (pip install 'nbn[bounds]'); "
             "method='kl' is SciPy-free and nearly as tight."
         ) from exc
     k_np, n_np, d_np = (t.detach().cpu().double().numpy() for t in (k, n, delta))

@@ -47,6 +47,15 @@ Declared assumptions (in the result)
   at every step) and stationary Markov loggers.  Persistent hidden state
   breaks per-step rows (history-indexed bounds are out of scope:
   Bareinboim, Thm 9.2.5, pp. 591–592).
+* **Trajectory data, configuration = loggers' state:** the anytime intervals
+  treat successive visits to a configuration ``u`` as i.i.d. draws of
+  ``(A, X')`` (the strong Markov "stack of samples" argument).  That needs
+  ``u`` to contain every observed variable the loggers read; if a logger
+  reads a state variable that is not a parent of ``X'``, include it among the
+  node's parents for this computation (or use i.i.d. rows).
+* ``declared_unconfounded`` is used by the **LP only**; the intersection,
+  Manski and sensitivity rows ignore it (sound, it only gives up information),
+  and the result notes when a declaration went unused.
 
 Gate (:func:`confounding_gate`)
 -------------------------------
@@ -69,12 +78,14 @@ from typing import List, Literal, Mapping, Sequence, Tuple
 import numpy as np
 import torch
 
-from nbn.uncertainty.binomial import IntervalMethod, anytime_delta, binomial_interval
+from nbn.core.variables import DiscreteVariable
+from nbn.uncertainty.binomial import IntervalMethod, binomial_interval
+from nbn.uncertainty.builders import Sampling, per_interval_delta
 from nbn.uncertainty.counts import count_table_for, parent_grid, parent_row_index
-from nbn.uncertainty.sets import IntervalSet
+from nbn.uncertainty.sets import IntervalSet, tighten_box_to_simplex
+from nbn.utils.device import to_device
 
 Method = Literal["auto", "lp", "intersection", "manski", "sensitivity"]
-Sampling = Literal["iid", "trajectory"]
 TOL = 1e-9
 #: outward widening of LP optima per unit of primal mass (above HiGHS' 1e-7 tolerances)
 SOLVER_SLACK = 1e-6
@@ -87,7 +98,9 @@ ASSUMPTIONS = (
     "exclusion: the regime acts on the child only through the action; same environment in every regime",
     "independence: the regime is independent of the hidden variable given the other parents",
     "fresh confounding for trajectory data (a new hidden value at every step); stationary Markov loggers",
-    "declared_unconfounded regimes do not read the hidden variable",
+    "trajectory data: the other parents include every observed variable the loggers read, so successive "
+    "visits to a configuration give i.i.d. (action, child) draws",
+    "declared_unconfounded regimes do not read the hidden variable (used by the LP only)",
 )
 
 
@@ -364,9 +377,8 @@ def _tighten(lo: np.ndarray, hi: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     lo, hi = np.clip(lo, 0, 1), np.clip(hi, 0, 1)
     if np.any(lo.sum(-1) > 1 + TOL) or np.any(hi.sum(-1) < 1 - TOL):
         raise RefutedAssumption("box does not meet the simplex")
-    new_lo = np.maximum(lo, 1.0 - (hi.sum(-1, keepdims=True) - hi))
-    new_hi = np.minimum(hi, 1.0 - (lo.sum(-1, keepdims=True) - lo))
-    return np.clip(new_lo, 0, 1), np.clip(new_hi, 0, 1)
+    t_lo, t_hi = tighten_box_to_simplex(torch.as_tensor(lo), torch.as_tensor(hi))
+    return t_lo.numpy(), t_hi.numpy()
 
 
 def rows_from_box(box: RegimeBox, method: Method = "auto", declared_unconfounded: Sequence[int] = (),
@@ -530,11 +542,13 @@ def confounded_interval_set(
     n_y = int(variables[node].cardinality)
     other_cards = [int(variables[p].cardinality) for p in others]
     n_u = math.prod(other_cards)
+    device = getattr(model, "device", None) or data[node].device
+    data = to_device(dict(data), torch.device(device))
+    regimes = data[regime].reshape(-1).long()
 
     # Counts N[u, k, a, y]: count the node against (others, regime, action).
-    reg_var = _RegimeVar(K)
     spec = dict(variables)
-    spec["__regime__"] = reg_var
+    spec["__regime__"] = DiscreteVariable("__regime__", K)
     cols = dict(data)
     cols["__regime__"] = regimes
     table, _ = count_table_for(spec, cols, node, (*others, "__regime__", action))
@@ -542,72 +556,125 @@ def confounded_interval_set(
 
     # 1. The box, batched (every cell and complement of every configuration and regime).
     n_events = n_u * K * 2 * n_a * n_y
-    delta_each = delta / n_events
     trials = N.sum(dim=(2, 3), keepdim=True).expand_as(N)
-    d = torch.full_like(trials, delta_each)
-    if sampling == "trajectory":
-        d = anytime_delta(delta_each, trials)
-    elif sampling != "iid":
-        raise ValueError("sampling must be 'iid' or 'trajectory'.")
+    d = per_interval_delta(delta, n_events, trials, sampling)
     comp = N.sum(-1, keepdim=True) - N
     cell_lo, cell_hi = binomial_interval(N, trials, d, method=interval_method)
     comp_lo, comp_hi = binomial_interval(comp, trials, d, method=interval_method)
-    to_np = lambda t: t.detach().cpu().double().numpy()  # noqa: E731
-    c_lo, c_hi, m_lo, m_hi = map(to_np, (cell_lo, cell_hi, comp_lo, comp_hi))
     visits = N.sum(dim=(2, 3))                                  # [n_u, K]
-    v_np = to_np(visits)
+    visited = visits.sum(-1) > 0                                # [n_u]
 
-    lo = np.zeros((n_u, n_a, n_y))
-    hi = np.ones((n_u, n_a, n_y))
     used: List[str] = ["unvisited"] * n_u
-    refuted = np.zeros(n_u, dtype=bool)
+    refuted = torch.zeros(n_u, dtype=torch.bool)
     notes: List[str] = []
     declared = [int(k) for k in declared_unconfounded]
-    for u in range(n_u):
-        seen = np.flatnonzero(v_np[u] > 0)
-        if len(seen) == 0:
-            continue
-        box = RegimeBox(c_lo[u, seen], c_hi[u, seen], m_lo[u, seen], m_hi[u, seen], v_np[u, seen])
-        dec = [int(np.flatnonzero(seen == k)[0]) for k in declared if k in seen]
-        try:
-            row_lo, row_hi, used[u] = rows_from_box(box, method, dec, lam, max_types, max_vars)
-        except RefutedAssumption as err:
+    lo = torch.zeros(n_u, n_a, n_y, dtype=cell_lo.dtype, device=cell_lo.device)
+    hi = torch.ones_like(lo)
+
+    want_lp = method in ("auto", "lp")
+    lp_ok = want_lp and _lp_available(n_a, n_y, K, max_types, max_vars, method)
+    if method in ("intersection", "manski") or (method == "auto" and not lp_ok):
+        # 2. Closed form, vectorised over configurations.  An unvisited regime has
+        # the box [0, 1], whose Manski row [0, 1] is neutral in the intersection.
+        n_lo = cell_lo.amax(dim=1)                              # [n_u, n_a, n_y]
+        n_hi = (1.0 - comp_lo).amin(dim=1)
+        empty = (n_lo > n_hi + TOL).any(-1).any(-1)
+        miss = ((n_lo.sum(-1) > 1 + TOL) | (n_hi.sum(-1) < 1 - TOL)).any(-1)
+        bad = (empty | miss) & visited
+        label = "manski" if method == "manski" else "intersection"
+        if method == "auto":
+            label = f"intersection ({lp_ok_reason(n_a, n_y, K, max_types, max_vars)})"
+        t_lo, t_hi = tighten_box_to_simplex(n_lo.clamp(0, 1), torch.maximum(n_hi, n_lo).clamp(0, 1))
+        ok = visited & ~bad
+        lo = torch.where(ok[:, None, None], t_lo, lo)
+        hi = torch.where(ok[:, None, None], t_hi, hi)
+        for u in torch.nonzero(visited).reshape(-1).tolist():
+            used[u] = label
+        for u in torch.nonzero(bad).reshape(-1).tolist():
+            msg = f"configuration {u} of {others}: empty intersection of per-regime rows"
             if on_refuted == "raise":
-                raise RefutedAssumption(f"configuration {u} of {others}: {err}") from err
-            used[u] = "refuted"
-            refuted[u] = True
-            notes.append(f"configuration {u} of {others}: {err}")
-            continue
-        if used[u] == "intersection (lp failed)":
-            notes.append(f"configuration {u}: LP solver failed; used the intersection rows (sound, possibly wider)")
-        lo[u], hi[u] = row_lo, row_hi
+                raise RefutedAssumption(msg)
+            used[u], refuted[u] = "refuted", True
+            notes.append(msg)
+        if declared:
+            notes.append(f"declared_unconfounded {declared} not used: only the LP uses declarations "
+                         f"(method used: {label}).")
+    else:
+        to_np = lambda t: t.detach().cpu().double().numpy()  # noqa: E731
+        c_lo, c_hi, m_lo, m_hi = map(to_np, (cell_lo, cell_hi, comp_lo, comp_hi))
+        v_np = to_np(visits)
+        lo_np, hi_np = np.zeros((n_u, n_a, n_y)), np.ones((n_u, n_a, n_y))
+        for u in range(n_u):
+            seen = np.flatnonzero(v_np[u] > 0)
+            if len(seen) == 0:
+                continue
+            box = RegimeBox(c_lo[u, seen], c_hi[u, seen], m_lo[u, seen], m_hi[u, seen], v_np[u, seen])
+            dec = [int(np.flatnonzero(seen == k)[0]) for k in declared if k in seen]
+            try:
+                row_lo, row_hi, used[u] = rows_from_box(box, method, dec, lam, max_types, max_vars)
+            except RefutedAssumption as err:
+                if on_refuted == "raise":
+                    raise RefutedAssumption(f"configuration {u} of {others}: {err}") from err
+                used[u], refuted[u] = "refuted", True
+                notes.append(f"configuration {u} of {others}: {err}")
+                continue
+            if used[u] == "intersection (lp failed)":
+                notes.append(f"configuration {u}: LP solver failed; used the intersection rows (sound, possibly wider)")
+            lo_np[u], hi_np[u] = row_lo, row_hi
+        if declared and method == "sensitivity":
+            notes.append(f"declared_unconfounded {declared} not used: only the LP uses declarations.")
+        lo, hi = _outward(lo_np, hi_np, cell_lo.dtype, cell_lo.device)
 
     # Layout: rows over `parents` in DAG order (C order), as the node's table.
-    device = N.device
-    grid = parent_grid([int(variables[p].cardinality) for p in parents])
+    grid = parent_grid([int(variables[p].cardinality) for p in parents], device=lo.device)
     u_index = parent_row_index(grid[:, [parents.index(p) for p in others]], other_cards) if others \
-        else torch.zeros(grid.shape[0], dtype=torch.long)
+        else torch.zeros(grid.shape[0], dtype=torch.long, device=lo.device)
     a_index = grid[:, parents.index(action)]
-    lo_t = torch.as_tensor(lo, dtype=N.dtype)[u_index, a_index]
-    hi_t = torch.as_tensor(hi, dtype=N.dtype)[u_index, a_index]
-    action_taken = torch.as_tensor(N.sum(dim=(1, 3)).cpu() > 0)  # [n_u, n_a]: some regime took a
-    unseen = ~action_taken[u_index, a_index] | torch.as_tensor(refuted)[u_index]
-    result = IntervalSet(level=1.0 - delta, guarantee="pac_under_model", unseen=unseen.to(device),
-                         lower=lo_t.to(device), upper=hi_t.to(device))
+    action_taken = N.sum(dim=(1, 3)) > 0                       # [n_u, n_a]: some regime took a
+    refuted_d = refuted.to(lo.device)
+    unseen = ~action_taken[u_index, a_index] | refuted_d[u_index]
+    result = IntervalSet(level=1.0 - delta, guarantee="pac_under_model", unseen=unseen,
+                         lower=lo[u_index, a_index], upper=hi[u_index, a_index])
     return ConfoundedSet(
         node=node, action=action, parents=parents, set=result, others=others, method_used=used,
-        refuted=torch.as_tensor(refuted), counts=visits, n_regimes=K, delta=delta, sampling=sampling,
+        refuted=refuted_d, counts=visits, n_regimes=K, delta=delta, sampling=sampling,
         interval_method=interval_method, declared_unconfounded=tuple(declared), notes=notes,
     )
 
 
-class _RegimeVar:
-    """A minimal discrete variable spec for the regime column."""
+def _lp_available(n_a: int, n_y: int, K: int, max_types: int, max_vars: int, method: str) -> bool:
+    """Whether the LP can run (SciPy present, program within the size limits)."""
+    reason = lp_ok_reason(n_a, n_y, K, max_types, max_vars)
+    if reason == "":
+        return True
+    if method == "lp":
+        if reason.startswith("no LP: SciPy"):
+            _scipy()                                   # raises the ImportError with the hint
+        raise ProgramTooLarge(reason)
+    return False
 
-    is_discrete = True
 
-    def __init__(self, k: int) -> None:
-        self.cardinality = k
+def lp_ok_reason(n_a: int, n_y: int, K: int, max_types: int, max_vars: int) -> str:
+    """Empty string if the LP can run, else why not (used in method labels)."""
+    try:
+        _scipy()
+    except ImportError:
+        return "no LP: SciPy not installed"
+    n_types = n_y ** n_a
+    if n_types > max_types or n_types * (1 + K * n_a) > max_vars:
+        return f"no LP: {n_types} response types too many"
+    return ""
+
+
+def _outward(lo: np.ndarray, hi: np.ndarray, dtype: torch.dtype, device) -> Tuple[torch.Tensor, torch.Tensor]:
+    """float64 bounds to ``dtype`` rounded outward (float32 on MPS must not tighten a bound)."""
+    lo_t, hi_t = torch.as_tensor(lo, dtype=torch.float64), torch.as_tensor(hi, dtype=torch.float64)
+    if dtype != torch.float64:
+        lo_c, hi_c = lo_t.to(dtype), hi_t.to(dtype)
+        lo_c = torch.where(lo_c.double() > lo_t, torch.nextafter(lo_c, torch.full_like(lo_c, -1.0)), lo_c)
+        hi_c = torch.where(hi_c.double() < hi_t, torch.nextafter(hi_c, torch.full_like(hi_c, 2.0)), hi_c)
+        lo_t, hi_t = lo_c.clamp(0, 1), hi_c.clamp(0, 1)
+    return lo_t.to(device), hi_t.to(device)
 
 
 # ---------------------------------------------------------------------------
@@ -623,19 +690,29 @@ class GateDecision:
     reason: str
 
 
-def confounding_gate(declared_unconfounded: bool, invariance=None, alpha: float = 0.05) -> GateDecision:
-    """Possibly confounded unless declared unconfounded; a rejected invariance test overrides.
+def confounding_gate(node_declared_unconfounded: bool, invariance=None, alpha: float = 0.05) -> GateDecision:
+    """Possibly confounded unless the **node** is declared unconfounded; a rejected test overrides.
+
+    ``node_declared_unconfounded`` is one bool for the node (e.g. every logger
+    randomised).  It is not the list of unconfounded regimes that
+    :func:`confounded_interval_set` takes: one randomised regime among
+    confounded ones still leaves the node possibly confounded.
 
     ``invariance`` is an optional :class:`nbn.scm.DiagnosticResult` of
     ``context_invariance_test`` (regime as context).  A rejection raises
     suspicion and forces the confounded rows even for a declared node; a
     non-rejection never certifies a node (no test for confounding exists).
     """
+    if not isinstance(node_declared_unconfounded, bool):
+        raise TypeError(
+            "node_declared_unconfounded must be a bool for the node; a list of regimes belongs to "
+            "confounded_interval_set(declared_unconfounded=...)."
+        )
     rejected = invariance is not None and bool(invariance.rejected(alpha))
     if rejected:
         return GateDecision(True, f"context invariance rejected (p = {invariance.p_value:.3g} < {alpha}): "
                                   "confounding or a changed mechanism; use the confounded rows")
-    if declared_unconfounded:
+    if node_declared_unconfounded:
         return GateDecision(False, "declared unconfounded (e.g. randomised loggers); the invariance test "
                                    "did not reject, which does not prove it")
     return GateDecision(True, "not declared unconfounded: rows are possibly confounded")

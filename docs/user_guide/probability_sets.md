@@ -323,7 +323,11 @@ rows.refuted        # configurations where the data contradict the instrument as
    - `"sensitivity"`: rows under a marginal sensitivity model with parameter
      `lam`.
    - `"auto"`: the LP when it is small and SciPy is installed
-     (`pip install "nbn[bounds]"`), else the intersection.
+     (`pip install "nbn[bounds]"`), else the intersection, labelled with the
+     reason (`"intersection (no LP: ...)"`).
+
+   Declared regimes are used by the LP only; the other methods note in
+   `rows.notes` that a declaration went unused.
 
    With a confidence box, the rows are **valid, not sharp**.
 3. **Refutation.** An empty intersection or an infeasible LP means the
@@ -336,10 +340,17 @@ rows.refuted        # configurations where the data contradict the instrument as
      parents;
    - **fresh** confounding for trajectory data (a new hidden value at every
      step);
+   - for trajectory data, the other parents include every observed variable
+     the loggers read. The anytime intervals treat successive visits to a
+     configuration as i.i.d. draws, which needs the configuration to be the
+     loggers' whole observed input;
    - declared regimes do not read the hidden variable.
 
-**The gate.** `confounding_gate(declared_unconfounded, invariance)` treats a
-node as possibly confounded unless it is declared unconfounded. A rejected
+**The gate.** `confounding_gate(node_declared_unconfounded, invariance)` treats a
+node as possibly confounded unless the **node** is declared unconfounded, for
+example when every logger is randomised. One randomised regime among
+confounded ones does not make the node unconfounded; it goes into
+`confounded_interval_set(declared_unconfounded=[k])`. A rejected
 `context_invariance_test` (regime as context) forces the confounded rows even
 for a declared node, but a test that passes never certifies a node: there is
 no statistical test for confounding.

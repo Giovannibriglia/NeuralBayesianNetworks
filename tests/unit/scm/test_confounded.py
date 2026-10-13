@@ -216,7 +216,7 @@ def test_rows_contain_the_interventional_kernel(method, interval_method):
     expected = "lp" if method == "auto" else "intersection"
     assert set(res.method_used) <= {expected, "unvisited"} and expected in set(res.method_used)
     assert res.set.guarantee == "pac_under_model" and res.set.level == pytest.approx(0.95)
-    assert len(res.assumptions) == 4
+    assert len(res.assumptions) == 5
 
 
 @pytest.mark.parametrize("device", available_devices())
@@ -332,7 +332,7 @@ def test_scipy_free_intersection_path(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", no_scipy)
     res = confounded_interval_set(model_for(2, 2), data, "s'", "a", "k", method="intersection")
     auto = confounded_interval_set(model_for(2, 2), data, "s'", "a", "k", method="auto")
-    assert set(auto.method_used) <= {"intersection", "unvisited"}                 # auto falls back
+    assert set(auto.method_used) <= {"intersection (no LP: SciPy not installed)", "unvisited"}  # labelled fallback
     assert torch.equal(res.set.lower, auto.set.lower)
 
 
@@ -344,6 +344,8 @@ def test_gate():
         def rejected(self, alpha=0.05):
             return self.p_value < alpha
 
+    with pytest.raises(TypeError, match="bool"):
+        confounding_gate([1])                         # a regime list belongs to the builder
     assert confounding_gate(False).use_confounded_rows
     assert not confounding_gate(True).use_confounded_rows
     assert not confounding_gate(True, Result(0.4)).use_confounded_rows
@@ -421,3 +423,64 @@ def test_joint_coverage(method):
                                       sampling="trajectory")
         misses += not contains(res, truth, 3, 2)
     assert misses / reps <= 0.1
+
+
+
+# --- review regressions (#324) --------------------------------------------------------------
+def test_declarations_unused_by_non_lp_methods_are_noted():
+    rng = np.random.default_rng(5)
+    mdp = random_confounded_mdp(rng, n_states=2, n_actions=2, n_regimes=2)
+    data = as_data(*pooled(mdp, rng, n_episodes=60))
+    res = confounded_interval_set(model_for(2, 2), data, "s'", "a", "k", method="intersection",
+                                  declared_unconfounded=[1])
+    assert any("not used" in n for n in res.notes)
+
+
+def test_vectorised_intersection_equals_the_per_configuration_path():
+    from nbn.uncertainty.confounded import RegimeBox, rows_from_box
+
+    rng = np.random.default_rng(2)
+    mdp = random_confounded_mdp(rng, n_states=3, n_actions=2, n_regimes=3)
+    data = as_data(*pooled(mdp, rng))
+    res = confounded_interval_set(model_for(3, 2), data, "s'", "a", "k", method="intersection",
+                                  interval_method="clopper_pearson", sampling="trajectory")
+    lo, hi = rows_as_sas(res, 3, 2)
+    # per configuration through the box path (as the LP path does)
+    from nbn.uncertainty.binomial import binomial_interval
+    from nbn.uncertainty.builders import per_interval_delta
+    from nbn.uncertainty.counts import count_table_for
+    from nbn.core.variables import DiscreteVariable
+    spec = dict(model_for(3, 2).variables)
+    spec["__regime__"] = DiscreteVariable("__regime__", 3)
+    N = count_table_for(spec, {**data, "__regime__": data["k"]}, "s'", ("s", "__regime__", "a"))[0].reshape(3, 3, 2, 3)
+    trials = N.sum(dim=(2, 3), keepdim=True).expand_as(N)
+    d = per_interval_delta(0.05, 3 * 3 * 2 * 2 * 3, trials, "trajectory")
+    cl, ch = binomial_interval(N, trials, d, method="clopper_pearson")
+    ml, mh = binomial_interval(N.sum(-1, keepdim=True) - N, trials, d, method="clopper_pearson")
+    for u in range(3):
+        seen = (N[u].sum(dim=(1, 2)) > 0).numpy()
+        box = RegimeBox(cl[u].numpy()[seen], ch[u].numpy()[seen], ml[u].numpy()[seen], mh[u].numpy()[seen],
+                        N[u].sum(dim=(1, 2)).numpy()[seen])
+        r_lo, r_hi, _ = rows_from_box(box, "intersection")
+        np.testing.assert_allclose(lo[u], r_lo, atol=1e-12)
+        np.testing.assert_allclose(hi[u], r_hi, atol=1e-12)
+
+
+def test_float32_cast_rounds_outward():
+    from nbn.uncertainty.confounded import _outward
+
+    lo = np.array([0.30000001192092896 - 1e-9, 0.1])
+    hi = np.array([0.30000001192092896 + 1e-9, 0.7])
+    lo32, hi32 = _outward(lo, hi, torch.float32, "cpu")
+    assert bool((lo32.double() <= torch.as_tensor(lo)).all()) and bool((hi32.double() >= torch.as_tensor(hi)).all())
+
+
+@pytest.mark.parametrize("device", available_devices())
+def test_results_live_on_the_model_device(device):
+    rng = np.random.default_rng(0)
+    mdp = random_confounded_mdp(rng, n_states=2, n_actions=2, n_regimes=2)
+    data = as_data(*pooled(mdp, rng, n_episodes=30))                     # data on the CPU
+    res = confounded_interval_set(model_for(2, 2, device=device), data, "s'", "a", "k", method="intersection")
+    dev = torch.device(device).type
+    assert res.set.lower.device.type == dev and res.refuted.device.type == dev and res.counts.device.type == dev
+    _ = res.counts[res.refuted]                                            # same device: no error
