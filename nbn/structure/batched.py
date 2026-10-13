@@ -113,13 +113,16 @@ class StackedMLP(nn.Module):
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         """``z`` ``[N, D_in]`` (union inputs) -> ``[C, N, out]``."""
-        h = z.unsqueeze(0).expand(self.n_candidates, -1, -1)
+        # Plain contiguous bmm plus an explicit bias add: baddbmm on a stride-0
+        # (expanded) input with a broadcast bias gave wrong outputs on the MPS of
+        # the macOS CI runner (a paravirtualised GPU), in training and inference.
+        h = z.unsqueeze(0).expand(self.n_candidates, -1, -1).contiguous()
         n_layers = len(self.weights)
         for li in range(n_layers):
             w = self.weights[li]
             if li == 0:
                 w = w * self.mask.unsqueeze(-1)       # unused inputs: no value, no gradient
-            h = torch.baddbmm(self.biases[li].unsqueeze(1), h, w)
+            h = torch.bmm(h, w.contiguous()) + self.biases[li].unsqueeze(1)
             if li < n_layers - 1:
                 h = self.act(h)
         return h
