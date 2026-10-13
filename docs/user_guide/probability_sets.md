@@ -18,6 +18,8 @@ no data, whose bounds are the whole simplex).
 | `l1_ball_set(model, data, node, delta)` | `L1BallSet` | one ball `||P_row - P_hat_row||_1 <= r` per row | PAC | counts |
 | `nbn.scm.noise_parameter_set(model, data, nodes, delta)` | `NoiseParameterSet` | a polytope on a shared noise law `q`; every row of every tied node is a linear image of `q` | PAC under the noise model | pooled counts per distinct expression |
 | `dirichlet_set(model, data, node, delta)` | `SampleSet` | Dirichlet posterior draws and their quantile box | Bayesian | counts |
+| `interval_set_from_counts(counts, delta)`, `l1_ball_set_from_counts(counts, delta)` | `IntervalSet`, `L1BallSet` | as above, from a count table `[R, K]` | PAC (whole-number counts only) | any count table, e.g. `count_table_for(variables, data, node, parents)` |
+| `dirichlet_set_from_counts(counts, delta)` | `SampleSet` | as above, from a count table | Bayesian | counts or weighted pseudo-counts |
 | `bootstrap_set(model, data, statistic, groups)` | `SampleSet` | episode-bootstrap refits of any statistic | asymptotic | refits |
 | `nbn.scm.cdf_band_set(model, data, node, delta)` | `CDFBandSet` | a band on the noise CDF of a continuous additive mechanism | PAC given the location `g` | residuals |
 
@@ -79,9 +81,10 @@ several candidate parent sets of the same node:
 ```python
 from nbn.uncertainty import count_table_for, interval_set_from_counts
 
-for parents in [("health", "exercise"), ("health", "tired", "exercise")]:
+candidates = [("health", "exercise"), ("health", "tired", "exercise")]
+for parents in candidates:
     counts, cards = count_table_for(model.variables, data, "health'", parents)
-    candidate = interval_set_from_counts(counts, delta=0.1)
+    candidate = interval_set_from_counts(counts, delta=0.1 / len(candidates))  # both hold at 90%
     print(parents, tuple(counts.shape), "unseen rows:", int(candidate.unseen.sum()))
 ```
 
@@ -91,7 +94,9 @@ parent. `interval_set(model, data, node)` is exactly
 `interval_set_from_counts(count_table(model, data, node)[0])`, and likewise for
 `l1_ball_set` and `dirichlet_set`. When several sets must hold at once (one per
 candidate parent set, or one per next-state variable), split `delta` between
-them by a union bound.
+them by a union bound. The PAC builders need whole-number counts of independent
+draws and reject weighted tables (a weight is not a number of draws); the
+Dirichlet builder accepts weighted pseudo-counts.
 
 ## Structure uncertainty: several candidate parent sets
 

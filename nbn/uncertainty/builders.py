@@ -1,10 +1,11 @@
 """Build probability sets for the table of a discrete node.
 
 Each builder reads counts from data (see :func:`count_table`), so it does not
-depend on how the node's mechanism was fitted.  Every builder has a
-``*_from_counts`` twin that takes the count table itself, for tables counted
-against any parent tuple (:func:`count_table_for`), not only a model's DAG.  ``sampling`` declares how the
-data were collected:
+depend on how the node's mechanism was fitted.  Every count-based builder
+(intervals, L1 balls, Dirichlet) has a ``*_from_counts`` twin that takes the
+count table itself, for tables counted against any parent tuple
+(:func:`count_table_for`), not only a model's DAG.  ``sampling`` declares how
+the data were collected:
 
 ``"iid"``
     Independent rows.  Given the parent values, the child values of a parent
@@ -75,9 +76,12 @@ def interval_set_from_counts(
     """:func:`interval_set` from a count table ``[R, K]`` (rows = parent values).
 
     Use it when the counts do not come from one model's DAG, e.g. a table
-    counted against a candidate parent set (:func:`count_table_for`).
+    counted against a candidate parent set (:func:`count_table_for`).  The
+    PAC guarantee holds for **counts of independent draws**, so the entries
+    must be whole numbers; weighted counts (``count_table_for(...,
+    weights=w)``) are rejected, since a weight is not a number of draws.
     """
-    counts = _check_counts(counts)
+    counts = _check_counts(counts, integer=True)
     trials = counts.sum(dim=-1, keepdim=True).expand_as(counts)
     per_entry = per_interval_delta(delta, counts.numel(), trials, sampling)
     lower, upper = binomial_interval(counts, trials, per_entry, method=method)
@@ -114,8 +118,12 @@ def l1_ball_set_from_counts(
     delta: float = 0.05,
     sampling: Sampling = "iid",
 ) -> L1BallSet:
-    """:func:`l1_ball_set` from a count table ``[R, K]`` (rows = parent values)."""
-    counts = _check_counts(counts)
+    """:func:`l1_ball_set` from a count table ``[R, K]`` (rows = parent values).
+
+    Like :func:`interval_set_from_counts`, the PAC guarantee needs whole-number
+    counts of independent draws; weighted counts are rejected.
+    """
+    counts = _check_counts(counts, integer=True)
     trials = counts.sum(dim=-1)
     n_rows, k = counts.shape
     per_row = per_interval_delta(delta, n_rows, trials, sampling)
@@ -158,7 +166,11 @@ def dirichlet_set_from_counts(
     prior: float = 1.0,
     n_samples: int = 4000,
 ) -> SampleSet:
-    """:func:`dirichlet_set` from a count table ``[R, K]`` (rows = parent values)."""
+    """:func:`dirichlet_set` from a count table ``[R, K]`` (rows = parent values).
+
+    Fractional (weighted) counts are accepted and act as pseudo-counts; the
+    result is a posterior under that choice, with no frequentist guarantee.
+    """
     counts = _check_counts(counts)
     # MPS has no float64 Dirichlet sampler; float32 draws are plenty here.
     posterior = Dirichlet((counts + prior).to(torch.float32))
@@ -217,16 +229,30 @@ def bootstrap_set(
 # ---------------------------------------------------------------------------
 
 
-def _check_counts(counts: torch.Tensor) -> torch.Tensor:
-    """A count table must be ``[R, K]`` with finite, non-negative entries."""
+def _check_counts(counts: torch.Tensor, integer: bool = False) -> torch.Tensor:
+    """A count table must be ``[R, K]`` with finite, non-negative entries.
+
+    Returned in the accumulation dtype of its device (float64, or float32 on
+    MPS), whatever it came in, so low-precision tables cannot overflow or
+    round the sums.  With ``integer=True`` the entries must also be whole
+    numbers (counts of draws).  One host sync for all checks.
+    """
     if counts.dim() != 2:
         raise ValueError(f"A count table is [R, K]; got shape {tuple(counts.shape)}.")
     if counts.shape[1] < 1:
         raise ValueError("A count table needs at least one child value (K >= 1).")
-    if not torch.is_floating_point(counts):
-        counts = counts.to(accum_dtype(counts.device))
-    if counts.numel() and (not bool(torch.isfinite(counts).all()) or float(counts.min()) < 0):
-        raise ValueError("Counts must be finite and non-negative.")
+    counts = counts.to(accum_dtype(counts.device))
+    if counts.numel():
+        ok = torch.isfinite(counts) & (counts >= 0)
+        if integer:
+            ok = ok & (counts == counts.round())
+        if not bool(ok.all()):
+            if integer:
+                raise ValueError(
+                    "Counts must be finite, non-negative whole numbers (counts of independent "
+                    "draws): the PAC sets do not hold for weighted counts."
+                )
+            raise ValueError("Counts must be finite and non-negative.")
     return counts
 
 
