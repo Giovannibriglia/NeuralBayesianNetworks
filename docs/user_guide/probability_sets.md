@@ -289,6 +289,63 @@ lower, upper, nodes = joint_row_bounds(ex, h, row=5)   # bounds on P(s' | s, a) 
 
 Worked example: {doc}`../examples/16_export_factored_sets`.
 
+## Confounded action effects from several regimes
+
+If a logged action may depend on a **hidden** variable that also moves the
+next state (`A <- W -> X'`), the fitted table `P(X' | parents)` is not the
+interventional row `P(X' | do(A=a), u)` that planning needs. With data from
+several regimes (behaviour policies), `confounded_interval_set` gives
+per-entry intervals on the interventional rows, valid together with
+probability `>= 1 - delta` under declared assumptions:
+
+```python
+from nbn.uncertainty import confounded_interval_set, confounding_gate
+
+rows = confounded_interval_set(model, data, node="h'", action="a", regime="logger",
+                               method="auto", delta=0.05, sampling="trajectory",
+                               declared_unconfounded=[1])       # logger 1 is a randomised trial
+rows.set            # IntervalSet in the node's table layout, guarantee "pac_under_model"
+rows.method_used    # per configuration of the other parents: "lp" / "intersection" / ...
+rows.refuted        # configurations where the data contradict the instrument assumptions
+```
+
+1. **Confidence first.** A box on every regime's observables
+   `P_k(A=a, X'=y | u)` and `P_k(A=a, X' != y | u)`, simultaneous by
+   Bonferroni over a budget fixed in advance, anytime-valid for trajectories.
+   The intervals are KL by default (SciPy-free); `interval_method="clopper_pearson"`
+   is available.
+2. **Rows over the whole box.**
+   - `"intersection"`: per-regime Manski rows `[P(a, y), 1 - P(a, X' != y)]`,
+     intersected (the natural IV bound).
+   - `"lp"`: the IV linear program over response types (Balke–Pearl,
+     generalised to finite cardinalities). Regimes in
+     `declared_unconfounded` add constraints.
+   - `"sensitivity"`: rows under a marginal sensitivity model with parameter
+     `lam`.
+   - `"auto"`: the LP when it is small and SciPy is installed
+     (`pip install "nbn[bounds]"`), else the intersection.
+
+   With a confidence box, the rows are **valid, not sharp**.
+3. **Refutation.** An empty intersection or an infeasible LP means the
+   regimes are incompatible with one shared environment (the instrumental
+   inequality). It is reported (`refuted`, the simplex for that
+   configuration), never silently widened.
+4. **Assumptions** (in `rows.assumptions`):
+   - exclusion: the regime acts on the child only through the action;
+   - independence of the regime and the hidden variable given the other
+     parents;
+   - **fresh** confounding for trajectory data (a new hidden value at every
+     step);
+   - declared regimes do not read the hidden variable.
+
+**The gate.** `confounding_gate(declared_unconfounded, invariance)` treats a
+node as possibly confounded unless it is declared unconfounded. A rejected
+`context_invariance_test` (regime as context) forces the confounded rows even
+for a declared node, but a test that passes never certifies a node: there is
+no statistical test for confounding.
+
+Worked example: {doc}`../examples/18_confounded_rows`.
+
 ## How the guarantee is built
 
 Binomial intervals come from the Chernoff (KL) inequality, inverted by

@@ -36,6 +36,7 @@ force the CPU.
 | {doc}`15_agreement_rule` | One valid set per row under structure uncertainty with `agreement_set`: refutation by one-variable extensions, coverage of never-visited joint values, a coverage check, and a wrong bound. |
 | {doc}`16_export_factored_sets` | Export factored sets with their sharing for robust / interval / parametric MDP tools, read them back, and rebuild the joint bounds of a never-visited row. |
 | {doc}`17_continuous_hypothesis_sets` | Continuous and mixed factors: batched candidate fits, one calibrated set per factor, marginal vs conditional coverage, and `model_for`. |
+| {doc}`18_confounded_rows` | Sound interval rows for a confounded action from several regimes: the gate, intersection vs IV linear program, a declared randomised trial, refutation, and coverage. |
 
 ```{toctree}
 :hidden:
@@ -58,4 +59,5 @@ force the CPU.
 15_agreement_rule
 16_export_factored_sets
 17_continuous_hypothesis_sets
+18_confounded_rows
 ```
