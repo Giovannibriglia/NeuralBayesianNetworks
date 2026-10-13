@@ -156,7 +156,11 @@ Count-based sets need discrete nodes and parents. For continuous targets, and
 for discrete targets with continuous parents, `HypothesisSet.fit` fits one
 mechanism per factor, with **all candidates of a node fitted together**. Each
 result is a standard NBN mechanism, so `model_for`, the calibration tools and
-counterfactuals work unchanged.
+counterfactuals work unchanged. Table factors and discrete inputs become
+`StructuralCategoricalTable` objects, with the declared `coupling` and the
+smoothing `alpha` given to `fit`. A candidate's initial weights depend only on
+the seed and the factor itself, so adding or reordering candidates does not
+change the other candidates' fits.
 
 ```python
 fitted = hs.fit(train, location="mlp", epochs=100)        # or location="linear"
@@ -180,7 +184,11 @@ model = hs.model_for(hypothesis, fitted)                  # a StructuralCausalMo
   compute-bound and both paths cost about the same.
 - **Calibrated sets per factor** on held-out rows: split conformal (`"cqr"`
   / `"residual"`, or conformal sets for discrete children) or a PIT band
-  (`"pit"`). The level is split over the factors by a union bound.
+  (`"pit"`). The level is split over **all** factors of the set by a union
+  bound, as in `factor_sets`. So in a mixed set, `calibrated_sets(level)` for
+  the continuous and neural factors and `factor_sets(delta = 1 - level)` for
+  the count-based ones hold together at `level`. `factor_sets` builds only
+  the count-based factors and lists the others in `skipped`.
   - Conformal results are **marginal**: coverage on average over the parents,
     not for each parent value. So they do not support a per-row worst case
     in robust planning.

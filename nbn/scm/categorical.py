@@ -381,6 +381,13 @@ class StructuralCategoricalTable(_CategoricalStructural, CategoricalTableMechani
         super().__init__(*args, **kwargs)
         self._init_coupling(coupling)
 
+    def fit_from_counts(self, counts: torch.Tensor, parent_cards: list) -> dict:
+        """The table from raw counts (as :class:`CategoricalTableMechanism`), with the coupling set up."""
+        metrics = CategoricalTableMechanism.fit_from_counts(self, counts, parent_cards)
+        self.noise.n_classes = self._k()
+        self.noise.to(self._kernel_device())
+        return metrics
+
 
 # ===========================================================================
 # Internals

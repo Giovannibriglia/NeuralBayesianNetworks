@@ -28,6 +28,10 @@ is split over the distinct factors by a union bound (valid whatever the
 dependence created by sharing the calibration rows).  What the level means
 is declared per factor:
 
+The budget is split over **all** factors of the hypothesis set (also those
+handled by ``factor_sets``), so calibrated sets at ``level`` and PAC table
+sets of ``factor_sets(delta = 1 - level)`` hold together at ``level``.
+
 * conformal results are ``"marginal"``: coverage on average over the parents,
   **not** for each parent value (Kochenderfer et al., *Algorithms for
   Validation*, §12.2.3, p. 340; Ex. 12.7, p. 345), so they do not support a
@@ -43,7 +47,7 @@ not supported; use a fresh split for that.
 from __future__ import annotations
 
 import copy
-import warnings
+import zlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Tuple
 
@@ -117,26 +121,36 @@ def fit_factors(
     weights: torch.Tensor | None = None,
     seed: int = 0,
     coupling: str = "gumbel_max",
+    alpha: float = 0.0,
+    consolidate: bool = True,
     device: str | torch.device | None = None,
 ) -> FactorMechanisms:
-    """Fit every factor of ``hs`` once; see the module docstring."""
-    from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
-    from nbn.scm.categorical import StructuralNeuralCategorical
+    """Fit every factor of ``hs`` once; see the module docstring.
+
+    ``alpha`` is the Dirichlet smoothing of the table factors and discrete
+    roots; ``consolidate`` stores the online-update state of the neural
+    categorical factors (so ``model.update`` works), as ``fit`` does.  Each
+    candidate's initial weights come from a generator seeded by ``seed`` and
+    the factor itself, so adding or reordering candidates does not change
+    another candidate's fit.
+    """
+    from nbn.scm.categorical import StructuralCategoricalTable, StructuralNeuralCategorical
     from nbn.scm.mechanisms import AdditiveNoiseMechanism
+    from nbn.update import online_laplace
 
     if location not in ("linear", "mlp"):
         raise ValueError(f"location must be 'linear' or 'mlp'; got {location!r}.")
     first = data[hs.targets[0]]
     dev = torch.device(device) if device is not None else first.device
     data = to_device(dict(data), dev)
-    n = data[hs.targets[0]].reshape(-1).shape[0]
+    n = data[hs.targets[0]].shape[0]
     w = validate_weights(weights, n, where="HypothesisSet.fit", device=dev)
     mechs: Dict[Factor, nn.Module] = {}
     kinds: Dict[Factor, str] = {}
     losses: Dict[Factor, float] = {}
     counts = None
 
-    for t_index, node in enumerate(hs.targets):
+    for node in hs.targets:
         cands = hs.candidates[node]
         var = hs.variables[node]
         union = tuple(dict.fromkeys(p for c in cands for p in c))
@@ -148,33 +162,37 @@ def fit_factors(
                 if counts is None:
                     counts = hs.counts(data, weights=w, input_marginals=False, discrete_only=True)
                 for c in table_cands:
-                    mech = CategoricalTableMechanism()
+                    mech = StructuralCategoricalTable(alpha=alpha, coupling=coupling)
                     mech.fit_from_counts(counts.tables[(node, c)], counts.parent_cards[(node, c)])
                     mechs[(node, c)], kinds[(node, c)] = mech, "table"
             if neural_cands:
                 k = int(var.cardinality)
-                y = data[node].reshape(-1).long()
+                y = data[node].reshape(n, -1)[:, 0].long()
                 sub_union = tuple(p for p in union if any(p in c for c in neural_cands))
-                z = torch.stack([data[p].reshape(-1).to(torch.float32) for p in sub_union], -1)
-                masks = torch.tensor([[1.0 if p in c else 0.0 for p in sub_union] for c in neural_cands])
-                gens = [torch.Generator().manual_seed(_seed(seed, t_index, i)) for i in range(len(neural_cands))]
+                z, col_of = _columns(data, sub_union, n)
+                masks = _masks(col_of, z.shape[1], neural_cands)
+                gens = [torch.Generator().manual_seed(_seed(seed, node, c)) for c in neural_cands]
                 net = StackedMLP(masks, categorical_hidden, k, activation="relu", generators=gens).to(dev)
-                last = train_stacked(
+                final = train_stacked(
                     net, z, y, "cross_entropy", weights=w,
                     epochs=100 if epochs is None else epochs, lr=1e-3 if lr is None else lr,
                     batch_size=512 if batch_size is None else batch_size,
-                    order_generator=torch.Generator().manual_seed(_seed(seed, t_index, -1)),
+                    order_generator=torch.Generator().manual_seed(_seed(seed, node, ())),
                 )
                 for i, c in enumerate(neural_cands):
                     mech = StructuralNeuralCategorical(n_classes=k, hidden=categorical_hidden,
                                                        activation="relu", coupling=coupling)
-                    seq = net.export(i)
-                    mech.net = _reorder_first_layer(seq, [p for p in sub_union if p in c], list(c))
-                    mech._d_pa = len(c)
+                    mech.net = _reorder_first_layer(net.export(i), _cols_in_union_order(col_of, c),
+                                                    _cols_in_candidate_order(col_of, c))
+                    mech._d_pa = sum(len(col_of[p]) for p in c)
                     mech.noise.n_classes = k
                     mech.to(dev)
+                    mech.eval()
+                    if consolidate:
+                        pa_c = z[:, _cols_in_candidate_order(col_of, c)]
+                        online_laplace.consolidate(mech, y, pa_c, weights=w)
                     mechs[(node, c)], kinds[(node, c)] = mech, "categorical_mlp"
-                    losses[(node, c)] = last[i]
+                    losses[(node, c)] = final[i]
             continue
 
         # Continuous target: x = g(pa) + U.
@@ -187,47 +205,72 @@ def fit_factors(
             mechs[(node, c)], kinds[(node, c)] = mech, "root"
         if not with_parents:
             continue
-        pa_union = torch.stack([data[p].reshape(-1).to(torch.float32) for p in union], -1)
+        pa_union, col_of = _columns(data, union, n)
         if location == "linear":
-            for c, mech in _fit_linear_subblocks(x, pa_union, union, with_parents, w, noise).items():
+            for c, mech in _fit_linear_subblocks(x, pa_union, col_of, with_parents, w, noise).items():
                 mechs[(node, c)], kinds[(node, c)] = mech, "linear"
         else:
             mean, std = weighted_moments(pa_union, w, unbiased=True)
             mean = mean.to(torch.float32)
             std = std.to(torch.float32).nan_to_num(1.0).clamp_min(1e-6)
             z = (pa_union - mean) / std
-            masks = torch.tensor([[1.0 if p in c else 0.0 for p in union] for c in with_parents])
-            gens = [torch.Generator().manual_seed(_seed(seed, t_index, i)) for i in range(len(with_parents))]
+            masks = _masks(col_of, z.shape[1], with_parents)
+            gens = [torch.Generator().manual_seed(_seed(seed, node, c)) for c in with_parents]
             net = StackedMLP(masks, (hidden, hidden), x.shape[1], activation="silu", generators=gens).to(dev)
-            last = train_stacked(
+            final = train_stacked(
                 net, z, x, "mse", weights=w,
                 epochs=300 if epochs is None else epochs, lr=1e-2 if lr is None else lr,
-                batch_size=batch_size, order_generator=torch.Generator().manual_seed(_seed(seed, t_index, -1)),
+                batch_size=batch_size, order_generator=torch.Generator().manual_seed(_seed(seed, node, ())),
             )
             for i, c in enumerate(with_parents):
-                cols = [union.index(p) for p in c]
+                cols = _cols_in_candidate_order(col_of, c)
                 mech = AdditiveNoiseMechanism(location="mlp", noise=noise, hidden=hidden)
-                in_union_order = [p for p in union if p in c]
-                mech.net = _reorder_first_layer(net.export(i), in_union_order, list(c))
+                mech.net = _reorder_first_layer(net.export(i), _cols_in_union_order(col_of, c), cols)
                 mech.output_dim = x.shape[1]
-                mech._input_dim = len(c)
+                mech._input_dim = len(cols)
                 mech._pa_mean = mean[cols].clone()
                 mech._pa_std = std[cols].clone()
                 mech._ensure_noise(x.shape[1], dev)
-                pa_c = pa_union[:, cols]
-                mech.noise.fit(mech.residual(x, pa_c).detach(), w)
+                mech.noise.fit(mech.residual(x, pa_union[:, cols]).detach(), w)
                 mechs[(node, c)], kinds[(node, c)] = mech, "mlp"
-                losses[(node, c)] = last[i]
+                losses[(node, c)] = final[i]
 
-    root_mechs = _fit_roots(hs, data, w, noise)
+    root_mechs = _fit_roots(hs, data, w, noise, alpha, coupling)
     return FactorMechanisms(
         hypothesis_set=hs, mechanisms=mechs, roots=root_mechs, kinds=kinds, train_loss=losses,
         config={"location": location, "noise": noise, "hidden": hidden, "seed": seed,
-                "categorical_hidden": list(categorical_hidden), "coupling": coupling},
+                "categorical_hidden": list(categorical_hidden), "coupling": coupling, "alpha": alpha},
     )
 
 
-def _fit_linear_subblocks(x, pa_union, union, cands, w, noise) -> Dict[Tuple[str, ...], nn.Module]:
+def _columns(data, variables: Tuple[str, ...], n: int) -> Tuple[torch.Tensor, Dict[str, List[int]]]:
+    """``[N, D]`` float design over ``variables`` (multi-dimensional ones span several columns)."""
+    parts, col_of, start = [], {}, 0
+    for v in variables:
+        part = data[v].reshape(n, -1).to(torch.float32)
+        parts.append(part)
+        col_of[v] = list(range(start, start + part.shape[1]))
+        start += part.shape[1]
+    return torch.cat(parts, -1), col_of
+
+
+def _masks(col_of: Dict[str, List[int]], d: int, cands) -> torch.Tensor:
+    masks = torch.zeros(len(cands), d)
+    for i, c in enumerate(cands):
+        for p in c:
+            masks[i, col_of[p]] = 1.0
+    return masks
+
+
+def _cols_in_candidate_order(col_of: Dict[str, List[int]], c: Tuple[str, ...]) -> List[int]:
+    return [j for p in c for j in col_of[p]]
+
+
+def _cols_in_union_order(col_of: Dict[str, List[int]], c: Tuple[str, ...]) -> List[int]:
+    return sorted(_cols_in_candidate_order(col_of, c))
+
+
+def _fit_linear_subblocks(x, pa_union, col_of, cands, w, noise) -> Dict[Tuple[str, ...], nn.Module]:
     """Weighted ridge per candidate from one union Gram matrix (sub-blocks)."""
     from nbn.scm.mechanisms import AdditiveNoiseMechanism
 
@@ -243,10 +286,11 @@ def _fit_linear_subblocks(x, pa_union, union, cands, w, noise) -> Dict[Tuple[str
     bias_col = design.shape[1] - 1
     for c in cands:
         mech = AdditiveNoiseMechanism(location="linear", noise=noise)
-        idx = [union.index(p) for p in c] + [bias_col]
+        cols = _cols_in_candidate_order(col_of, c)
+        idx = cols + [bias_col]
         g = gram[idx][:, idx] + mech.ridge * torch.eye(len(idx), device=solve_on, dtype=dtype)
         coef = torch.linalg.solve(g, cross[idx]).to(x.device, torch.float32)
-        d_pa, d_x = len(c), x.shape[1]
+        d_pa, d_x = len(cols), x.shape[1]
         mech.output_dim = d_x
         mech._input_dim = d_pa
         mech._pa_mean = torch.zeros(d_pa, device=x.device)
@@ -257,15 +301,14 @@ def _fit_linear_subblocks(x, pa_union, union, cands, w, noise) -> Dict[Tuple[str
             layer.bias.copy_(coef[d_pa])
         mech.net = layer
         mech._ensure_noise(d_x, x.device)
-        pa_c = pa_union[:, [union.index(p) for p in c]]
-        mech.noise.fit(mech.residual(x, pa_c).detach(), w)
+        mech.noise.fit(mech.residual(x, pa_union[:, cols]).detach(), w)
         out[c] = mech
     return out
 
 
-def _fit_roots(hs, data, w, noise) -> Dict[str, nn.Module]:
+def _fit_roots(hs, data, w, noise, alpha: float = 0.0, coupling: str = "gumbel_max") -> Dict[str, nn.Module]:
     """A fitted root mechanism for every input that some candidate uses."""
-    from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
+    from nbn.scm.categorical import StructuralCategoricalTable
     from nbn.scm.mechanisms import AdditiveNoiseMechanism
     from nbn.uncertainty.counts import count_table_for
 
@@ -276,7 +319,7 @@ def _fit_roots(hs, data, w, noise) -> Dict[str, nn.Module]:
             continue
         var = hs.variables[v]
         if var.is_discrete:
-            mech = CategoricalTableMechanism()
+            mech = StructuralCategoricalTable(alpha=alpha, coupling=coupling)
             table, _ = count_table_for(hs.variables, data, v, (), w)
             mech.fit_from_counts(table, [])
         else:
@@ -286,19 +329,21 @@ def _fit_roots(hs, data, w, noise) -> Dict[str, nn.Module]:
     return roots
 
 
-def _reorder_first_layer(seq: nn.Sequential, current: List[str], target: List[str]) -> nn.Sequential:
+def _reorder_first_layer(seq: nn.Sequential, current: List[int], target: List[int]) -> nn.Sequential:
     """Permute the input columns of the first ``nn.Linear`` from ``current`` to ``target`` order."""
     if current == target:
         return seq
     first = seq[0]
-    perm = [current.index(p) for p in target]
+    perm = [current.index(j) for j in target]
     with torch.no_grad():
         first.weight.copy_(first.weight[:, perm].clone())
     return seq
 
 
-def _seed(seed: int, target: int, cand: int) -> int:
-    return (int(seed) * 1_000_003 + target * 10_007 + (cand + 1)) % (2**63 - 1)
+def _seed(seed: int, node: str, parents: Tuple[str, ...]) -> int:
+    """A generator seed from ``seed`` and the factor itself (stable under adding / reordering)."""
+    key = f"{node}|{','.join(parents)}".encode()
+    return (int(seed) * 1_000_003 + zlib.crc32(key)) % (2**63 - 1)
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +373,11 @@ def calibrate_factors(
     skipped = {f: "count-based table: use factor_sets (PAC)" for f in hs.factors if fitted.kinds[f] == "table"}
     if not eligible:
         raise ValueError("No continuous or neural factor to calibrate; use factor_sets.")
-    per_factor = (1.0 - level) / len(eligible)
+    # The budget is split over ALL factors of the set, as factor_sets does, so the
+    # calibrated sets here and the PAC table sets of factor_sets(delta = 1 - level)
+    # hold together at `level` (union bound over every factor).
+    per_factor = (1.0 - level) / hs.n_factors
+    calibration_data = to_device(dict(calibration_data), _device_of(fitted))
     sets: Dict[Factor, Any] = {}
     guarantees: Dict[Factor, str] = {}
     models: Dict[Factor, Any] = {}
@@ -344,10 +393,8 @@ def calibrate_factors(
             res = conformal_sets(model, calibration_data, node, alpha=per_factor, groups=groups,
                                  generator=generator)
         else:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", UserWarning)
-                res = conformal_intervals(model, calibration_data, node, alpha=per_factor,
-                                          method=method, groups=groups, generator=generator)
+            res = conformal_intervals(model, calibration_data, node, alpha=per_factor,
+                                      method=method, groups=groups, generator=generator)
         sets[f] = res
         guarantees[f] = res.guarantee
     return CalibratedFactorSets(
@@ -376,8 +423,9 @@ def _device_of(fitted: FactorMechanisms) -> torch.device:
     return torch.device("cpu")
 
 
-def model_from_fitted(hs: HypothesisSet, fitted: FactorMechanisms, hypothesis: Mapping[str, Any]):
-    """A ``StructuralCausalModel`` for one hypothesis with copies of the fitted mechanisms."""
+def model_from_fitted(hs: HypothesisSet, fitted: FactorMechanisms, hypothesis: Mapping[str, Any],
+                      device: str | torch.device | None = None):
+    """A ``StructuralCausalModel`` for one hypothesis with copies of the fitted mechanisms (on ``device``)."""
     from nbn.scm import StructuralCausalModel
 
     hs._check_hypothesis(hypothesis)
@@ -394,4 +442,6 @@ def model_from_fitted(hs: HypothesisSet, fitted: FactorMechanisms, hypothesis: M
             model.set_mechanism(node, copy.deepcopy(fitted.roots[node]))
         else:
             raise ValueError(f"No fitted mechanism for the input '{node}'.")
+    if device is not None:
+        model.to(torch.device(device))
     return model

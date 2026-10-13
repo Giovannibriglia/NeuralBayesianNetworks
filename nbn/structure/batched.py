@@ -76,14 +76,19 @@ class StackedMLP(nn.Module):
         layer_w: List[List[torch.Tensor]] = [[] for _ in sizes[:-1]]
         layer_b: List[List[torch.Tensor]] = [[] for _ in sizes[:-1]]
         for c in range(n_cand):
-            fan_ins = [max(int(masks[c].sum().item()), 0), *sizes[1:-1]]
+            active = masks[c].bool()
+            fan_ins = [int(active.sum().item()), *sizes[1:-1]]
             for li, (d_a, d_b) in enumerate(zip(sizes[:-1], sizes[1:])):
                 fan_in = fan_ins[li]
                 bound = 1.0 / math.sqrt(fan_in) if fan_in > 0 else 0.0
-                w = (torch.rand(d_a, d_b, generator=generators[c]) * 2 - 1) * bound
-                b = (torch.rand(d_b, generator=generators[c]) * 2 - 1) * bound
                 if li == 0:
-                    w = w * masks[c].unsqueeze(-1)
+                    # Draw only the active rows, so a candidate's start depends on its
+                    # own inputs and generator, never on the union or its siblings.
+                    w = torch.zeros(d_a, d_b)
+                    w[active] = (torch.rand(fan_in, d_b, generator=generators[c]) * 2 - 1) * bound
+                else:
+                    w = (torch.rand(d_a, d_b, generator=generators[c]) * 2 - 1) * bound
+                b = (torch.rand(d_b, generator=generators[c]) * 2 - 1) * bound
                 layer_w[li].append(w)
                 layer_b[li].append(b)
         for ws, bs in zip(layer_w, layer_b):
@@ -143,14 +148,14 @@ def train_stacked(
     over output dims, as ``AdditiveNoiseMechanism``) or ``[N]`` class indices for
     ``"cross_entropy"`` (as ``NeuralCategoricalMechanism``).  The batch order
     comes from ``order_generator`` (CPU), shared by every candidate.  Returns
-    the final per-candidate training losses.
+    each candidate's (weighted) mean loss on **all** rows after training.
     """
+    from nbn.utils.device import accum_dtype
     if order_generator is None:
         order_generator = torch.Generator().manual_seed(0)
     n = z.shape[0]
     size = n if batch_size is None else int(batch_size)
     optimiser = torch.optim.Adam(net.parameters(), lr=lr)
-    last = torch.zeros(net.n_candidates)
     for _ in range(int(epochs)):
         order = torch.randperm(n, generator=order_generator).to(z.device)
         for start in range(0, n, size):
@@ -163,13 +168,29 @@ def train_stacked(
                 c, b, k = out.shape
                 err = nn.functional.cross_entropy(
                     out.reshape(c * b, k), y[idx].repeat(c), reduction="none").reshape(c, b)
-            if w is None:
-                per_cand = err.mean(-1)
-            else:
-                w = w.to(err.dtype)
-                per_cand = (err * w).sum(-1) / w.sum().clamp_min(1e-12)
+            per_cand = _per_candidate_mean(err, w, accum_dtype(err.device))
             optimiser.zero_grad()
             per_cand.sum().backward()
             optimiser.step()
-            last = per_cand.detach()
-    return [float(v) for v in last.cpu()]
+    with torch.no_grad():
+        out = net(z)
+        if loss == "mse":
+            err = (out - y.unsqueeze(0)).pow(2).sum(-1)
+        else:
+            c, b, k = out.shape
+            err = nn.functional.cross_entropy(out.reshape(c * b, k), y.repeat(c), reduction="none").reshape(c, b)
+        final = _per_candidate_mean(err, weights, accum_dtype(err.device))
+    return [float(v) for v in final.cpu()]
+
+
+def _per_candidate_mean(err: torch.Tensor, w: torch.Tensor | None, acc: torch.dtype) -> torch.Tensor:
+    """``[C]`` weighted means of ``err`` ``[C, B]``, as ``nbn.learning.weighting.weighted_mean``.
+
+    Accumulated in the widest float of the device and cast back, so the
+    gradient keeps the parameters' dtype.
+    """
+    if w is None:
+        return err.mean(-1)
+    e = err.to(acc)
+    ww = w.to(device=err.device, dtype=acc)
+    return ((e * ww).sum(-1) / ww.sum()).to(err.dtype)

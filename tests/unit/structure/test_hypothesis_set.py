@@ -331,10 +331,12 @@ def test_fit_from_counts_refuses_subclasses_with_their_own_fit_local():
 
     counts = torch.tensor([[3.0, 1.0], [0.0, 2.0]])
     binning = BinningCategoricalTable.__new__(BinningCategoricalTable)  # the guard runs first
-    for mech in (binning, StructuralCategoricalTable()):
-        with pytest.raises(NotImplementedError, match="fit_local"):
-            mech.fit_from_counts(counts, [2])
+    with pytest.raises(NotImplementedError, match="fit_local"):
+        binning.fit_from_counts(counts, [2])
     SmoothedEmpiricalCategoricalMechanism().fit_from_counts(counts, [2])  # no fit_local override
+    structural = StructuralCategoricalTable()                            # overrides both: supported
+    structural.fit_from_counts(counts, [2])
+    assert structural.noise.n_classes == 2
 
 
 def _small():
