@@ -164,7 +164,11 @@ over all intervals by a union bound (`union_bound`).
 and depend on earlier draws, so each interval is made valid for every sample
 size at once with `delta_n = delta / (n (n + 1))` (`anytime_delta`; the
 coupling argument of Agarwal et al., *RL: Theory and Algorithms*, Lemma 6.2,
-with a summable schedule instead of a finite range).
+with a summable schedule instead of a finite range). This assumes the table's
+parents make the child Markov along the episode. For a table counted against a
+candidate parent set (`count_table_for`), the candidate must contain the true
+parents and every observed variable the logging policies read; otherwise the
+set bounds a policy-dependent average and the declared level does not hold.
 
 **Factored next states.** Build one set per next-state variable and split
 `delta` across them; this is the learning scheme of Schnitzer, Abate and
