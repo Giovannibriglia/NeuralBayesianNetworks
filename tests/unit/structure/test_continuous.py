@@ -1,6 +1,7 @@
 """Continuous and mixed factors (#318): batched candidate fits and calibrated sets."""
 from __future__ import annotations
 
+import copy
 import math
 
 import pytest
@@ -78,11 +79,17 @@ def test_export_matches_the_stacked_forward(device):
     z = torch.randn(50, 3, generator=g).to(device)
     net = StackedMLP(_masks(), (8, 8), 2, activation="silu").to(device)
     train_stacked(net, z, torch.randn(50, 2, generator=g).to(device), "mse", epochs=5, lr=1e-2)
+    # A CPU copy of the whole net is the reference for both the device forward and the export.
+    ref_net = copy.deepcopy(net).cpu()
+    ref = ref_net(z.cpu())
+    torch.testing.assert_close(net(z).cpu(), ref, rtol=1e-4, atol=1e-5,
+                               msg=lambda m: f"stacked forward on {device} differs from CPU: {m}")
     for c in range(3):
         active = torch.nonzero(_masks()[c]).reshape(-1).tolist()
         seq = net.export(c)
         assert next(seq.parameters()).device.type == torch.device(device).type
-        torch.testing.assert_close(seq(z[:, active]), net(z)[c], rtol=1e-4, atol=1e-5)
+        torch.testing.assert_close(seq(z[:, active]).cpu(), ref[c], rtol=1e-4, atol=1e-5,
+                                   msg=lambda m, c=c: f"export of candidate {c} on {device}: {m}")
         perm = active[::-1]                                  # inputs in another order
         torch.testing.assert_close(net.export(c, order=perm)(z[:, perm]), net(z)[c], rtol=1e-4, atol=1e-5)
     with pytest.raises(ValueError, match="permutation"):
