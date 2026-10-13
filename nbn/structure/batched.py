@@ -48,6 +48,12 @@ class StackedMLP(nn.Module):
     generators:
         One CPU generator per candidate for the initial weights (so a
         candidate's start does not depend on the others).
+    input_orders:
+        Per candidate, its union columns **in the candidate's own order**.
+        The first-layer rows are drawn in that order and scattered to the
+        union positions, so a candidate starts exactly where a network built
+        on its own inputs would, whatever the union and its siblings.
+        Default: the active columns in union order.
     """
 
     def __init__(
@@ -57,6 +63,7 @@ class StackedMLP(nn.Module):
         out_dim: int,
         activation: Activation = "relu",
         generators: Sequence[torch.Generator] | None = None,
+        input_orders: Sequence[Sequence[int]] | None = None,
     ) -> None:
         super().__init__()
         if activation not in _ACTIVATIONS:
@@ -75,9 +82,13 @@ class StackedMLP(nn.Module):
         self.biases = nn.ParameterList()
         layer_w: List[List[torch.Tensor]] = [[] for _ in sizes[:-1]]
         layer_b: List[List[torch.Tensor]] = [[] for _ in sizes[:-1]]
+        if input_orders is None:
+            input_orders = [torch.nonzero(masks[c]).reshape(-1).tolist() for c in range(n_cand)]
         for c in range(n_cand):
-            active = masks[c].bool()
-            fan_ins = [int(active.sum().item()), *sizes[1:-1]]
+            order = list(input_orders[c])
+            if sorted(order) != torch.nonzero(masks[c]).reshape(-1).tolist():
+                raise ValueError(f"input_orders[{c}] does not match the mask's active columns.")
+            fan_ins = [len(order), *sizes[1:-1]]
             for li, (d_a, d_b) in enumerate(zip(sizes[:-1], sizes[1:])):
                 fan_in = fan_ins[li]
                 bound = 1.0 / math.sqrt(fan_in) if fan_in > 0 else 0.0
@@ -85,7 +96,8 @@ class StackedMLP(nn.Module):
                     # Draw only the active rows, so a candidate's start depends on its
                     # own inputs and generator, never on the union or its siblings.
                     w = torch.zeros(d_a, d_b)
-                    w[active] = (torch.rand(fan_in, d_b, generator=generators[c]) * 2 - 1) * bound
+                    if order:
+                        w[torch.tensor(order)] = (torch.rand(fan_in, d_b, generator=generators[c]) * 2 - 1) * bound
                 else:
                     w = (torch.rand(d_a, d_b, generator=generators[c]) * 2 - 1) * bound
                 b = (torch.rand(d_b, generator=generators[c]) * 2 - 1) * bound
@@ -146,7 +158,9 @@ def train_stacked(
 
     ``z`` ``[N, D_in]``; ``y`` ``[N, D_out]`` for ``"mse"`` (squared error summed
     over output dims, as ``AdditiveNoiseMechanism``) or ``[N]`` class indices for
-    ``"cross_entropy"`` (as ``NeuralCategoricalMechanism``).  The batch order
+    ``"cross_entropy"`` (as ``NeuralCategoricalMechanism``).  Memory: one
+    step holds ``[C, batch, hidden]`` activations, ``C`` times a single fit;
+    pass ``batch_size`` for many rows.  The batch order
     comes from ``order_generator`` (CPU), shared by every candidate.  Returns
     each candidate's (weighted) mean loss on **all** rows after training.
     """
@@ -172,14 +186,19 @@ def train_stacked(
             optimiser.zero_grad()
             per_cand.sum().backward()
             optimiser.step()
+    # Final full-data loss, in chunks so the [C, N, hidden] activations stay bounded.
+    errs = []
     with torch.no_grad():
-        out = net(z)
-        if loss == "mse":
-            err = (out - y.unsqueeze(0)).pow(2).sum(-1)
-        else:
-            c, b, k = out.shape
-            err = nn.functional.cross_entropy(out.reshape(c * b, k), y.repeat(c), reduction="none").reshape(c, b)
-        final = _per_candidate_mean(err, weights, accum_dtype(err.device))
+        for start in range(0, n, 65_536):
+            sl = slice(start, start + 65_536)
+            out = net(z[sl])
+            if loss == "mse":
+                errs.append((out - y[sl].unsqueeze(0)).pow(2).sum(-1))
+            else:
+                c, b, k = out.shape
+                errs.append(nn.functional.cross_entropy(
+                    out.reshape(c * b, k), y[sl].repeat(c), reduction="none").reshape(c, b))
+        final = _per_candidate_mean(torch.cat(errs, -1), weights, accum_dtype(z.device))
     return [float(v) for v in final.cpu()]
 
 
@@ -191,6 +210,9 @@ def _per_candidate_mean(err: torch.Tensor, w: torch.Tensor | None, acc: torch.dt
     """
     if w is None:
         return err.mean(-1)
+    from nbn.learning.weighting import _MIN_TOTAL_WEIGHT
+
     e = err.to(acc)
     ww = w.to(device=err.device, dtype=acc)
-    return ((e * ww).sum(-1) / ww.sum()).to(err.dtype)
+    # An all-zero mini-batch contributes 0 (not 0/0), as weighted_mean does.
+    return ((e * ww).sum(-1) / ww.sum().clamp_min(_MIN_TOTAL_WEIGHT)).to(err.dtype)

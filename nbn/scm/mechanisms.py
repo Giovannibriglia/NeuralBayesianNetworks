@@ -349,6 +349,22 @@ class DiscreteAdditiveNoiseMechanism(StructuralMechanism):
 # ===========================================================================
 
 
+def linear_moments(x: torch.Tensor, pa: torch.Tensor, w: torch.Tensor | None = None):
+    """Weighted normal-equation moments ``(D^T W D, D^T W x)`` of the design ``D = [pa, 1]``.
+
+    Computed in the widest float of the linear-algebra device; any sub-block of
+    rows/columns ``[cols..., bias]`` gives the moments of a model on a subset of
+    the parents (the linear-Gaussian sufficient statistics).
+    """
+    solve_on = linalg_device(x.device)
+    dtype = accum_dtype(solve_on)
+    design = torch.cat([pa, torch.ones(pa.shape[0], 1, device=pa.device)], 1)
+    design = to_device_dtype(design, solve_on, dtype)
+    target = to_device_dtype(ensure_2d(x), solve_on, dtype)
+    wd = design if w is None else design * to_device_dtype(w, solve_on, dtype).unsqueeze(-1)
+    return design.T @ wd, wd.T @ target
+
+
 class AdditiveNoiseMechanism(StructuralMechanism):
     """``x = g(pa) + U`` with ``g`` linear or an MLP and ``U`` a learned law.
 
@@ -454,32 +470,61 @@ class AdditiveNoiseMechanism(StructuralMechanism):
 
     def _fit_linear(self, x: torch.Tensor, pa: torch.Tensor, w: torch.Tensor | None) -> None:
         d_pa, d_x = pa.shape[1], x.shape[1]
-        self._input_dim = d_pa
-        self._pa_mean = torch.zeros(d_pa, device=x.device)
-        self._pa_std = torch.ones(d_pa, device=x.device)
         if d_pa == 0:
+            self._input_dim = 0
+            self._pa_mean = torch.zeros(0, device=x.device)
+            self._pa_std = torch.ones(0, device=x.device)
             mean, _ = weighted_moments(x, w)
-            weight, bias = torch.zeros(d_x, 0, device=x.device), mean.to(torch.float32)
-        else:
-            # Weighted ridge regression via the normal equations, widest dtype.
-            solve_on = linalg_device(x.device)
-            dtype = accum_dtype(solve_on)
-            design = torch.cat([pa, torch.ones(pa.shape[0], 1, device=x.device)], 1)
-            design = to_device_dtype(design, solve_on, dtype)
-            target = to_device_dtype(x, solve_on, dtype)
-            wd = design if w is None else design * to_device_dtype(w, solve_on, dtype).unsqueeze(-1)
-            gram = design.T @ wd + self.ridge * torch.eye(d_pa + 1, device=solve_on, dtype=dtype)
-            coef = torch.linalg.solve(gram, wd.T @ target).to(x.device, torch.float32)
-            weight, bias = coef[:d_pa].T, coef[d_pa]
+            self._set_linear(torch.zeros(d_x, 0, device=x.device), mean.to(torch.float32), x.device)
+            return
+        gram, cross = linear_moments(x, pa, w)
+        self.set_linear_from_moments(gram, cross, device=x.device)
+
+    def set_linear_from_moments(self, gram: torch.Tensor, cross: torch.Tensor,
+                                device: torch.device | str | None = None) -> None:
+        """Set a linear location from the weighted normal equations of ``[pa, 1]``.
+
+        ``gram = D^T W D`` and ``cross = D^T W x`` for the design ``D = [pa, 1]``
+        (bias column last), e.g. sub-blocks of a larger design's moments
+        (:func:`linear_moments`).  The ridge ``self.ridge`` is added here.
+        """
+        d_pa = gram.shape[0] - 1
+        g = gram + self.ridge * torch.eye(d_pa + 1, device=gram.device, dtype=gram.dtype)
+        dev = torch.device(device) if device is not None else gram.device
+        coef = torch.linalg.solve(g, cross).to(dev, torch.float32)
+        self._input_dim = d_pa
+        self._pa_mean = torch.zeros(d_pa, device=dev)
+        self._pa_std = torch.ones(d_pa, device=dev)
+        self._set_linear(coef[:d_pa].T, coef[d_pa], dev)
+
+    def _set_linear(self, weight: torch.Tensor, bias: torch.Tensor, device) -> None:
+        d_x, d_pa = weight.shape
+        self.output_dim = d_x
         with warnings.catch_warnings():
             # A root has no parents: nn.Linear(0, d) warns that initialising an
             # empty weight is a no-op.  The weights are overwritten just below.
             warnings.simplefilter("ignore", UserWarning)
-            layer = nn.Linear(d_pa, d_x).to(x.device)
+            layer = nn.Linear(d_pa, d_x).to(device)
         with torch.no_grad():
             layer.weight.copy_(weight)
             layer.bias.copy_(bias)
         self.net = layer
+
+    def set_mlp_location(self, net: nn.Module, pa_mean: torch.Tensor, pa_std: torch.Tensor,
+                         output_dim: int) -> None:
+        """Set a trained MLP location ``g(pa) = net((pa - pa_mean) / pa_std)``."""
+        self.net = net
+        self._input_dim = int(pa_mean.numel())
+        self._pa_mean = pa_mean.detach().to(torch.float32).clone()
+        self._pa_std = pa_std.detach().to(torch.float32).clone()
+        self.output_dim = int(output_dim)
+
+    def fit_noise(self, x: torch.Tensor, parents: torch.Tensor | None,
+                  weights: torch.Tensor | None = None) -> dict:
+        """Fit (or refit) the noise law on the residuals ``x - g(pa)`` of the current location."""
+        x = ensure_2d(x).to(torch.float32)
+        self._ensure_noise(x.shape[1], x.device)
+        return self.noise.fit(self.residual(x, parents).detach(), weights)
 
     def _fit_mlp(
         self, x: torch.Tensor, pa: torch.Tensor, w: torch.Tensor | None,

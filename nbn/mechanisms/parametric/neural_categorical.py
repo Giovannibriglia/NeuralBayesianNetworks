@@ -245,6 +245,13 @@ class NeuralCategoricalMechanism(Mechanism):
             fisher_batch_size=fisher_batch_size, sample_cap=sample_cap,
         )
 
+    def set_network(self, net: nn.Module, d_pa: int) -> None:
+        """Set a trained logits network over ``d_pa`` raw parent columns (no embeddings)."""
+        self.net = net
+        self.embeddings = None
+        self._d_pa = int(d_pa)
+        self.eval()
+
     def _logits_from_parents(self, parents: torch.Tensor) -> torch.Tensor:
         if self.embeddings is not None:
             # Index the *last* (parent) axis: ``parents[:, i]`` picked the

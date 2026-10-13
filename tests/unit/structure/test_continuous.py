@@ -319,3 +319,45 @@ def test_train_loss_is_the_full_data_loss():
     pa = torch.stack([data["x"], data["a"]], -1)
     mse = float((mech.location(pa)[:, 0] - data["x'"]).pow(2).mean().detach())
     assert fm.train_loss[("x'", ("x", "a"))] == pytest.approx(mse, rel=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 regressions (#323)
+# ---------------------------------------------------------------------------
+
+
+def test_zero_weight_mini_batches_do_not_poison_the_fit():
+    data = simulate(2000)
+    w = torch.zeros(2000)
+    w[:40] = 1.0                                   # most mini-batches have zero total weight
+    hs = HypothesisSet(VARS, {"x'": [("x", "a")], "d'": [("x",)]})
+    fm = hs.fit(data, location="mlp", epochs=3, batch_size=64, weights=w)
+    for f in hs.factors:
+        assert all(bool(torch.isfinite(p).all()) for p in fm[f].parameters())
+        assert math.isfinite(fm.train_loss[f])
+
+
+def test_initial_weights_do_not_depend_on_the_union_order():
+    v = {"b": ("continuous", 1), "x": ("continuous", 1), "x'": ("continuous", 1)}
+    g = torch.Generator().manual_seed(0)
+    data = {k: torch.randn(500, generator=g) for k in v}
+    alone = HypothesisSet(v, {"x'": [("b", "x")]}).fit(data, location="mlp", epochs=0)
+    with_sibling = HypothesisSet(v, {"x'": [("x",), ("b", "x")]}).fit(data, location="mlp", epochs=0)
+    for p, q in zip(alone[("x'", ("b", "x"))].net.parameters(), with_sibling[("x'", ("b", "x"))].net.parameters()):
+        torch.testing.assert_close(p, q)
+
+
+def test_mixed_set_edge_cases():
+    data = simulate(800)
+    hs = HypothesisSet(VARS, CANDS)
+    fc = hs.counts(data, discrete_only=True)               # continuous inputs are skipped, no crash
+    assert set(fc.input_marginals) == {"a"}
+    with pytest.raises(ValueError, match="fit"):
+        hs.model_for({"x'": ("x", "a"), "d'": ("a",)}, fc)
+    fs = hs.factor_sets(data)
+    from nbn.structure import export_factored_sets
+    with pytest.raises(ValueError, match="no count-based set"):
+        export_factored_sets("/nonexistent/should-not-be-created", fs, hs, ["x", "y"], ["a"])
+    only_continuous = HypothesisSet(VARS, {"x'": [("x",)]})
+    with pytest.raises(ValueError, match="No count-based factor"):
+        only_continuous.factor_sets(data)

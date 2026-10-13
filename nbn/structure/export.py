@@ -344,6 +344,12 @@ def _collect(sets: PlanningSets, source: Any):
         if source is not None and source is not hs and not isinstance(source, Mapping):
             raise ValueError("A FactorSets export takes its HypothesisSet (or None) as source.")
         candidates: Dict[str, List[str]] = {}
+        missing = [f for f in hs.factors if f not in sets.sets]
+        if missing:
+            raise ValueError(
+                f"These FactorSets have no count-based set for {missing} (continuous or mixed factors); "
+                "export a mapping node -> set for one hypothesis instead."
+            )
         for i, (node, parents) in enumerate(hs.factors):
             fid = f"f{i}"
             entries[fid] = (node, parents, sets.sets[(node, parents)], sets.counts.tables[(node, parents)])
