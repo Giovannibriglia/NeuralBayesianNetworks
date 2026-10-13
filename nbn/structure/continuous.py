@@ -56,7 +56,7 @@ import torch.nn as nn
 
 from nbn.learning.weighting import validate_weights, weighted_moments
 from nbn.structure.batched import StackedMLP, train_stacked
-from nbn.utils.device import accum_dtype, linalg_device, to_device, to_device_dtype
+from nbn.utils.device import to_device
 
 if TYPE_CHECKING:  # pragma: no cover
     from nbn.structure.hypotheses import HypothesisSet
@@ -172,7 +172,9 @@ def fit_factors(
                 z, col_of = _columns(data, sub_union, n)
                 masks = _masks(col_of, z.shape[1], neural_cands)
                 gens = [torch.Generator().manual_seed(_seed(seed, node, c)) for c in neural_cands]
-                net = StackedMLP(masks, categorical_hidden, k, activation="relu", generators=gens).to(dev)
+                orders = [_cols_in_candidate_order(col_of, c) for c in neural_cands]
+                net = StackedMLP(masks, categorical_hidden, k, activation="relu", generators=gens,
+                                 input_orders=orders).to(dev)
                 final = train_stacked(
                     net, z, y, "cross_entropy", weights=w,
                     epochs=100 if epochs is None else epochs, lr=1e-3 if lr is None else lr,
@@ -182,12 +184,11 @@ def fit_factors(
                 for i, c in enumerate(neural_cands):
                     mech = StructuralNeuralCategorical(n_classes=k, hidden=categorical_hidden,
                                                        activation="relu", coupling=coupling)
-                    mech.net = _reorder_first_layer(net.export(i), _cols_in_union_order(col_of, c),
-                                                    _cols_in_candidate_order(col_of, c))
-                    mech._d_pa = sum(len(col_of[p]) for p in c)
+                    mech.set_network(_reorder_first_layer(net.export(i), _cols_in_union_order(col_of, c),
+                                                          _cols_in_candidate_order(col_of, c)),
+                                     d_pa=sum(len(col_of[p]) for p in c))
                     mech.noise.n_classes = k
                     mech.to(dev)
-                    mech.eval()
                     if consolidate:
                         pa_c = z[:, _cols_in_candidate_order(col_of, c)]
                         online_laplace.consolidate(mech, y, pa_c, weights=w)
@@ -216,7 +217,9 @@ def fit_factors(
             z = (pa_union - mean) / std
             masks = _masks(col_of, z.shape[1], with_parents)
             gens = [torch.Generator().manual_seed(_seed(seed, node, c)) for c in with_parents]
-            net = StackedMLP(masks, (hidden, hidden), x.shape[1], activation="silu", generators=gens).to(dev)
+            orders = [_cols_in_candidate_order(col_of, c) for c in with_parents]
+            net = StackedMLP(masks, (hidden, hidden), x.shape[1], activation="silu", generators=gens,
+                             input_orders=orders).to(dev)
             final = train_stacked(
                 net, z, x, "mse", weights=w,
                 epochs=300 if epochs is None else epochs, lr=1e-2 if lr is None else lr,
@@ -225,13 +228,9 @@ def fit_factors(
             for i, c in enumerate(with_parents):
                 cols = _cols_in_candidate_order(col_of, c)
                 mech = AdditiveNoiseMechanism(location="mlp", noise=noise, hidden=hidden)
-                mech.net = _reorder_first_layer(net.export(i), _cols_in_union_order(col_of, c), cols)
-                mech.output_dim = x.shape[1]
-                mech._input_dim = len(cols)
-                mech._pa_mean = mean[cols].clone()
-                mech._pa_std = std[cols].clone()
-                mech._ensure_noise(x.shape[1], dev)
-                mech.noise.fit(mech.residual(x, pa_union[:, cols]).detach(), w)
+                mech.set_mlp_location(_reorder_first_layer(net.export(i), _cols_in_union_order(col_of, c), cols),
+                                      mean[cols], std[cols], output_dim=x.shape[1])
+                mech.fit_noise(x, pa_union[:, cols], w)
                 mechs[(node, c)], kinds[(node, c)] = mech, "mlp"
                 losses[(node, c)] = final[i]
 
@@ -272,36 +271,17 @@ def _cols_in_union_order(col_of: Dict[str, List[int]], c: Tuple[str, ...]) -> Li
 
 def _fit_linear_subblocks(x, pa_union, col_of, cands, w, noise) -> Dict[Tuple[str, ...], nn.Module]:
     """Weighted ridge per candidate from one union Gram matrix (sub-blocks)."""
-    from nbn.scm.mechanisms import AdditiveNoiseMechanism
+    from nbn.scm.mechanisms import AdditiveNoiseMechanism, linear_moments
 
     out: Dict[Tuple[str, ...], nn.Module] = {}
-    solve_on = linalg_device(x.device)
-    dtype = accum_dtype(solve_on)
-    design = torch.cat([pa_union, torch.ones(pa_union.shape[0], 1, device=x.device)], 1)
-    design = to_device_dtype(design, solve_on, dtype)
-    target = to_device_dtype(x, solve_on, dtype)
-    wd = design if w is None else design * to_device_dtype(w, solve_on, dtype).unsqueeze(-1)
-    gram = design.T @ wd
-    cross = wd.T @ target
-    bias_col = design.shape[1] - 1
+    gram, cross = linear_moments(x, pa_union, w)
+    bias_col = gram.shape[0] - 1
     for c in cands:
         mech = AdditiveNoiseMechanism(location="linear", noise=noise)
         cols = _cols_in_candidate_order(col_of, c)
         idx = cols + [bias_col]
-        g = gram[idx][:, idx] + mech.ridge * torch.eye(len(idx), device=solve_on, dtype=dtype)
-        coef = torch.linalg.solve(g, cross[idx]).to(x.device, torch.float32)
-        d_pa, d_x = len(cols), x.shape[1]
-        mech.output_dim = d_x
-        mech._input_dim = d_pa
-        mech._pa_mean = torch.zeros(d_pa, device=x.device)
-        mech._pa_std = torch.ones(d_pa, device=x.device)
-        layer = nn.Linear(d_pa, d_x).to(x.device)
-        with torch.no_grad():
-            layer.weight.copy_(coef[:d_pa].T)
-            layer.bias.copy_(coef[d_pa])
-        mech.net = layer
-        mech._ensure_noise(d_x, x.device)
-        mech.noise.fit(mech.residual(x, pa_union[:, cols]).detach(), w)
+        mech.set_linear_from_moments(gram[idx][:, idx], cross[idx], device=x.device)
+        mech.fit_noise(x, pa_union[:, cols], w)
         out[c] = mech
     return out
 

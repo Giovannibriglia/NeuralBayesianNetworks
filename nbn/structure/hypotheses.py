@@ -191,13 +191,15 @@ class HypothesisSet:
                 "previous slice only."
             ) from err
 
-    def _has_continuous(self) -> bool:
+    def _continuous_involved(self) -> List[str]:
         involved = set(self.targets) | {p for cs in self.candidates.values() for c in cs for p in c}
-        return any(not self.variables[v].is_discrete for v in involved)
+        return sorted(v for v in involved if not self.variables[v].is_discrete)
+
+    def _has_continuous(self) -> bool:
+        return bool(self._continuous_involved())
 
     def _require_discrete(self) -> None:
-        involved = set(self.targets) | {p for cs in self.candidates.values() for c in cs for p in c}
-        continuous = sorted(v for v in involved if not self.variables[v].is_discrete)
+        continuous = self._continuous_involved()
         if continuous:
             raise ValueError(
                 f"Count-based factors need discrete variables; {continuous} are continuous "
@@ -325,7 +327,7 @@ class HypothesisSet:
         if input_marginals:
             used = {p for cs in self.candidates.values() for c in cs for p in c}
             for v in self.inputs:
-                if v in used and v in data:
+                if v in used and v in data and self.variables[v].is_discrete:
                     marginals[v], _ = count_table_for(self.variables, data, v, (), weights)
         return FactorCounts(
             hypothesis_set=self, tables=tables, parent_cards=cards,
@@ -391,6 +393,9 @@ class HypothesisSet:
         per_factor = delta / self.n_factors
         sets: Dict[Factor, ProbabilitySet] = {}
         skipped: Dict[Factor, str] = {}
+        if not fc.tables:
+            raise ValueError("No count-based factor in this set (every factor involves a continuous variable); "
+                             "use HypothesisSet.fit and calibrated_sets.")
         for f in self.factors:
             if f not in fc.tables:
                 skipped[f] = "continuous or mixed factor: use HypothesisSet.fit and calibrated_sets"
@@ -484,6 +489,10 @@ class HypothesisSet:
         if counts.hypothesis_set is not self:
             raise ValueError("These counts were built by another HypothesisSet.")
         self._check_hypothesis(hypothesis)
+        missing_f = [(n, tuple(p)) for n, p in hypothesis.items() if (n, tuple(p)) not in counts.tables]
+        if missing_f:
+            raise ValueError(f"No count tables for {missing_f} (continuous or mixed factors): "
+                             "fit them with HypothesisSet.fit and pass its result to model_for.")
         used = set(self.targets) | {p for parents in hypothesis.values() for p in parents}
         roots = [v for v in self.inputs if v in used]
         marginals = {v: counts.input_marginals.get(v) for v in roots}
