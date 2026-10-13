@@ -68,6 +68,31 @@ print("true noise law inside the polytope:", polytope.contains(TRUE_NOISE.double
 Pooling the shared noise law gives much tighter bounds than one interval per
 entry: the 64 entries of the table are linear images of 3 noise probabilities.
 
+### Sets from a count table
+
+The count-based builders only need the table of counts `n(u, x)` of a node per
+parent value `u`. Each has a `*_from_counts` twin that takes the table itself,
+and `count_table_for` counts a node against **any** tuple of discrete parents,
+not only its parents in a model's DAG. This is the building block for comparing
+several candidate parent sets of the same node:
+
+```python
+from nbn.uncertainty import count_table_for, interval_set_from_counts
+
+for parents in [("health", "exercise"), ("health", "tired", "exercise")]:
+    counts, cards = count_table_for(model.variables, data, "health'", parents)
+    candidate = interval_set_from_counts(counts, delta=0.1)
+    print(parents, tuple(counts.shape), "unseen rows:", int(candidate.unseen.sum()))
+```
+
+Rows are in C order (last parent fastest), the layout of
+`CategoricalTableMechanism`, so `counts.reshape(*cards, K)` gives one axis per
+parent. `interval_set(model, data, node)` is exactly
+`interval_set_from_counts(count_table(model, data, node)[0])`, and likewise for
+`l1_ball_set` and `dirichlet_set`. When several sets must hold at once (one per
+candidate parent set, or one per next-state variable), split `delta` between
+them by a union bound.
+
 ## How the guarantee is built
 
 Binomial intervals come from the Chernoff (KL) inequality, inverted by

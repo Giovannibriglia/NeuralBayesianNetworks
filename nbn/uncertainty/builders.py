@@ -1,7 +1,9 @@
 """Build probability sets for the table of a discrete node.
 
 Each builder reads counts from data (see :func:`count_table`), so it does not
-depend on how the node's mechanism was fitted.  ``sampling`` declares how the
+depend on how the node's mechanism was fitted.  Every builder has a
+``*_from_counts`` twin that takes the count table itself, for tables counted
+against any parent tuple (:func:`count_table_for`), not only a model's DAG.  ``sampling`` declares how the
 data were collected:
 
 ``"iid"``
@@ -41,6 +43,7 @@ from nbn.uncertainty.binomial import (
 )
 from nbn.uncertainty.counts import count_table
 from nbn.uncertainty.sets import IntervalSet, L1BallSet, SampleSet
+from nbn.utils.device import accum_dtype
 
 Sampling = Literal["iid", "trajectory"]
 
@@ -56,9 +59,25 @@ def interval_set(
     """Entry-wise intervals for ``P(node | parents)``, valid for all entries at once.
 
     The budget ``delta`` is split over all ``R * K`` entries (union bound);
-    the result is then tightened to the simplex.
+    the result is then tightened to the simplex.  Same as
+    :func:`interval_set_from_counts` on :func:`count_table`.
     """
     counts, _ = count_table(model, data, node)
+    return interval_set_from_counts(counts, delta=delta, method=method, sampling=sampling)
+
+
+def interval_set_from_counts(
+    counts: torch.Tensor,
+    delta: float = 0.05,
+    method: IntervalMethod = "kl",
+    sampling: Sampling = "iid",
+) -> IntervalSet:
+    """:func:`interval_set` from a count table ``[R, K]`` (rows = parent values).
+
+    Use it when the counts do not come from one model's DAG, e.g. a table
+    counted against a candidate parent set (:func:`count_table_for`).
+    """
+    counts = _check_counts(counts)
     trials = counts.sum(dim=-1, keepdim=True).expand_as(counts)
     per_entry = per_interval_delta(delta, counts.numel(), trials, sampling)
     lower, upper = binomial_interval(counts, trials, per_entry, method=method)
@@ -83,9 +102,20 @@ def l1_ball_set(
     HP Labs report HPL-2003-97, original not checked; the same radius,
     ``sqrt(2 (ln(2^a - 2) - ln delta) / n)``, is used by Schnitzer et al.,
     AAAI 2026, §4.1), solved for ``eps``.  Rows without data get radius
-    2, i.e. the whole simplex.
+    2, i.e. the whole simplex.  Same as :func:`l1_ball_set_from_counts` on
+    :func:`count_table`.
     """
     counts, _ = count_table(model, data, node)
+    return l1_ball_set_from_counts(counts, delta=delta, sampling=sampling)
+
+
+def l1_ball_set_from_counts(
+    counts: torch.Tensor,
+    delta: float = 0.05,
+    sampling: Sampling = "iid",
+) -> L1BallSet:
+    """:func:`l1_ball_set` from a count table ``[R, K]`` (rows = parent values)."""
+    counts = _check_counts(counts)
     trials = counts.sum(dim=-1)
     n_rows, k = counts.shape
     per_row = per_interval_delta(delta, n_rows, trials, sampling)
@@ -115,9 +145,21 @@ def dirichlet_set(
 
     Bayesian credibility, not a frequentist guarantee; useful as genuine
     posterior weights and as a sanity check of the PAC sets.  Seed with
-    ``torch.manual_seed`` for reproducible draws.
+    ``torch.manual_seed`` for reproducible draws.  Same as
+    :func:`dirichlet_set_from_counts` on :func:`count_table`.
     """
     counts, _ = count_table(model, data, node)
+    return dirichlet_set_from_counts(counts, delta=delta, prior=prior, n_samples=n_samples)
+
+
+def dirichlet_set_from_counts(
+    counts: torch.Tensor,
+    delta: float = 0.05,
+    prior: float = 1.0,
+    n_samples: int = 4000,
+) -> SampleSet:
+    """:func:`dirichlet_set` from a count table ``[R, K]`` (rows = parent values)."""
+    counts = _check_counts(counts)
     # MPS has no float64 Dirichlet sampler; float32 draws are plenty here.
     posterior = Dirichlet((counts + prior).to(torch.float32))
     return SampleSet(
@@ -173,6 +215,19 @@ def bootstrap_set(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _check_counts(counts: torch.Tensor) -> torch.Tensor:
+    """A count table must be ``[R, K]`` with finite, non-negative entries."""
+    if counts.dim() != 2:
+        raise ValueError(f"A count table is [R, K]; got shape {tuple(counts.shape)}.")
+    if counts.shape[1] < 1:
+        raise ValueError("A count table needs at least one child value (K >= 1).")
+    if not torch.is_floating_point(counts):
+        counts = counts.to(accum_dtype(counts.device))
+    if counts.numel() and (not bool(torch.isfinite(counts).all()) or float(counts.min()) < 0):
+        raise ValueError("Counts must be finite and non-negative.")
+    return counts
 
 
 def per_interval_delta(

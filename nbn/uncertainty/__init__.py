@@ -8,6 +8,9 @@ Builders (from data, for a discrete node's table ``P(X | pa)``):
 * :func:`bootstrap_set` — episode bootstrap of any statistic, asymptotic
   (discrete or continuous models).
 
+The first three have ``*_from_counts`` twins that take a count table ``[R, K]``
+directly; :func:`count_table_for` counts a node against any parent tuple.
+
 Structural sets that pool shared noise live in :mod:`nbn.scm`.
 User guide: https://nbn.readthedocs.io/en/latest/user_guide/probability_sets.html
 """
@@ -15,11 +18,14 @@ from nbn.uncertainty.binomial import anytime_delta, binomial_interval, kl_bernou
 from nbn.uncertainty.builders import (
     bootstrap_set,
     dirichlet_set,
+    dirichlet_set_from_counts,
     interval_set,
+    interval_set_from_counts,
     l1_ball_set,
+    l1_ball_set_from_counts,
     per_interval_delta,
 )
-from nbn.uncertainty.counts import count_table, parent_row_index
+from nbn.uncertainty.counts import count_table, count_table_for, parent_row_index
 from nbn.uncertainty.sets import (
     CDFBandSet,
     IntervalSet,
@@ -41,12 +47,16 @@ __all__ = [
     "l1_ball_set",
     "dirichlet_set",
     "bootstrap_set",
+    "interval_set_from_counts",
+    "l1_ball_set_from_counts",
+    "dirichlet_set_from_counts",
     "binomial_interval",
     "kl_bernoulli",
     "union_bound",
     "anytime_delta",
     "per_interval_delta",
     "count_table",
+    "count_table_for",
     "parent_row_index",
     "tighten_box_to_simplex",
 ]

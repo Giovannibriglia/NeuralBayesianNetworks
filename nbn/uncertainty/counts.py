@@ -1,7 +1,7 @@
 """Count tables of a discrete node, straight from data (no fitted mechanism needed)."""
 from __future__ import annotations
 
-from typing import Mapping
+from typing import Any, Mapping, Sequence
 
 import torch
 
@@ -59,6 +59,7 @@ def count_table(
 
     Rows follow the DAG's parent order and the declared cardinalities of the
     model's variables, so the table lines up with the node's mechanism.
+    Same as :func:`count_table_for` with ``parents=model.dag.parents(node)``.
 
     Returns
     -------
@@ -68,13 +69,58 @@ def count_table(
     parent_cards:
         Cardinality of each parent, in DAG order.
     """
-    variable = model.variables[node]
+    return count_table_for(model.variables, data, node, model.dag.parents(node), weights)
+
+
+def count_table_for(
+    variables: Mapping[str, Any],
+    data: Mapping[str, torch.Tensor],
+    node: str,
+    parents: Sequence[str],
+    weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, list[int]]:
+    """Counts ``[R, K]`` of ``node`` against any tuple of discrete ``parents``.
+
+    Unlike :func:`count_table`, the parents need not be the node's parents in
+    a model: any tuple of other discrete variables works, in the order given.
+    This is what a cache of counts over several candidate parent sets needs.
+    Rows are in C order (last parent fastest), the layout of
+    ``CategoricalTableMechanism``, so ``counts.reshape(*parent_cards, K)``
+    recovers one axis per parent.
+
+    Parameters
+    ----------
+    variables:
+        Variable specs by name (e.g. ``model.variables``); each needs
+        ``is_discrete`` and ``cardinality``.
+    data:
+        Columns by name; ``data[v]`` holds the integer values of ``v``.
+    node, parents:
+        The child and the parent tuple to count against.
+    weights:
+        Optional per-row weights (replication semantics).
+
+    Returns
+    -------
+    counts, parent_cards:
+        As in :func:`count_table`, with ``parent_cards`` in the order of
+        ``parents``.
+    """
+    parents = tuple(parents)
+    if node not in variables:
+        raise KeyError(f"Unknown variable '{node}'.")
+    if node in parents:
+        raise ValueError(f"'{node}' cannot be its own parent.")
+    if len(set(parents)) != len(parents):
+        raise ValueError(f"Repeated parents in {parents}.")
+    variable = variables[node]
     if not variable.is_discrete:
         raise ValueError(f"count_table needs a discrete node; '{node}' is continuous.")
-    parents = model.dag.parents(node)
     parent_cards = []
     for p in parents:
-        pv = model.variables[p]
+        if p not in variables:
+            raise KeyError(f"Unknown parent '{p}'.")
+        pv = variables[p]
         if not pv.is_discrete:
             raise ValueError(f"count_table needs discrete parents; '{p}' is continuous.")
         parent_cards.append(int(pv.cardinality))
