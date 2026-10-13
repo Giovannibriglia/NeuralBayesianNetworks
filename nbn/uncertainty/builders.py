@@ -13,7 +13,13 @@ the data were collected:
 ``"trajectory"``
     Rows are transitions of episodes.  The number of visits of a parent
     configuration depends on earlier draws, so every interval is made valid
-    for all sample sizes at once (:func:`anytime_delta`).
+    for all sample sizes at once (:func:`anytime_delta`).  This needs the
+    table's parents to make the next value Markov: the child's law given
+    the counted parents must not change along an episode.  For a table
+    counted against a candidate parent set, that holds when the candidate
+    contains the true parents and every observed variable the logging
+    policies read; a candidate that leaves out a real parent bounds a
+    policy-dependent average, and the declared level does not hold for it.
 
 Factored next states
 --------------------
@@ -249,17 +255,18 @@ def _check_counts(counts: torch.Tensor, integer: bool = False) -> torch.Tensor:
     round the sums.  With ``integer=True`` the entries must also be whole
     numbers (counts of draws).  One host sync for all checks.
     """
+    if not isinstance(counts, torch.Tensor):
+        counts = torch.as_tensor(counts)
     if counts.dim() != 2:
         raise ValueError(f"A count table is [R, K]; got shape {tuple(counts.shape)}.")
     if counts.shape[0] < 1 or counts.shape[1] < 1:
         raise ValueError(f"A count table needs R >= 1 rows and K >= 1 values; got {tuple(counts.shape)}.")
     counts = counts.to(accum_dtype(counts.device))
-    valid = torch.isfinite(counts) & (counts >= 0)
-    whole = counts == counts.round()
-    flags = torch.stack([valid.all(), (valid & whole).all() if integer else valid.all()]).tolist()
+    valid = (torch.isfinite(counts) & (counts >= 0)).all()
+    flags = (torch.stack([valid, (counts == counts.round()).all()]) if integer else valid.reshape(1)).tolist()
     if not flags[0]:
         raise ValueError("Counts must be finite and non-negative.")
-    if not flags[1]:
+    if integer and not flags[1]:
         raise ValueError(
             "Counts must be whole numbers (counts of independent draws): fractional entries "
             "mean a weighted table, for which the PAC sets do not hold."

@@ -189,3 +189,62 @@ def test_count_table_for_checks_weights_and_columns():
         count_table_for(model.variables, data, "y", ("a",), weights=torch.ones(500))
     with pytest.raises(KeyError, match="No data column"):
         count_table_for(model.variables, {k: v for k, v in data.items() if k != "b"}, "y", ("b",))
+
+
+# ---------------------------------------------------------------------------
+# Third review round (#317)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("device", available_devices())
+def test_all_zero_weights_count_to_an_all_zero_table(device):
+    """As on master: counting with weightless rows gives zeros, not an error."""
+    model = _model(("a",), device)
+    data = _data(device)
+    counts, _ = count_table(model, data, "y", weights=torch.zeros(300))
+    assert counts.shape == (2, 4) and float(counts.abs().sum()) == 0.0
+    empty = {v: t[:0] for v, t in data.items()}
+    counts, _ = count_table_for(model.variables, empty, "y", ("a",), weights=torch.zeros(0))
+    assert float(counts.sum()) == 0.0
+
+
+@pytest.mark.parametrize("column", ["y", "a"])
+def test_fractional_values_are_rejected_not_truncated(column):
+    model = _model(("a",), "cpu")
+    data = {v: t.float() for v, t in _data("cpu").items()}
+    data[column] = data[column].clone()
+    data[column][0] = 0.5
+    with pytest.raises(ValueError, match="whole numbers"):
+        count_table_for(model.variables, data, "y", ("a",))
+
+
+def test_count_table_for_refuses_tables_whose_row_index_would_overflow():
+    from types import SimpleNamespace
+
+    many = {f"p{i}": SimpleNamespace(is_discrete=True, cardinality=2) for i in range(64)}
+    variables = {"y": SimpleNamespace(is_discrete=True, cardinality=2), **many}
+    data = {v: torch.zeros(3, dtype=torch.long) for v in variables}
+    with pytest.raises(ValueError, match="overflow"):
+        count_table_for(variables, data, "y", tuple(many))
+
+
+def test_from_counts_accept_lists_and_numpy_tables():
+    np = pytest.importorskip("numpy")
+    table = [[3, 1], [0, 0]]
+    ref = interval_set_from_counts(torch.tensor(table), delta=0.1)
+    for given in (table, np.array(table)):
+        s = interval_set_from_counts(given, delta=0.1)
+        assert torch.equal(s.lower, ref.lower) and torch.equal(s.upper, ref.upper)
+        l1_ball_set_from_counts(given, delta=0.1)
+        dirichlet_set_from_counts(given, n_samples=50)
+
+
+def test_count_table_for_takes_kind_dim_specs():
+    model = _model(("a", "b"), "cpu")
+    data = _data("cpu")
+    specs = {v: ("discrete", c) for v, c in CARDS.items()}
+    a, ca = count_table_for(specs, data, "y", ("b", "a"))
+    b, cb = count_table_for(model.variables, data, "y", ("b", "a"))
+    assert torch.equal(a, b) and ca == cb
+    with pytest.raises(ValueError, match="continuous"):
+        count_table_for({**specs, "a": ("continuous", 1)}, data, "y", ("a",))

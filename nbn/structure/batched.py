@@ -124,23 +124,36 @@ class StackedMLP(nn.Module):
                 h = self.act(h)
         return h
 
-    def export(self, c: int) -> nn.Sequential:
-        """Candidate ``c`` as an ``nn.Sequential`` over its own inputs (in union order)."""
-        active = self.mask[c].bool()
+    def export(self, c: int, order: Sequence[int] | None = None) -> nn.Sequential:
+        """Candidate ``c`` as an ``nn.Sequential`` over its own inputs.
+
+        Inputs are in union order, or in ``order`` (a permutation of the active
+        union columns) when given.  The layers are assembled on CPU from
+        contiguous copies and then moved to the parameters' device: strided
+        copies (row selection, transposes) gave wrong weights on some MPS builds.
+        """
+        device = self.weights[0].device
+        active = torch.nonzero(self.mask[c].detach().cpu()).reshape(-1).tolist()
+        if order is None:
+            order = active
+        elif sorted(order) != active:
+            raise ValueError(f"order {list(order)} is not a permutation of the active columns {active}.")
         layers: List[nn.Module] = []
         n_layers = len(self.weights)
         for li in range(n_layers):
-            w = self.weights[li][c].detach()
+            w = self.weights[li][c].detach().cpu().clone()
             if li == 0:
-                w = w[active]
-            lin = nn.Linear(w.shape[0], w.shape[1]).to(w.device)
+                w = w.index_select(0, torch.tensor(list(order), dtype=torch.long))
+            weight = w.t().contiguous()
+            bias = self.biases[li][c].detach().cpu().clone().contiguous()
+            lin = nn.Linear(weight.shape[1], weight.shape[0])
             with torch.no_grad():
-                lin.weight.copy_(w.T)
-                lin.bias.copy_(self.biases[li][c].detach())
+                lin.weight.copy_(weight)
+                lin.bias.copy_(bias)
             layers.append(lin)
             if li < n_layers - 1:
                 layers.append(_ACTIVATIONS[self.activation]())
-        return nn.Sequential(*layers)
+        return nn.Sequential(*layers).to(device)
 
 
 def train_stacked(
