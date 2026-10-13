@@ -26,6 +26,19 @@ def parent_row_index(parents: torch.Tensor, parent_cards: list[int]) -> torch.Te
     return index
 
 
+def parent_grid(parent_cards: Sequence[int], device: Any = "cpu") -> torch.Tensor:
+    """Every parent configuration ``[prod(cards), len(cards)]`` in C order (last fastest).
+
+    Row ``r`` of the result is the configuration whose :func:`parent_row_index`
+    is ``r``.
+    """
+    cards = [int(c) for c in parent_cards]
+    if not cards:
+        return torch.zeros(1, 0, dtype=torch.long, device=device)
+    mesh = torch.meshgrid(*[torch.arange(c, device=device) for c in cards], indexing="ij")
+    return torch.stack([m.reshape(-1) for m in mesh], dim=-1)
+
+
 def scatter_counts(
     rows: torch.Tensor,
     values: torch.Tensor,

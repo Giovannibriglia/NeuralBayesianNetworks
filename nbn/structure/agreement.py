@@ -66,7 +66,7 @@ import torch
 from nbn.core.variables import Variable
 from nbn.structure.hypotheses import HypothesisSet, _reorder_parents
 from nbn.uncertainty.builders import Sampling, l1_ball_set_from_counts
-from nbn.uncertainty.counts import count_table_for, parent_row_index
+from nbn.uncertainty.counts import count_table_for, parent_grid, parent_row_index
 from nbn.uncertainty.sets import L1BallSet
 
 Family = Tuple[str, ...]
@@ -358,7 +358,7 @@ def agreement_set(
             f"The survivors' parents {union} span {n_rows} rows (> max_rows={max_rows}); "
             "lower max_parents, restrict inputs, or raise max_rows."
         )
-    grid = _grid(union_cards, device)
+    grid = parent_grid(union_cards, device)
     centers, radii, seen = [], [], []
     for s in survivors:
         cols = [union.index(p) for p in s]
@@ -385,12 +385,3 @@ def agreement_set(
         flat_with_set=with_set_on_coverage(~all_seen, union),
         **common,
     )
-
-
-def _grid(cards: List[int], device) -> torch.Tensor:
-    """All parent configurations ``[prod(cards), len(cards)]`` in C order (last fastest)."""
-    if not cards:
-        return torch.zeros(1, 0, dtype=torch.long, device=device)
-    axes = [torch.arange(c, device=device) for c in cards]
-    mesh = torch.meshgrid(*axes, indexing="ij")
-    return torch.stack([m.reshape(-1) for m in mesh], dim=-1)

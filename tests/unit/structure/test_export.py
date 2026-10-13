@@ -102,18 +102,44 @@ def test_row_index_matches_parent_row_index_and_is_omitted_when_too_large(tmp_pa
     small, _ = _export_ring(tmp_path / "small", max_rows=10)
     ex2 = load_factored_sets(small)
     assert ex2.manifest["planning_space"]["n_rows"] is None
-    assert not any(k.endswith("/row_index") for k in ex2.arrays)
+    assert not any(k.startswith("row_index/") for k in ex2.arrays)
+    (h,) = ex.hypotheses()
+    (h2,) = ex2.hypotheses()
+    for row in (0, 17, 200, 255):                       # the layout gives the same rows and bounds
+        for fid in h.values():
+            assert ex2.factor_row(fid, row) == ex.factor_row(fid, row)
+        a, b = joint_row_bounds(ex, h, row), joint_row_bounds(ex2, h2, row)
+        np.testing.assert_array_equal(a[0], b[0])
+        np.testing.assert_array_equal(a[1], b[1])
 
 
 def test_exact_bounds_are_rounded_outwards(tmp_path):
+    from fractions import Fraction
+
     out, _ = _export_ring(tmp_path, exact=True, denominator=1000)
     ex = load_factored_sets(out)
     assert ex.manifest["exact"] == {"denominator": 1000}
     for f in ex.manifest["factors"]:
         lo, hi = ex.array(f["id"], "lower"), ex.array(f["id"], "upper")
-        assert np.all(ex.array(f["id"], "lower_num") / 1000 <= lo + 1e-15)
-        assert np.all(ex.array(f["id"], "upper_num") / 1000 >= hi - 1e-15)
-        assert ex.array(f["id"], "lower_num").dtype == np.int64
+        num_lo, num_hi = ex.array(f["id"], "lower_num"), ex.array(f["id"], "upper_num")
+        assert num_lo.dtype == np.int64
+        for x, n in zip(lo.ravel(), num_lo.ravel()):
+            assert Fraction(int(n), 1000) <= Fraction(float(x))          # exact, no tolerance
+        for x, n in zip(hi.ravel(), num_hi.ravel()):
+            assert Fraction(int(n), 1000) >= Fraction(float(x))
+
+
+def test_outward_rounding_on_values_that_float_multiplication_rounds_inward():
+    from fractions import Fraction
+
+    from nbn.structure.export import _outward
+
+    lo = np.array([0.3, 0.7, 0.1, 0.0, 0.5])
+    hi = np.array([0.3, 0.7, 0.1, 1.0, 0.5])
+    num_lo, num_hi = _outward(lo, hi, 10)
+    for x, a, b in zip(lo, num_lo, num_hi):
+        assert Fraction(int(a), 10) <= Fraction(float(x)) <= Fraction(int(b), 10)
+    assert num_lo[3] == 0 and num_hi[3] == 10          # exact end points stay exact
 
 
 def test_hypothesis_set_export_lists_candidates_and_the_composition(tmp_path):
@@ -125,7 +151,10 @@ def test_hypothesis_set_export_lists_candidates_and_the_composition(tmp_path):
     ex = load_factored_sets(out)
     assert len(ex.manifest["factors"]) == hs.n_factors == 8
     assert {n: len(v) for n, v in ex.manifest["hypotheses"]["candidates"].items()} == dict.fromkeys(cands, 2)
-    assert len(ex.hypotheses()) == hs.n_hypotheses == 16
+    assert ex.n_hypotheses == hs.n_hypotheses == 16
+    assert sum(1 for _ in ex.hypotheses()) == 16                  # lazy, but complete
+    keys = {f["row_index"] for f in ex.manifest["factors"]}
+    assert len(keys) == len({tuple(f["parents"]) for f in ex.manifest["factors"]})   # one map per parent tuple
     assert ex.manifest["composition"]["level"] == pytest.approx(0.9)
     assert ex.manifest["composition"]["guarantees"] == ["pac"]
     assert all(f["sampling"] == "trajectory" for f in ex.manifest["factors"])
@@ -203,6 +232,16 @@ def test_errors(tmp_path):
     export_factored_sets(out, sets, VARIABLES, STATE, [f"rep{i}" for i in range(N)], overwrite=True)
     with pytest.raises(ValueError, match="not state or action"):
         export_factored_sets(tmp_path / "e1", sets, VARIABLES, STATE[:3], [f"rep{i}" for i in range(N)])
+    with pytest.raises(ValueError, match="not state or action"):              # also without row maps
+        export_factored_sets(tmp_path / "e1b", sets, VARIABLES, STATE[:3], [f"rep{i}" for i in range(N)],
+                             max_rows=2)
+    (out / "notes.txt").write_text("mine")
+    with pytest.raises(FileExistsError, match="other files"):
+        export_factored_sets(out, sets, VARIABLES, STATE, [f"rep{i}" for i in range(N)], overwrite=True)
+    target = tmp_path / "kernel.npz"
+    target.write_text("x")
+    with pytest.raises(FileExistsError, match="not a directory"):
+        export_factored_sets(target, sets, VARIABLES, STATE, [f"rep{i}" for i in range(N)])
     with pytest.raises(TypeError):
         export_factored_sets(tmp_path / "e2", {"m0'": object()}, VARIABLES, STATE, ["rep0"])
     with pytest.raises(ValueError, match="model's DAG"):
@@ -216,3 +255,33 @@ def test_errors(tmp_path):
         bad.mkdir()
         (bad / "manifest.json").write_text(json.dumps({"schema": "other/9"}))
         load_factored_sets(bad)
+
+
+
+def test_noise_polytope_exact_bounds(tmp_path):
+    from fractions import Fraction
+
+    from nbn.scm import noise_parameter_set
+
+    model, data = _health_model()
+    poly = noise_parameter_set(model, data, ["h'", "g'"], delta=0.1)
+    out = export_factored_sets(tmp_path / "nq", {"h'": poly, "g'": poly}, model, ["h"], ["e"],
+                               exact=True, denominator=10**6)
+    ex = load_factored_sets(out)
+    pid = ex.manifest["parameters"][0]["id"]
+    for x, n in zip(ex.array(pid, "lower"), ex.array(pid, "lower_num")):
+        assert Fraction(int(n), 10**6) <= Fraction(float(x))
+    for x, n in zip(ex.array(pid, "upper"), ex.array(pid, "upper_num")):
+        assert Fraction(int(n), 10**6) >= Fraction(float(x))
+
+
+def test_sample_set_bounds_are_computed_once(tmp_path):
+    import warnings
+
+    data = ring_data(n_episodes=50)
+    hs = HypothesisSet(VARIABLES, {"m0'": [("m0", "m3", "rep0")]})
+    fs = hs.factor_sets(data, builder="dirichlet", delta=0.5, n_samples=20)   # too few draws: warns
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        export_factored_sets(tmp_path / "d", fs, hs, STATE, [f"rep{i}" for i in range(N)])
+    assert sum("does not support the declared level" in str(w.message) for w in caught) == 1

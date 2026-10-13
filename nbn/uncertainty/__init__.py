@@ -25,7 +25,7 @@ from nbn.uncertainty.builders import (
     l1_ball_set_from_counts,
     per_interval_delta,
 )
-from nbn.uncertainty.counts import count_table, count_table_for, parent_row_index
+from nbn.uncertainty.counts import count_table, count_table_for, parent_grid, parent_row_index
 from nbn.uncertainty.sets import (
     CDFBandSet,
     IntervalSet,
@@ -58,5 +58,6 @@ __all__ = [
     "count_table",
     "count_table_for",
     "parent_row_index",
+    "parent_grid",
     "tighten_box_to_simplex",
 ]

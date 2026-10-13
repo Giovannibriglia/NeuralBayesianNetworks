@@ -178,11 +178,11 @@ def test_level_does_not_depend_on_the_memory_guard():
 
 
 def test_flat_with_set_matches_a_dense_projection():
-    from nbn.structure.agreement import _grid
+    from nbn.uncertainty import parent_grid
 
     data = ring_data(n_episodes=100)
     res = agreement_set(VARIABLES, data, "m0'", INPUTS, max_parents=3, delta=0.1)
-    full = _grid([2] * len(INPUTS), "cpu")
+    full = parent_grid([2] * len(INPUTS))
     proj = parent_row_index(full[:, [INPUTS.index(p) for p in res.parents]], res.parent_cards)
     assert res.flat_with_set == int((~res.set.unseen.cpu())[proj].sum())
 

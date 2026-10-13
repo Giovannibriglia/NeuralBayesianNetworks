@@ -70,7 +70,8 @@
         "state_vars",
         "action_vars",
         "n_rows",
-        "layout"
+        "layout",
+        "cards"
       ],
       "properties": {
         "state_vars": {
@@ -94,6 +95,13 @@
         },
         "layout": {
           "type": "string"
+        },
+        "cards": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
         }
       }
     },
@@ -115,7 +123,8 @@
           "guarantee",
           "level",
           "graph_preserving",
-          "n_rows"
+          "n_rows",
+          "row_index"
         ],
         "properties": {
           "id": {
@@ -195,6 +204,13 @@
           "n_rows": {
             "type": "integer",
             "minimum": 1
+          },
+          "row_index": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Key in arrays.npz of the row map shared by factors with the same parents; null above max_rows."
           }
         }
       }
