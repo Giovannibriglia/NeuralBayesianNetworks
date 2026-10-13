@@ -112,8 +112,8 @@ def count_table_for(
     Parameters
     ----------
     variables:
-        Variable specs by name (e.g. ``model.variables``); each needs
-        ``is_discrete`` and ``cardinality``.
+        Variables by name: ``model.variables``, or ``(kind, dim)`` specs as
+        for a model (``{"x": ("discrete", 3)}``).
     data:
         Columns by name; ``data[v]`` holds the integer values of ``v``.
     node, parents:
@@ -142,14 +142,14 @@ def count_table_for(
         raise ValueError(f"'{node}' cannot be its own parent.")
     if len(set(parents)) != len(parents):
         raise ValueError(f"Repeated parents in {parents}.")
-    variable = variables[node]
+    variable = _as_variable(node, variables[node])
     if not variable.is_discrete:
         raise ValueError(f"count_table_for needs a discrete node; '{node}' is continuous.")
     parent_cards = []
     for p in parents:
         if p not in variables:
             raise KeyError(f"Unknown parent '{p}'.")
-        pv = variables[p]
+        pv = _as_variable(p, variables[p])
         if not pv.is_discrete:
             raise ValueError(f"count_table_for needs discrete parents; '{p}' is continuous.")
         parent_cards.append(int(pv.cardinality))
@@ -171,3 +171,12 @@ def count_table_for(
     rows = parent_row_index(pa, parent_cards)
     n_rows = math.prod(parent_cards)
     return scatter_counts(rows, x, n_rows, int(variable.cardinality), weights), parent_cards
+
+
+def _as_variable(name: str, spec: Any) -> Any:
+    """A variable object, from itself or from a ``(kind, dim)`` spec."""
+    if hasattr(spec, "is_discrete"):
+        return spec
+    from nbn.core.network import _build_variable
+
+    return _build_variable(name, spec)
