@@ -243,7 +243,7 @@ def agreement_set(
     # A one-node HypothesisSet gives the factor cache (count once, marginalise).
     spec = {v: variables[v] for v in (*inputs, node)}
     hs = HypothesisSet(spec, {node: fam_list})
-    counts = hs.counts(data, input_marginals=False)
+    counts = hs.counts(data)
     cards = {v: int(hs.variables[v].cardinality) for v in (*inputs, node)}
     k = cards[node]
     flat_rows = math.prod(cards[p] for p in inputs)

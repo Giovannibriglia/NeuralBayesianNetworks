@@ -439,13 +439,7 @@ def _build_discrete_mechanism(
 
     mech._logits = nn.Parameter(logits.to(device))
     mech._n_classes = k
-    mech._parent_cards = parent_cards
-    strides: List[int] = []
-    stride = 1
-    for c in reversed(parent_cards):
-        strides.append(stride)
-        stride *= c
-    mech._parent_strides = list(reversed(strides))
+    mech._set_parent_layout(parent_cards)
     mech._class_values = torch.arange(k, dtype=torch.float, device=device)
     mech.output_dim = 1
     return mech.to(device)
