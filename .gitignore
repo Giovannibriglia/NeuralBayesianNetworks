@@ -41,3 +41,5 @@ paper/
 # Notebooks copied into the docs at build time (examples/ is the source).
 docs/examples/*.ipynb
 docs/api/generated/
+# Figures written by the examples' save() (regenerate by running the notebooks)
+examples/figures/
