@@ -1,0 +1,166 @@
+"""Permutation reference of ``context_invariance_test`` (NBN #328).
+
+The chi-square reference of the stratified G statistic over-rejects a true
+null when many parent configurations hold few rows; the permutation reference
+(context labels exchanged within each configuration, margins fixed) keeps the
+level at any sample size.
+"""
+from __future__ import annotations
+
+import itertools
+
+import numpy as np
+import pytest
+import torch
+
+from nbn.scm import StructuralCausalModel, context_invariance_test
+from nbn.scm.diagnostics import _g_numpy, _stratified_g, _stratified_g_permutation
+
+N_PARENTS = 6  # 64 parent configurations
+
+
+def _sparse_model(device="cpu"):
+    parents = [f"x{i}" for i in range(N_PARENTS)]
+    variables = dict.fromkeys(parents, ("discrete", 2))
+    variables.update({"y": ("discrete", 2), "c": ("discrete", 2)})
+    return StructuralCausalModel([(p, "y") for p in parents], variables, context="c", device=device)
+
+
+def _sparse_data(n, seed, drift=0.0):
+    """``y`` depends on the parity of the parents; ``drift`` shifts it in context 1."""
+    gen = torch.Generator().manual_seed(seed)
+    x = torch.randint(0, 2, (n, N_PARENTS), generator=gen)
+    c = torch.randint(0, 2, (n,), generator=gen)
+    p_y = 0.2 + 0.6 * (x.sum(1) % 2).float() + drift * c.float()
+    y = (torch.rand(n, generator=gen) < p_y.clamp(0, 1)).long()
+    data = {f"x{i}": x[:, i].float() for i in range(N_PARENTS)}
+    data.update(y=y.float(), c=c.float())
+    return data
+
+
+def test_permutation_keeps_the_level_where_chi_square_over_rejects():
+    model = _sparse_model()
+    reps, alpha = 200, 0.05
+    perm = chi = 0
+    for seed in range(reps):
+        data = _sparse_data(200, seed)  # about 3 rows per configuration and context
+        gen = torch.Generator().manual_seed(seed)
+        perm += context_invariance_test(model, data, "y", n_perm=199, generator=gen).p_value <= alpha
+        chi += context_invariance_test(model, data, "y", reference="chi2").p_value <= alpha
+    # binomial(200, 0.05): mean 10, sd 3.1; 20 is about 3 sd above the nominal level
+    assert perm <= 20
+    assert chi > perm and chi >= 25
+
+
+def test_permutation_has_power_against_a_changed_mechanism():
+    model = _sparse_model()
+    data = _sparse_data(2000, 0, drift=0.15)
+    res = context_invariance_test(model, data, "y", generator=torch.Generator().manual_seed(0))
+    assert res.p_value <= 1 / 1000
+    assert res.details["method"] == "G-test, permutation reference" and res.details["n_perm"] == 999
+
+
+def test_statistic_matches_the_chi_square_branch_and_is_reproducible():
+    model = _sparse_model()
+    data = _sparse_data(500, 3, drift=0.1)
+    a = context_invariance_test(model, data, "y", n_perm=99, generator=torch.Generator().manual_seed(7))
+    b = context_invariance_test(model, data, "y", n_perm=99, generator=torch.Generator().manual_seed(7))
+    chi = context_invariance_test(model, data, "y", reference="chi2")
+    assert a.p_value == b.p_value
+    assert a.statistic == pytest.approx(chi.statistic, rel=1e-9, abs=1e-9)
+    assert chi.details["method"] == "G-test, chi-square reference"
+
+
+def test_p_value_grid_and_floor():
+    model = _sparse_model()
+    data = _sparse_data(300, 1)
+    for n_perm in (1, 19, 99):
+        p = context_invariance_test(model, data, "y", n_perm=n_perm,
+                                    generator=torch.Generator().manual_seed(0)).p_value
+        assert 1 / (n_perm + 1) <= p <= 1.0
+        assert abs(p * (n_perm + 1) - round(p * (n_perm + 1))) < 1e-9  # (1 + count) / (n_perm + 1)
+
+
+def test_redrawn_tables_keep_both_margins():
+    """The sequential hypergeometric draws are exact: brute-force the law of a tiny table."""
+    t = torch.tensor([[[2.0, 1.0], [0.0, 2.0]]])  # one stratum, 2 contexts x 2 values
+    # Under the null, the count n_00 is hypergeometric(N=5, K=2 zeros, n=3 rows in context 0).
+    labels = [0, 0, 0, 1, 1]
+    values = [0, 0, 1, 1, 1]
+    g_all = []
+    for perm in itertools.permutations(range(5)):
+        tab = np.zeros((2, 2))
+        for i, j in enumerate(perm):
+            tab[labels[i], values[j]] += 1
+        g_all.append(_g_numpy(tab))
+    g_obs = _g_numpy(t[0].numpy())
+    exact = float(np.mean(np.array(g_all) >= g_obs - 1e-9))
+    p, g = _stratified_g_permutation(t, 20000, torch.Generator().manual_seed(0))
+    assert g == pytest.approx(g_obs)
+    assert p == pytest.approx(exact, abs=0.02)
+
+
+def test_strata_with_one_context_or_one_value_contribute_nothing():
+    t = torch.zeros(3, 2, 2)
+    t[0] = torch.tensor([[4.0, 0.0], [0.0, 0.0]])  # one context
+    t[1] = torch.tensor([[3.0, 0.0], [2.0, 0.0]])  # one value
+    t[2] = torch.tensor([[3.0, 1.0], [1.0, 3.0]])
+    p, g = _stratified_g_permutation(t, 99, torch.Generator().manual_seed(0))
+    assert g == pytest.approx(_stratified_g(t[2:])[0])
+    assert 0.0 < p <= 1.0
+
+
+def test_invalid_arguments():
+    model = _sparse_model()
+    data = _sparse_data(100, 0)
+    with pytest.raises(ValueError, match="reference"):
+        context_invariance_test(model, data, "y", reference="exact")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="n_perm"):
+        context_invariance_test(model, data, "y", n_perm=0)
+
+
+@pytest.mark.parametrize("device", ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
+                         + (["mps"] if torch.backends.mps.is_available() else []))
+def test_permutation_reference_on_every_device(device):
+    model = _sparse_model(device)
+    data = _sparse_data(400, 2, drift=0.3)
+    cpu = context_invariance_test(_sparse_model(), data, "y", n_perm=99,
+                                  generator=torch.Generator().manual_seed(1))
+    res = context_invariance_test(model, data, "y", n_perm=99, generator=torch.Generator().manual_seed(1))
+    assert res.p_value == cpu.p_value
+    assert res.statistic == pytest.approx(cpu.statistic, rel=1e-5)
+
+
+def _exact_p(labels, values, n_ctx, k):
+    """Exact permutation p-value of one stratum by enumerating every relabelling."""
+    def g_of(vals):
+        tab = np.zeros((n_ctx, k))
+        for a, b in zip(labels, vals):
+            tab[a, b] += 1
+        return _g_numpy(tab)
+
+    g_obs = g_of(values)
+    g_all = np.array([g_of([values[j] for j in perm]) for perm in itertools.permutations(range(len(values)))])
+    return float(np.mean(g_all >= g_obs - 1e-9))
+
+
+def test_three_contexts_three_values_match_the_exact_permutation_law():
+    labels = [0, 0, 1, 1, 2, 2, 2]
+    values = [0, 1, 1, 2, 2, 2, 0]
+    t = torch.zeros(1, 3, 3)
+    for a, b in zip(labels, values):
+        t[0, a, b] += 1
+    p, _ = _stratified_g_permutation(t, 20000, torch.Generator().manual_seed(0))
+    assert p == pytest.approx(_exact_p(labels, values, 3, 3), abs=0.015)
+
+
+def test_chunking_over_strata_gives_the_same_statistic_and_level():
+    model = _sparse_model()
+    data = _sparse_data(800, 4, drift=0.05)
+    full = context_invariance_test(model, data, "y", n_perm=499, generator=torch.Generator().manual_seed(2))
+    table = torch.zeros(2**N_PARENTS, 2, 2)
+    x = sum(data[f"x{i}"].long() * 2 ** (N_PARENTS - 1 - i) for i in range(N_PARENTS))
+    table.index_put_((x, data["c"].long(), data["y"].long()), torch.ones(800), accumulate=True)
+    p_small, g_small = _stratified_g_permutation(table, 499, torch.Generator().manual_seed(2), max_elements=7)
+    assert g_small == pytest.approx(full.statistic, rel=1e-12)
+    assert p_small == pytest.approx(full.p_value, abs=0.06)  # different draws, same law

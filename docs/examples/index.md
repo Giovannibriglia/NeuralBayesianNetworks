@@ -28,7 +28,7 @@ force the CPU.
 | Notebook | What it shows |
 |---|---|
 | {doc}`09_discrete_noise_and_probability_sets` | A discrete noise law with `DiscreteAdditiveNoiseMechanism`, and three 90% probability sets (intervals, L1 balls, shared-noise polytope) with a coverage check; sets from a count table for candidate parent sets. |
-| {doc}`10_confounding_and_noise_diagnostics` | Detecting a confounded logger with `context_invariance_test`, and testing noise sharing, tying and freshness with Benjamini-Hochberg. |
+| {doc}`10_confounding_and_noise_diagnostics` | Detecting a confounded logger with `context_invariance_test` (permutation vs chi-square reference on sparse strata), and testing noise sharing, tying and freshness with Benjamini-Hochberg. |
 | {doc}`11_continuous_noise_and_counterfactuals` | An MLP location with mixture noise, a DKW band on `P(a < X <= b | pa)`, and counterfactuals by exact abduction. |
 | {doc}`12_mdp_trajectories_factored_sets` | From logged episodes to a factored transition model with trajectory-valid probability sets, the budget split across variables. |
 | {doc}`13_discrete_counterfactuals` | Two declared couplings giving different counterfactuals from one kernel, sharp bounds over every compatible SCM, and calibration with a PIT band and conformal sets. |
