@@ -64,6 +64,16 @@ pip install -e ".[all,dev]"
 MPLBACKEND=Agg pytest --nbmake examples/
 ```
 
+## Figures
+
+Every notebook draws with one shared style (`_figures.py`, `nbn_style.mplstyle`):
+the colour-blind-safe Okabe–Ito palette, single-column (3.4 in) and
+double-column (7.0 in) widths, and vector (SVG) output inline.  Each figure is
+also written by `save(fig, name)` to `examples/figures/<name>.pdf` (vector) and
+`.png` (300 dpi), ready for a paper; that folder is git-ignored.  A caption
+under each figure says what is plotted and what any band or error bar is.
+`NBN_FIGURE_FORMAT=png` switches the inline output to PNG.
+
 Note: any string is a valid node name, including names of `torch.nn.Module`
 attributes (e.g. `train`, `eval`, `to`) and names with dots (`pm2.5`): NBN
 stores such nodes under an escaped alias and every call keeps the original

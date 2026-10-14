@@ -1,0 +1,43 @@
+# One style for every NBN example figure (see _figures.py).
+# Sizes in inches: single column 3.4, double column 7.0.
+
+figure.figsize: 7.0, 2.8
+figure.dpi: 110
+figure.constrained_layout.use: True
+savefig.dpi: 300
+savefig.bbox: tight
+savefig.pad_inches: 0.02
+
+font.size: 9
+axes.titlesize: 9
+axes.titleweight: normal
+axes.labelsize: 9
+xtick.labelsize: 8
+ytick.labelsize: 8
+legend.fontsize: 8
+legend.frameon: False
+legend.handlelength: 1.6
+
+axes.spines.top: False
+axes.spines.right: False
+axes.linewidth: 0.8
+axes.grid: True
+axes.axisbelow: True
+grid.color: "#d9d9d9"
+grid.linewidth: 0.5
+grid.alpha: 1.0
+xtick.major.width: 0.8
+ytick.major.width: 0.8
+xtick.major.size: 3
+ytick.major.size: 3
+
+lines.linewidth: 1.5
+lines.markersize: 4
+patch.linewidth: 0.5
+errorbar.capsize: 2
+
+# Okabe & Ito (2008) colour-blind-safe palette
+axes.prop_cycle: cycler("color", ["0072B2", "E69F00", "009E73", "D55E00", "56B4E9", "CC79A7", "F0E442", "000000"])
+image.cmap: viridis
+svg.fonttype: path
+pdf.fonttype: 42
