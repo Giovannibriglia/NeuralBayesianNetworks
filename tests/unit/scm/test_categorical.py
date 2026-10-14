@@ -514,6 +514,18 @@ def test_issue_322_confident_rows_get_one_class(score, p_top):
     assert _threshold_rule(probs, true, 0.1, score).tolist() == [[True, False]]
 
 
+def _saturating_data(n, seed):
+    g = torch.Generator().manual_seed(seed)
+    x = 2 * torch.randn(n, generator=g)
+    v = 0.2 * torch.randn(n, generator=g)
+    return {"x": x.unsqueeze(-1), "d": (x + v > 0).float().unsqueeze(-1)}
+
+
+@pytest.fixture(scope="module")
+def saturating():
+    return _saturating_model()
+
+
 def _saturating_model():
     """A nearly deterministic child of a continuous parent: d = [x + V > 0], V ~ N(0, 0.2^2)."""
     def data(n, seed):
@@ -530,8 +542,8 @@ def _saturating_model():
     return model, data
 
 
-def test_exclusive_score_gives_informative_sets_on_a_saturated_classifier():
-    model, data = _saturating_model()
+def test_exclusive_score_gives_informative_sets_on_a_saturated_classifier(saturating):
+    model, data = saturating
     mech, test = model.mechanisms["d"], data(4000, 2)
     cs = conformal_sets(model, data(1000, 1), "d", alpha=0.1)            # default: exclusive
     assert cs.score == "exclusive" and cs.threshold == 0.0
@@ -589,7 +601,7 @@ def test_randomized_sets_are_reproducible_with_a_generator_and_validated():
 def test_calibrated_sets_pass_the_discrete_score_through():
     from nbn.structure import HypothesisSet
 
-    model, data = _saturating_model()
+    data = _saturating_data
     hs = HypothesisSet({"x": ("continuous", 1), "d": ("discrete", 2)}, {"d": [("x",)]})
     fitted = hs.fit(data(3000, 0))
     for score in SCORES:
@@ -598,13 +610,36 @@ def test_calibrated_sets_pass_the_discrete_score_through():
         assert cal[("d", ("x",))].score == score
 
 
-def test_tied_classes_share_a_score_and_stay_together():
-    """A uniform or near-tied row keeps all its tied top classes (no index or float-noise tie-break)."""
+def test_exclusive_scores_tie_exactly_equal_classes_and_order_others_by_value():
+    """Exact ties share a score (a uniform row keeps every class); no tie-break by class index."""
     from nbn.scm.calibration import _cumulative_scores, _upper_threshold
 
-    probs = torch.tensor([[1 / 3, 1 / 3, 1 / 3], [0.5 + 1e-7, 0.5 - 1e-7, 0.0], [0.7, 0.2, 0.1]])
+    probs = torch.tensor([[1 / 3, 1 / 3, 1 / 3], [0.3, 0.4, 0.3], [0.1, 0.2, 0.7]], dtype=torch.float64)
     sets = _cumulative_scores(probs, 0.0) <= _upper_threshold(0.0, probs.dtype, 3)
-    assert sets.tolist() == [[True, True, True], [True, True, False], [True, False, False]]
+    assert sets.tolist() == [[True, True, True], [False, True, False], [False, False, True]]
+
+
+def _reference_scores(probs, u):
+    """Brute force: exclusive = mass strictly larger; u > 0 = master's stable-sorted cumulative sum."""
+    p = probs.double() / probs.double().sum(-1, keepdim=True)
+    if u == 0.0:
+        return ((p.unsqueeze(-2) > p.unsqueeze(-1)).double() * p.unsqueeze(-2)).sum(-1)
+    order = torch.argsort(p, dim=-1, descending=True, stable=True)
+    sp = p.gather(-1, order)
+    before = torch.cat([torch.zeros_like(sp[..., :1]), sp.cumsum(-1)[..., :-1]], -1)
+    out = before + u * sp
+    if u == 1.0:
+        out[..., -1] = 1.0
+    return torch.empty_like(p).scatter_(-1, order, out)
+
+
+@pytest.mark.parametrize("u", [0.0, 1.0, 0.37])
+def test_scores_match_the_reference_definitions_with_ties(u):
+    from nbn.scm.calibration import _cumulative_scores
+
+    g = torch.Generator().manual_seed(0)
+    probs = torch.randint(1, 5, (500, 6), generator=g).float()        # many exact ties
+    torch.testing.assert_close(_cumulative_scores(probs, u), _reference_scores(probs, u))
 
 
 @pytest.mark.parametrize("k", [3, 5, 10])
@@ -638,7 +673,6 @@ def test_old_pickles_keep_the_inclusive_score():
 def test_calibrated_sets_reject_an_unknown_discrete_score_up_front():
     from nbn.structure import HypothesisSet
 
-    model, data = _saturating_model()
     hs = HypothesisSet({"x": ("continuous", 1), "y": ("continuous", 1)}, {"y": [("x",)]})
     fitted = hs.fit({"x": torch.randn(200, 1), "y": torch.randn(200, 1)})
     with pytest.raises(ValueError, match="score must be one of"):

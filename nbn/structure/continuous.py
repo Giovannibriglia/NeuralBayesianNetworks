@@ -55,11 +55,11 @@ import torch
 import torch.nn as nn
 
 from nbn.learning.weighting import validate_weights, weighted_moments
-from nbn.scm.calibration import ConformalScore, check_conformal_score
 from nbn.structure.batched import StackedMLP, train_stacked
 from nbn.utils.device import to_device
 
 if TYPE_CHECKING:  # pragma: no cover
+    from nbn.scm.calibration import ConformalScore
     from nbn.structure.hypotheses import HypothesisSet
 
 Factor = Tuple[str, Tuple[str, ...]]
@@ -346,6 +346,7 @@ def calibrate_factors(
     does not use it.
     """
     from nbn.scm import conformal_intervals, conformal_sets, pit_band_set
+    from nbn.scm.calibration import check_conformal_score
 
     if not 0.0 < level < 1.0:
         raise ValueError(f"level must be in (0, 1); got {level}.")

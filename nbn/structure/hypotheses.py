@@ -65,6 +65,7 @@ import torch
 from nbn.core.variables import Variable
 
 if TYPE_CHECKING:  # pragma: no cover
+    from nbn.scm.calibration import ConformalScore
     from nbn.structure.continuous import CalibratedFactorSets, FactorMechanisms
 from nbn.learning.weighting import validate_weights
 from nbn.uncertainty.builders import (
@@ -76,9 +77,6 @@ from nbn.uncertainty.builders import (
 from nbn.uncertainty.binomial import IntervalMethod
 from nbn.uncertainty.counts import count_table_for
 from nbn.uncertainty.sets import ProbabilitySet
-
-if TYPE_CHECKING:
-    from nbn.scm.calibration import ConformalScore
 
 Factor = Tuple[str, Tuple[str, ...]]
 Hypothesis = Dict[str, Tuple[str, ...]]
