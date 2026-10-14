@@ -73,7 +73,7 @@ import torch
 
 from nbn.scm._stats import require_cpu_generator
 from nbn.scm.mechanisms import StructuralMechanism
-from nbn.utils.device import to_device, to_device_dtype
+from nbn.utils.device import supports_float64, to_device, to_device_dtype
 
 Guarantee = Literal["pac_if_pit_independent", "marginal"]
 
@@ -328,7 +328,6 @@ def _base_interval(mechanism, parents, method: str, alpha: float):
 
 ConformalScore = Literal["exclusive", "inclusive", "randomized"]
 CONFORMAL_SCORES: tuple[str, ...] = get_args(ConformalScore)
-_TIE_ULPS = 4  # probabilities within this many float units of each other count as tied
 
 
 def check_conformal_score(score: str) -> None:
@@ -349,12 +348,13 @@ class ConformalSets:
     ``score`` is the one used at calibration (see :func:`conformal_sets`).
     Discrete scores tie, so coverage can exceed ``level`` by more than
     ``1/(n+1)``: only the lower bound is guaranteed (``"randomized"`` breaks
-    the ties).  Float noise: the probabilities of one row can differ by a few
-    units in the last place between batch sizes.  Classes whose probabilities
-    are that close count as tied (they share a score), and membership is
-    ``score <= threshold`` up to ``K`` such units, so a set does not depend on
-    the batch size; classes closer than that to the threshold cannot be told
-    apart from noise and are kept.
+    the ties).  Float noise: the probabilities of one row can differ by about
+    one unit in the last place between batch sizes.  Membership is
+    ``score <= threshold`` up to ``K`` such units (a score sums up to ``K``
+    probabilities), so a class at the threshold is not dropped by that noise.
+    One case remains batch-dependent: two classes of a row whose
+    probabilities differ by about one unit can swap order, which moves a whole
+    probability between their scores (measure zero for continuous outputs).
     """
 
     node: str
@@ -395,20 +395,22 @@ def conformal_sets(model, calibration_data: Mapping[str, torch.Tensor], node: st
                    score: ConformalScore = "exclusive") -> ConformalSets:
     """Calibrate prediction sets of level ``1 - alpha`` for a discrete node on held-out rows.
 
-    The score of class ``y`` is the mass of the classes with a strictly larger
-    ``p_hat`` plus ``u * p_hat(y)`` (tied classes share a score):
+    Classes are ranked by decreasing ``p_hat``; the score of class ``y`` is the
+    mass ranked before it plus ``u * p_hat(y)``:
 
     ``"exclusive"`` (default, ``u = 0``)
-        The most probable classes score exactly ``0`` and are always in the set,
-        so a set is never empty, a confident row gets one class whatever the
-        float precision, and a row with tied top classes keeps all of them.
+        The mass of the classes with a strictly larger probability: the most
+        probable classes score exactly ``0`` and are always in the set, so a
+        set is never empty, a confident row gets one class whatever the float
+        precision, and exactly tied top classes are all kept.
         Ties at ``0`` make it conservative (coverage above ``1 - alpha``) for
         very accurate classifiers.
     ``"inclusive"`` (``u = 1``)
-        The cumulative mass up to and including ``y`` (Kochenderfer et al.,
-        *Algorithms for Validation*, Ex. 12.4, p. 342).  When probabilities
-        saturate, a row more confident than the threshold gets an empty set
-        (NBN #322); prefer ``"exclusive"`` or ``"randomized"``.
+        The cumulative mass up to and including ``y`` in a stable descending
+        sort, the score NBN used before (Kochenderfer et al., *Algorithms for
+        Validation*, Ex. 12.4, p. 342).  When probabilities saturate, a row
+        more confident than the threshold gets an empty set (NBN #322); prefer
+        ``"exclusive"`` or ``"randomized"``.
     ``"randomized"`` (``u ~ U(0, 1)``, one draw per row)
         The randomized adaptive score of Romano, Sesia & Candès (NeurIPS
         2020): ties are broken, so coverage is close to ``1 - alpha`` from
@@ -451,24 +453,31 @@ def _score_u(score: str, n_rows: int, generator: torch.Generator | None) -> torc
 
 
 def _cumulative_scores(probs: torch.Tensor, u: torch.Tensor | float = 1.0) -> torch.Tensor:
-    """``s[b, k]`` = mass of the classes with a larger probability than ``k`` + ``u * p[b, k]``.
+    """Cumulative scores ``s[b, k]`` (see :func:`conformal_sets`).
 
-    Classes whose probabilities differ by at most ``_TIE_ULPS`` units of the
-    input dtype count as tied, so float noise never decides their order.
-    Computed in float64 (on the CPU for MPS, which has no float64), on
-    probabilities normalised to sum to one; memory ``O(B K^2)``.  ``u`` is a
-    float or a ``[B, 1]`` tensor (one draw per row).
+    ``u = 0`` (exclusive): the mass of the classes with a strictly larger
+    probability, by exact comparison, so exactly tied classes share a score
+    (a uniform row scores 0 everywhere) and near-ties are ordered by value.
+    ``u > 0`` (inclusive, randomized): the mass ranked before ``k`` in a
+    stable descending sort plus ``u * p_k``, the previous NBN definition
+    (exact ties broken by class index).  Float64 (on the CPU for MPS, which
+    has no float64), probabilities normalised to sum to one; ``O(B K log K)``
+    time and ``O(B K)`` memory.  ``u`` is a float or a ``[B, 1]`` tensor.
     """
-    dtype = probs.dtype if probs.dtype.is_floating_point else torch.float32
-    device = torch.device("cpu") if probs.device.type == "mps" else probs.device
+    device = probs.device if supports_float64(probs.device) else torch.device("cpu")
     p = probs.detach().to(device=device, dtype=torch.float64)
     p = p / p.sum(-1, keepdim=True)
-    tie = _TIE_ULPS * torch.finfo(dtype).eps
-    larger = (p.unsqueeze(-2) > p.unsqueeze(-1) + tie).to(p.dtype)      # [B, k, j]: p_j > p_k
-    above = (larger * p.unsqueeze(-2)).sum(-1)
-    if isinstance(u, float):
-        return above if u == 0.0 else above + u * p
-    return above + u.to(device) * p
+    sorted_p, order = torch.sort(p, dim=-1, descending=True, stable=True)
+    before = torch.cat([torch.zeros_like(sorted_p[..., :1]), sorted_p.cumsum(-1)[..., :-1]], -1)
+    if isinstance(u, float) and u == 0.0:
+        # mass strictly above each value: position of its first equal in the descending sort
+        first = torch.searchsorted(-sorted_p.contiguous(), -p.contiguous(), right=False)
+        return before.gather(-1, first)
+    u_t = u if isinstance(u, float) else u.to(device)
+    scores_sorted = before + u_t * sorted_p
+    if isinstance(u, float) and u == 1.0:
+        scores_sorted[..., -1] = 1.0                                  # no float drift at the end
+    return torch.empty_like(p).scatter_(-1, order, scores_sorted)
 
 
 def _upper_threshold(threshold: float, dtype: torch.dtype, n_classes: int = 1) -> float:
