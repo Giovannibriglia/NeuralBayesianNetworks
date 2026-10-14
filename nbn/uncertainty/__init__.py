@@ -11,6 +11,10 @@ Builders (from data, for a discrete node's table ``P(X | pa)``):
 The first three have ``*_from_counts`` twins that take a count table ``[R, K]``
 directly; :func:`count_table_for` counts a node against any parent tuple.
 
+Rows of a possibly confounded action effect from several logging regimes
+(Manski / intersection / IV linear program / sensitivity; the confidence box
+first): :func:`confounded_interval_set`, with :func:`confounding_gate`.
+
 Structural sets that pool shared noise live in :mod:`nbn.scm`.
 User guide: https://nbn.readthedocs.io/en/latest/user_guide/probability_sets.html
 """
@@ -24,6 +28,15 @@ from nbn.uncertainty.builders import (
     l1_ball_set,
     l1_ball_set_from_counts,
     per_interval_delta,
+)
+from nbn.uncertainty.confounded import (
+    ConfoundedSet,
+    GateDecision,
+    LPFailure,
+    ProgramTooLarge,
+    RefutedAssumption,
+    confounded_interval_set,
+    confounding_gate,
 )
 from nbn.uncertainty.counts import count_table, count_table_for, parent_grid, parent_row_index
 from nbn.uncertainty.sets import (
@@ -60,4 +73,11 @@ __all__ = [
     "parent_row_index",
     "parent_grid",
     "tighten_box_to_simplex",
+    "confounded_interval_set",
+    "confounding_gate",
+    "ConfoundedSet",
+    "GateDecision",
+    "RefutedAssumption",
+    "LPFailure",
+    "ProgramTooLarge",
 ]

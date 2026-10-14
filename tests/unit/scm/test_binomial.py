@@ -80,3 +80,14 @@ def test_interval_runs_on_every_device(device):
     assert lower.device.type == torch.device(device).type
     assert torch.allclose(lower.cpu().double(), ref_lower, atol=1e-5)
     assert torch.allclose(upper.cpu().double(), ref_upper, atol=1e-5)
+
+
+def test_clopper_pearson_upper_end_not_saturated_at_tiny_levels():
+    """beta.ppf(1 - d/2) rounded to 1.0 for d < 1.1e-16 (anytime levels at large n)."""
+    pytest.importorskip("scipy")
+    from nbn.uncertainty import binomial_interval
+
+    k = torch.tensor([3e6], dtype=torch.float64)
+    n = torch.tensor([4e6], dtype=torch.float64)
+    lo, hi = binomial_interval(k, n, torch.tensor([1e-17], dtype=torch.float64), method="clopper_pearson")
+    assert float(hi) < 0.76 and float(lo) > 0.74
