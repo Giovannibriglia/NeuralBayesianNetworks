@@ -93,8 +93,9 @@ def test_redrawn_tables_keep_both_margins():
         for i, j in enumerate(perm):
             tab[labels[i], values[j]] += 1
         g_all.append(_g_numpy(tab))
-    g_obs = _g_numpy(t[0].numpy())
-    exact = float(np.mean(np.array(g_all) >= g_obs - 1e-9))
+    g_obs = _g_numpy(t[0].double().numpy())  # float64, as in the helper: float32 rounding breaks ties
+    exact = float(np.mean(np.array(g_all) >= g_obs - 1e-9 * max(1.0, g_obs)))
+    assert exact == pytest.approx(0.4)        # hypergeometric: P(n00 = 2) + P(n00 = 0) = 3/10 + 1/10
     p, g = _stratified_g_permutation(t, 20000, torch.Generator().manual_seed(0))
     assert g == pytest.approx(g_obs)
     assert p == pytest.approx(exact, abs=0.02)
@@ -141,7 +142,7 @@ def _exact_p(labels, values, n_ctx, k):
 
     g_obs = g_of(values)
     g_all = np.array([g_of([values[j] for j in perm]) for perm in itertools.permutations(range(len(values)))])
-    return float(np.mean(g_all >= g_obs - 1e-9))
+    return float(np.mean(g_all >= g_obs - 1e-9 * max(1.0, g_obs)))
 
 
 def test_three_contexts_three_values_match_the_exact_permutation_law():
