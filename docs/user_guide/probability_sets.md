@@ -245,6 +245,22 @@ inputs as parents). With explicit `candidates`, the first assumption becomes
 every logger (no hidden confounding). Several nodes: split `delta` between
 them. Worked example: {doc}`../examples/15_agreement_rule`.
 
+**Union over a given family.** When the candidates come from another procedure
+(the parent sets accepted by an invariance test, a Bayesian credible family, a
+declared list), pass them with `refute=False`. No candidate is refuted and no
+extension family is built: `delta` is split over the candidates only, and each
+row gets one ball that contains every candidate's ball (the whole simplex where
+some candidate has no data). The first assumption becomes "some given candidate
+contains Pa(node)", and no bound on the number of parents is needed. If the
+family holds with probability `1 - delta_G` (ICP at level `delta_G`), the
+result holds with probability at least `1 - delta_G - delta`. `res.refute`
+records the mode, and the export manifest keeps it (`agreement.refute`).
+
+```python
+res = agreement_set(variables, data, "m0'", inputs, delta=0.1, candidates=icp_family,
+                    sampling="trajectory", refute=False)
+```
+
 ## Export for planning and verification tools
 
 Robust value iteration and interval or parametric model checkers (PRISM,
