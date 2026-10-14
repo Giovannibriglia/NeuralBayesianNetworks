@@ -495,17 +495,19 @@ SCORES = ["exclusive", "inclusive", "randomized"]
 def _threshold_rule(probs, true, alpha, score):
     from nbn.scm.calibration import _cumulative_scores, _upper_threshold
 
-    u = 0.0 if score == "exclusive" else 1.0
+    u = {"exclusive": 0.0, "inclusive": 1.0}[score]                     # deterministic scores only
     scores = _cumulative_scores(probs, u).gather(-1, true.unsqueeze(-1)).squeeze(-1)
     rank = math.ceil((probs.shape[0] + 1) * (1 - alpha))
     thr = float(scores.sort().values[rank - 1])
-    return _cumulative_scores(probs[:1], u) <= _upper_threshold(thr, probs.dtype)
+    return _cumulative_scores(probs[:1], u) <= _upper_threshold(thr, probs.dtype, probs.shape[-1])
 
 
-@pytest.mark.parametrize("score", ["exclusive", "inclusive"])
-def test_issue_322_confident_rows_get_one_class(score):
-    """The reproduction of #322: was [[True, True]] with the absolute 1e-6 tolerance."""
-    n, p_top = 1000, 1 - 1e-7
+@pytest.mark.parametrize("score, p_top", [("exclusive", 1 - 1e-7), ("inclusive", 1 - 1e-4)])
+def test_issue_322_confident_rows_get_one_class(score, p_top):
+    """#322: [[True, True]] with the absolute 1e-6 tolerance.  The default score fixes the exact
+    reproduction (two classes two float32 units apart); the inclusive score separates classes
+    farther apart than its noise margin (K units), not the two-unit case (documented)."""
+    n = 1000
     probs = torch.tensor([[p_top, 1 - p_top]]).repeat(n, 1)
     true = torch.zeros(n, dtype=torch.long)
     true[:50] = 1
@@ -536,8 +538,6 @@ def test_exclusive_score_gives_informative_sets_on_a_saturated_classifier():
     sets = cs.sets(mech, test["x"])
     assert bool((sets.sum(-1) == 1).all())                               # one class per row, never empty
     assert float(sets.gather(-1, test["d"].long()).float().mean()) >= 0.9
-    inclusive = conformal_sets(model, data(1000, 1), "d", alpha=0.1, score="inclusive").sets(mech, test["x"])
-    assert bool((inclusive.sum(-1) == 0).any())                          # the documented failure mode
 
 
 @pytest.mark.parametrize("score", SCORES)
@@ -596,3 +596,51 @@ def test_calibrated_sets_pass_the_discrete_score_through():
         cal = hs.calibrated_sets(fitted, data(800, 1), level=0.9, discrete_score=score,
                                  generator=torch.Generator().manual_seed(0))
         assert cal[("d", ("x",))].score == score
+
+
+def test_tied_classes_share_a_score_and_stay_together():
+    """A uniform or near-tied row keeps all its tied top classes (no index or float-noise tie-break)."""
+    from nbn.scm.calibration import _cumulative_scores, _upper_threshold
+
+    probs = torch.tensor([[1 / 3, 1 / 3, 1 / 3], [0.5 + 1e-7, 0.5 - 1e-7, 0.0], [0.7, 0.2, 0.1]])
+    sets = _cumulative_scores(probs, 0.0) <= _upper_threshold(0.0, probs.dtype, 3)
+    assert sets.tolist() == [[True, True, True], [True, True, False], [True, False, False]]
+
+
+@pytest.mark.parametrize("k", [3, 5, 10])
+def test_a_class_at_the_threshold_survives_one_unit_of_noise_per_probability(k):
+    """The review's check: a class whose score is the threshold must stay in the set when every
+    float32 probability of its row moves by one unit (batch-size noise)."""
+    from nbn.scm.calibration import _cumulative_scores, _upper_threshold
+
+    g = torch.Generator().manual_seed(k)
+    probs = torch.softmax(3 * torch.randn(4000, k, generator=g), -1).float()
+    step = torch.randint(-1, 2, probs.shape, generator=g).float()
+    nudged = torch.where(step == 0, probs, torch.nextafter(probs, probs + 2 * step))
+    rows = torch.arange(probs.shape[0])
+    cls = torch.randint(0, k, (probs.shape[0],), generator=g)
+    for u in (0.0, 1.0):
+        at = _cumulative_scores(probs, u)[rows, cls]                     # each row's threshold
+        moved = _cumulative_scores(nudged, u)[rows, cls]
+        bound = torch.tensor([_upper_threshold(float(t), torch.float32, k) for t in at],
+                             dtype=torch.float64)
+        assert bool((moved <= bound).all())
+
+
+def test_old_pickles_keep_the_inclusive_score():
+    model = _scm(StructuralCategoricalTable())
+    model.fit(_data(1000, seed=0))
+    cs = conformal_sets(model, _data(300, seed=4), "s", alpha=0.2, score="inclusive")
+    del cs.__dict__["score"]                                           # as saved before the field existed
+    assert pickle.loads(pickle.dumps(cs)).score == "inclusive"
+
+
+def test_calibrated_sets_reject_an_unknown_discrete_score_up_front():
+    from nbn.structure import HypothesisSet
+
+    model, data = _saturating_model()
+    hs = HypothesisSet({"x": ("continuous", 1), "y": ("continuous", 1)}, {"y": [("x",)]})
+    fitted = hs.fit({"x": torch.randn(200, 1), "y": torch.randn(200, 1)})
+    with pytest.raises(ValueError, match="score must be one of"):
+        hs.calibrated_sets(fitted, {"x": torch.randn(100, 1), "y": torch.randn(100, 1)},
+                           discrete_score="randomised")

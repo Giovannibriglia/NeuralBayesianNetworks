@@ -55,6 +55,7 @@ import torch
 import torch.nn as nn
 
 from nbn.learning.weighting import validate_weights, weighted_moments
+from nbn.scm.calibration import ConformalScore, check_conformal_score
 from nbn.structure.batched import StackedMLP, train_stacked
 from nbn.utils.device import to_device
 
@@ -335,18 +336,20 @@ def calibrate_factors(
     level: float = 0.9,
     groups: torch.Tensor | None = None,
     generator: torch.Generator | None = None,
-    discrete_score: str = "exclusive",
+    discrete_score: ConformalScore = "exclusive",
 ) -> CalibratedFactorSets:
     """One calibrated set per neural / linear factor, the level split over factors.
 
     Discrete neural factors get conformal sets with ``discrete_score``
     (``"exclusive"``, ``"inclusive"`` or ``"randomized"``; see
-    :func:`nbn.scm.conformal_sets`).
+    :func:`nbn.scm.conformal_sets`), checked before any work; ``method="pit"``
+    does not use it.
     """
     from nbn.scm import conformal_intervals, conformal_sets, pit_band_set
 
     if not 0.0 < level < 1.0:
         raise ValueError(f"level must be in (0, 1); got {level}.")
+    check_conformal_score(discrete_score)
     if method not in ("cqr", "residual", "pit"):
         raise ValueError(f"method must be 'cqr', 'residual' or 'pit'; got {method!r}.")
     if fitted.hypothesis_set is not hs:
@@ -378,7 +381,7 @@ def calibrate_factors(
                                generator=generator)
         elif discrete:
             res = conformal_sets(model, calibration_data, node, alpha=per_factor, groups=groups,
-                                 generator=generator, score=discrete_score)  # type: ignore[arg-type]
+                                 generator=generator, score=discrete_score)
         else:
             res = conformal_intervals(model, calibration_data, node, alpha=per_factor,
                                       method=method, groups=groups, generator=generator)
