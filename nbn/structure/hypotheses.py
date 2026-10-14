@@ -458,18 +458,21 @@ class HypothesisSet:
         level: float = 0.9,
         groups: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
+        discrete_score: str = "exclusive",
     ) -> CalibratedFactorSets:
         """One calibrated set per continuous or neural factor, on held-out rows.
 
         The level is split over the factors (union bound).  Conformal results
         are *marginal* (not per parent value); PIT bands hold for every
         conditional only under the declared PIT-independence assumption.  See
-        :func:`nbn.structure.continuous.calibrate_factors`.
+        :func:`nbn.structure.continuous.calibrate_factors`.  ``discrete_score``
+        is the conformal score of the discrete neural factors
+        (:func:`nbn.scm.conformal_sets`).
         """
         from nbn.structure.continuous import calibrate_factors
 
         return calibrate_factors(self, fitted, calibration_data, method=method, level=level,
-                                 groups=groups, generator=generator)
+                                 groups=groups, generator=generator, discrete_score=discrete_score)
 
     # ------------------------------------------------------------------
     # A fitted model for one hypothesis

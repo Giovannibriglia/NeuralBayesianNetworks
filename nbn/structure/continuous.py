@@ -335,8 +335,14 @@ def calibrate_factors(
     level: float = 0.9,
     groups: torch.Tensor | None = None,
     generator: torch.Generator | None = None,
+    discrete_score: str = "exclusive",
 ) -> CalibratedFactorSets:
-    """One calibrated set per neural / linear factor, the level split over factors."""
+    """One calibrated set per neural / linear factor, the level split over factors.
+
+    Discrete neural factors get conformal sets with ``discrete_score``
+    (``"exclusive"``, ``"inclusive"`` or ``"randomized"``; see
+    :func:`nbn.scm.conformal_sets`).
+    """
     from nbn.scm import conformal_intervals, conformal_sets, pit_band_set
 
     if not 0.0 < level < 1.0:
@@ -372,7 +378,7 @@ def calibrate_factors(
                                generator=generator)
         elif discrete:
             res = conformal_sets(model, calibration_data, node, alpha=per_factor, groups=groups,
-                                 generator=generator)
+                                 generator=generator, score=discrete_score)  # type: ignore[arg-type]
         else:
             res = conformal_intervals(model, calibration_data, node, alpha=per_factor,
                                       method=method, groups=groups, generator=generator)

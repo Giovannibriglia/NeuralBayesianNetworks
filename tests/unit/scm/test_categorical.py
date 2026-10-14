@@ -483,3 +483,116 @@ def test_bounds_from_sets_reject_an_empty_box():
     with pytest.raises(ValueError, match="simplex"):
         counterfactual_bounds_from_sets(torch.tensor([[0.5, 0.5]]), torch.tensor([[0.7, 0.7]]),
                                         torch.tensor([[0.9, 0.9]]), torch.tensor([0]))
+
+
+# ---------------------------------------------------------------------------
+# Conformal scores (#322)
+# ---------------------------------------------------------------------------
+
+SCORES = ["exclusive", "inclusive", "randomized"]
+
+
+def _threshold_rule(probs, true, alpha, score):
+    from nbn.scm.calibration import _cumulative_scores, _upper_threshold
+
+    u = 0.0 if score == "exclusive" else 1.0
+    scores = _cumulative_scores(probs, u).gather(-1, true.unsqueeze(-1)).squeeze(-1)
+    rank = math.ceil((probs.shape[0] + 1) * (1 - alpha))
+    thr = float(scores.sort().values[rank - 1])
+    return _cumulative_scores(probs[:1], u) <= _upper_threshold(thr, probs.dtype)
+
+
+@pytest.mark.parametrize("score", ["exclusive", "inclusive"])
+def test_issue_322_confident_rows_get_one_class(score):
+    """The reproduction of #322: was [[True, True]] with the absolute 1e-6 tolerance."""
+    n, p_top = 1000, 1 - 1e-7
+    probs = torch.tensor([[p_top, 1 - p_top]]).repeat(n, 1)
+    true = torch.zeros(n, dtype=torch.long)
+    true[:50] = 1
+    assert _threshold_rule(probs, true, 0.1, score).tolist() == [[True, False]]
+
+
+def _saturating_model():
+    """A nearly deterministic child of a continuous parent: d = [x + V > 0], V ~ N(0, 0.2^2)."""
+    def data(n, seed):
+        g = torch.Generator().manual_seed(seed)
+        x = 2 * torch.randn(n, generator=g)
+        v = 0.2 * torch.randn(n, generator=g)
+        return {"x": x.unsqueeze(-1), "d": (x + v > 0).float().unsqueeze(-1)}
+
+    torch.manual_seed(0)
+    model = StructuralCausalModel([("x", "d")], {"x": ("continuous", 1), "d": ("discrete", 2)}, device="cpu")
+    model.auto_mechanisms()
+    model.set_mechanism("d", StructuralNeuralCategorical(n_classes=2, hidden=(16,)))
+    model.fit(data(4000, 0))
+    return model, data
+
+
+def test_exclusive_score_gives_informative_sets_on_a_saturated_classifier():
+    model, data = _saturating_model()
+    mech, test = model.mechanisms["d"], data(4000, 2)
+    cs = conformal_sets(model, data(1000, 1), "d", alpha=0.1)            # default: exclusive
+    assert cs.score == "exclusive" and cs.threshold == 0.0
+    sets = cs.sets(mech, test["x"])
+    assert bool((sets.sum(-1) == 1).all())                               # one class per row, never empty
+    assert float(sets.gather(-1, test["d"].long()).float().mean()) >= 0.9
+    inclusive = conformal_sets(model, data(1000, 1), "d", alpha=0.1, score="inclusive").sets(mech, test["x"])
+    assert bool((inclusive.sum(-1) == 0).any())                          # the documented failure mode
+
+
+@pytest.mark.parametrize("score", SCORES)
+def test_every_score_keeps_marginal_coverage(score):
+    alpha, n_cal, n_test, replicates = 0.2, 300, 500, 60
+    model = _scm(StructuralNeuralCategorical(n_classes=3, hidden=(16,)))
+    torch.manual_seed(0)
+    model.fit(_data(3000, seed=0))
+    mech = model.mechanisms["s"]
+    coverage = []
+    for r in range(replicates):
+        gen = torch.Generator().manual_seed(r)
+        cs = conformal_sets(model, _data(n_cal, seed=1000 + r), "s", alpha=alpha, score=score, generator=gen)
+        test = _data(n_test, seed=2000 + r)
+        sets = cs.sets(mech, test["a"], generator=gen)
+        coverage.append(float(sets.gather(-1, test["s"].long()).float().mean()))
+    mean = sum(coverage) / replicates
+    assert mean >= (1 - alpha) - 0.02
+    if score == "randomized":                                            # ties broken: close to the level
+        assert mean <= (1 - alpha) + 0.03
+
+
+@pytest.mark.parametrize("score", ["exclusive", "inclusive"])
+def test_deterministic_scores_do_not_depend_on_the_batch_size(score):
+    torch.manual_seed(1)
+    model = _scm(StructuralNeuralCategorical(n_classes=3, hidden=(16,)))
+    model.fit(_data(2000, seed=1))
+    mech = model.mechanisms["s"]
+    cs = conformal_sets(model, _data(400, seed=51), "s", alpha=0.2, score=score)
+    test = _data(300, seed=61)
+    assert torch.equal(cs.sets(mech, test["a"]), torch.cat([cs.sets(mech, test["a"][i:i + 1]) for i in range(300)]))
+
+
+def test_randomized_sets_are_reproducible_with_a_generator_and_validated():
+    model = _scm(StructuralCategoricalTable())
+    model.fit(_data(2000, seed=0))
+    mech, pa = model.mechanisms["s"], _data(200, seed=3)["a"]
+    cs = conformal_sets(model, _data(300, seed=4), "s", alpha=0.2, score="randomized",
+                        generator=torch.Generator().manual_seed(0))
+    a = cs.sets(mech, pa, generator=torch.Generator().manual_seed(7))
+    b = cs.sets(mech, pa, generator=torch.Generator().manual_seed(7))
+    assert torch.equal(a, b)
+    with pytest.raises(ValueError, match="score must be one of"):
+        conformal_sets(model, _data(300, seed=4), "s", score="aps")
+    clone = pickle.loads(pickle.dumps(cs))
+    assert clone.score == "randomized"
+
+
+def test_calibrated_sets_pass_the_discrete_score_through():
+    from nbn.structure import HypothesisSet
+
+    model, data = _saturating_model()
+    hs = HypothesisSet({"x": ("continuous", 1), "d": ("discrete", 2)}, {"d": [("x",)]})
+    fitted = hs.fit(data(3000, 0))
+    for score in SCORES:
+        cal = hs.calibrated_sets(fitted, data(800, 1), level=0.9, discrete_score=score,
+                                 generator=torch.Generator().manual_seed(0))
+        assert cal[("d", ("x",))].score == score
