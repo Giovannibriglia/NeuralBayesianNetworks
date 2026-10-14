@@ -151,8 +151,52 @@ chosen = hs.model_for(next(hs.hypotheses()), sets.counts)   # fitted, no pass ov
   directly.
 - Worked example: {doc}`../examples/14_structure_uncertainty_hypothesis_sets`.
 - Scope: discrete nodes and parents. Continuous and mixed factors are planned
-  (issue #318); so is an agreement rule that combines the candidates of a
-  node into one set (issue #313).
+  (issue #318).
+
+### One set per row: the agreement rule
+
+A worst case over hypotheses falls back to the largest candidate, which has
+no data on most of its rows. `agreement_set(variables, data, node, inputs,
+max_parents=d)` gives **one** set per row that is valid without knowing the
+parents, under a declared bound `|Pa(node)| <= d` (KWIK agreement rule;
+k-meteorologists, Diuk, Li & Leffler 2009; offline use with one behaviour
+policy, Simão & Spaan 2019).
+
+1. Every parent set of size `d` from `inputs` is a candidate. Each candidate
+   and each **one-variable extension** `c ∪ {v}` gets an L1 ball per row, all
+   holding together at `1 - delta`.
+2. If `c` contains the true parents, so does `c ∪ {v}`, and their conditionals
+   are equal, so their balls overlap on every row. **Disjoint balls prove that
+   `c` misses a parent**, so `c` is discarded. On the joint event (probability
+   at least `1 - delta`) a superset candidate is never discarded.
+3. Over the union of the survivors' parents, each row where every survivor
+   has data gets a ball containing all of the survivors' balls. Some survivor
+   is a superset, so the ball contains the truth. Other rows get the simplex.
+
+```python
+from nbn.structure import agreement_set
+
+# inputs: every variable allowed as a parent; feasible: the (s, a) rows that can occur
+res = agreement_set(variables, data, "m0'", inputs, max_parents=3, delta=0.1,
+                    sampling="trajectory", coverage_rows=feasible)
+print(res.survivors, res.parents, res.set.guarantee)          # pac_under_model
+print("feasible rows visited / with a set:", res.flat_visited, "/", res.flat_with_set)
+```
+
+The gain is `res.n_rows_gained`: joint input values that no dataset visited
+but that still get a set, because each survivor visited its own parent values.
+When the inputs encode constrained actions (for example one-hot flags of a
+single action), pass the feasible rows as `coverage_rows`. Otherwise the
+counts include flag combinations that never occur.
+If every candidate is refuted, the bound `d` is contradicted
+(`res.assumption_refuted`), and the result falls back to the flat model (all
+inputs as parents). With explicit `candidates`, the first assumption becomes
+"some given candidate contains the true parents". Declared assumptions (in
+`res.assumptions`): `|Pa| <= d`,
+`Pa ⊆ inputs`, no intra-slice edges into the node, and the same mechanism for
+every logger (no hidden confounding). Several nodes: split `delta` between
+them. Worked example: {doc}`../examples/15_agreement_rule`.
+
 
 ## How the guarantee is built
 

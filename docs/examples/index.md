@@ -33,6 +33,7 @@ force the CPU.
 | {doc}`12_mdp_trajectories_factored_sets` | From logged episodes to a factored transition model with trajectory-valid probability sets, the budget split across variables. |
 | {doc}`13_discrete_counterfactuals` | Two declared couplings giving different counterfactuals from one kernel, sharp bounds over every compatible SCM, and calibration with a PIT band and conformal sets. |
 | {doc}`14_structure_uncertainty_hypothesis_sets` | Candidate parent sets per node with `HypothesisSet`: the factor cache, one set per factor with the budget split over factors, supersets against a missing parent, and `model_for`. |
+| {doc}`15_agreement_rule` | One valid set per row under structure uncertainty with `agreement_set`: refutation by one-variable extensions, coverage of never-visited joint values, a coverage check, and a wrong bound. |
 
 ```{toctree}
 :hidden:
@@ -52,4 +53,5 @@ force the CPU.
 12_mdp_trajectories_factored_sets
 13_discrete_counterfactuals
 14_structure_uncertainty_hypothesis_sets
+15_agreement_rule
 ```

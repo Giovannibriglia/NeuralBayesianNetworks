@@ -48,8 +48,8 @@ dependent on the loggers.
 Scope
 -----
 Discrete targets and discrete parents (count-based sets).  Continuous and
-mixed factors: issue #318.  Rules that combine the candidates of a node into
-one set (agreement rule): issue #313.
+mixed factors: issue #318.  One set per row that combines the candidates of a
+node: :func:`nbn.structure.agreement_set` (agreement rule).
 """
 from __future__ import annotations
 
@@ -259,6 +259,7 @@ class HypothesisSet:
         data: Mapping[str, torch.Tensor],
         weights: torch.Tensor | None = None,
         max_union_cells: int = DEFAULT_MAX_UNION_CELLS,
+        keep_union_tables: bool = False,
     ) -> FactorCounts:
         """Count tables ``[R, K]`` for every factor.
 
@@ -272,7 +273,10 @@ class HypothesisSet:
         :attr:`FactorCounts.union_used` records the choice.  Tables stay on
         the data's device, in the widest float the device supports.  The
         inputs' marginals are not counted: :attr:`FactorCounts.input_marginals`
-        sums them out of the factor tables, exactly.
+        sums them out of the factor tables, exactly.  ``keep_union_tables``
+        keeps each node's dense union table in
+        :attr:`FactorCounts.union_tables` (memory: one table per node);
+        by default it is freed once the candidates' tables are summed.
         """
         self._require_discrete()
         first = data[self.targets[0]]
@@ -281,6 +285,7 @@ class HypothesisSet:
         tables: Dict[Factor, torch.Tensor] = {}
         cards: Dict[Factor, List[int]] = {}
         union_used: Dict[str, bool] = {}
+        union_tables: Dict[str, Tuple[Tuple[str, ...], torch.Tensor]] = {}
         for node in self.targets:
             cs = self.candidates[node]
             union = tuple(dict.fromkeys(p for c in cs for p in c))
@@ -299,6 +304,8 @@ class HypothesisSet:
             union_used[node] = use_union
             if use_union:
                 full, _ = count_table_for(self.variables, data, node, union, weights)
+                if keep_union_tables:
+                    union_tables[node] = (union, full)
                 full = full.reshape(*union_cards, k)
                 for c in cs:
                     drop = [d for d, p in enumerate(union) if p not in c]
@@ -317,6 +324,7 @@ class HypothesisSet:
         return FactorCounts(
             hypothesis_set=self, tables=tables, parent_cards=cards,
             union_used=union_used, weighted=weights is not None,
+            union_tables=union_tables,
         )
 
     # ------------------------------------------------------------------
@@ -462,6 +470,8 @@ class FactorCounts:
     union_used: Dict[str, bool] = field(default_factory=dict)
     # Whether the tables are weighted (then they carry no PAC guarantee).
     weighted: bool = False
+    # Per target counted on the union path: (union parents, [R_union, K] table).
+    union_tables: Dict[str, Tuple[Tuple[str, ...], torch.Tensor]] = field(default_factory=dict, repr=False)
 
     def __getitem__(self, factor: Factor) -> torch.Tensor:
         node, parents = factor
