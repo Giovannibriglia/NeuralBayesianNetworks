@@ -39,13 +39,18 @@ The rule here
 
 **Union over a given family** (``refute=False``).  When the family of
 candidates comes from elsewhere (the parent sets accepted by an invariance
-test, a Bayesian credible family, a declared list), step 2 is skipped: no
-extension families, every candidate survives, ``delta`` is split over the
-candidates only, and step 3 gives the row-wise hull of their balls.  The
-result is valid when some candidate contains the true parents; if the family
-holds only with probability ``1 - delta_G`` (e.g. ICP at level ``delta_G``),
-the result holds with probability at least ``1 - delta_G - delta`` (union
-bound; the caller accounts for ``delta_G``).
+test, a declared list), step 2 is skipped: no extension families, every
+candidate survives, and step 3 gives each row one ball that contains every
+candidate's ball (it encloses their union).  Each candidate's balls are built
+at the **full** ``delta``, with no split: if a fixed candidate ``s*`` contains
+the true parents, the result contains ``s*``'s ball on every row, so it holds
+whenever that one ball holds, with probability at least ``1 - delta``.  For
+a data-dependent family that contains ``Pa(node)`` itself with probability at
+least ``1 - delta_G`` (ICP at level ``delta_G``: Peters, Janzing & Schölkopf
+2017, §7.2.5, pp. 153-154), the result holds with probability at least
+``1 - delta_G - delta`` (the caller accounts for ``delta_G``).  If a
+data-dependent family is only known to contain some superset of the parents,
+that argument does not apply.
 
 Literature: k-meteorologists (Diuk, Li & Leffler, ICML 2009); offline
 structure learning for safe policy improvement with one behaviour policy
@@ -205,12 +210,15 @@ def agreement_set(
         can include combinations that never occur.
     refute:
         ``True`` (default): the agreement rule, which discards candidates that
-        disagree with a one-variable extension.  ``False``: no refutation; the
-        result is the row-wise union (hull) of the given ``candidates``'
-        balls, with ``delta`` split over them only.  Use it for a family
-        built elsewhere (ICP accepted sets, a credible family): valid when
-        some candidate contains ``Pa(node)``.  Requires ``candidates`` (or a
-        :class:`HypothesisSet` with candidates for ``node``).
+        disagree with a one-variable extension.  ``False``: no refutation;
+        each row gets one ball containing every given candidate's ball, all
+        built at the full ``delta`` (see the module notes: no split is
+        needed).  Use it for a family built elsewhere (ICP accepted sets, a
+        declared list): valid with probability ``>= 1 - delta`` when a fixed
+        candidate contains ``Pa(node)``, and ``>= 1 - delta_G - delta`` when
+        ``Pa(node)`` itself is in a family that holds w.p. ``1 - delta_G``.
+        Requires ``candidates`` (or a :class:`HypothesisSet` with candidates
+        for ``node``).
 
     Returns
     -------
@@ -287,8 +295,12 @@ def agreement_set(
     flat_is_family = frozenset(inputs) in families
     # One share of the budget is kept for the flat fallback (all inputs as parents)
     # whenever it is not already a family; it does not depend on max_rows.  Without
-    # refutation every candidate survives, so there is no fallback to pay for.
-    per_family = delta / (len(fam_list) + (0 if flat_is_family or not refute else 1))
+    # refutation no union bound is needed: the result contains every candidate's
+    # ball, so it holds whenever the ball of one fixed superset candidate holds.
+    if refute:
+        per_family = delta / (len(fam_list) + (0 if flat_is_family else 1))
+    else:
+        per_family = delta
     balls: Dict[Family, L1BallSet] = {
         f: l1_ball_set_from_counts(counts[(node, f)], delta=per_family, sampling=sampling)
         for f in fam_list
@@ -430,7 +442,8 @@ def agreement_set(
     if n_rows > max_rows:
         raise ValueError(
             f"The survivors' parents {union} span {n_rows} rows (> max_rows={max_rows}); "
-            "lower max_parents, restrict inputs, or raise max_rows."
+            + ("use fewer or smaller candidates, or raise max_rows." if not refute
+               else "lower max_parents, restrict inputs, or raise max_rows.")
         )
     # Two streaming passes over the survivors: memory O(R K), whatever their number.
     def lifted(s: Family, table: torch.Tensor) -> torch.Tensor:

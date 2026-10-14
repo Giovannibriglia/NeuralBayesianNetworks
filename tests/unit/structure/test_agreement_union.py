@@ -35,7 +35,8 @@ def test_union_contains_every_candidate_ball_and_keeps_every_candidate(device):
     res = _union(data)
     assert res.survivors == FAMILY and res.discarded == {} and not res.refute
     assert res.parents == tuple(p for p in INPUTS if any(p in c for c in FAMILY))
-    assert res.n_families == len(FAMILY) and res.delta_per_family == pytest.approx(0.1 / len(FAMILY))
+    # No union bound: every ball at the full delta (the result holds when one superset's ball holds).
+    assert res.n_families == len(FAMILY) and res.delta_per_family == pytest.approx(0.1)
     assert res.max_parents is None and not res.assumption_refuted
     assert res.assumptions[0].startswith("some given candidate contains Pa(node)")
     any_unseen = torch.zeros_like(res.set.unseen)
@@ -47,7 +48,7 @@ def test_union_contains_every_candidate_ball_and_keeps_every_candidate(device):
         unseen = _lift(ball.unseen.unsqueeze(-1).float(), c, res.parents)[:, 0] > 0.5
         any_unseen |= unseen
         seen = ~res.set.unseen
-        reach = (center - res.set.center).abs().sum(-1) + radius     # the ball inside the result's ball
+        reach = ((center - res.set.center).abs().sum(-1) + radius).clamp_max(2.0)  # radius 2 = simplex
         assert bool((reach[seen] <= res.set.radius[seen] + 1e-5).all())
     assert torch.equal(res.set.unseen, any_unseen)                    # simplex where any candidate is blind
 
@@ -67,8 +68,11 @@ def test_the_agreement_rule_would_discard_the_wrong_candidates_the_union_keeps_t
     rule = agreement_set(VARIABLES, data, "m0'", INPUTS, delta=0.1, candidates=FAMILY, sampling="trajectory")
     assert rule.refute and set(rule.discarded) == {("m0", "rep0"), ("m1", "m2")}
     assert set(union.survivors) == set(FAMILY)
-    # Same budget split for the union: no extensions and no flat-fallback share.
-    assert union.delta_per_family > rule.delta_per_family
+    # The rule splits delta over its families (candidates and extensions) plus a fallback share;
+    # the union does not split it.
+    assert rule.n_families > len(FAMILY)
+    assert rule.delta_per_family == pytest.approx(0.1 / (rule.n_families + 1))
+    assert union.delta_per_family == pytest.approx(0.1)
     assert set(TRUE_PARENTS) <= set(union.parents)
 
 
@@ -101,3 +105,27 @@ def test_export_records_the_mode(tmp_path):
     for f in load_factored_sets(out).manifest["factors"]:
         assert f["agreement"]["refute"] is False and f["agreement"]["max_parents"] is None
         assert f["assumptions"][0].startswith("some given candidate contains Pa(node)")
+
+
+def test_union_options_pickle_and_schema(tmp_path):
+    import json
+    import pickle
+
+    from nbn.structure.export import SCHEMA_FILE
+    from tests.unit.structure.test_agreement import FEASIBLE
+
+    data = ring_data(n_episodes=100)
+    res = _union(data, family=[(), TRUE_PARENTS], coverage_rows=FEASIBLE)
+    assert res.parents == TRUE_PARENTS and res.flat_rows == FEASIBLE.shape[0]
+    assert res.flat_with_set is not None and res.flat_visited is not None
+    back = pickle.loads(pickle.dumps(res))
+    assert back.refute is False and torch.equal(back.set.radius, res.set.radius)
+    with pytest.raises(ValueError, match="fewer or smaller candidates"):
+        _union(data, max_rows=4)
+    jsonschema = pytest.importorskip("jsonschema")
+    sets = {f"m{i}'": agreement_set(VARIABLES, data, f"m{i}'", INPUTS, delta=0.1 / N, sampling="trajectory",
+                                    candidates=[(f"m{i}", f"m{(i - 1) % N}", f"rep{i}"), (f"m{i}",)],
+                                    refute=False) for i in range(N)}
+    out = export_factored_sets(tmp_path / "s", sets, VARIABLES, [f"m{i}" for i in range(N)],
+                               [f"rep{i}" for i in range(N)], exact=True)
+    jsonschema.validate(json.loads((out / "manifest.json").read_text()), json.loads(SCHEMA_FILE.read_text()))

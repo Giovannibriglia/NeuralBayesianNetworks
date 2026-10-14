@@ -246,15 +246,20 @@ every logger (no hidden confounding). Several nodes: split `delta` between
 them. Worked example: {doc}`../examples/15_agreement_rule`.
 
 **Union over a given family.** When the candidates come from another procedure
-(the parent sets accepted by an invariance test, a Bayesian credible family, a
-declared list), pass them with `refute=False`. No candidate is refuted and no
-extension family is built: `delta` is split over the candidates only, and each
-row gets one ball that contains every candidate's ball (the whole simplex where
-some candidate has no data). The first assumption becomes "some given candidate
-contains Pa(node)", and no bound on the number of parents is needed. If the
-family holds with probability `1 - delta_G` (ICP at level `delta_G`), the
-result holds with probability at least `1 - delta_G - delta`. `res.refute`
-records the mode, and the export manifest keeps it (`agreement.refute`).
+(the parent sets accepted by an invariance test, a declared list), pass them
+with `refute=False`. No candidate is refuted and no extension family is built.
+Each row gets one ball that contains every candidate's ball (the whole simplex
+where some candidate has no data). No union bound is needed: if a fixed
+candidate contains the true parents, the result contains that candidate's ball,
+so it holds whenever that one ball does. Every ball is therefore built at the
+full `delta`. The first assumption becomes "some given candidate contains
+Pa(node)". For a family built from data that contains `Pa(node)` itself with
+probability `1 - delta_G` (ICP at level `delta_G`), the result holds with
+probability at least `1 - delta_G - delta`. The trade-off against the rule:
+the union keeps wrong candidates, so it is wider where they disagree, but it
+spends no budget on extension families and never falls back to the flat
+model. `res.refute` records the mode, and the export manifest keeps it
+(`agreement.refute`).
 
 ```python
 res = agreement_set(variables, data, "m0'", inputs, delta=0.1, candidates=icp_family,
