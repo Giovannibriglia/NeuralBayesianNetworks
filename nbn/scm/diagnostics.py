@@ -27,6 +27,7 @@ import itertools
 from dataclasses import dataclass, field
 from typing import Dict, Literal, Mapping, Sequence
 
+import numpy as np
 import torch
 
 from nbn.scm._stats import chi2_sf, ks_two_sample, ks_uniform, normal_two_sided_p, require_cpu_generator
@@ -51,7 +52,8 @@ class DiagnosticResult:
     details: Dict[str, object] = field(default_factory=dict)
 
     def rejected(self, alpha: float = 0.05) -> bool:
-        return self.p_value < alpha
+        """``p <= alpha``: a valid p-value has ``P(p <= alpha) <= alpha`` under the null."""
+        return self.p_value <= alpha
 
 
 # ===========================================================================
@@ -254,7 +256,7 @@ def noise_independence_test(
     n = noise.shape[0]
     require_cpu_generator(generator, "noise_independence_test")
     if n > max_rows:
-        keep = torch.randperm(n, generator=generator)[:max_rows].to(noise.device)
+        keep = torch.randperm(n, generator=generator, device="cpu")[:max_rows].to(noise.device)
         noise, parents = noise[keep], parents[keep]
     statistic, p_value = _hsic_permutation(noise, parents, n_permutations, generator)
     return DiagnosticResult(
@@ -337,7 +339,9 @@ def calibration_by_bins_test(
 
 @torch.no_grad()
 def context_invariance_test(
-    model, data: Mapping[str, torch.Tensor], node: str, context: str | None = None
+    model, data: Mapping[str, torch.Tensor], node: str, context: str | None = None,
+    reference: Literal["permutation", "chi2"] = "permutation", n_perm: int = 999,
+    generator: torch.Generator | None = None,
 ) -> DiagnosticResult:
     """Does ``node``'s mechanism change across contexts (datasets, policies)?
 
@@ -345,11 +349,39 @@ def context_invariance_test(
     variable, a rejection means some logger used information the model does
     not see (a confounded action) or the dynamics drifted.
 
-    Discrete ``X`` with discrete parents: G-test of ``X ⊥ C`` within every
-    parent configuration, chi-square with the summed degrees of freedom of the
-    non-empty strata.  Continuous ``X``: KS tests of the residuals between
-    every pair of contexts, Bonferroni-combined.
+    Discrete ``X`` with discrete parents: the G statistic of ``X`` vs ``C``
+    summed over the parent configurations, with one of two references:
+
+    ``reference="permutation"`` (default)
+        Under the null the context labels are exchangeable within each parent
+        configuration, so each configuration's context-by-value table is
+        redrawn ``n_perm`` times with its margins fixed (multivariate
+        hypergeometric) and ``p = (1 + #{G_perm >= G_obs}) / (n_perm + 1)``.
+        For independent rows the level is valid at any sample size
+        (``P(p <= alpha) <= alpha``; conservative when the statistic has
+        ties).  For trajectories (the parents making the node Markov) later
+        strata depend on earlier outcomes, so the level is approximate; in
+        simulations it stays close to nominal.  The smallest p-value is
+        ``1 / (n_perm + 1)``: to reject at level ``alpha`` (after a
+        Bonferroni or Benjamini-Hochberg correction over ``m`` tests,
+        ``alpha / m``) use ``n_perm >= 1 / alpha``.  ``generator`` (CPU) makes
+        it reproducible; without one the p-value varies from run to run.
+        Counts of ``10**9`` or more rows for one value within a configuration
+        exceed numpy's hypergeometric sampler.
+    ``reference="chi2"``
+        The chi-square approximation with the summed degrees of freedom: fast,
+        but anti-conservative when many configurations are sparse: with 64
+        configurations, two contexts and 2000 rows it rejects a true null 21%
+        of the time at level 0.05 (about 80% with 200 rows; user guide, SCM
+        diagnostics; notebook 10, section 1b).
+
+    Continuous ``X``: KS tests of the residuals between every pair of
+    contexts, Bonferroni-combined (``reference`` does not apply).
     """
+    if reference not in ("permutation", "chi2"):
+        raise ValueError(f"reference must be 'permutation' or 'chi2'; got {reference!r}.")
+    if isinstance(n_perm, bool) or not isinstance(n_perm, int) or n_perm < 1:
+        raise ValueError(f"n_perm must be an integer >= 1; got {n_perm!r}.")
     context = context or getattr(model, "context", None)
     if context is None:
         raise ValueError("No context variable given (and the model declares none).")
@@ -369,9 +401,17 @@ def context_invariance_test(
         k = int(variable.cardinality)
         table = scatter_counts(rows, data[node], n_rows, k).reshape(-1, n_ctx, k)
         statistic, df = _stratified_g(table)
+        null = f"'{context}' ⊥ '{node}' | parents"
+        if reference == "chi2":
+            return DiagnosticResult(
+                "context_invariance", statistic, float(chi2_sf(statistic, df)),
+                null=null, details={"method": "G-test, chi-square reference", "df": df},
+            )
+        require_cpu_generator(generator, "context_invariance_test")
+        p_value, g_obs = _stratified_g_permutation(table, n_perm, generator)
         return DiagnosticResult(
-            "context_invariance", statistic, float(chi2_sf(statistic, df)),
-            null=f"'{context}' ⊥ '{node}' | parents", details={"method": "G-test", "df": df},
+            "context_invariance", g_obs, p_value, null=null,
+            details={"method": "G-test, permutation reference", "n_perm": n_perm, "df": df},
         )
     mech = _structural(model, node)
     if not isinstance(mech, AdditiveNoiseMechanism):
@@ -509,9 +549,63 @@ def _hsic_permutation(a: torch.Tensor, b: torch.Tensor, n_permutations: int,
     observed = float((k_a * k_b).sum() / n**2)
     exceed = 0
     for _ in range(n_permutations):
-        perm = torch.randperm(n, generator=generator).to(a.device)  # CPU generator: reproducible
+        perm = torch.randperm(n, generator=generator, device="cpu").to(a.device)  # CPU generator: reproducible
         exceed += int((k_a * k_b[perm][:, perm]).sum() / n**2 >= observed)
     return observed, (1 + exceed) / (1 + n_permutations)
+
+
+def _g_numpy(tables: np.ndarray) -> np.ndarray:
+    """G statistic of independence of ``[..., C, K]`` contingency tables (float64)."""
+    total = tables.sum((-2, -1), keepdims=True)
+    expected = tables.sum(-1, keepdims=True) * tables.sum(-2, keepdims=True) / np.maximum(total, 1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return 2.0 * np.where(tables > 0, tables * np.log(tables / expected), 0.0).sum((-2, -1))
+
+
+def _stratified_g_permutation(table: torch.Tensor, n_perm: int, generator: torch.Generator | None,
+                              max_elements: int = 1 << 22) -> tuple[float, float]:
+    """Permutation p-value of the stratified G statistic, and the observed statistic.
+
+    Each stratum's ``[C, K]`` table is redrawn with its row and column sums
+    fixed (the context labels permuted within the stratum): one context at a
+    time and one value at a time, by sequential hypergeometric draws,
+    vectorised over a block of replicates and a block of strata, with at most
+    about ``max_elements`` simulated cells per block (plus temporaries a few
+    times that size).  Strata with fewer than two contexts or two values have
+    a fixed table and are skipped; contexts and values empty in every kept
+    stratum are dropped (sparse context ids cost nothing).  The counts are
+    copied to the CPU with ``to_device_dtype``: a fused MPS -> CPU float64
+    move garbles them.
+    """
+    t_all = to_device_dtype(table.detach(), "cpu", torch.float64).round().to(torch.int64).numpy()
+    informative = ((t_all.sum(2) > 0).sum(1) >= 2) & ((t_all.sum(1) > 0).sum(1) >= 2)
+    t_all = t_all[informative]
+    t_all = t_all[:, t_all.sum((0, 2)) > 0][:, :, t_all.sum((0, 1)) > 0]
+    seed = int(torch.randint(0, 2**62, (1,), generator=generator, device="cpu").item())
+    rng = np.random.default_rng(seed)
+    n_ctx, k = t_all.shape[1:]
+    cells = max(1, n_ctx * k)
+    rep_block = max(1, min(n_perm, max_elements // cells))
+    strata_block = max(1, max_elements // (rep_block * cells))
+    g_obs = float(_g_numpy(t_all.astype(np.float64)).sum()) if t_all.shape[0] else 0.0
+    g_sim = np.zeros(n_perm)
+    for lo in range(0, t_all.shape[0], strata_block):
+        t = t_all[lo:lo + strata_block]                               # [S, C, K]
+        for r0 in range(0, n_perm, rep_block):
+            n_rep = min(rep_block, n_perm - r0)
+            sim = np.empty((n_rep,) + t.shape)
+            remaining = np.broadcast_to(t.sum(1), (n_rep,) + t.shape[::2]).copy()    # [P, S, K]
+            for r in range(n_ctx):
+                left = np.broadcast_to(t[:, r].sum(1), (n_rep, t.shape[0])).copy()   # [P, S]
+                for c in range(k):
+                    draw = left if c == k - 1 else rng.hypergeometric(
+                        remaining[..., c], remaining[..., c + 1:].sum(-1), left)
+                    sim[:, :, r, c] = draw
+                    remaining[..., c] -= draw
+                    left = left - draw
+            g_sim[r0:r0 + n_rep] += _g_numpy(sim).sum(1)
+    exceed = np.sum(g_sim >= g_obs - 1e-9 * max(1.0, g_obs))      # ties count as exceedances
+    return float((1 + exceed) / (n_perm + 1)), g_obs
 
 
 def _stratified_g(table: torch.Tensor) -> tuple[float, int]:
