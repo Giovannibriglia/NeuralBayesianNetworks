@@ -33,7 +33,7 @@ force the CPU.
 | {doc}`12_mdp_trajectories_factored_sets` | From logged episodes to a factored transition model with trajectory-valid probability sets, the budget split across variables. |
 | {doc}`13_discrete_counterfactuals` | Two declared couplings giving different counterfactuals from one kernel, sharp bounds over every compatible SCM, and calibration with a PIT band and conformal sets. |
 | {doc}`14_structure_uncertainty_hypothesis_sets` | Candidate parent sets per node with `HypothesisSet`: the factor cache, one set per factor with the budget split over factors, supersets against a missing parent, and `model_for`. |
-| {doc}`15_agreement_rule` | One valid set per row under structure uncertainty with `agreement_set`: refutation by one-variable extensions, coverage of never-visited joint values, a coverage check, and a wrong bound. |
+| {doc}`15_agreement_rule` | One valid set per row under structure uncertainty with `agreement_set`: refutation by one-variable extensions, coverage of never-visited joint values, a coverage check, a wrong bound, and the union over a given family (`refute=False`). |
 | {doc}`16_export_factored_sets` | Export factored sets with their sharing for robust / interval / parametric MDP tools, read them back, and rebuild the joint bounds of a never-visited row. |
 | {doc}`17_continuous_hypothesis_sets` | Continuous and mixed factors: batched candidate fits, one calibrated set per factor, marginal vs conditional coverage, and `model_for`. |
 | {doc}`18_confounded_rows` | Sound interval rows for a confounded action from several regimes: the gate, intersection vs IV linear program, a declared randomised trial, refutation, and coverage. |

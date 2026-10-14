@@ -37,6 +37,21 @@ The rule here
    parents, which stays valid while ``Pa ⊆ inputs`` (one share of the budget
    is kept for it).
 
+**Union over a given family** (``refute=False``).  When the family of
+candidates comes from elsewhere (the parent sets accepted by an invariance
+test, a declared list), step 2 is skipped: no extension families, every
+candidate survives, and step 3 gives each row one ball that contains every
+candidate's ball (it encloses their union).  Each candidate's balls are built
+at the **full** ``delta``, with no split: if a fixed candidate ``s*`` contains
+the true parents, the result contains ``s*``'s ball on every row, so it holds
+whenever that one ball holds, with probability at least ``1 - delta``.  For
+a data-dependent family that contains ``Pa(node)`` itself with probability at
+least ``1 - delta_G`` (ICP at level ``delta_G``: Peters, Janzing & Schölkopf
+2017, §7.2.5, pp. 153-154), the result holds with probability at least
+``1 - delta_G - delta`` (the caller accounts for ``delta_G``).  If a
+data-dependent family is only known to contain some superset of the parents,
+that argument does not apply.
+
 Literature: k-meteorologists (Diuk, Li & Leffler, ICML 2009); offline
 structure learning for safe policy improvement with one behaviour policy
 (Simão & Spaan, IJCAI 2019, Alg. 3 and Prop. 1, p. 3456); the KWIK framework
@@ -106,6 +121,9 @@ class AgreementSet:
     delta_per_family: float = 0.0
     sampling: str = "iid"
     assumption_refuted: bool = False
+    # Whether candidates were tested against their one-variable extensions
+    # (the agreement rule); False: the union over the given family.
+    refute: bool = True
     # Declared assumptions; with explicit candidates the first one is "some
     # given candidate contains Pa(node)" instead of the bound on max_parents.
     assumptions: Tuple[str, ...] = ASSUMPTIONS
@@ -148,6 +166,7 @@ def agreement_set(
     max_rows: int = 1 << 20,
     max_families: int = 1 << 14,
     coverage_rows: torch.Tensor | None = None,
+    refute: bool = True,
 ) -> AgreementSet:
     """One probability set per row of ``node``, valid without knowing its parents.
 
@@ -189,6 +208,17 @@ def agreement_set(
         the feasible state-action rows when the inputs encode actions with
         constraints (one-hot repair flags).  Default: every joint value, which
         can include combinations that never occur.
+    refute:
+        ``True`` (default): the agreement rule, which discards candidates that
+        disagree with a one-variable extension.  ``False``: no refutation;
+        each row gets one ball containing every given candidate's ball, all
+        built at the full ``delta`` (see the module notes: no split is
+        needed).  Use it for a family built elsewhere (ICP accepted sets, a
+        declared list): valid with probability ``>= 1 - delta`` when a fixed
+        candidate contains ``Pa(node)``, and ``>= 1 - delta_G - delta`` when
+        ``Pa(node)`` itself is in a family that holds w.p. ``1 - delta_G``.
+        Requires ``candidates`` (or a :class:`HypothesisSet` with candidates
+        for ``node``).
 
     Returns
     -------
@@ -207,6 +237,9 @@ def agreement_set(
         raise ValueError(f"inputs has repeated names: {list(inputs)}.")
     if node in inputs:
         raise ValueError(f"'{node}' cannot be one of its own inputs.")
+    if not refute and candidates is None:
+        raise ValueError("refute=False needs the family: pass candidates (or a HypothesisSet with "
+                         f"candidates for '{node}').")
     if candidates is None and max_parents is None:
         raise ValueError("max_parents is required when candidates is not given.")
     if max_parents is not None and max_parents < 0:
@@ -241,6 +274,8 @@ def agreement_set(
     extensions: Dict[Family, List[Tuple[str, Family]]] = {}
     for c in cands:
         extensions[c] = []
+        if not refute:
+            continue                                      # union over the given family: no extensions
         for v in inputs:
             if v in c:
                 continue
@@ -259,8 +294,13 @@ def agreement_set(
     flat_ok = flat_rows <= max_rows
     flat_is_family = frozenset(inputs) in families
     # One share of the budget is kept for the flat fallback (all inputs as parents)
-    # whenever it is not already a family; it does not depend on max_rows.
-    per_family = delta / (len(fam_list) + (0 if flat_is_family else 1))
+    # whenever it is not already a family; it does not depend on max_rows.  Without
+    # refutation no union bound is needed: the result contains every candidate's
+    # ball, so it holds whenever the ball of one fixed superset candidate holds.
+    if refute:
+        per_family = delta / (len(fam_list) + (0 if flat_is_family else 1))
+    else:
+        per_family = delta
     balls: Dict[Family, L1BallSet] = {
         f: l1_ball_set_from_counts(counts[(node, f)], delta=per_family, sampling=sampling)
         for f in fam_list
@@ -345,15 +385,24 @@ def agreement_set(
             return (full.sum(dim=drop) if drop else full).reshape(-1, k)
         return count_table_for(hs.variables, data, node, union)[0]
 
-    assumptions = ASSUMPTIONS if candidates is None else (
-        "some given candidate contains Pa(node) (explicit candidates: max_parents is not used)",
-        *ASSUMPTIONS[1:],
-    )
+    if not refute:
+        assumptions: Tuple[str, ...] = (
+            "some given candidate contains Pa(node) (union over the given family, no refutation)",
+            *ASSUMPTIONS[2:],
+        )
+    elif candidates is None:
+        assumptions = ASSUMPTIONS
+    else:
+        assumptions = (
+            "some given candidate contains Pa(node) (explicit candidates: max_parents is not used)",
+            *ASSUMPTIONS[1:],
+        )
     common = dict(
         node=node, candidates=cands, discarded=discarded,
         max_parents=d if candidates is None else None, epsilon=epsilon,
         level=1.0 - delta, n_families=len(fam_list), delta_per_family=per_family,
         sampling=sampling, flat_rows=n_coverage, flat_visited=flat_visited, assumptions=assumptions,
+        refute=refute,
     )
 
     if not survivors:
@@ -393,7 +442,8 @@ def agreement_set(
     if n_rows > max_rows:
         raise ValueError(
             f"The survivors' parents {union} span {n_rows} rows (> max_rows={max_rows}); "
-            "lower max_parents, restrict inputs, or raise max_rows."
+            + ("use fewer or smaller candidates, or raise max_rows." if not refute
+               else "lower max_parents, restrict inputs, or raise max_rows.")
         )
     # Two streaming passes over the survivors: memory O(R K), whatever their number.
     def lifted(s: Family, table: torch.Tensor) -> torch.Tensor:

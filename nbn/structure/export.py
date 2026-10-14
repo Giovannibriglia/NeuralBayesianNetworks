@@ -205,7 +205,7 @@ def export_factored_sets(
             if isinstance(obj, AgreementSet):
                 record["agreement"] = {
                     "max_parents": obj.max_parents, "survivors": [list(c) for c in obj.survivors],
-                    "assumption_refuted": bool(obj.assumption_refuted),
+                    "assumption_refuted": bool(obj.assumption_refuted), "refute": bool(obj.refute),
                 }
             if isinstance(ps, L1BallSet):
                 arrays[f"{fid}/center"] = _np(ps.center)
