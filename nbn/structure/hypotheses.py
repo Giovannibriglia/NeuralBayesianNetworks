@@ -77,6 +77,9 @@ from nbn.uncertainty.binomial import IntervalMethod
 from nbn.uncertainty.counts import count_table_for
 from nbn.uncertainty.sets import ProbabilitySet
 
+if TYPE_CHECKING:
+    from nbn.scm.calibration import ConformalScore
+
 Factor = Tuple[str, Tuple[str, ...]]
 Hypothesis = Dict[str, Tuple[str, ...]]
 Builder = Literal["interval", "l1", "dirichlet"]
@@ -458,7 +461,7 @@ class HypothesisSet:
         level: float = 0.9,
         groups: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
-        discrete_score: str = "exclusive",
+        discrete_score: ConformalScore = "exclusive",
     ) -> CalibratedFactorSets:
         """One calibrated set per continuous or neural factor, on held-out rows.
 
