@@ -41,11 +41,15 @@ conformal part).  Transitions from one episode are not: pass ``groups``
     order (meaningful for ordered classes).
 
 :func:`conformal_sets` — prediction sets for discrete children
-    Split conformal with the cumulative (adaptive) score: sort classes by
-    decreasing ``p_hat`` and add the probabilities up to and including the
-    observed class (Romano, Sesia & Candès, *Classification with Valid and
-    Adaptive Coverage*, NeurIPS 2020; Kochenderfer et al., *Algorithms for
-    Validation*, Ex. 12.4, p. 342).  Marginal coverage ``>= 1 - alpha``.
+    Split conformal with a cumulative (adaptive) score: sort classes by
+    decreasing ``p_hat``; the score of class ``y`` is the mass of the classes
+    ranked above it, plus ``u`` times its own probability (Romano, Sesia &
+    Candès, *Classification with Valid and Adaptive Coverage*, NeurIPS 2020).
+    ``score="exclusive"`` (``u = 0``, the default), ``"inclusive"``
+    (``u = 1``; Kochenderfer et al., *Algorithms for Validation*, Ex. 12.4,
+    p. 342) or ``"randomized"`` (``u ~ U(0, 1)`` per row).  Any of them gives
+    marginal coverage ``>= 1 - alpha`` under exchangeability (*ibid.*,
+    §12.2.3, p. 340).
 
 :func:`conformal_intervals` — prediction intervals
     Split conformal prediction: intervals for ``X | pa`` that cover a new
@@ -63,13 +67,13 @@ from __future__ import annotations
 import hashlib
 import math
 from dataclasses import dataclass, field
-from typing import Literal, Mapping
+from typing import Literal, Mapping, get_args
 
 import torch
 
 from nbn.scm._stats import require_cpu_generator
 from nbn.scm.mechanisms import StructuralMechanism
-from nbn.utils.device import to_device, to_device_dtype
+from nbn.utils.device import supports_float64, to_device, to_device_dtype
 
 Guarantee = Literal["pac_if_pit_independent", "marginal"]
 
@@ -322,6 +326,16 @@ def _base_interval(mechanism, parents, method: str, alpha: float):
 # ---------------------------------------------------------------------------
 
 
+ConformalScore = Literal["exclusive", "inclusive", "randomized"]
+CONFORMAL_SCORES: tuple[str, ...] = get_args(ConformalScore)
+
+
+def check_conformal_score(score: str) -> None:
+    """Raise ``ValueError`` unless ``score`` is one of :data:`CONFORMAL_SCORES`."""
+    if score not in CONFORMAL_SCORES:
+        raise ValueError(f"score must be one of {CONFORMAL_SCORES}; got {score!r}.")
+
+
 @dataclass(kw_only=True)
 class ConformalSets:
     """Split-conformal prediction sets for one discrete node (cumulative score).
@@ -331,11 +345,16 @@ class ConformalSets:
     *marginally*.  ``threshold`` is ``inf`` (every class) when there are too
     few calibration rows for the requested level.
 
-    Discrete scores tie (e.g. every row whose class is ranked last scores 1),
-    so coverage can exceed ``level`` by more than ``1/(n+1)``: only the lower
-    bound is guaranteed.  Membership uses ``score <= threshold + 1e-6`` so
-    that float noise between batch sizes cannot drop a class (a negligible
-    extra over-coverage).
+    ``score`` is the one used at calibration (see :func:`conformal_sets`).
+    Discrete scores tie, so coverage can exceed ``level`` by more than
+    ``1/(n+1)``: only the lower bound is guaranteed (``"randomized"`` breaks
+    the ties).  Float noise: the probabilities of one row can differ by about
+    one unit in the last place between batch sizes.  Membership is
+    ``score <= threshold`` up to ``K`` such units (a score sums up to ``K``
+    probabilities), so a class at the threshold is not dropped by that noise.
+    One case remains batch-dependent: two classes of a row whose
+    probabilities differ by about one unit can swap order, which moves a whole
+    probability between their scores (measure zero for continuous outputs).
     """
 
     node: str
@@ -343,47 +362,135 @@ class ConformalSets:
     threshold: float
     n_calibration: int
     level: float
+    score: ConformalScore = "exclusive"
     guarantee: Guarantee = "marginal"
     _bound_to: str = field(default="", repr=False)
 
-    def sets(self, mechanism, parents: torch.Tensor | None, batch: int | None = None) -> torch.Tensor:
+    def __setstate__(self, state: dict) -> None:
+        # Sets pickled before the ``score`` field existed were calibrated with the inclusive score.
+        state.setdefault("score", "inclusive")
+        self.__dict__.update(state)
+
+    def sets(self, mechanism, parents: torch.Tensor | None, batch: int | None = None,
+             generator: torch.Generator | None = None) -> torch.Tensor:
+        """``[B, K]`` membership mask.
+
+        For ``score="randomized"`` one ``u`` is drawn per row, in row order, from
+        ``generator`` (the global RNG if None): the same rows give the same sets
+        only with a generator in the same state.  Pass a freshly seeded generator
+        to every call whose sets must agree.
+        """
         _check_bound(self._bound_to, mechanism)
         with torch.no_grad():
             probs = mechanism.probs(parents, batch)
-            return _cumulative_scores(probs) <= self.threshold + _SCORE_TOL
+            u = _score_u(self.score, probs.shape[0], generator)
+            scores = _cumulative_scores(probs, u)
+            bound = _upper_threshold(self.threshold, probs.dtype, probs.shape[-1])
+            return (scores <= bound).to(probs.device)
 
 
 def conformal_sets(model, calibration_data: Mapping[str, torch.Tensor], node: str,
                    alpha: float = 0.1, groups: torch.Tensor | None = None,
-                   generator: torch.Generator | None = None) -> ConformalSets:
+                   generator: torch.Generator | None = None,
+                   score: ConformalScore = "exclusive") -> ConformalSets:
     """Calibrate prediction sets of level ``1 - alpha`` for a discrete node on held-out rows.
 
-    Score of a row: the total probability of the classes ranked (by
-    decreasing ``p_hat``) up to and including the observed one.  Threshold:
-    the ``ceil((n + 1)(1 - alpha))``-th smallest score.  A new row's set is
-    every class whose score is at most the threshold.
+    Classes are ranked by decreasing ``p_hat``; the score of class ``y`` is the
+    mass ranked before it plus ``u * p_hat(y)``:
+
+    ``"exclusive"`` (default, ``u = 0``)
+        The mass of the classes with a strictly larger probability: the most
+        probable classes score exactly ``0`` and are always in the set, so a
+        set is never empty, a confident row gets one class whatever the float
+        precision, and exactly tied top classes are all kept.
+        Ties at ``0`` make it conservative (coverage above ``1 - alpha``) for
+        very accurate classifiers.
+    ``"inclusive"`` (``u = 1``)
+        The cumulative mass up to and including ``y`` in a stable descending
+        sort, the score NBN used before (Kochenderfer et al., *Algorithms for
+        Validation*, Ex. 12.4, p. 342).  When probabilities saturate, a row
+        more confident than the threshold gets an empty set (NBN #322); prefer
+        ``"exclusive"`` or ``"randomized"``.
+    ``"randomized"`` (``u ~ U(0, 1)``, one draw per row)
+        The randomized adaptive score of Romano, Sesia & Candès (NeurIPS
+        2020): ties are broken, so coverage is close to ``1 - alpha`` from
+        above, and sets are random (pass ``generator`` for reproducibility;
+        :meth:`ConformalSets.sets` takes one too).  A set can be empty.
+
+    Threshold: the ``ceil((n + 1)(1 - alpha))``-th smallest calibration
+    score.  A new row's set is every class whose score is at most the
+    threshold.  Every score gives marginal coverage ``>= 1 - alpha`` for
+    exchangeable rows (*ibid.*, §12.2.3, p. 340); none gives conditional
+    coverage.
     """
     if not 0.0 < alpha < 1.0:
         raise ValueError(f"alpha must lie in (0, 1), got {alpha}.")
+    check_conformal_score(score)
     mech = _mechanism(model, node, need=("probs", "class_index"))
     x, parents = _calibration_rows(model, calibration_data, node, groups, generator)
     with torch.no_grad():
         idx = mech.class_index(x)
-        scores = _cumulative_scores(mech.probs(parents, idx.shape[0]))
-        scores = scores.gather(-1, idx.unsqueeze(-1)).squeeze(-1)
+        probs = mech.probs(parents, idx.shape[0])
+        u = _score_u(score, probs.shape[0], generator)
+        scores = _cumulative_scores(probs, u)
+        scores = scores.gather(-1, idx.reshape(-1, 1).to(scores.device)).squeeze(-1)
     n = scores.numel()
     rank = math.ceil((n + 1) * (1.0 - alpha))
     threshold = math.inf if rank > n else float(scores.sort().values[rank - 1])
     return ConformalSets(node=node, alpha=alpha, threshold=threshold, n_calibration=n,
-                         level=1.0 - alpha, _bound_to=_fingerprint(mech))
+                         level=1.0 - alpha, score=score, _bound_to=_fingerprint(mech))
 
 
-_SCORE_TOL = 1e-6  # float32 scores of the same cell differ by ~1 ulp between batch sizes
+def _score_u(score: str, n_rows: int, generator: torch.Generator | None) -> torch.Tensor | float:
+    """The weight ``u`` of the observed class's own probability in the score."""
+    check_conformal_score(score)
+    if score == "exclusive":
+        return 0.0
+    if score == "inclusive":
+        return 1.0
+    require_cpu_generator(generator, 'conformal_sets(score="randomized")')
+    return torch.rand(n_rows, 1, generator=generator, dtype=torch.float64)
 
 
-def _cumulative_scores(probs: torch.Tensor) -> torch.Tensor:
-    """``s[b, k]`` = mass of the classes ranked at or above ``k`` (decreasing probability)."""
-    order = torch.argsort(probs, dim=-1, descending=True, stable=True)
-    cumulative = probs.gather(-1, order).cumsum(-1)
-    cumulative = cumulative / cumulative[..., -1:]  # the last class scores exactly 1 (no float drift)
-    return torch.empty_like(probs).scatter_(-1, order, cumulative)
+def _cumulative_scores(probs: torch.Tensor, u: torch.Tensor | float = 1.0) -> torch.Tensor:
+    """Cumulative scores ``s[b, k]`` (see :func:`conformal_sets`).
+
+    ``u = 0`` (exclusive): the mass of the classes with a strictly larger
+    probability, by exact comparison, so exactly tied classes share a score
+    (a uniform row scores 0 everywhere) and near-ties are ordered by value.
+    ``u > 0`` (inclusive, randomized): the mass ranked before ``k`` in a
+    stable descending sort plus ``u * p_k``, the previous NBN definition
+    (exact ties broken by class index).  Float64 (on the CPU for MPS, which
+    has no float64), probabilities normalised to sum to one; ``O(B K log K)``
+    time and ``O(B K)`` memory.  ``u`` is a float or a ``[B, 1]`` tensor.
+    """
+    device = probs.device if supports_float64(probs.device) else torch.device("cpu")
+    p = probs.detach().to(device=device, dtype=torch.float64)
+    p = p / p.sum(-1, keepdim=True)
+    sorted_p, order = torch.sort(p, dim=-1, descending=True, stable=True)
+    before = torch.cat([torch.zeros_like(sorted_p[..., :1]), sorted_p.cumsum(-1)[..., :-1]], -1)
+    if isinstance(u, float) and u == 0.0:
+        # mass strictly above each value: position of its first equal in the descending sort
+        first = torch.searchsorted(-sorted_p.contiguous(), -p.contiguous(), right=False)
+        return before.gather(-1, first)
+    u_t = u if isinstance(u, float) else u.to(device)
+    scores_sorted = before + u_t * sorted_p
+    if isinstance(u, float) and u == 1.0:
+        scores_sorted[..., -1] = 1.0                                  # no float drift at the end
+    return torch.empty_like(p).scatter_(-1, order, scores_sorted)
+
+
+def _upper_threshold(threshold: float, dtype: torch.dtype, n_classes: int = 1) -> float:
+    """``threshold`` plus ``n_classes`` units in the last place of ``dtype`` at ``threshold``.
+
+    A cumulative score sums up to ``K`` probabilities, each of which can move
+    by about one unit between batch sizes; the margin keeps such a class in
+    the set.  Classes within the margin of the threshold are kept (they cannot
+    be told apart from noise); at ``threshold = 0`` the margin is negligible.
+    """
+    if math.isinf(threshold):
+        return threshold
+    dt = dtype if dtype.is_floating_point else torch.float32
+    t = torch.tensor(abs(threshold), dtype=dt)
+    spacing = float(torch.nextafter(t, torch.tensor(math.inf, dtype=dt)).double() - t.double())
+    return threshold + max(1, int(n_classes)) * spacing
