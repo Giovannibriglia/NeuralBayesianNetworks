@@ -47,8 +47,9 @@ dependent on the loggers.
 
 Scope
 -----
-Discrete targets and discrete parents (count-based sets).  Continuous and
-mixed factors: issue #318.  One set per row that combines the candidates of a
+Count-based sets need discrete targets and parents.  Continuous and mixed
+factors: :meth:`HypothesisSet.fit` and :meth:`HypothesisSet.calibrated_sets`
+(:mod:`nbn.structure.continuous`).  One set per row that combines the candidates of a
 node: :func:`nbn.structure.agreement_set` (agreement rule).
 """
 from __future__ import annotations
@@ -57,11 +58,14 @@ import itertools
 import math
 import warnings
 from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, Literal, Mapping, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Dict, Iterator, List, Literal, Mapping, Sequence, Tuple, Union
 
 import torch
 
 from nbn.core.variables import Variable
+
+if TYPE_CHECKING:  # pragma: no cover
+    from nbn.structure.continuous import CalibratedFactorSets, FactorMechanisms
 from nbn.learning.weighting import validate_weights
 from nbn.uncertainty.builders import (
     Sampling,
@@ -195,13 +199,19 @@ class HypothesisSet:
                 "previous slice only."
             ) from err
 
-    def _require_discrete(self) -> None:
+    def _continuous_involved(self) -> List[str]:
         involved = set(self.targets) | {p for cs in self.candidates.values() for c in cs for p in c}
-        continuous = sorted(v for v in involved if not self.variables[v].is_discrete)
+        return sorted(v for v in involved if not self.variables[v].is_discrete)
+
+    def _has_continuous(self) -> bool:
+        return bool(self._continuous_involved())
+
+    def _require_discrete(self) -> None:
+        continuous = self._continuous_involved()
         if continuous:
             raise ValueError(
                 f"Count-based factors need discrete variables; {continuous} are continuous "
-                "(continuous and mixed factors: issue #318)."
+                "(fit continuous and mixed factors with HypothesisSet.fit and calibrated_sets)."
             )
 
     # ------------------------------------------------------------------
@@ -260,6 +270,7 @@ class HypothesisSet:
         weights: torch.Tensor | None = None,
         max_union_cells: int = DEFAULT_MAX_UNION_CELLS,
         keep_union_tables: bool = False,
+        discrete_only: bool = False,
     ) -> FactorCounts:
         """Count tables ``[R, K]`` for every factor.
 
@@ -276,18 +287,30 @@ class HypothesisSet:
         sums them out of the factor tables, exactly.  ``keep_union_tables``
         keeps each node's dense union table in
         :attr:`FactorCounts.union_tables` (memory: one table per node);
-        by default it is freed once the candidates' tables are summed.
+        by default it is freed once the candidates' tables are summed.  ``discrete_only`` counts only the factors whose node and
+        parents are all discrete (the others are fitted by :meth:`fit`),
+        instead of raising.
         """
-        self._require_discrete()
+        if not discrete_only:
+            self._require_discrete()
         first = data[self.targets[0]]
-        n_rows = first.reshape(-1).shape[0]
+        n_rows = int(first.shape[0]) if first.dim() > 0 else 1   # rows; a column may be [N, D]
         weights = validate_weights(weights, n_rows, where="HypothesisSet.counts", device=first.device)
         tables: Dict[Factor, torch.Tensor] = {}
         cards: Dict[Factor, List[int]] = {}
         union_used: Dict[str, bool] = {}
         union_tables: Dict[str, Tuple[Tuple[str, ...], torch.Tensor]] = {}
+        not_counted: List[Factor] = []
         for node in self.targets:
             cs = self.candidates[node]
+            if discrete_only:
+                if not self.variables[node].is_discrete:
+                    not_counted += [(node, c) for c in cs]
+                    continue
+                not_counted += [(node, c) for c in cs if not all(self.variables[p].is_discrete for p in c)]
+                cs = [c for c in cs if all(self.variables[p].is_discrete for p in c)]
+                if not cs:
+                    continue
             union = tuple(dict.fromkeys(p for c in cs for p in c))
             union_cards = [int(self.variables[p].cardinality) for p in union]
             k = int(self.variables[node].cardinality)
@@ -324,7 +347,7 @@ class HypothesisSet:
         return FactorCounts(
             hypothesis_set=self, tables=tables, parent_cards=cards,
             union_used=union_used, weighted=weights is not None,
-            union_tables=union_tables,
+            union_tables=union_tables, not_counted=not_counted,
         )
 
     # ------------------------------------------------------------------
@@ -377,6 +400,7 @@ class HypothesisSet:
                 "PAC sets need counts of independent draws; weighted counts do not carry the "
                 "guarantee (use builder='dirichlet' for weighted pseudo-counts)."
             )
+        mixed = self._has_continuous()
         if isinstance(data_or_counts, FactorCounts):
             if data_or_counts.hypothesis_set is not self:
                 raise ValueError("These counts were built by another HypothesisSet.")
@@ -384,10 +408,19 @@ class HypothesisSet:
                 raise ValueError("weights apply when counting; pass them to counts().")
             fc = data_or_counts
         else:
-            fc = self.counts(data_or_counts, weights=weights)
+            fc = self.counts(data_or_counts, weights=weights, discrete_only=mixed)
+        # Split over ALL factors (also the continuous ones calibrated elsewhere), so the
+        # sets here and calibrated_sets(level = 1 - delta) hold together at 1 - delta.
         per_factor = delta / self.n_factors
         sets: Dict[Factor, ProbabilitySet] = {}
+        skipped: Dict[Factor, str] = {}
+        if not fc.tables:
+            raise ValueError("No count-based factor in this set (every factor involves a continuous variable); "
+                             "use HypothesisSet.fit and calibrated_sets.")
         for f in self.factors:
+            if f not in fc.tables:
+                skipped[f] = "continuous or mixed factor: use HypothesisSet.fit and calibrated_sets"
+                continue
             table = fc.tables[f]
             if builder == "interval":
                 sets[f] = interval_set_from_counts(table, delta=per_factor, method=method, sampling=sampling)
@@ -399,7 +432,44 @@ class HypothesisSet:
         return FactorSets(
             hypothesis_set=self, sets=sets, counts=fc, builder=builder, level=1.0 - delta,
             delta_per_factor=per_factor, sampling=None if builder == "dirichlet" else sampling,
+            skipped=skipped,
         )
+
+    # ------------------------------------------------------------------
+    # Continuous and mixed factors (#318)
+    # ------------------------------------------------------------------
+
+    def fit(self, data: Mapping[str, torch.Tensor], **kwargs) -> FactorMechanisms:
+        """Fit one mechanism per factor, all candidates of a node together.
+
+        See :func:`nbn.structure.continuous.fit_factors` for the options
+        (``location="mlp" | "linear"``, ``noise``, ``hidden``, ``epochs``,
+        ``lr``, ``batch_size``, ``weights``, ``seed``, ``coupling``).
+        """
+        from nbn.structure.continuous import fit_factors
+
+        return fit_factors(self, data, **kwargs)
+
+    def calibrated_sets(
+        self,
+        fitted: FactorMechanisms,
+        calibration_data: Mapping[str, torch.Tensor],
+        method: str = "cqr",
+        level: float = 0.9,
+        groups: torch.Tensor | None = None,
+        generator: torch.Generator | None = None,
+    ) -> CalibratedFactorSets:
+        """One calibrated set per continuous or neural factor, on held-out rows.
+
+        The level is split over the factors (union bound).  Conformal results
+        are *marginal* (not per parent value); PIT bands hold for every
+        conditional only under the declared PIT-independence assumption.  See
+        :func:`nbn.structure.continuous.calibrate_factors`.
+        """
+        from nbn.structure.continuous import calibrate_factors
+
+        return calibrate_factors(self, fitted, calibration_data, method=method, level=level,
+                                 groups=groups, generator=generator)
 
     # ------------------------------------------------------------------
     # A fitted model for one hypothesis
@@ -408,7 +478,7 @@ class HypothesisSet:
     def model_for(
         self,
         hypothesis: Mapping[str, Sequence[str]],
-        counts: FactorCounts,
+        counts: Union[FactorCounts, FactorMechanisms],
         alpha: float = 0.0,
         device: str | None = None,
     ):
@@ -422,13 +492,29 @@ class HypothesisSet:
         counts.  The result is
         the model that fitting this hypothesis' DAG directly with table
         mechanisms of smoothing ``alpha`` would give.
+
+        Given the :class:`FactorMechanisms` of :meth:`fit` instead of counts,
+        it returns a ``StructuralCausalModel`` with copies of the fitted
+        mechanisms (continuous and mixed factors).
         """
         from nbn.core.network import NeuralBayesianNetwork
         from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
+        from nbn.structure.continuous import FactorMechanisms, model_from_fitted
 
+        if isinstance(counts, FactorMechanisms):
+            if counts.hypothesis_set is not self:
+                raise ValueError("These mechanisms were fitted by another HypothesisSet.")
+            if alpha != 0.0:
+                raise ValueError("The smoothing of fitted table factors is set at fit time: "
+                                 "HypothesisSet.fit(..., alpha=...).")
+            return model_from_fitted(self, counts, hypothesis, device=device)
         if counts.hypothesis_set is not self:
             raise ValueError("These counts were built by another HypothesisSet.")
         self._check_hypothesis(hypothesis)
+        missing_f = [(n, tuple(p)) for n, p in hypothesis.items() if (n, tuple(p)) not in counts.tables]
+        if missing_f:
+            raise ValueError(f"No count tables for {missing_f} (continuous or mixed factors): "
+                             "fit them with HypothesisSet.fit and pass its result to model_for.")
         used = set(self.targets) | {p for parents in hypothesis.values() for p in parents}
         roots = [v for v in self.inputs if v in used]
         marginals = {v: _marginal_from_factors(counts, v) for v in roots}
@@ -472,10 +558,19 @@ class FactorCounts:
     weighted: bool = False
     # Per target counted on the union path: (union parents, [R_union, K] table).
     union_tables: Dict[str, Tuple[Tuple[str, ...], torch.Tensor]] = field(default_factory=dict, repr=False)
+    # Factors left out by counts(discrete_only=True): continuous or mixed.
+    not_counted: List[Factor] = field(default_factory=list)
 
     def __getitem__(self, factor: Factor) -> torch.Tensor:
         node, parents = factor
+        self._require_counted([(node, tuple(parents))])
         return self.tables[(node, tuple(parents))]
+
+    def _require_counted(self, factors: List[Factor]) -> None:
+        missing = [f for f in factors if f in self.not_counted]
+        if missing:
+            raise KeyError(f"No count table for {missing}: continuous or mixed factors are not counted "
+                           f"(discrete_only=True); fit them with HypothesisSet.fit.")
 
     @property
     def input_marginals(self) -> Dict[str, torch.Tensor]:
@@ -490,6 +585,7 @@ class FactorCounts:
     def for_hypothesis(self, hypothesis: Mapping[str, Sequence[str]]) -> Dict[str, torch.Tensor]:
         """The count table of every target under one hypothesis (no copy)."""
         self.hypothesis_set._check_hypothesis(hypothesis)
+        self._require_counted([(n, tuple(p)) for n, p in hypothesis.items()])
         return {n: self.tables[(n, tuple(p))] for n, p in hypothesis.items()}
 
 
@@ -506,9 +602,21 @@ class FactorSets:
     delta_per_factor: float = 0.05
     # How the data were collected, for the PAC builders; None for "dirichlet".
     sampling: str | None = "iid"
+    # Factors without a count-based set (continuous or mixed; see calibrated_sets).
+    skipped: Dict[Factor, str] = field(default_factory=dict)
 
     @property
     def n_factors(self) -> int:
+        """Factors in the union-bound split: all of the hypothesis set's, skipped ones included.
+
+        ``level = 1 - n_factors * delta_per_factor``; :attr:`n_sets` counts
+        the factors that have a set here.
+        """
+        return self.hypothesis_set.n_factors
+
+    @property
+    def n_sets(self) -> int:
+        """Factors with a count-based set here (the others are in :attr:`skipped`)."""
         return len(self.sets)
 
     def __getitem__(self, factor: Factor) -> ProbabilitySet:
@@ -518,6 +626,9 @@ class FactorSets:
     def sets_for(self, hypothesis: Mapping[str, Sequence[str]]) -> Dict[str, ProbabilitySet]:
         """The set of every target under one hypothesis (views into the cache, no copy)."""
         self.hypothesis_set._check_hypothesis(hypothesis)
+        missing = [(n, tuple(p)) for n, p in hypothesis.items() if (n, tuple(p)) in self.skipped]
+        if missing:
+            raise KeyError(f"No count-based set for {missing}: {self.skipped[missing[0]]}.")
         return {n: self.sets[(n, tuple(p))] for n, p in hypothesis.items()}
 
 

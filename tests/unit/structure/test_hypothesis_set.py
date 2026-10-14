@@ -89,10 +89,10 @@ def test_validation(bad, err):
         HypothesisSet(v, bad)
 
 
-def test_continuous_variables_point_to_the_continuous_issue():
+def test_continuous_variables_point_to_fit_and_calibrated_sets():
     v = {"x": ("continuous", 1), "x'": ("discrete", 2)}
     hs = HypothesisSet(v, {"x'": [("x",)]})
-    with pytest.raises(ValueError, match="#318"):
+    with pytest.raises(ValueError, match="HypothesisSet.fit"):
         hs.counts({"x": torch.randn(5), "x'": torch.zeros(5)})
 
 
@@ -331,10 +331,12 @@ def test_fit_from_counts_refuses_subclasses_with_their_own_fit_local():
 
     counts = torch.tensor([[3.0, 1.0], [0.0, 2.0]])
     binning = BinningCategoricalTable.__new__(BinningCategoricalTable)  # the guard runs first
-    for mech in (binning, StructuralCategoricalTable()):
-        with pytest.raises(NotImplementedError, match="fit_local"):
-            mech.fit_from_counts(counts, [2])
+    with pytest.raises(NotImplementedError, match="fit_local"):
+        binning.fit_from_counts(counts, [2])
     SmoothedEmpiricalCategoricalMechanism().fit_from_counts(counts, [2])  # no fit_local override
+    structural = StructuralCategoricalTable()                            # overrides both: supported
+    structural.fit_from_counts(counts, [2])
+    assert structural.noise.n_classes == 2
 
 
 def _small():

@@ -150,8 +150,56 @@ chosen = hs.model_for(next(hs.hypotheses()), sets.counts)   # fitted, no pass ov
   table mechanisms set from the cached counts, equal to fitting that DAG
   directly.
 - Worked example: {doc}`../examples/14_structure_uncertainty_hypothesis_sets`.
-- Scope: discrete nodes and parents. Continuous and mixed factors are planned
-  (issue #318).
+- Scope of the count-based sets: discrete nodes and parents. Continuous and
+  mixed factors: see the next section.
+
+### Continuous and mixed factors
+
+Count-based sets need discrete nodes and parents. For continuous targets, and
+for discrete targets with continuous parents, `HypothesisSet.fit` fits one
+mechanism per factor, with **all candidates of a node fitted together**. Each
+result is a standard NBN mechanism, so `model_for`, the calibration tools and
+counterfactuals work unchanged. Table factors and discrete inputs become
+`StructuralCategoricalTable` objects, with the declared `coupling` and the
+smoothing `alpha` given to `fit`. A candidate's initial weights depend only on
+the seed and the factor itself, so adding or reordering candidates does not
+change the other candidates' fits.
+
+```python
+fitted = hs.fit(train, location="mlp", epochs=100)        # or location="linear"
+cal = hs.calibrated_sets(fitted, calibration, method="cqr", level=0.9)
+cal.guarantees                                            # per factor: "marginal"
+model = hs.model_for(hypothesis, fitted)                  # a StructuralCausalModel
+```
+
+- **Linear location** (`AdditiveNoiseMechanism(location="linear")`). The
+  weighted moments of the union of a node's candidate parents are computed
+  once, and each candidate's normal equations are sub-blocks of them.
+- **MLP location** (`location="mlp"`). The candidates' networks are stacked
+  along a candidate axis, and each reads the union of parents through a fixed
+  mask, so unused parents never reach it. The loss is the sum of the
+  candidates' losses, so each candidate trains as it would alone. After
+  training, each candidate becomes an `AdditiveNoiseMechanism` with its own
+  standardisation and a noise law fitted on its own residuals. Discrete
+  targets with continuous parents use the same trainer with a categorical
+  head (`StructuralNeuralCategorical`). Batching pays off with mini-batches
+  (many small steps); with full batches on many rows the work is
+  compute-bound and both paths cost about the same.
+- **Calibrated sets per factor** on held-out rows: split conformal (`"cqr"`
+  / `"residual"`, or conformal sets for discrete children) or a PIT band
+  (`"pit"`). The level is split over **all** factors of the set by a union
+  bound, as in `factor_sets`. So in a mixed set, `calibrated_sets(level)` for
+  the continuous and neural factors and `factor_sets(delta = 1 - level)` for
+  the count-based ones hold together at `level`. `factor_sets` builds only
+  the count-based factors and lists the others in `skipped`.
+  - Conformal results are **marginal**: coverage on average over the parents,
+    not for each parent value. So they do not support a per-row worst case
+    in robust planning.
+  - PIT bands bound every conditional only under the declared
+    PIT-independence assumption.
+  - Keep every candidate. Choosing one by its calibration score and quoting
+    its guarantee is not supported; use a fresh split for that.
+- Worked example: {doc}`../examples/17_continuous_hypothesis_sets`.
 
 ### One set per row: the agreement rule
 
