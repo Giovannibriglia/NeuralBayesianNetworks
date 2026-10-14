@@ -81,7 +81,7 @@ def test_p_value_grid_and_floor():
         assert abs(p * (n_perm + 1) - round(p * (n_perm + 1))) < 1e-9  # (1 + count) / (n_perm + 1)
 
 
-def test_redrawn_tables_keep_both_margins():
+def test_exact_permutation_law_on_a_2x2_table():
     """The sequential hypergeometric draws are exact: brute-force the law of a tiny table."""
     t = torch.tensor([[[2.0, 1.0], [0.0, 2.0]]])  # one stratum, 2 contexts x 2 values
     # Under the null, the count n_00 is hypergeometric(N=5, K=2 zeros, n=3 rows in context 0).
@@ -116,8 +116,9 @@ def test_invalid_arguments():
     data = _sparse_data(100, 0)
     with pytest.raises(ValueError, match="reference"):
         context_invariance_test(model, data, "y", reference="exact")  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="n_perm"):
-        context_invariance_test(model, data, "y", n_perm=0)
+    for bad in (0, 10.5, True):
+        with pytest.raises(ValueError, match="n_perm"):
+            context_invariance_test(model, data, "y", n_perm=bad)
 
 
 @pytest.mark.parametrize("device", ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
@@ -155,13 +156,65 @@ def test_three_contexts_three_values_match_the_exact_permutation_law():
     assert p == pytest.approx(_exact_p(labels, values, 3, 3), abs=0.015)
 
 
-def test_chunking_over_strata_gives_the_same_statistic_and_level():
+def test_chunking_over_replicates_and_strata_keeps_the_exact_law():
+    """Tiny blocks (one replicate, one stratum at a time) give the same statistic and the exact law."""
+    labels = [0, 0, 1, 1, 2, 2, 2]
+    values = [0, 1, 1, 2, 2, 2, 0]
+    t = torch.zeros(3, 3, 3)
+    for a, b in zip(labels, values):
+        t[0, a, b] += 1
+    t[1] = t[0]                                   # two identical strata, one uninformative
+    t[2, 0, 0] = 4.0
+    p_big, g_big = _stratified_g_permutation(t, 20000, torch.Generator().manual_seed(0))
+    p_small, g_small = _stratified_g_permutation(t, 20000, torch.Generator().manual_seed(0), max_elements=7)
+    assert g_small == pytest.approx(g_big, rel=1e-12) == pytest.approx(float(_stratified_g(t)[0]), rel=1e-12)
+    # exact law of the sum over the two identical strata, by convolving the one-stratum law
+    one = []
+    for perm in itertools.permutations(range(len(values))):
+        tab = np.zeros((3, 3))
+        for i, j in enumerate(perm):
+            tab[labels[i], values[j]] += 1
+        one.append(_g_numpy(tab))
+    one = np.array(one)
+    total = (one[:, None] + one[None, :]).ravel()
+    exact = float(np.mean(total >= g_big - 1e-9 * max(1.0, g_big)))
+    for p in (p_big, p_small):
+        assert p == pytest.approx(exact, abs=0.015)
+
+
+def test_sparse_context_ids_cost_nothing():
+    """Contexts {0, 999} give the same tables, hence the same draws, as contexts {0, 1}."""
+    t = torch.zeros(8, 1000, 3)
+    dense = torch.zeros(8, 2, 3)
+    gen = torch.Generator().manual_seed(0)
+    dense[:] = torch.randint(0, 6, (8, 2, 3), generator=gen).float()
+    t[:, 0], t[:, 999] = dense[:, 0], dense[:, 1]
+    a = _stratified_g_permutation(t, 999, torch.Generator().manual_seed(3))
+    b = _stratified_g_permutation(dense, 999, torch.Generator().manual_seed(3))
+    assert a == b
+
+
+def test_rejection_includes_the_level_and_the_gate_warns_at_an_impossible_alpha():
+    from nbn.scm import DiagnosticResult
+    from nbn.uncertainty import confounding_gate
+
+    res = DiagnosticResult("context_invariance", 9.0, 0.001, null="", details={"n_perm": 999})
+    assert res.rejected(0.001) and not res.rejected(0.0009)
+    assert confounding_gate(True, res, alpha=0.001).use_confounded_rows
+    with pytest.warns(UserWarning, match="can never reject"):
+        confounding_gate(True, res, alpha=0.0005)
+
+
+@pytest.mark.parametrize("device", (["cuda"] if torch.cuda.is_available() else [])
+                         + (["mps"] if torch.backends.mps.is_available() else []))
+def test_cpu_generator_works_under_another_default_device(device):
     model = _sparse_model()
-    data = _sparse_data(800, 4, drift=0.05)
-    full = context_invariance_test(model, data, "y", n_perm=499, generator=torch.Generator().manual_seed(2))
-    table = torch.zeros(2**N_PARENTS, 2, 2)
-    x = sum(data[f"x{i}"].long() * 2 ** (N_PARENTS - 1 - i) for i in range(N_PARENTS))
-    table.index_put_((x, data["c"].long(), data["y"].long()), torch.ones(800), accumulate=True)
-    p_small, g_small = _stratified_g_permutation(table, 499, torch.Generator().manual_seed(2), max_elements=7)
-    assert g_small == pytest.approx(full.statistic, rel=1e-12)
-    assert p_small == pytest.approx(full.p_value, abs=0.06)  # different draws, same law
+    data = _sparse_data(300, 5)
+    ref = context_invariance_test(model, data, "y", n_perm=49, generator=torch.Generator().manual_seed(0))
+    old = torch.get_default_device()
+    torch.set_default_device(device)
+    try:
+        res = context_invariance_test(model, data, "y", n_perm=49, generator=torch.Generator(device="cpu").manual_seed(0))
+    finally:  # None removes the device mode; setting "cpu" back would leave it installed
+        torch.set_default_device(None if old.type == "cpu" else old)
+    assert res.p_value == ref.p_value
