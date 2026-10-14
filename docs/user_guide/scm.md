@@ -158,6 +158,17 @@ probability integral transform of any continuous structural mechanism,
 `"residual"`), and `conformal_sets` gives prediction sets for a discrete
 node.
 
+`conformal_sets` ranks classes by decreasing probability and scores the
+observed class by the mass ranked above it plus `u` times its own probability.
+`score="exclusive"` (`u = 0`, the default) never returns an empty set and stays
+informative when a classifier is very confident; `score="inclusive"` (`u = 1`,
+Kochenderfer et al., *Algorithms for Validation*, Ex. 12.4) can return empty
+sets once probabilities saturate; `score="randomized"` (Romano, Sesia & Candès,
+NeurIPS 2020) breaks ties, so coverage is close to `1 - alpha`, and takes a
+`generator`. All three have marginal coverage of at least `1 - alpha`.
+`HypothesisSet.calibrated_sets(..., discrete_score=...)` passes the choice on.
+Example: notebook 13, section 5.
+
 ```python
 from nbn.scm import conformal_intervals
 
