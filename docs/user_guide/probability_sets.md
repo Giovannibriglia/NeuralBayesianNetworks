@@ -197,6 +197,61 @@ inputs as parents). With explicit `candidates`, the first assumption becomes
 every logger (no hidden confounding). Several nodes: split `delta` between
 them. Worked example: {doc}`../examples/15_agreement_rule`.
 
+## Export for planning and verification tools
+
+Robust value iteration and interval or parametric model checkers (PRISM,
+Storm) need the sets **with their sharing**. A factor row `p_j(. | u)` is
+shared by every state-action row whose parents take the value `u`. Without
+the sharing, a tool can only build per-row boxes, which are sound but
+pessimistic; with it, it can build the coupled parametric model.
+`export_factored_sets` writes a documented side file:
+
+```python
+from nbn.structure import export_factored_sets, joint_row_bounds, load_factored_sets
+
+export_factored_sets("out/kernel", sets, model, state_vars=["health"], action_vars=["exercise"],
+                     exact=True)
+ex = load_factored_sets("out/kernel")
+(h,) = ex.hypotheses()                       # lazily, {node: factor id}
+lower, upper, nodes = joint_row_bounds(ex, h, row=5)   # bounds on P(s' | s, a) for one (s, a)
+```
+
+- `sets` can be a `FactorSets` (every factor of a `HypothesisSet`; the
+  hypotheses are the product of the candidates), or a mapping `node -> set`:
+  a `ProbabilitySet` (parents from the model's DAG), an `AgreementSet`, or a
+  `NoiseParameterSet` (nodes tied to one noise law share one **parameter
+  block**, so the coupling survives the export).
+- **`manifest.json`** (`schema: "nbn.factored_sets/1"`, JSON Schema in
+  `nbn/structure/schemas/factored_sets_v1.schema.json`) records:
+  - the variables and their roles (state, action, next state, reward,
+    termination) and the planning space (C order over state then action
+    variables);
+  - per factor: node, parents, set type, guarantee, level, sampling,
+    declared assumptions, and `graph_preserving`. That flag is false when an
+    entry can be zero in one member and positive in another, for example on
+    unseen rows; some interval-MDP solvers assume it. With `exact=True` it
+    holds for the rational bounds too;
+  - the parameter blocks, the hypotheses, the composition (union bound over
+    all listed sets, with the total level), and the two quantifiers. Robust
+    planning is "for all kernels, max policy"; parameter synthesis is
+    "exists parameters".
+- **`arrays.npz`** holds, per factor, `lower` / `upper` `[R, K]`, `unseen`,
+  `center` / `radius` for L1 balls, `samples`, `counts` (visits per factor
+  row), and one row map per distinct parent tuple (the factor row of each
+  planning row; omitted when their total size, `|S||A|` times the number of
+  distinct parent tuples, is above `max_rows`, where `factor_row` computes it
+  from the layout). With `exact=True` it also holds rational bounds
+  `lower_num / D <= lower` and `upper_num / D >= upper`, rounded outward
+  exactly (0 and 1 stay exact), for the factor boxes and the noise-polytope
+  constraints.
+- A `ProbabilitySet` has no parent names: they come from the model's DAG,
+  in its order, unless `parents={node: (...)}` names the order the table was
+  counted in.
+- Turning factor sets into joint rows is the tool's job. A joint row is the
+  product of its factor rows (multilinear in the factor parameters), and
+  `joint_row_bounds` gives the entry-wise box of that product.
+
+Worked example: {doc}`../examples/16_export_factored_sets`.
 
 ## How the guarantee is built
 

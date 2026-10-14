@@ -108,6 +108,7 @@ include = ["nbn*"]
 # ``nbn-bench --config`` and the bnlearn problem source work from a plain
 # ``pip install "nbn[bench]"``, not only from a checkout.
 "nbn.bench" = ["configs/**/*.yaml", "data/bnlearn/*.json"]
+"nbn.structure" = ["schemas/*.json"]
 
 [tool.setuptools_scm]
 write_to = "nbn/_version.py"

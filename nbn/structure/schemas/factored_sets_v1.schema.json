@@ -1,0 +1,344 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nbn.readthedocs.io/schemas/factored_sets_v1.schema.json",
+  "title": "NBN factored probability sets, version 1",
+  "description": "Manifest of an export by nbn.structure.export_factored_sets: factored transition sets with their sharing, for robust / interval / parametric MDP tools. Arrays live in arrays.npz under '<factor id>/<name>' and '<parameter id>/<name>'.",
+  "type": "object",
+  "required": [
+    "schema",
+    "nbn_version",
+    "variables",
+    "planning_space",
+    "row_layout",
+    "factors",
+    "parameters",
+    "hypotheses",
+    "composition",
+    "quantifiers",
+    "exact"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nbn.factored_sets/1"
+    },
+    "nbn_version": {
+      "type": "string"
+    },
+    "variables": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "cardinality",
+          "kind",
+          "role"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "cardinality": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "kind": {
+            "enum": [
+              "discrete",
+              "continuous"
+            ]
+          },
+          "role": {
+            "enum": [
+              "state",
+              "action",
+              "next_state",
+              "reward",
+              "termination",
+              "other"
+            ]
+          }
+        }
+      }
+    },
+    "planning_space": {
+      "type": "object",
+      "required": [
+        "state_vars",
+        "action_vars",
+        "n_rows",
+        "layout",
+        "cards"
+      ],
+      "properties": {
+        "state_vars": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "action_vars": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "n_rows": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "layout": {
+          "type": "string"
+        },
+        "cards": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    "row_layout": {
+      "type": "string"
+    },
+    "factors": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "node",
+          "parents",
+          "parent_cards",
+          "n_classes",
+          "set_type",
+          "guarantee",
+          "level",
+          "graph_preserving",
+          "n_rows",
+          "row_index"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "node": {
+            "type": "string"
+          },
+          "parents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "parent_cards": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "n_classes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "set_type": {
+            "enum": [
+              "interval",
+              "l1",
+              "samples",
+              "noise_polytope"
+            ]
+          },
+          "guarantee": {
+            "enum": [
+              "pac",
+              "pac_under_model",
+              "bayesian",
+              "asymptotic"
+            ]
+          },
+          "level": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "delta": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 1
+          },
+          "sampling": {
+            "enum": [
+              "iid",
+              "trajectory",
+              null
+            ]
+          },
+          "assumptions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "parameter": {
+            "type": "string"
+          },
+          "agreement": {
+            "type": "object"
+          },
+          "graph_preserving": {
+            "type": "boolean"
+          },
+          "n_rows": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "row_index": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Key in arrays.npz of the row map shared by factors with the same parents; null above max_rows."
+          }
+        }
+      }
+    },
+    "parameters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "n_values",
+          "n_expressions",
+          "guarantee",
+          "level",
+          "nodes"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "noise_polytope"
+          },
+          "n_values": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "n_expressions": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "guarantee": {
+            "type": "string"
+          },
+          "level": {
+            "type": "number"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "hypotheses": {
+      "type": "object",
+      "required": [
+        "candidates",
+        "list"
+      ],
+      "properties": {
+        "candidates": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "list": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "composition": {
+      "type": "object",
+      "required": [
+        "rule",
+        "events",
+        "delta_total",
+        "level",
+        "guarantees"
+      ],
+      "properties": {
+        "rule": {
+          "const": "union_bound"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "delta_total": {
+          "type": "number",
+          "minimum": 0
+        },
+        "level": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "guarantees": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "quantifiers": {
+      "type": "object",
+      "required": [
+        "robust_planning",
+        "parameter_synthesis"
+      ]
+    },
+    "exact": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "denominator": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

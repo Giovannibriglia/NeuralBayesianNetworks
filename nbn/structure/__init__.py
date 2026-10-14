@@ -11,11 +11,20 @@
   from the cached counts;
 * :func:`agreement_set` — one valid set per row of a node whose parents are
   uncertain (KWIK agreement rule, under a declared bound on the number of
-  parents).
+  parents);
+* :func:`export_factored_sets` / :func:`load_factored_sets` — a documented
+  side file (manifest + arrays) with the sets and their sharing, for robust,
+  interval and parametric MDP tools.
 
 User guide: https://nbn.readthedocs.io/en/latest/user_guide/probability_sets.html
 """
 from nbn.structure.agreement import AgreementSet, agreement_set
+from nbn.structure.export import (
+    FactoredSetsExport,
+    export_factored_sets,
+    joint_row_bounds,
+    load_factored_sets,
+)
 from nbn.structure.hypotheses import (
     DEFAULT_MAX_UNION_CELLS,
     FactorCounts,
@@ -26,4 +35,5 @@ from nbn.structure.hypotheses import (
 __all__ = [
     "HypothesisSet", "FactorCounts", "FactorSets", "DEFAULT_MAX_UNION_CELLS",
     "agreement_set", "AgreementSet",
+    "export_factored_sets", "load_factored_sets", "joint_row_bounds", "FactoredSetsExport",
 ]
