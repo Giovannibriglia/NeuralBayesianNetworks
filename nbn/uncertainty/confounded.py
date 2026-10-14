@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import warnings
 from dataclasses import dataclass, field
 from typing import List, Literal, Mapping, Sequence, Tuple
 
@@ -795,6 +796,8 @@ def confounding_gate(node_declared_unconfounded: bool, invariance=None, alpha: f
     ``context_invariance_test`` (regime as context).  A rejection raises
     suspicion and forces the confounded rows even for a declared node; a
     non-rejection never certifies a node (no test for confounding exists).
+    A permutation p-value is at least ``1 / (n_perm + 1)``; the gate warns
+    when that floor makes a rejection at ``alpha`` impossible.
     """
     flag = node_declared_unconfounded
     scalar_tensor = isinstance(flag, torch.Tensor) and flag.dtype == torch.bool and flag.dim() == 0
@@ -808,6 +811,14 @@ def confounding_gate(node_declared_unconfounded: bool, invariance=None, alpha: f
             )
         raise TypeError(f"node_declared_unconfounded must be a bool; got {type(flag).__name__}.")
     node_declared_unconfounded = flag
+    n_perm = getattr(invariance, "details", {}).get("n_perm") if invariance is not None else None
+    if n_perm is not None and alpha < 1.0 / (n_perm + 1):
+        warnings.warn(
+            f"The invariance test is a permutation test with n_perm={n_perm}: its p-value is at least "
+            f"{1.0 / (n_perm + 1):.3g}, so it can never reject at alpha={alpha}.  Rerun it with "
+            f"n_perm >= {math.ceil(1.0 / alpha)}.",
+            stacklevel=2,
+        )
     rejected = invariance is not None and bool(invariance.rejected(alpha))
     if rejected:
         return GateDecision(True, f"context invariance rejected (p = {invariance.p_value:.3g} < {alpha}): "

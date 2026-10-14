@@ -143,6 +143,23 @@ null they reject 5.0% and 4.0% of the time at `alpha = 0.05`. The continuous
 tests use asymptotic laws (a White-type `n R^2` test, KS with Bonferroni,
 Fisher z, HSIC with permutations).
 
+For a discrete node, `context_invariance_test` sums the G statistic over the
+parent configurations and, by default, compares it with a **permutation**
+reference: within each configuration the context labels are exchangeable
+under the null, so each context-by-value table is redrawn `n_perm = 999`
+times with its margins fixed, and `p = (1 + #{G_perm >= G_obs}) / (n_perm + 1)`
+(so `p >= 0.001`). For independent rows the level holds at any sample size;
+for trajectories it is approximate (close to nominal in simulations). To reject
+at level `alpha` after correcting for `m` tests, use `n_perm >= m / alpha`;
+`confounding_gate` warns when the floor makes a rejection impossible.
+`reference="chi2"`
+keeps the chi-square approximation, which is fast but over-rejects when many
+configurations are sparse: with 64 configurations and two contexts, under the
+null at `alpha = 0.05`, the permutation reference rejects 4.9% of 6000
+datasets of 2000 rows, the chi-square reference 21% (about 80% with 200 rows). Pass
+a CPU `generator` for reproducible p-values. Worked example:
+{doc}`../examples/10_confounding_and_noise_diagnostics`, section 1b.
+
 ```python
 from nbn.scm import noise_sharing_test
 

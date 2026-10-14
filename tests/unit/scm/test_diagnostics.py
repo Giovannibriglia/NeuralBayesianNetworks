@@ -189,7 +189,8 @@ def test_context_test_flags_the_confounded_logger_only():
     data = confounded_regimes(3000, generator=torch.Generator().manual_seed(0))
     clean = {k: v[data["c"] < 2] for k, v in data.items()}
     assert context_invariance_test(_regime_model(clean), clean, "h'").p_value > 0.01
-    assert context_invariance_test(_regime_model(data), data, "h'").p_value < 1e-6
+    assert context_invariance_test(_regime_model(data), data, "h'").p_value <= 1 / 1000  # permutation floor
+    assert context_invariance_test(_regime_model(data), data, "h'", reference="chi2").p_value < 1e-6
 
 
 def test_context_test_on_a_continuous_mechanism():
