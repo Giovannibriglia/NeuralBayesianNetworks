@@ -66,38 +66,69 @@ def _x(r, axis):
     return r["n"] if axis == "n" else r["n_edges"]
 
 
-def plot_time(ax, rows, axis, topo=None, budget=30.0, methods=None, ylabel=True):
-    groups = defaultdict(list)
+def agg(rows, axis, topo=None, methods=None):
+    """{method: [cell, ...]} with one cell per x value, aggregated over seeds.
+
+    A cell has x (mean nodes or mean edges), t (median time over seeds that
+    answered every query), ok (all seeds answered all), answered/asked
+    totals, and fail (first failure status, if any seed failed).
+    """
+    groups = defaultdict(lambda: defaultdict(list))
     for r in rows:
         if r.get("axis") != axis or (topo and r.get("topology") != topo):
             continue
-        if methods and r["method"] not in methods:
+        m = r["method"] + ("" if r.get("device", "cpu") == "cpu" else f"[{r['device']}]")
+        if methods and m not in methods:
             continue
-        groups[r["method"]].append(r)
-    for m, rs in sorted(groups.items()):
-        rs.sort(key=lambda r: _x(r, axis))
-        ok = [r for r in rs if r["status"] == "ok" and r.get("n_answered", 1) == r.get("n_q", 1)]
-        bad = [r for r in rs if r not in ok]
-        c = COLOR.get(_base(m), GREY)
+        key = r["n"] if axis == "n" else r["deg"]
+        groups[m][key].append(r)
+    out = {}
+    for m, by in groups.items():
+        cells = []
+        for key in sorted(by):
+            rs = by[key]
+            full = [r for r in rs if r["status"] == "ok"
+                    and r.get("n_answered", r.get("n_q")) == r.get("n_q")]
+            part = [r for r in rs if r["status"] == "ok" and r not in full]
+            bad = [r for r in rs if r["status"] != "ok"]
+            ts = [r["time_s"] for r in full + part]
+            cells.append(dict(
+                key=key, x=float(np.mean([_x(r, axis) for r in rs])),
+                t=float(np.median(ts)) if ts else None,
+                ok=len(full) == len(rs), n_runs=len(rs),
+                answered=sum(r.get("n_answered", r.get("n_q", 0)) or 0 for r in full + part),
+                asked=sum(r.get("n_q", 0) or 0 for r in rs),
+                fail=(bad[0]["status"] if bad else None), n_fail=len(bad),
+                rows=rs))
+        out[m] = cells
+    return out
+
+
+def plot_time(ax, rows, axis, topo=None, budget=30.0, methods=None, ylabel=True):
+    for m, cells in sorted(agg(rows, axis, topo, methods).items()):
+        c = COLOR.get(_base(m.split("[")[0]), GREY)
         ls = "--" if "@" in m else "-"
-        lab = LABEL.get(_base(m), m) + (" [master]" if "@" in m else "")
-        if ok:
-            ax.plot([_x(r, axis) for r in ok], [r["time_s"] for r in ok], ls, color=c,
+        lab = LABEL.get(_base(m.split("[")[0]), m) + (" [master]" if "@" in m else "")
+        good = [cl for cl in cells if cl["ok"]]
+        if good:
+            ax.plot([cl["x"] for cl in good], [cl["t"] for cl in good], ls, color=c,
                     marker="o", ms=3.5, lw=1.6, label=lab)
-        if bad:
-            r = bad[0]
-            y = budget if r["status"] == "timeout" else (ok[-1]["time_s"] if ok else budget)
-            why = {"timeout": "time", "oom": "mem"}.get(r["status"], r["status"])
-            if r["status"] == "ok":
-                why = f"{r.get('n_answered')}/{r.get('n_q')}"
-            ax.plot([_x(r, axis)], [y], "x", color=c, ms=7, mew=2,
-                    label=None if ok else lab)
-            ax.annotate(why, (_x(r, axis), y), textcoords="offset points", xytext=(4, 4),
+        partial = [cl for cl in cells if not cl["ok"] and cl["t"] is not None]
+        if partial:
+            ax.plot([cl["x"] for cl in partial], [cl["t"] for cl in partial], linestyle="none",
+                    marker="o", mfc="none", color=c, ms=5, label=None if good else lab)
+        dead = [cl for cl in cells if cl["t"] is None]
+        if dead:
+            cl = dead[0]
+            ax.plot([cl["x"]], [budget], "x", color=c, ms=7, mew=2,
+                    label=None if (good or partial) else lab)
+            ax.annotate({"timeout": "time", "oom": "mem"}.get(cl["fail"], cl["fail"]),
+                        (cl["x"], budget), textcoords="offset points", xytext=(4, 4),
                         fontsize=7, color=INK)
     ax.axhline(budget, color=GREY, lw=0.8, ls=":")
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlabel("nodes" if axis == "n" else "edges")
+    ax.set_xlabel("nodes" if axis == "n" else "edges (mean over seeds)")
     if ylabel:
         ax.set_ylabel("time (s)")
 
@@ -121,21 +152,34 @@ def fig_discrete_infer():
     rows = load("discrete_infer", "discrete_infer_master", "discrete_infer_cert")
     if not rows:
         return
-    fig, axs = plt.subplots(1, 3, figsize=(DOUBLE * 1.45, 2.8))
-    plot_time(axs[0], rows, "n", "local")
-    plot_time(axs[1], rows, "n", "er", ylabel=False)
-    plot_time(axs[2], rows, "deg", "er", ylabel=False)
-    axs[0].set_title("10 queries vs nodes\nbounded treewidth (window 5)")
-    axs[1].set_title("10 queries vs nodes\nErdős–Rényi (deg 2)")
-    axs[2].set_title("10 queries vs edges\nErdős–Rényi (n=100)")
-    h, l = axs[0].get_legend_handles_labels()
-    h2, l2 = axs[1].get_legend_handles_labels()
-    for hh, ll in zip(h2, l2):
-        if ll not in l:
-            h.append(hh)
-            l.append(ll)
-    fig.legend(h, l, loc="lower center", ncol=4, frameon=False, bbox_to_anchor=(0.5, -0.08))
-    fig.tight_layout(rect=(0, 0.08, 1, 1))
+    fig, axs = plt.subplots(2, 2, figsize=(DOUBLE, 5.4))
+    plot_time(axs[0, 0], rows, "n", "local")
+    plot_time(axs[0, 1], rows, "n", "er", ylabel=False)
+    plot_time(axs[1, 0], rows, "deg", "er")
+    axs[0, 0].set_title("10 queries vs nodes, bounded tree-width (window 5)")
+    axs[0, 1].set_title("10 queries vs nodes, Erdős–Rényi (deg 2)")
+    axs[1, 0].set_title("10 queries vs edges, Erdős–Rényi (n = 100)")
+    ax = axs[1, 1]
+    A = agg(rows, "n", "er", ["nbn_ve", "nbn_ve@master", "pgmpy_ve"])
+    for m, cells in sorted(A.items()):
+        c = COLOR.get(_base(m), GREY)
+        ax.plot([cl["x"] for cl in cells],
+                [100.0 * cl["answered"] / max(1, cl["asked"]) for cl in cells],
+                "--" if "@" in m else "-", color=c, marker="o", ms=3.5,
+                label=LABEL[_base(m)] + (" [master]" if "@" in m else ""))
+    ax.set_xscale("log")
+    ax.set_ylim(-3, 103)
+    ax.set_xlabel("nodes")
+    ax.set_ylabel("queries answered exactly (%)")
+    ax.set_title("Exact answers within budget, Erdős–Rényi (deg 2)\nhollow markers in other panels = partial")
+    h, l = [], []
+    for a in axs.flat[:3]:
+        for hh, ll in zip(*a.get_legend_handles_labels()):
+            if ll not in l:
+                h.append(hh)
+                l.append(ll)
+    fig.legend(h, l, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.5, -0.06))
+    fig.tight_layout(rect=(0, 0.06, 1, 1))
     fig.savefig(FIG / "discrete_infer.png", dpi=200, bbox_inches="tight")
     fig.savefig(FIG / "discrete_infer.pdf", bbox_inches="tight")
 
@@ -163,6 +207,28 @@ def lw_errors(rows):
                                         zip(r["lower"][qi], e, r["upper"][qi]))),
                                     width=(r.get("max_width") or [None] * 99)[qi]))
     return out
+
+
+def width_bound_stats(rows, k=3, budget_bytes=0.75 * 4 * 2**30, elem=4):
+    """How often the tree-width lower bound *proves* a refused query infeasible."""
+    import math
+    need = math.log(budget_bytes / elem, k) - 1  # lb above this => factor > budget
+    tot = refused = proven = 0
+    gaps = []
+    for r in rows:
+        if r["method"] != "nbn_ve" or r["status"] != "ok" or not r.get("width_bounds"):
+            continue
+        for a, (lb, ub) in zip(r["answers"], r["width_bounds"]):
+            tot += 1
+            gaps.append(ub - lb)
+            if a is None:
+                refused += 1
+                proven += lb > need
+    if not tot:
+        return ""
+    return (f"Width bounds on {tot} exact-VE queries: median gap (min-fill width − lower bound) = "
+            f"{np.median(gaps):.0f}; {refused} refused by the memory guard, of which {proven} are "
+            f"*proven* infeasible by the lower bound (needs lb > {need:.1f}).\n")
 
 
 def ve_agreement(rows):
@@ -365,29 +431,36 @@ def frontier(rows, topo=None, axis="n"):
 
 
 def table(rows, axis="n", topo=None, field="time_s"):
-    """Markdown table: rows = x values, columns = methods."""
-    cells = defaultdict(dict)
-    meths = set()
-    for r in rows:
-        if r.get("axis") != axis or (topo and r.get("topology") != topo):
-            continue
-        x = _x(r, axis) if axis == "deg" else r["n"]
-        m = r["method"] + ("" if r.get("device", "cpu") == "cpu" else f"[{r['device']}]")
-        meths.add(m)
-        if r["status"] == "ok":
-            v = r.get(field)
-            s = f"{v:.3g}" if isinstance(v, (int, float)) else "?"
-            if r.get("n_answered", r.get("n_q")) != r.get("n_q"):
-                s += f" ({r['n_answered']}/{r['n_q']})"
-        else:
-            s = r["status"]
-        cells[x][m] = s
-    meths = sorted(meths)
-    hdr = "| " + ("nodes" if axis == "n" else "edges") + " | " + " | ".join(meths) + " |"
-    sep = "|" + "---|" * (len(meths) + 1)
-    lines = [hdr, sep]
-    for x in sorted(cells):
-        lines.append(f"| {x} | " + " | ".join(cells[x].get(m, "") for m in meths) + " |")
+    """Markdown table: rows = x values, columns = methods (aggregated over seeds)."""
+    A = agg(rows, axis, topo)
+    meths = sorted(A)
+    keys = sorted({cl["key"] for cells in A.values() for cl in cells})
+    xs = {}
+    for cells in A.values():
+        for cl in cells:
+            xs.setdefault(cl["key"], []).append(cl["x"])
+    hdr = ("| nodes | " if axis == "n" else "| mean in-degree (edges) | ") + " | ".join(meths) + " |"
+    lines = [hdr, "|" + "---|" * (len(meths) + 1)]
+    for k in keys:
+        lab = f"{k}" if axis == "n" else f"{k:g} ({np.mean(xs[k]):.0f})"
+        row = []
+        for m in meths:
+            cl = next((c for c in A[m] if c["key"] == k), None)
+            if cl is None:
+                row.append("")
+            elif cl["t"] is None:
+                row.append(f"{cl['fail']}" + (f" ({cl['n_fail']}/{cl['n_runs']})" if cl["n_runs"] > 1 else ""))
+            else:
+                if field == "time_s":
+                    v = cl["t"]
+                else:
+                    vals = [r.get(field) for r in cl["rows"] if r["status"] == "ok" and r.get(field) is not None]
+                    v = float(np.median(vals)) if vals else float("nan")
+                txt = f"{v:.3g}"
+                if not cl["ok"]:
+                    txt += f" ({cl['answered']}/{cl['asked']})" if cl["n_fail"] == 0 else f" ({cl['fail']} in {cl['n_fail']}/{cl['n_runs']})"
+                row.append(txt)
+        lines.append(f"| {lab} | " + " | ".join(row) + " |")
     return "\n".join(lines)
 
 
@@ -425,6 +498,9 @@ def main():
     rows = [r for r in rows if r.get("seed", 0) == 0] + [r for r in rows if r.get("seed", 0) != 0]
     for ax, tp in [("n", "local"), ("n", "er"), ("deg", "er")]:
         out.append(f"### discrete_infer ({tp}), x = {ax}\n\n" + table(rows, ax, tp) + "\n")
+    wb = width_bound_stats(rows)
+    if wb:
+        out.append(wb)
     d = ve_agreement(rows)
     if d:
         out.append(f"NBN VE vs pgmpy VE: {len(d)} queries, max |diff| = {max(d):.2e}\n")

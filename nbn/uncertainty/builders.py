@@ -122,30 +122,47 @@ def interval_sets(
     the per-node kernel-launch overhead that dominated the loop.
     """
     nodes = list(model.dag.topological_order()) if nodes is None else list(nodes)
-    tables, flat_c, flat_t, flat_d = [], [], [], []
+    out: Dict[str, IntervalSet] = {}
+    group: list = []
+    size = 0
+
+    def flush():
+        if not group:
+            return
+        lower, upper = binomial_interval(
+            torch.cat([c.reshape(-1) for _, c, _, _ in group]),
+            torch.cat([t.reshape(-1) for _, _, t, _ in group]),
+            torch.cat([d.reshape(-1).to(t.dtype) for _, _, t, d in group]),
+            method=method)
+        start = 0
+        for node, counts, trials, _ in group:
+            n = counts.numel()
+            out[node] = IntervalSet(
+                level=1.0 - delta, guarantee="pac", unseen=trials[:, 0] == 0,
+                lower=lower[start:start + n].reshape(counts.shape),
+                upper=upper[start:start + n].reshape(counts.shape),
+            )
+            start += n
+        group.clear()
+
     for node in nodes:
         counts, _ = count_table(model, data, node)
         trials = counts.sum(dim=-1, keepdim=True).expand_as(counts)
         per_entry = per_interval_delta(delta, counts.numel(), trials, sampling)
-        tables.append((node, counts.shape, trials))
-        flat_c.append(counts.reshape(-1))
-        flat_t.append(trials.reshape(-1))
-        flat_d.append(per_entry.reshape(-1).to(trials.dtype))
-    if not tables:
-        return {}
-    lower, upper = binomial_interval(torch.cat(flat_c), torch.cat(flat_t),
-                                     torch.cat(flat_d), method=method)
-    out: Dict[str, IntervalSet] = {}
-    start = 0
-    for node, shape, trials in tables:
-        n = int(torch.Size(shape).numel())
-        out[node] = IntervalSet(
-            level=1.0 - delta, guarantee="pac", unseen=trials[:, 0] == 0,
-            lower=lower[start:start + n].reshape(shape),
-            upper=upper[start:start + n].reshape(shape),
-        )
-        start += n
-    return out
+        # Small tables share one vectorised pass; a pass is closed once it
+        # holds ``_BATCH_ENTRIES`` entries, so big tables stay cache-sized
+        # (one huge concatenation made the bisection memory-bound).
+        if group and size + counts.numel() > _BATCH_ENTRIES:
+            flush()
+            size = 0
+        group.append((node, counts, trials, per_entry))
+        size += counts.numel()
+    flush()
+    return {node: out[node] for node in nodes}
+
+
+#: Entries per vectorised pass of :func:`interval_sets`.
+_BATCH_ENTRIES = 1 << 14
 
 
 def l1_ball_set(
