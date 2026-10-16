@@ -235,3 +235,21 @@ def test_router_query_width_check_routes_small_queries_exactly():
     assert on.last_engine == "tensor_ve"
     exact = big.query(*q, engine=TensorVariableElimination())
     assert torch.allclose(p, exact)
+
+
+@pytest.mark.parametrize("bound", ["kl", "kl+bernstein"])
+def test_certified_bounds_cover_and_bernstein_is_not_wider(bound):
+    m, names = _random_bn(6)
+    tgt, ev = names[5], {names[8]: 0, names[1]: 2}
+    exact = m.query([tgt], evidence=ev, engine=TensorVariableElimination()).double()
+    torch.manual_seed(1)
+    a = certified_query(m, tgt, ev, n_samples=80_000, bound=bound)
+    assert bool((a.lower <= exact + 1e-9).all() and (exact <= a.upper + 1e-9).all())
+    torch.manual_seed(1)
+    kl = certified_query(m, tgt, ev, n_samples=80_000, bound="kl")
+    if bound == "kl+bernstein":
+        # same particles: the intersection uses half the level for KL, so it
+        # can be marginally wider only where Bernstein does not help
+        assert a.max_width <= kl.max_width * 1.1
+    with pytest.raises(ValueError):
+        certified_query(m, tgt, ev, n_samples=10, bound="nope")

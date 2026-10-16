@@ -31,7 +31,11 @@ between the statistics is needed), and on that event, for every class ``y``::
 
     P(y | e) = P(y, e) / P(e)  in  [ lo_ye / hi_e ,  min(1, hi_ye / lo_e) ]
 
-(all quantities non-negative; if ``lo_e = 0`` the upper ends are 1).  Since
+(all quantities non-negative; if ``lo_e = 0`` the upper ends are 1).  By
+default each mean's interval is the intersection of that KL interval and an
+empirical Bernstein interval [Maurer & Pontil, COLT 2009, Thm 4], each at
+half of ``delta'``; both are valid, so their intersection is, and it is about
+half as wide when the weights vary little.  Since
 the ``P(y | e)`` sum to one, each interval is then tightened with
 ``1 - sum_{y' != y} upper_{y'}`` and ``1 - sum_{y' != y} lower_{y'}``, still on
 the same event.  K&F note that normalised LW has "no formal analysis" of its
@@ -48,6 +52,7 @@ Continuous evidence has an unbounded density, so it is rejected.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Mapping
 
@@ -109,13 +114,24 @@ def certified_query(
     delta: float = 0.05,
     do: Mapping[str, object] | None = None,
     chunk: int | None = None,
+    bound: str = "kl+bernstein",
 ) -> CertifiedAnswer:
     """Interval answer to ``P(target | evidence, do(...))`` at level ``1 - delta``.
 
     See the module docstring for the construction and its guarantee.
     ``chunk`` bounds the particles per pass (default: the likelihood-weighting
     engine's memory-aware pass size, about 256 MiB of particle buffer).
+    ``bound``: ``"kl"`` (Chernoff–Hoeffding KL interval per mean) or
+    ``"kl+bernstein"`` (default): the KL interval and the empirical
+    Bernstein interval, each at half the level, intersected.  Empirical
+    Bernstein [Maurer & Pontil, COLT 2009, Thm 4, arXiv:0907.3740]: for
+    i.i.d. ``Z`` in ``[0, 1]`` with unbiased sample variance ``V``, with
+    probability ``>= 1 - d``, ``E Z - mean <= sqrt(2 V ln(2/d) / M) +
+    7 ln(2/d) / (3 (M - 1))``; applied to ``1 - Z`` for the lower side.  It is
+    much tighter when the weights vary little.
     """
+    if bound not in ("kl", "kl+bernstein"):
+        raise ValueError("bound must be 'kl' or 'kl+bernstein'.")
     from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
 
     evidence = dict(evidence or {})
@@ -145,6 +161,8 @@ def certified_query(
     dd = {kk: _t(v) for kk, v in do.items()}
     sum_w = torch.zeros((), dtype=torch.float64)
     sum_wy = torch.zeros(k, dtype=torch.float64)
+    sq_w = torch.zeros((), dtype=torch.float64)
+    sq_wy = torch.zeros(k, dtype=torch.float64)
     done = 0
     while done < n_samples:
         s = min(chunk, n_samples - done)
@@ -157,10 +175,24 @@ def certified_query(
         w = w.clamp(0.0, 1.0)
         sum_w += w.sum()
         sum_wy += torch.bincount(y, weights=w, minlength=k)[:k]
+        sq_w += (w * w).sum()
+        sq_wy += torch.bincount(y, weights=w * w, minlength=k)[:k]
         done += s
     m = torch.tensor(float(done), dtype=torch.float64)
     succ = torch.cat([sum_w.reshape(1), sum_wy])
-    lo, hi = binomial_interval(succ, m.expand(k + 1), delta / (k + 1), method="kl")
+    d_each = delta / (k + 1)
+    if bound == "kl":
+        lo, hi = binomial_interval(succ, m.expand(k + 1), d_each, method="kl")
+    else:
+        lo, hi = binomial_interval(succ, m.expand(k + 1), d_each / 2, method="kl")
+        sq = torch.cat([sq_w.reshape(1), sq_wy])
+        mean = succ / m
+        var = ((sq - succ * succ / m) / (m - 1)).clamp_min(0.0) if done > 1 else torch.ones_like(mean)
+        d_side = d_each / 4                      # two sides, half the per-mean budget
+        rad = torch.sqrt(2 * var * math.log(2 / d_side) / m) \
+            + 7 * math.log(2 / d_side) / (3 * max(done - 1, 1))
+        lo = torch.maximum(lo, (mean - rad).clamp(0.0, 1.0))
+        hi = torch.minimum(hi, (mean + rad).clamp(0.0, 1.0))
     lo_e, hi_e = float(lo[0]), float(hi[0])
     lo_y, hi_y = lo[1:].cpu(), hi[1:].cpu()
     lower = (lo_y / hi_e).clamp(0.0, 1.0) if hi_e > 0 else torch.zeros(k, dtype=torch.float64)
