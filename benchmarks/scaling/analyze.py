@@ -240,6 +240,87 @@ def fig_cont_infer():
     fig.savefig(FIG / "cont_infer.pdf", bbox_inches="tight")
 
 
+def fig_indeg():
+    rows = load("discrete_fit_indeg")
+    if not rows:
+        return
+    fig, axs = plt.subplots(1, 3, figsize=(DOUBLE * 1.45, 2.6))
+    for r in rows:
+        r["_d"] = r["deg"]
+    for ax, field, lab in [(axs[0], "time_s", "time (s)"),
+                           (axs[1], "watch_peak_rss_mb", "peak RSS (MB)"),
+                           (axs[2], "acc_tv", "TV to true CPD\n(mean over rows)")]:
+        for m in ("nbn", "nbn_sparse", "pgmpy"):
+            rs = sorted([r for r in rows if r["method"] == m], key=lambda r: r["_d"])
+            ok = [r for r in rs if r["status"] == "ok"]
+            bad = [r for r in rs if r["status"] != "ok"]
+            c = {"nbn": SKY, "nbn_sparse": BLUE, "pgmpy": ORANGE}[m]
+            lbl = {"nbn": "NBN dense table", "nbn_sparse": "NBN sparse table",
+                   "pgmpy": "pgmpy MLE"}[m]
+            ax.plot([r["_d"] for r in ok], [r[field] for r in ok], "-o", ms=3.5, color=c,
+                    label=lbl)
+            if bad and field != "acc_tv":
+                r = bad[0]
+                y = 30.0 if field == "time_s" else r["watch_peak_rss_mb"]
+                ax.plot([r["_d"]], [y], "x", color=c, ms=7, mew=2)
+                ax.annotate({"timeout": "time", "oom": "mem"}.get(r["status"], r["status"]),
+                            (r["_d"], y), textcoords="offset points", xytext=(4, 4), fontsize=7)
+        ax.set_xlabel("in-degree (parents per node)")
+        ax.set_ylabel(lab)
+        if field != "acc_tv":
+            ax.set_yscale("log")
+    axs[0].axhline(30, color=GREY, lw=0.8, ls=":")
+    axs[1].axhline(4096, color=GREY, lw=0.8, ls=":")
+    axs[0].set_title("Discrete MLE vs in-degree\n(30 nodes, K=3, 10k rows)")
+    axs[1].set_title("Memory")
+    axs[2].set_title("Accuracy (identical where all run):\nfragmentation, not compute")
+    axs[0].legend(loc="upper left")
+    fig.tight_layout()
+    fig.savefig(FIG / "discrete_fit_indeg.png", dpi=200)
+    fig.savefig(FIG / "discrete_fit_indeg.pdf")
+
+
+def fig_mps():
+    cpu = [r for r in load("cont_fit") if r.get("axis") == "n"]
+    gpu = [r for r in load("cont_fit_mps") if r.get("axis") == "n"]
+    if not gpu:
+        return
+    fig, ax = plt.subplots(figsize=(DOUBLE * 0.6, 2.8))
+    for rows, ls, dev in [(cpu, "-", "1 CPU thread"), (gpu, "--", "Apple MPS GPU")]:
+        for m in ("nbn_local", "nbn_stacked", "pyro_svi"):
+            rs = sorted([r for r in rows if r["method"] == m], key=lambda r: r["n"])
+            ok = [r for r in rs if r["status"] == "ok"]
+            if ok:
+                ax.plot([r["n"] for r in ok], [r["time_s"] for r in ok], ls, marker="o", ms=3,
+                        color=COLOR[m], label=f"{LABEL[m]}, {dev}")
+    ax.axhline(30, color=GREY, lw=0.8, ls=":")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("nodes")
+    ax.set_ylabel("fit time (s)")
+    ax.set_title("Non-Gaussian fit: CPU vs GPU (same budget of steps)")
+    ax.legend(fontsize=6, loc="upper left")
+    fig.tight_layout()
+    fig.savefig(FIG / "cont_fit_mps.png", dpi=200)
+    fig.savefig(FIG / "cont_fit_mps.pdf")
+
+
+def frontier(rows, topo=None, axis="n"):
+    """Largest x at which each method succeeded (all queries answered), per seed."""
+    best = defaultdict(dict)
+    for r in rows:
+        if r.get("axis") != axis or (topo and r.get("topology") != topo):
+            continue
+        ok = r["status"] == "ok" and r.get("n_answered", r.get("n_q")) == r.get("n_q")
+        key = (r["method"] + ("" if r.get("device", "cpu") == "cpu" else f"[{r['device']}]"))
+        x = r["n"] if axis == "n" else r["n_edges"]
+        if ok:
+            best[key][r.get("seed", 0)] = max(best[key].get(r.get("seed", 0), 0), x)
+        else:
+            best[key].setdefault(r.get("seed", 0), 0)
+    return {m: sorted(v.values()) for m, v in best.items()}
+
+
 def table(rows, axis="n", topo=None, field="time_s"):
     """Markdown table: rows = x values, columns = methods."""
     cells = defaultdict(dict)
@@ -276,7 +357,19 @@ def main():
     fig_sets()
     fig_cont_fit()
     fig_cont_infer()
+    fig_indeg()
+    fig_mps()
     out = []
+    out.append("## Frontier: largest size solved within the budget (per seed)\n")
+    for nm, tp in [("discrete_infer", "local"), ("discrete_infer", "er"), ("discrete_fit", None),
+                   ("discrete_sets", None), ("cont_fit", None), ("cont_infer", None)]:
+        rows = load(nm, nm + "_master", nm + "_mps", nm + "_cert")
+        if nm == "discrete_infer":
+            rows += load("discrete_infer_cert")
+        if rows:
+            fr = frontier(rows, tp)
+            out.append(f"- **{nm}{' (' + tp + ')' if tp else ''}**: "
+                       + "; ".join(f"{m}: {v}" for m, v in sorted(fr.items())) + "\n")
     for nm, axes in [("discrete_fit", [("n", None), ("deg", None)]),
                      ("discrete_sets", [("n", None), ("deg", None)]),
                      ("cont_fit", [("n", None), ("deg", None)]),
@@ -285,6 +378,7 @@ def main():
         for ax, tp in axes:
             out.append(f"### {nm}, x = {ax}\n\n" + table(rows, ax, tp) + "\n")
     rows = load("discrete_infer", "discrete_infer_master", "discrete_infer_cert")
+    rows = [r for r in rows if r.get("seed", 0) == 0] + [r for r in rows if r.get("seed", 0) != 0]
     for ax, tp in [("n", "local"), ("n", "er"), ("deg", "er")]:
         out.append(f"### discrete_infer ({tp}), x = {ax}\n\n" + table(rows, ax, tp) + "\n")
     d = ve_agreement(rows)
@@ -298,8 +392,10 @@ def main():
                        f"median |err| = {np.median(es):.4f}, max = {max(es):.4f}\n")
             cov = [e["covered"] for e in errs if e["method"] == m and e["covered"] is not None]
             if cov:
+                ws = [e["width"] for e in errs if e["method"] == m and e.get("width") is not None]
                 out.append(f"{m}: certified interval covers exact answer in "
-                           f"{sum(cov)}/{len(cov)} queries\n")
+                           f"{sum(cov)}/{len(cov)} queries; median max-width "
+                           f"{np.median(ws):.3f}\n")
     (RES / "tables.md").write_text("\n".join(out))
     print("\n".join(out))
 
