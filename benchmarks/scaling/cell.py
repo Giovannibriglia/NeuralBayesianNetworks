@@ -252,10 +252,13 @@ def d_infer(pr, method, dev, budget, opt):
                 per_q.append(time.perf_counter() - t1)
         res["time_s"] = t.elapsed
         res["q_time_s"] = per_q
-        if method == "nbn_ve":
+        try:  # width bounds need this branch's NBN (absent on master)
+            from nbn.inference._elimination_order import query_width_bounds
+        except ImportError:
+            query_width_bounds = None
+        if method == "nbn_ve" and query_width_bounds is not None:
             # width bounds per query (not timed): lower = minor-min-width on the
             # pruned, evidence-reduced moral graph; upper = NBN's min-fill order
-            from nbn.inference._elimination_order import query_width_bounds
             wb = []
             for tgt, ev in qs:
                 _, rel = eng._plan_with_relevant(model, tgt, tuple(sorted(ev)))

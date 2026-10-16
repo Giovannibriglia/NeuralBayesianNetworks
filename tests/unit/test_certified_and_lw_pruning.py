@@ -149,3 +149,19 @@ def test_interval_sets_identical_to_per_node():
                 a = interval_set(m, data, v, delta=0.01, method=meth, sampling=sampling)
                 assert torch.equal(a.lower, b[v].lower) and torch.equal(a.upper, b[v].upper)
                 assert torch.equal(a.unseen, b[v].unseen) and a.level == b[v].level
+
+
+def test_lw_particle_chunking_same_answer():
+    m, names = _random_bn(4)
+    tgt, ev = names[5], {names[8]: 1}
+    exact = m.query([tgt], evidence=ev, engine=TensorVariableElimination())
+    eng = LikelihoodWeightingEngine(60_000)
+    eng.max_buffer_elements = 10 * 1024  # forces several passes
+    assert eng._particle_chunk(1, len(names)) < 60_000
+    torch.manual_seed(0)
+    p, ess = m.query([tgt], evidence=ev, engine=eng, return_ess=True)
+    assert p.shape == exact.shape and (p - exact).abs().max() < 0.02
+    assert 0.0 < float(ess) <= 1.0
+    # continuous-style return path (weights, samples) keeps all particles
+    w, x = eng.query(m, [tgt, names[6]], {names[8]: torch.tensor([1])})
+    assert w.shape == (1, 60_000) and x.shape == (1, 60_000, 2)

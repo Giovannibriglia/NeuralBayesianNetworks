@@ -25,8 +25,10 @@ from _figures import (  # noqa: E402
     AQUA, BLUE, DOUBLE, GREY, INK, MAGENTA, ORANGE, SKY, VERMILLION, use_style,
 )
 
-RES = HERE / "results"
-FIG = HERE / "figures"
+import os  # noqa: E402
+
+RES = Path(os.environ.get("SCALING_RES", HERE / "results"))
+FIG = Path(os.environ.get("SCALING_FIG", HERE / "figures"))
 
 COLOR = {
     "nbn": BLUE, "nbn_ve": BLUE, "nbn_local": SKY, "nbn_stacked": BLUE,
@@ -298,7 +300,7 @@ def main():
             if cov:
                 out.append(f"{m}: certified interval covers exact answer in "
                            f"{sum(cov)}/{len(cov)} queries\n")
-    (HERE / "results" / "tables.md").write_text("\n".join(out))
+    (RES / "tables.md").write_text("\n".join(out))
     print("\n".join(out))
 
 

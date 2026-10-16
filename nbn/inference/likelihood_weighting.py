@@ -131,6 +131,15 @@ class LikelihoodWeightingEngine(InferenceEngine):
         self._cache: Dict = {}
         self._anc_cache: Dict = {}
 
+    #: Upper bound on particle-buffer elements per pass (float32; 2**26 is
+    #: 256 MiB) when ``prune_barren`` is on.  ``None`` attribute on old
+    #: pickles falls back to this default.
+    max_buffer_elements: int = 2 ** 26
+
+    def _particle_chunk(self, b: int, total_dim: int) -> int:
+        cap = int(getattr(self, "max_buffer_elements", 2 ** 26) or 2 ** 26)
+        return max(1024, cap // max(1, b * total_dim))
+
     def _run(
         self,
         model,
@@ -286,8 +295,38 @@ class LikelihoodWeightingEngine(InferenceEngine):
         # proposal logic and are not pruned.
         prune = (getattr(self, "prune_barren", False)
                  and type(self)._run is LikelihoodWeightingEngine._run)
-        log_w, buf = (self._run(model, targets, evidence, do, s, prune=True) if prune
-                      else self._run(model, targets, evidence, do, s))
+        state = get_inference_state(model, targets, tuple(sorted((evidence or {}).keys())),
+                                     tuple(sorted((do or {}).keys())), self._cache)
+        full_slices = [state.node_slices[state.node_to_idx[t]] for t in targets]
+        # Rows of the batch, read the way ``_run`` reads them.
+        b_rows = max([1] + [
+            (t.reshape(1) if t.dim() == 0 else t).shape[0]
+            for t in (torch.as_tensor(v) for v in
+                      list((evidence or {}).values()) + list((do or {}).values()))
+        ])
+        chunk = self._particle_chunk(b_rows, state.total_dim)
+        if prune and s > chunk:
+            # Particles are independent: run them in passes and keep only the
+            # log-weights and the target columns, so memory is
+            # O(chunk x nodes) instead of O(particles x nodes).  Same law.
+            lw_parts, t_parts, done = [], [], 0
+            while done < s:
+                c = min(chunk, s - done)
+                lw_c, buf_c = self._run(model, targets, evidence, do, c, prune=True)
+                lw_parts.append(lw_c)
+                t_parts.append(torch.cat([buf_c[..., sl] for sl in full_slices], dim=-1))
+                del buf_c
+                done += c
+            log_w = torch.cat(lw_parts, dim=-1)
+            buf = torch.cat(t_parts, dim=1)
+            tslices, off = [], 0
+            for sl in full_slices:
+                tslices.append(slice(off, off + (sl.stop - sl.start)))
+                off += sl.stop - sl.start
+        else:
+            log_w, buf = (self._run(model, targets, evidence, do, s, prune=True) if prune
+                          else self._run(model, targets, evidence, do, s))
+            tslices = full_slices
 
         # Normalise weights
         weights = torch.softmax(log_w, dim=-1)  # [B, S]
@@ -324,10 +363,7 @@ class LikelihoodWeightingEngine(InferenceEngine):
                 # Build weighted histogram over class values [K]
                 cv = mech._class_values.to(device=model.device)
                 k = len(cv)
-                state = get_inference_state(model, targets, tuple(sorted((evidence or {}).keys())),
-                                             tuple(sorted((do or {}).keys())), self._cache)
-                tgt_sl = state.node_slices[state.node_to_idx[tgt]]
-                samp_vals = buf[..., tgt_sl].squeeze(-1).long()  # [B, S]
+                samp_vals = buf[..., tslices[0]].squeeze(-1).long()  # [B, S]
                 b = weights.shape[0]
                 probs = torch.zeros(b, k, device=model.device)
                 for ci in range(k):
@@ -339,10 +375,7 @@ class LikelihoodWeightingEngine(InferenceEngine):
                 out = probs.squeeze(0) if (squeeze and b == 1) else probs
                 return _wrap(out)
 
-        state = get_inference_state(model, targets, tuple(sorted((evidence or {}).keys())),
-                                     tuple(sorted((do or {}).keys())), self._cache)
-        tgt_slices = [state.node_slices[state.node_to_idx[t]] for t in targets]
-        samps = [buf[..., sl] for sl in tgt_slices]
+        samps = [buf[..., sl] for sl in tslices]
         out = (weights, torch.cat(samps, dim=-1))
         return _wrap(out)
 
