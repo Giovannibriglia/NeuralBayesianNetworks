@@ -132,14 +132,14 @@ def sweep_specs(name):
         specs.append(("deg", "discrete", "er", DEGS, 200, "sets",
                       ["nbn_interval", "nbn_intervals_batched", "nbn_l1"], {}))
     elif name == "cont_fit":
-        specs.append(("n", "nongauss", "er", NODES, 2, "fit",
+        specs.append(("n", "ngs", "er", NODES, 2, "fit",
                       ["nbn_local", "nbn_stacked", "pyro_svi"], {}))
-        specs.append(("deg", "nongauss", "er", DEGS, 100, "fit",
+        specs.append(("deg", "ngs", "er", DEGS, 100, "fit",
                       ["nbn_local", "nbn_stacked", "pyro_svi"], {}))
     elif name == "cont_infer":
-        specs.append(("n", "nongauss", "er", NODES, 2, "infer",
+        specs.append(("n", "ngs", "er", NODES, 2, "infer",
                       ["nbn_lw", "pyro_vec", "pyro_is"], {}))
-        specs.append(("deg", "nongauss", "er", DEGS, 100, "infer",
+        specs.append(("deg", "ngs", "er", DEGS, 100, "infer",
                       ["nbn_lw", "pyro_vec", "pyro_is"], {}))
     else:
         raise ValueError(name)

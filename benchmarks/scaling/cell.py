@@ -97,15 +97,39 @@ def discrete_queries(pr, n_q=10, n_ev=5, seed=123):
 
 
 def continuous_queries(pr, n_q=10, n_ev=3, seed=123):
+    """Queries whose evidence is relevant: P(Y > median(Y) | e).
+
+    The target has at least one parent; evidence is drawn from its Markov
+    blanket and grandparents (random nodes in a sparse graph are nearly
+    independent of the target, which would make every answer ~0.5), with
+    values taken from one test row.
+    """
     rng = np.random.default_rng(seed)
     nodes = pr["nodes"]
     test, train = pr["test"], pr["train"]
+    pa = {v: [a for a, b in pr["edges"] if b == v] for v in nodes}
+    ch = {v: [] for v in nodes}
+    for a, b in pr["edges"]:
+        ch[a].append(b)
+    with_pa = [v for v in nodes if pa[v]] or nodes
     qs = []
     for q in range(n_q):
-        pick = rng.choice(len(nodes), size=min(len(nodes), n_ev + 1), replace=False)
-        tgt = nodes[pick[0]]
+        tgt = with_pa[int(rng.integers(len(with_pa)))]
+        pool = set(pa[tgt]) | set(ch[tgt])
+        for c in ch[tgt]:
+            pool |= set(pa[c])
+        for a in pa[tgt]:
+            pool |= set(pa[a])
+        pool.discard(tgt)
+        pool = sorted(pool)
+        k = min(n_ev, len(pool))
+        ev_nodes = list(rng.choice(pool, size=k, replace=False)) if k else []
+        while len(ev_nodes) < min(n_ev, len(nodes) - 1):
+            v = nodes[int(rng.integers(len(nodes)))]
+            if v != tgt and v not in ev_nodes:
+                ev_nodes.append(v)
         row = int(rng.integers(test[tgt].shape[0]))
-        ev = {nodes[i]: float(test[nodes[i]][row]) for i in pick[1:]}
+        ev = {v: float(test[v][row]) for v in ev_nodes}
         thr = float(train[tgt].median())
         qs.append((tgt, ev, thr))
     return qs
@@ -574,6 +598,8 @@ TASKS = {
     ("discrete", "sets"): d_sets,
     ("nongauss", "fit"): c_fit,
     ("nongauss", "infer"): c_infer,
+    ("ngs", "fit"): c_fit,
+    ("ngs", "infer"): c_infer,
 }
 
 

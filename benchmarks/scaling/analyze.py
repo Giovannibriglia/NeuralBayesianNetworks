@@ -240,6 +240,49 @@ def fig_cont_infer():
     fig.savefig(FIG / "cont_infer.pdf", bbox_inches="tight")
 
 
+def cont_errors():
+    ref = {r["problem"]: r for r in load("cont_infer_ref")}
+    out = []
+    for r in load("cont_infer", "cont_infer_master"):
+        if r["status"] != "ok" or r["problem"] not in ref:
+            continue
+        for qi, a in enumerate(r.get("answers") or []):
+            out.append(dict(method=r["method"], n=r["n"], axis=r["axis"],
+                            err=abs(a - ref[r["problem"]]["answers"][qi]),
+                            ess=(r.get("ess_frac") or [None] * 99)[qi]))
+    return out
+
+
+def fig_approx():
+    rows = load("discrete_infer", "discrete_infer_cert")
+    errs = lw_errors(rows)
+    if not errs:
+        return
+    fig, axs = plt.subplots(1, 2, figsize=(DOUBLE, 2.7))
+    for ax, topo in zip(axs, ("er", "local")):
+        for m, c, lab in (("nbn_lw", AQUA, "LW |error| vs exact"),
+                          ("nbn_cert", MAGENTA, "certified LW |error|")):
+            es = [e for e in errs if e["method"] == m and e["topology"] == topo and e["axis"] == "n"]
+            if es:
+                ax.scatter([e["n"] * (1.0 + 0.04 * (m == "nbn_cert")) for e in es],
+                           [max(e["err"], 1e-5) for e in es], s=6, color=c, alpha=0.6, label=lab)
+        ws = [e for e in errs if e["method"] == "nbn_cert" and e["topology"] == topo
+              and e["axis"] == "n" and e.get("width") is not None]
+        if ws:
+            ax.scatter([e["n"] * 1.04 for e in ws], [e["width"] for e in ws], s=10,
+                       marker="_", color=INK, label="certified width (max over classes)")
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel("nodes")
+        ax.set_title({"er": "Erdős–Rényi", "local": "bounded tree-width"}[topo]
+                     + ": approximate arms where exact is known")
+    axs[0].set_ylabel("absolute error / width")
+    axs[0].legend(fontsize=6, loc="lower left")
+    fig.tight_layout()
+    fig.savefig(FIG / "discrete_approx.png", dpi=200)
+    fig.savefig(FIG / "discrete_approx.pdf")
+
+
 def fig_indeg():
     rows = load("discrete_fit_indeg")
     if not rows:
@@ -359,6 +402,7 @@ def main():
     fig_cont_infer()
     fig_indeg()
     fig_mps()
+    fig_approx()
     out = []
     out.append("## Frontier: largest size solved within the budget (per seed)\n")
     for nm, tp in [("discrete_infer", "local"), ("discrete_infer", "er"), ("discrete_fit", None),
@@ -396,6 +440,11 @@ def main():
                 out.append(f"{m}: certified interval covers exact answer in "
                            f"{sum(cov)}/{len(cov)} queries; median max-width "
                            f"{np.median(ws):.3f}\n")
+    ce = cont_errors()
+    for m in sorted({e["method"] for e in ce}):
+        es = [e["err"] for e in ce if e["method"] == m]
+        out.append(f"{m} (continuous, vs 1M-particle reference): {len(es)} queries; "
+                   f"median |err| = {np.median(es):.4f}, 90% = {np.quantile(es, 0.9):.4f}\n")
     (RES / "tables.md").write_text("\n".join(out))
     print("\n".join(out))
 

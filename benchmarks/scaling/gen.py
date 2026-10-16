@@ -64,6 +64,40 @@ def make_dag(n: int, deg: float, topology: str, window: int, cap: int,
     return edges
 
 
+def _strengthen(mech, parents, pilot, strength=1.5, gen=None):
+    """Strong-dependence, correctly laid-out MDN truth (family ``ngs``).
+
+    ``MDNMechanism._params_from_parents`` reads the outputs after the ``K``
+    logits as *interleaved* pairs ``(loc_c, log_scale_c)`` per component.
+    ``nbn.bench.synthetic._build_mdn_mechanism`` writes them as blocks
+    ``[locs | log_scales]``, so part of its mean weights land on log-scales
+    and the scale becomes ``exp(linear in parents)`` (heavy tails; found in
+    this study, to be filed).  Here the layout is the one the mechanism
+    reads: mixture means linear in the *standardised* parents with weights of
+    scale ``strength / sqrt(p)``, log-scales constant in the parents, mixing
+    weights constant.  Parents are standardised with pilot-sample moments
+    (``_pa_mean`` / ``_pa_std``), so chains stay bounded.
+    """
+    P = torch.stack([pilot[a] for a in parents], -1)
+    mech._pa_mean = P.mean(0, keepdim=True)
+    mech._pa_std = P.std(0, keepdim=True).clamp_min(1e-3)
+    lin = mech.net[0]
+    k = mech.num_components
+    p = len(parents)
+    old_b = lin.bias.detach().clone()
+    W = torch.zeros_like(lin.weight)
+    Bv = torch.zeros_like(lin.bias)
+    Bv[:k] = old_b[:k]                                   # mixing logits
+    for c in range(k):
+        loc_row, ls_row = k + 2 * c, k + 2 * c + 1
+        W[loc_row] = torch.randn(p, generator=gen) * strength / p ** 0.5
+        Bv[loc_row] = 0.3 * torch.randn((), generator=gen) + 0.6 * (c - 1)
+        Bv[ls_row] = torch.log(torch.empty(()).uniform_(0.3, 0.7, generator=gen))
+    with torch.no_grad():
+        lin.weight.copy_(W)
+        lin.bias.copy_(Bv)
+
+
 def problem_name(family, topology, n, deg, k, seed, window):
     w = f"_w{window}" if topology == "local" else ""
     return f"{family}_{topology}{w}_n{n}_deg{deg:g}_k{k}_s{seed}"
@@ -122,8 +156,10 @@ def build(family: str, topology: str, n: int, deg: float, *, k: int = 3,
         spec = {v: ("discrete", k) for v in names}
     else:
         spec = {v: ("continuous", 1) for v in names}
+    strong = family == "ngs"
     model = NeuralBayesianNetwork(edges, variables=spec, device="cpu")
     kinds = {v: ("discrete" if family == "discrete" else "continuous") for v in names}
+    pilot: dict = {}
     for v in names:  # names are already a topological order
         pa = list(model.dag.parents(v))
         if family == "discrete":
@@ -131,7 +167,13 @@ def build(family: str, topology: str, n: int, deg: float, *, k: int = 3,
                                              torch.device("cpu"), family="discrete")
         else:
             mech = _build_mdn_mechanism(pa, gen, torch.device("cpu"))
+            if strong and pa:
+                _strengthen(mech, pa, pilot, strength=1.5, gen=gen)
         model.set_mechanism(v, mech)
+        if strong:
+            with torch.no_grad():
+                P = torch.stack([pilot[a] for a in pa], -1) if pa else None
+                pilot[v] = (mech.sample(P, 1) if pa else mech.sample(None, 4000)).reshape(-1)
     torch.manual_seed(seed)
     with torch.no_grad():
         train = model.sample(n=n_train)

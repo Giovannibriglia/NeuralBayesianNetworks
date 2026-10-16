@@ -32,7 +32,7 @@ def main():
     done = set()
     if out.exists():
         done = {json.loads(l)["problem"] for l in out.read_text().splitlines() if l.strip()}
-    for p in sorted((HERE / "problems").glob("nongauss_*.pt")):
+    for p in sorted((HERE / "problems").glob("ngs_*.pt")):
         pr = torch.load(p, weights_only=False)
         if pr["name"] in done:
             continue
