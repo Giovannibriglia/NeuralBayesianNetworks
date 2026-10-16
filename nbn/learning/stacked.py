@@ -58,6 +58,56 @@ _ACTS = {"relu": torch.relu, "tanh": torch.tanh,
          "gelu": nn.functional.gelu, "elu": nn.functional.elu}
 
 
+class _MixtureNLL(torch.autograd.Function):
+    """Negative log-likelihood of the MDN mixture with a hand-written backward.
+
+    Same function as the autograd graph of ``MDNMechanism._log_prob_2d``
+    (child de-standardisation, ``log_scale`` clamp, ``min_scale`` floor), but
+    the backward is closed form: with responsibilities ``r = softmax(logits +
+    log N_k)`` and weights ``pi = softmax(logits)``,
+
+    * d nll / d logits      = pi - r
+    * d nll / d loc_raw     = -r * z * x_std / scale
+    * d nll / d log_scale   = -r * (z^2 - 1)   (0 where a clamp is active)
+
+    where ``z = (x - loc) / scale``.  This replaces ~60 small element-wise
+    kernels per step by ~20, the dominant cost once the matmuls are batched.
+    Clamp gradients follow PyTorch's convention (pass-through on the
+    boundary).
+    """
+
+    @staticmethod
+    def forward(ctx, logits, loc_raw, ls_raw, x, x_mean, x_std, ls_clamp, min_scale):
+        # logits [B,J,K]; loc_raw, ls_raw [B,J,K,D]; x [B,J,D]; x_mean, x_std [J,D]
+        ls = ls_raw.clamp(max=ls_clamp)
+        scale_raw = x_std[:, None, :] * torch.exp(ls)
+        scale = scale_raw.clamp_min(min_scale)
+        loc = x_mean[:, None, :] + x_std[:, None, :] * loc_raw
+        z = (x.unsqueeze(-2) - loc) / scale
+        log_comp = (-0.5 * z * z - torch.log(scale)).sum(-1) - 0.5 * math.log(2 * math.pi) * z.shape[-1]
+        log_pi = torch.log_softmax(logits, -1)
+        joint = log_pi + log_comp
+        lp = torch.logsumexp(joint, -1)
+        r = torch.exp(joint - lp.unsqueeze(-1))
+        ctx.save_for_backward(r, log_pi, z, scale, x_std,
+                              (ls_raw <= ls_clamp) & (scale_raw >= min_scale))
+        return -lp
+
+    @staticmethod
+    def backward(ctx, g):
+        r, log_pi, z, scale, x_std, live = ctx.saved_tensors
+        g = g.unsqueeze(-1)                                   # [B,J,1]
+        d_logits = g * (torch.exp(log_pi) - r)
+        gr = (g * r).unsqueeze(-1)                            # [B,J,K,1]
+        d_loc = -gr * z * x_std[:, None, :] / scale
+        d_ls = -gr * (z * z - 1.0) * live
+        return d_logits, d_loc, d_ls, None, None, None, None, None
+
+
+#: Use the closed-form backward (:class:`_MixtureNLL`); False = plain autograd.
+_FUSED = True
+
+
 def stack_key(mech) -> tuple | None:
     """Group key for stacking, or ``None`` if the mechanism cannot be stacked."""
     if type(mech) is not MDNMechanism:
@@ -156,7 +206,6 @@ def _fit_chunk(nodes, mechs, xs, parents, *, k, hidden, act, d_x, out_dim, n_row
     pa_clamp = float(m_ref._pa_clamp)
     ls_clamp = float(m_ref._log_scale_clamp)
     min_scale = float(m_ref.min_scale)
-    log2pi = math.log(2.0 * math.pi)
 
     def nll(idx):
         xb = X[idx]                                     # [B, J, D_x]
@@ -169,15 +218,16 @@ def _fit_chunk(nodes, mechs, xs, parents, *, k, hidden, act, d_x, out_dim, n_row
                 h = act(h)
         logits = h[..., :k]
         rest = h[..., k:].reshape(*h.shape[:-1], k, 2 * d_x)
-        loc = rest[..., :d_x]
-        log_scale = rest[..., d_x:].clamp(max=ls_clamp)
-        scale = torch.exp(log_scale)
-        loc = x_mean[:, None, :] + x_std[:, None, :] * loc          # [B, J, K, D]
-        scale = (x_std[:, None, :] * scale).clamp_min(min_scale)
+        if _FUSED:
+            return _MixtureNLL.apply(logits, rest[..., :d_x], rest[..., d_x:], xb,
+                                     x_mean, x_std, ls_clamp, min_scale)   # [B, J]
+        loc = x_mean[:, None, :] + x_std[:, None, :] * rest[..., :d_x]
+        scale = (x_std[:, None, :] * torch.exp(rest[..., d_x:].clamp(max=ls_clamp))
+                 ).clamp_min(min_scale)
         diff = (xb.unsqueeze(-2) - loc) / scale
-        log_comp = (-0.5 * diff.pow(2) - torch.log(scale) - 0.5 * log2pi).sum(-1)
-        lp = torch.logsumexp(torch.log_softmax(logits, -1) + log_comp, -1)  # [B, J]
-        return -lp
+        log_comp = (-0.5 * diff.pow(2) - torch.log(scale)
+                    - 0.5 * math.log(2.0 * math.pi)).sum(-1)
+        return -torch.logsumexp(torch.log_softmax(logits, -1) + log_comp, -1)
 
     max_norm = 5.0
     for _ in range(epochs):

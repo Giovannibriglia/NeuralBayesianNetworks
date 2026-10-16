@@ -106,3 +106,31 @@ def test_stacked_node_chunking_is_equivalent(monkeypatch):
     test = {k: v.reshape(-1, 1) for k, v in _data(100, seed=2).items()}
     with torch.no_grad():
         assert torch.allclose(a.log_prob(test), b.log_prob(test), atol=1e-4)
+
+
+def test_mixture_nll_closed_form_backward_matches_autograd():
+    from nbn.learning.stacked import _MixtureNLL
+
+    torch.manual_seed(0)
+    B, J, K, D = 6, 4, 3, 2
+    lg = torch.randn(B, J, K, dtype=torch.float64, requires_grad=True)
+    lr = torch.randn(B, J, K, D, dtype=torch.float64, requires_grad=True)
+    ls = (torch.randn(B, J, K, D, dtype=torch.float64) * 3).requires_grad_()
+    x = torch.randn(B, J, D, dtype=torch.float64)
+    xm = torch.randn(J, D, dtype=torch.float64)
+    xs = torch.rand(J, D, dtype=torch.float64) + 0.5
+
+    def ref():
+        sc = (xs[:, None, :] * torch.exp(ls.clamp(max=1.0))).clamp_min(0.3)
+        z = (x.unsqueeze(-2) - (xm[:, None, :] + xs[:, None, :] * lr)) / sc
+        lc = (-0.5 * z.pow(2) - torch.log(sc) - 0.5 * math.log(2 * math.pi)).sum(-1)
+        return -torch.logsumexp(torch.log_softmax(lg, -1) + lc, -1)
+
+    w = torch.randn(B, J, dtype=torch.float64)
+    a = ref()
+    ga = torch.autograd.grad((a * w).sum(), [lg, lr, ls])
+    b = _MixtureNLL.apply(lg, lr, ls, x, xm, xs, 1.0, 0.3)
+    gb = torch.autograd.grad((b * w).sum(), [lg, lr, ls])
+    assert torch.allclose(a, b, atol=1e-12)
+    for p, q in zip(ga, gb):
+        assert torch.allclose(p, q, atol=1e-12)
