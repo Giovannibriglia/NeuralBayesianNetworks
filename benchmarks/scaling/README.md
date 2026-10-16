@@ -13,17 +13,17 @@ not scale is a theorem, not an implementation detail.**  Under a 1-thread /
 | operation | scales with nodes? | scales with edges? | binding constraint | vs baseline |
 |---|---|---|---|---|
 | discrete MLE fit | ✅ 5 000 nodes in 1.5 s | ✅ to in-degree 20 with the sparse table (dense: OOM at 16) | data fragmentation: TV error to the truth grows 0.01 → 0.25 with in-degree | pgmpy 2.7× slower at 5 000 nodes, 9× at in-degree 8, times out at in-degree 13 |
-| exact discrete queries | ✅ on bounded tree-width (5 000 nodes, 0.16 s / 10 queries) | ❌ exponential in tree-width | tree-width (K&F Thm 9.6; optimal ordering NP-hard, Thm 9.7) | pgmpy 8× slower at 5 000; pgmpy fails at 200 ER nodes where NBN still answers 90% of queries exactly |
+| exact discrete queries | ✅ on bounded tree-width (5 000 nodes, 0.17 s / 10 queries) | ❌ exponential in tree-width | tree-width (K&F Thm 9.6; optimal ordering NP-hard, Thm 9.7) | pgmpy 8× slower at 5 000; pgmpy fails at 200 ER nodes where NBN still answers 90% of queries exactly |
 | sampling queries (LW) | ✅ 5 000 nodes, any tree-width | ✅ linear in edges | `1/P(e)` (rare evidence), not the graph | 5–32× faster than NBN master; on non-Gaussian queries vectorised Pyro is 36× slower at 2 000 nodes and runs out of memory at 5 000 |
-| certified discrete queries | ✅ 5 000 ER nodes, 1.7 s / query | ✅ | `W/P(e)` | new: 518/518 intervals cover the exact answer; median width 0.067 |
-| S4 per-factor sets | ✅ 5 000 nodes in 1.35 s (batched KL) | table size `K^(p+1)` | parent-set size (data per row) | 4.6× faster than per-node; bit-identical |
-| non-Gaussian neural fit | ✅ linear, 3× smaller constant (stacked); 1 000 nodes on the GPU | ✅ flat in edges | compute: rows × epochs × nodes | sequential NBN and Pyro SVI hit the 30 s budget at 500 nodes, stacked at 1 000 (CPU) |
+| certified discrete queries | ✅ 5 000 ER nodes, 1.5 s / query | ✅ | `W/P(e)` | new: 528/528 intervals cover the exact answer; median width 0.033 |
+| S4 per-factor sets | ✅ 5 000 nodes in 1.0 s (batched KL) | table size `K^(p+1)` | parent-set size (data per row) | 6× faster than per-node; bit-identical |
+| non-Gaussian neural fit | ✅ linear, 3× smaller constant (stacked); 1 000 nodes on the GPU or on 10 threads | ✅ flat in edges | compute: rows × epochs × nodes | sequential NBN and Pyro SVI hit the 30 s budget at 500 nodes (1 thread); on the GPU at 50 and 20 |
 | non-Gaussian queries | ✅ 5 000 nodes in 1.8 s / 10 queries | ✅ | effective sample size | Pyro vectorised: 23 s at 2 000, OOM at 5 000 |
 
 What changed: 11 semantics-preserving engine changes (§2), all tested; the
-two largest effects are the incremental min-fill (exact queries 19–66×
-faster than master on 100–2 000-node networks) and barren-node pruning in
-likelihood weighting (5–32×).  Two new mechanisms make the "edges" axis tractable where
+two largest effects are the incremental min-fill (exact queries 6–51×
+faster than master on 200–2 000-node bounded-tree-width networks) and
+barren-node pruning in likelihood weighting (5–32×).  Two new mechanisms make the "edges" axis tractable where
 it can be: `SparseCategoricalTableMechanism` (fit memory `O(N)` instead of
 `O(K^(p+1))`) and `certified_query` (sampling answers with a declared
 `1 − δ` level, so dense graphs get *guaranteed* answers when exact inference
@@ -120,16 +120,22 @@ Figures are in `figures/`, full tables in `results/tables.md` (medians over
 
 * Exactness: NBN VE and pgmpy VE agree to 1.9e-7 on 450 queries.
 * **Bounded tree-width (window 5)**: exact VE scales to 5 000 nodes —
-  NBN 0.16 s per 10 queries (pgmpy 1.36 s, NBN master 2.42 s; at 2 000 nodes
-  NBN 0.09 s vs master 6.1 s).  Before this branch, ~97% of the query time
+  NBN 0.17 s per 10 queries (pgmpy 1.36 s, NBN master 2.42 s; at 1 000
+  nodes NBN 0.07 s vs master 3.7 s, at 2 000 0.19 s vs 6.1 s; medians of 3
+  seeds).  Before this branch, ~97% of the query time
   was the min-fill ordering (graph copy + full rescoring per step).
 * **Erdős–Rényi**: tree-width grows with n, so exact inference must fail —
   and it does for every exact method: pgmpy at 200 nodes (OOM), NBN answers
   100% of queries up to 100 nodes, 90% at 200, 47% at 500, ~25% at
   2 000–5 000 (the queries whose pruned scope is small), refusing the rest
-  within the memory budget instead of crashing.  Evidence-reduced ordering
-  raises the exact share over master on the same graphs (seed 0: 9/10 vs
-  8/10 at 200 nodes, 6/10 vs 3/10 at 500).
+  within the memory budget instead of crashing.  The evidence-reduced
+  ordering barely changes *which* queries are feasible (27 vs 26 of 30 at
+  200 nodes, equal elsewhere): it lowers some induced widths (e.g. 25 → 21),
+  but those queries stay far over budget.  The gain over master is speed.
+  With the whole machine (10 threads, 18 GB for VE) the exact share is the
+  same order (8/10 at 200, 5/10 at 500, 2–4/10 beyond): memory does not buy
+  much against exponential growth, and pgmpy still fails at 200 nodes
+  (10 GB, timeout).
 * Edges (ER, n = 100): exact VE dies between mean in-degree 2 and 4 for
   both libraries; LW and certified LW are flat (1–2.5 s and 1.4–7 s).
 * Can a better ordering rescue ER?  The minor-min-width lower bound proves
@@ -140,22 +146,24 @@ Figures are in `figures/`, full tables in `results/tables.md` (medians over
   worst case [K&F Thm 9.4, p. 291], so no implementation trick removes this
   wall; it can only be moved.
 * **Approximate arms** (where exact answers exist): LW (100k particles)
-  median |error| 0.0027, max 0.013; **certified LW** (200k, δ = 0.05) covers
-  the exact answer in **518/518** queries, median worst-class width 0.067,
-  and reaches 5 000 ER nodes (17 s per 10 queries).  On bounded tree-width
+  median |error| 0.0027, max 0.011; **certified LW** (200k, δ = 0.05) covers
+  the exact answer in **528/528** queries, median worst-class width 0.033
+  (0.067 with the KL bound alone), and reaches 5 000 ER nodes (15 s per 10
+  queries).  On bounded tree-width
   graphs certified LW is slower (ancestral closures cover most of the graph)
   and stops at 1 000–2 000 nodes within 30 s for 10 queries.
-* The price of the guarantee: certified widths (≈ 0.05–0.15) are about 30×
-  the actual errors (≈ 1e-3).  The worst-case KL–Hoeffding bound, the union
-  over K + 1 means and the ratio all add slack; variance-adaptive bounds
-  (empirical Bernstein) are the natural next step.
+* The price of the guarantee: with the KL bound alone the widths were about
+  30× the actual errors (≈ 1e-3); intersecting with an empirical-Bernstein
+  interval [Maurer & Pontil 2009, Thm 4] halved them (median 0.067 → 0.033)
+  with coverage unchanged.  The union over K + 1 means and the ratio still
+  add slack.
 
 ### 3.3 S4 set builders
 
 ![sets](figures/discrete_sets.png)
 
 * Per-node KL intervals: 6.3 s for 5 000 nodes; **batched `interval_sets`:
-  1.35 s**, bit-identical; L1 balls (closed form): 0.43 s.
+  1.0 s**, bit-identical; L1 balls (closed form): 0.43 s.
 * With in-degree the cost follows the table size `K^(p+1)`; batching then
   gives nothing (passes are capped so it is never slower).
 * Statistically, Hoeffding/Weissman widths shrink like `sqrt(log(1/δ_j)/n(u))`
@@ -174,9 +182,15 @@ Figures are in `figures/`, full tables in `results/tables.md` (medians over
 * 1 CPU thread: stacked is 3× faster than sequential NBN and 4–5× faster
   than Pyro at every size; within 30 s it fits 500 nodes (local and Pyro
   stop at 200).  Flat in edges.
-* Apple GPU (MPS): sequential NBN and Pyro are *slower* than on the CPU
-  (per-node kernel launches); stacked fits 1 000 nodes in ≈ 18 s.  Stacking
-  is what makes the GPU usable at all.
+* Apple GPU (MPS): sequential NBN and Pyro are *slower* than on one CPU
+  thread (per-node kernel launches: 17 s for 20 nodes, Pyro times out at
+  20); stacked fits 1 000 nodes in 15 s and is flat in edges (≈ 2 s at
+  n = 100 from mean in-degree 1 to 8).  Stacking is what makes the GPU
+  usable at all.
+* Whole CPU (10 threads): only stacked benefits (1 000 nodes in 19 s);
+  sequential NBN and Pyro get *slower* (25.5 s vs 19 s at 200 nodes; Pyro
+  times out at 200) because their per-node operations are too small to
+  split across threads.
 * The remaining cost is real compute (rows × epochs × nodes × MLP); a
   closed-form backward of the mixture likelihood saves ≈ 10%.
 
@@ -188,8 +202,13 @@ Figures are in `figures/`, full tables in `results/tables.md` (medians over
   NBN LW 0.64 s at 2 000 nodes and 1.8 s at 5 000; NBN master 20.5 s and
   timeout; Pyro vectorised 23 s and OOM; `pyro.infer.Importance` (one
   particle at a time) times out already at 10 nodes.
-* All three estimators are the same (prior proposal); accuracy against a
-  4M-particle reference: <!-- CONT-ERR -->.
+* All three estimators are the same (prior proposal), and so is their
+  accuracy against a 4M-particle reference: median |error| 0.005 (NBN),
+  0.004 (Pyro), 90% quantile ≈ 0.02, worst 0.076 when the effective sample
+  size drops to ≈ 0.5% (Markov-blanket evidence on a strongly dependent
+  network).  Continuous evidence has unbounded densities, so no certified
+  interval is available here; the effective sample size (reported) is a
+  heuristic.
 
 ## 4. What does not scale, and why (honest limits)
 

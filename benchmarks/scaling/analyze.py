@@ -105,7 +105,7 @@ def agg(rows, axis, topo=None, methods=None):
 
 
 def plot_time(ax, rows, axis, topo=None, budget=30.0, methods=None, ylabel=True):
-    for m, cells in sorted(agg(rows, axis, topo, methods).items()):
+    for mi, (m, cells) in enumerate(sorted(agg(rows, axis, topo, methods).items())):
         c = COLOR.get(_base(m.split("[")[0]), GREY)
         ls = "--" if "@" in m else "-"
         lab = LABEL.get(_base(m.split("[")[0]), m) + (" [master]" if "@" in m else "")
@@ -120,14 +120,16 @@ def plot_time(ax, rows, axis, topo=None, budget=30.0, methods=None, ylabel=True)
         dead = [cl for cl in cells if cl["t"] is None]
         if dead:
             cl = dead[0]
-            ax.plot([cl["x"]], [budget], "x", color=c, ms=7, mew=2,
+            xd = cl["x"] * (1.0 + 0.12 * mi)   # keep coincident failure marks apart
+            ax.plot([xd], [budget], "x", color=c, ms=7, mew=2,
                     label=None if (good or partial) else lab)
             ax.annotate({"timeout": "time", "oom": "mem"}.get(cl["fail"], cl["fail"]),
-                        (cl["x"], budget), textcoords="offset points", xytext=(4, 4),
+                        (xd, budget), textcoords="offset points", xytext=(4, 4 + 10 * (mi % 2)),
                         fontsize=7, color=INK)
     ax.axhline(budget, color=GREY, lw=0.8, ls=":")
     ax.set_xscale("log")
     ax.set_yscale("log")
+    ax.set_ylim(top=budget * 4)   # room for the failure labels under the title
     ax.set_xlabel("nodes" if axis == "n" else "edges (mean over seeds)")
     if ylabel:
         ax.set_ylabel("time (s)")
@@ -194,7 +196,7 @@ def lw_errors(rows):
                     exact.setdefault((r["problem"], qi), a)
     out = []
     for r in rows:
-        if _base(r["method"]) in ("nbn_lw", "nbn_cert") and r["status"] == "ok":
+        if _base(r["method"]).startswith(("nbn_lw", "nbn_cert")) and r["status"] == "ok":
             for qi, a in enumerate(r.get("answers") or []):
                 e = exact.get((r["problem"], qi))
                 if e is not None and a is not None:
@@ -282,6 +284,7 @@ def fig_cont_fit():
     ax.set_xscale("log")
     ax.set_xlabel("nodes")
     ax.set_ylabel("LL gap to truth\n(median row, nats / node)")
+    ax.set_ylim(bottom=0)
     ax.set_title("Fit quality (same budget)")
     h, l = axs[0].get_legend_handles_labels()
     fig.legend(h, l, loc="lower center", ncol=4, frameon=False, bbox_to_anchor=(0.5, -0.08))
@@ -392,10 +395,12 @@ def fig_indeg():
 def fig_mps():
     cpu = [r for r in load("cont_fit") if r.get("axis") == "n"]
     gpu = [r for r in load("cont_fit_mps") if r.get("axis") == "n"]
+    full = [r for r in load("cont_fit_full") if r.get("axis") == "n"]
     if not gpu:
         return
-    fig, ax = plt.subplots(figsize=(DOUBLE * 0.6, 2.8))
-    for rows, ls, dev in [(cpu, "-", "1 CPU thread"), (gpu, "--", "Apple MPS GPU")]:
+    fig, ax = plt.subplots(figsize=(DOUBLE * 0.62, 3.0))
+    for rows, ls, dev in [(cpu, "-", "1 thread"), (full, ":", "10 threads"),
+                          (gpu, "--", "MPS GPU")]:
         for m in ("nbn_local", "nbn_stacked", "pyro_svi"):
             rs = sorted([r for r in rows if r["method"] == m], key=lambda r: r["n"])
             ok = [r for r in rs if r["status"] == "ok"]
@@ -407,8 +412,8 @@ def fig_mps():
     ax.set_yscale("log")
     ax.set_xlabel("nodes")
     ax.set_ylabel("fit time (s)")
-    ax.set_title("Non-Gaussian fit: CPU vs GPU (same budget of steps)")
-    ax.legend(fontsize=6, loc="upper left")
+    ax.set_title("Non-Gaussian fit: 1 thread vs 10 threads vs GPU\n(same model, same Adam steps)")
+    ax.legend(fontsize=5.5, loc="upper left", ncol=1)
     fig.tight_layout()
     fig.savefig(FIG / "cont_fit_mps.png", dpi=200)
     fig.savefig(FIG / "cont_fit_mps.pdf")
@@ -516,10 +521,22 @@ def main():
                 out.append(f"{m}: certified interval covers exact answer in "
                            f"{sum(cov)}/{len(cov)} queries; median max-width "
                            f"{np.median(ws):.3f}\n")
+    klp = RES / "prelim" / "discrete_infer_cert_klonly.jsonl"
+    if klp.exists():
+        kl_rows = [json.loads(l) for l in klp.read_text().splitlines() if l.strip()]
+        base = [r for r in load("discrete_infer") if r["method"] in ("nbn_ve", "pgmpy_ve")]
+        for r in kl_rows:
+            r["method"] = "nbn_cert_klonly"
+        ek = [e for e in lw_errors(base + kl_rows) if e["method"] == "nbn_cert_klonly"]
+        if ek:
+            ws = [e["width"] for e in ek if e.get("width") is not None]
+            cov = [e["covered"] for e in ek if e["covered"] is not None]
+            out.append(f"nbn_cert with bound='kl' only (earlier run): coverage {sum(cov)}/{len(cov)}; "
+                       f"median max-width {np.median(ws):.3f}\n")
     ce = cont_errors()
     for m in sorted({e["method"] for e in ce}):
         es = [e["err"] for e in ce if e["method"] == m]
-        out.append(f"{m} (continuous, vs 1M-particle reference): {len(es)} queries; "
+        out.append(f"{m} (continuous, vs 4M-particle reference): {len(es)} queries; "
                    f"median |err| = {np.median(es):.4f}, 90% = {np.quantile(es, 0.9):.4f}\n")
     (RES / "tables.md").write_text("\n".join(out))
     print("\n".join(out))
