@@ -32,10 +32,16 @@ PROBLEMS = HERE / "problems"
 
 
 def ensure_problem(family, topology, n, deg, k=3, window=5, seed=0):
-    name = gen.problem_name(family, topology, n, deg, k, seed, window)
+    if family == "discadd":
+        name = f"discadd_fixed_n{n}_deg{deg}_k{k}_s{seed}"
+    else:
+        name = gen.problem_name(family, topology, n, deg, k, seed, window)
     p = PROBLEMS / f"{name}.pt"
     if not p.exists():
-        pr = gen.build(family, topology, n, deg, k=k, window=window, seed=seed)
+        if family == "discadd":
+            pr = gen.build_additive(n, int(deg), k=k, seed=seed)
+        else:
+            pr = gen.build(family, topology, n, deg, k=k, window=window, seed=seed)
         gen.save(pr, PROBLEMS)
     return p
 
@@ -117,6 +123,9 @@ def sweep_specs(name):
         for topo in ("er", "local"):
             specs.append(("n", "discrete", topo, NODES, 2, "infer", ["nbn_cert"], {}))
         specs.append(("deg", "discrete", "er", DEGS, 100, "infer", ["nbn_cert"], {}))
+    elif name == "discrete_fit_indeg":
+        specs.append(("deg", "discadd", "fixed", [2, 4, 6, 8, 10, 12, 13, 14, 16, 18, 20],
+                      30, "fit", ["nbn", "nbn_sparse", "pgmpy"], {}))
     elif name == "discrete_sets":
         specs.append(("n", "discrete", "er", NODES, 2, "sets",
                       ["nbn_interval", "nbn_intervals_batched", "nbn_l1"], {}))

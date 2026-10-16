@@ -69,6 +69,47 @@ def problem_name(family, topology, n, deg, k, seed, window):
     return f"{family}_{topology}{w}_n{n}_deg{deg:g}_k{k}_s{seed}"
 
 
+def build_additive(n: int, indeg: int, *, k: int = 3, n_train: int = 10_000,
+                   n_test: int = 2_000, seed: int = 0) -> dict:
+    """In-degree stress case: node j has exactly ``min(j, indeg)`` parents.
+
+    The true CPD is additive in logit space,
+    ``logit P(X_j = c | pa) = b_j[c] + sum_i W_ji[pa_i, c]``, so the truth is
+    compact although a table of it has ``k^(indeg+1)`` entries; data are
+    sampled directly (no dense table is ever built).
+    """
+    rng = np.random.default_rng(seed)
+    names = [f"X{i}" for i in range(n)]
+    parents, W, B = [], [], []
+    for j in range(n):
+        d = min(j, indeg)
+        pa = sorted(rng.choice(j, size=d, replace=False).tolist()) if d else []
+        parents.append(pa)
+        W.append(rng.normal(0, 1.5 / max(1, d) ** 0.5, size=(d, k, k)))
+        B.append(rng.normal(0, 1, size=k))
+    def sample(m):
+        X = np.zeros((m, n), dtype=np.int64)
+        for j in range(n):
+            lg = np.tile(B[j], (m, 1))
+            for t, i in enumerate(parents[j]):
+                lg += W[j][t][X[:, i]]
+            p = np.exp(lg - lg.max(1, keepdims=True))
+            p /= p.sum(1, keepdims=True)
+            u = rng.random((m, 1))
+            X[:, j] = np.minimum((u > p.cumsum(1)).sum(1), k - 1)
+        return X
+    Xtr, Xte = sample(n_train), sample(n_test)
+    edges = [(names[i], names[j]) for j in range(n) for i in parents[j]]
+    return dict(
+        name=f"discadd_fixed_n{n}_deg{indeg}_k{k}_s{seed}", family="discadd",
+        topology="fixed", n=n, deg=indeg, k=k, window=0, seed=seed, nodes=names,
+        edges=edges, n_edges=len(edges), max_in=max(len(p) for p in parents),
+        train={v: torch.from_numpy(Xtr[:, i]) for i, v in enumerate(names)},
+        test={v: torch.from_numpy(Xte[:, i]) for i, v in enumerate(names)},
+        true_model=None, add_parents=parents, add_W=W, add_B=B,
+    )
+
+
 def build(family: str, topology: str, n: int, deg: float, *, k: int = 3,
           window: int = 5, cap: int = 8, n_train: int = 10_000,
           n_test: int = 2_000, seed: int = 0) -> dict:

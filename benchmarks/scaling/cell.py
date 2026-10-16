@@ -148,17 +148,23 @@ def d_fit(pr, method, dev, budget, opt):
     k = pr["k"]
     nodes = pr["nodes"]
     res = {}
-    if method == "nbn":
+    if method in ("nbn", "nbn_sparse"):
+        from nbn.mechanisms.parametric.sparse_categorical_table import (
+            SparseCategoricalTableMechanism,
+        )
+        cls = CategoricalTableMechanism if method == "nbn" else SparseCategoricalTableMechanism
         data = {v: pr["train"][v].to(dev) for v in nodes}
         with Timer(budget) as t:
             m = NeuralBayesianNetwork(pr["edges"], variables={v: ("discrete", k) for v in nodes},
                                       device=str(dev))
             for v in nodes:
-                m.set_mechanism(v, CategoricalTableMechanism(alpha=0.0))
+                m.set_mechanism(v, cls(alpha=0.0))
             m.fit(data, consolidate=False)
             if dev.type == "mps":
                 torch.mps.synchronize()
         res["time_s"] = t.elapsed
+        if pr["family"] == "discadd":
+            return _additive_accuracy(pr, res, lambda v, rows: _nbn_row_probs(m, v, rows))
         learned = {v: torch.softmax(m.mechanisms[v].tabulate().detach().cpu().double(), -1)
                    .reshape(-1, k) for v in nodes}
     elif method == "pgmpy":
@@ -187,6 +193,14 @@ def d_fit(pr, method, dev, budget, opt):
                 arr = arr.permute(*perm)
                 vals = arr.reshape(k, -1)
             learned[v] = vals.T.double()
+        if pr["family"] == "discadd":
+            def _pg_rows(v, rows):
+                pa = [a for a, b in pr["edges"] if b == v]
+                idx = torch.zeros(rows[v].shape[0], dtype=torch.long)
+                for a in pa:
+                    idx = idx * k + rows[a]
+                return learned[v].reshape(-1, k)[idx]
+            return _additive_accuracy(pr, res, _pg_rows)
     else:
         raise ValueError(method)
     # accuracy: TV distance to the true CPT, averaged over parent rows weighted
@@ -209,6 +223,31 @@ def d_fit(pr, method, dev, budget, opt):
         tv_den += float(cnt.sum())
     res["acc_tv"] = tv_num / tv_den
     res["cpt_hash"] = float(sum(float(torch.nan_to_num(learned[v]).sum()) for v in nodes))
+    return res
+
+
+def _nbn_row_probs(m, v, rows):
+    pa = list(m.dag.parents(v))
+    mech = m.mechanisms[v]
+    n = rows[v].shape[0]
+    P = torch.stack([rows[a] for a in pa], -1) if pa else None
+    with torch.no_grad():
+        out = [mech.log_prob(torch.full((n,), c), P).exp() for c in range(mech.n_classes)]
+    return torch.stack(out, -1).double().cpu()
+
+
+def _additive_accuracy(pr, res, row_probs):
+    """Mean TV between learned and true rows over the training rows."""
+    k, nodes = pr["k"], pr["nodes"]
+    rows = pr["train"]
+    tv = []
+    for j, v in enumerate(nodes):
+        lg = torch.tensor(pr["add_B"][j]).expand(rows[v].shape[0], k).clone()
+        for t, i in enumerate(pr["add_parents"][j]):
+            lg += torch.tensor(pr["add_W"][j][t])[rows[nodes[i]]]
+        p_true = torch.softmax(lg, -1)
+        tv.append(float(0.5 * (row_probs(v, rows) - p_true).abs().sum(-1).mean()))
+    res["acc_tv"] = float(np.mean(tv))
     return res
 
 
@@ -530,6 +569,7 @@ def c_infer(pr, method, dev, budget, opt):
 
 TASKS = {
     ("discrete", "fit"): d_fit,
+    ("discadd", "fit"): d_fit,
     ("discrete", "infer"): d_infer,
     ("discrete", "sets"): d_sets,
     ("nongauss", "fit"): c_fit,

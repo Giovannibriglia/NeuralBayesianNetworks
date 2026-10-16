@@ -17,9 +17,11 @@ from nbn.mechanisms.parametric.dirac_gaussian import DiracGaussianMechanism
 from nbn.mechanisms.parametric.linear_gaussian import LinearGaussianMechanism
 from nbn.mechanisms.parametric.mdn import MDNMechanism
 from nbn.mechanisms.parametric.neural_categorical import NeuralCategoricalMechanism
+from nbn.mechanisms.parametric.sparse_categorical_table import SparseCategoricalTableMechanism
 
 __all__ = [
     "CategoricalTableMechanism",
+    "SparseCategoricalTableMechanism",
     "BinningCategoricalTable",
     "LinearGaussianMechanism",
     "MDNMechanism",

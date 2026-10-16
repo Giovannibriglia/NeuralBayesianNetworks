@@ -1,4 +1,5 @@
 from nbn.inference.base import InferenceEngine
+from nbn.inference.certified import CertifiedAnswer, certified_query
 from nbn.inference.hybrid import HybridRouter
 from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
 from nbn.inference.tensor_ve import TensorVariableElimination
@@ -8,4 +9,6 @@ __all__ = [
     "LikelihoodWeightingEngine",
     "TensorVariableElimination",
     "HybridRouter",
+    "certified_query",
+    "CertifiedAnswer",
 ]

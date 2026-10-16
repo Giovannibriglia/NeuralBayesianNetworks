@@ -24,6 +24,7 @@ from nbn.mechanisms.parametric import (
     LinearGaussianMechanism,
     MDNMechanism,
     NeuralCategoricalMechanism,
+    SparseCategoricalTableMechanism,
 )
 
 # --- Non-parametric ------------------------------------------------------
@@ -38,6 +39,7 @@ __all__ = [
     "Mechanism",
     # parametric
     "CategoricalTableMechanism",
+    "SparseCategoricalTableMechanism",
     "BinningCategoricalTable",
     "LinearGaussianMechanism",
     "MDNMechanism",
