@@ -24,7 +24,10 @@ class HybridRouter(InferenceEngine):
        row) when the joint table has at most ``max_joint_elements``
        entries, else LW's ``(weights, samples)`` particles (R6; a
        multi-target query used to crash VE, B6).
-    3. Induced treewidth > τ → LW (a cheap structural pre-filter).
+    3. Induced treewidth > τ → LW (a cheap structural pre-filter).  With
+       ``query_width_check=True``, a network over τ is given a second look:
+       the width of the query's own pruned plan decides (a query touching a
+       small part of a large dense network can still be answered exactly).
     4. Otherwise price the *actual* VE plan of this query: its estimated
        peak bytes for one row against the device memory budget (VE splits
        larger batches into rows-chunks that fit).  Fits → exact
@@ -59,6 +62,12 @@ class HybridRouter(InferenceEngine):
         this fraction of the stable memory capacity (leaving room for the
         rest of the process).  Called directly, VE itself rejects only plans
         beyond the whole capacity.
+    query_width_check: bool
+        When the whole network's width exceeds ``treewidth_threshold``, also
+        measure the width of the query's own pruned plan and route to exact
+        VE if that is within the threshold (and the plan fits memory).  More
+        answers become exact; some of them can be slow.  Default False keeps
+        the historical routing.
     """
 
     # Bound on remembered "already warned" query shapes.
@@ -71,8 +80,10 @@ class HybridRouter(InferenceEngine):
         memory_budget: float | None = None,
         ve_host_fraction: float = 0.75,
         max_joint_elements: int = 1 << 20,
+        query_width_check: bool = False,
     ) -> None:
         self.treewidth_threshold = treewidth_threshold
+        self.query_width_check = bool(query_width_check)
         self.max_joint_elements = int(max_joint_elements)
         self.ve_host_fraction = float(ve_host_fraction)
         self._ve = TensorVariableElimination(
@@ -149,6 +160,21 @@ class HybridRouter(InferenceEngine):
             # bugs and must propagate, not silently downgrade the engine.
             tw = self.treewidth_threshold + 1
 
+        if (tw > self.treewidth_threshold and targets is not None
+                and getattr(self, "query_width_check", False)):
+            # The global width is a property of the whole network; the query
+            # only eliminates its own pruned scope.  Before giving up on
+            # exactness, measure that scope's plan width (cheap: the plan is
+            # cached and reused by VE if it is chosen).  The memory check
+            # below still prices the plan.
+            try:
+                qw = self._ve.plan_width(
+                    model, tuple(targets) if multi else targets[0],
+                    tuple(evidence or {}), tuple(do or {}), order=order)
+            except (nx.NetworkXError, ValueError, KeyError):
+                qw = None
+            if qw is not None and qw <= self.treewidth_threshold:
+                tw = qw
         if tw > self.treewidth_threshold:
             return self._use_lw(
                 "HybridRouter: induced treewidth %d > threshold %d for %s; "

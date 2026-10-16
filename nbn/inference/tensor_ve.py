@@ -573,6 +573,39 @@ class TensorVariableElimination(InferenceEngine):
         head = device_headroom_bytes(device)
         return float("inf") if head is None else self.memory_safety * head
 
+    def plan_width(self, model, target, evidence_keys=(), do_keys=(), *,
+                   order: str = "min_fill") -> int | None:
+        """Induced width of this query's elimination plan (``None``: nothing to eliminate).
+
+        Measured on the query's own pruned factor scope after conditioning
+        (the graph the plan is computed on), not on the whole network: on a
+        large network with a high global width, a query whose relevant part
+        is small still has a small width [Koller & Friedman 2009, §9.3.2 and
+        §9.4, pp. 303–310].
+        """
+        from nbn.inference._elimination_order import _moral_adjacency, induced_width
+
+        do_set = set(do_keys)
+        ev = tuple(sorted(k for k in evidence_keys if k not in do_set))
+        do_t = tuple(sorted(do_set))
+        plan_target = _plan_target(target, set(ev) | do_set)
+        if plan_target is None:
+            return None
+        order_list, relevant = self._plan_with_relevant(model, plan_target, ev,
+                                                        do_keys=do_t, order=order)
+        graph = model.dag.networkx_graph
+        if do_t:
+            graph = graph.copy()
+            graph.remove_edges_from([(u, v) for (u, v) in list(graph.in_edges(do_t))])
+        scope = set(relevant)
+        for node in relevant:
+            scope.update(graph.predecessors(node))
+        adj = _moral_adjacency(graph.subgraph(scope))
+        for e in set(ev) | do_set:
+            for u in adj.pop(e, ()):
+                adj[u].discard(e)
+        return induced_width(adj, order_list)
+
     def fits_memory(self, model, target, evidence_keys=(), do_keys=(), *,
                     order: str = "min_fill",
                     host_fraction: float | None = None) -> bool:

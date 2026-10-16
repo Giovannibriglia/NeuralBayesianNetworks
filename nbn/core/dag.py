@@ -115,25 +115,21 @@ class DAG:
         """
         if self._induced_width is not None:
             return self._induced_width
-        g = nx.moral_graph(self._g)
-        width = 0
-        while g.number_of_nodes():
-            def _fill_cost(node: str) -> tuple[int, int]:
-                nbrs = list(g.neighbors(node))
-                fill = sum(
-                    not g.has_edge(nbrs[i], nbrs[j])
-                    for i in range(len(nbrs))
-                    for j in range(i + 1, len(nbrs))
-                )
-                return (fill, len(nbrs))
-
-            node = min(g.nodes, key=_fill_cost)
-            nbrs = list(g.neighbors(node))
-            width = max(width, len(nbrs))
-            for i in range(len(nbrs)):
-                for j in range(i + 1, len(nbrs)):
-                    g.add_edge(nbrs[i], nbrs[j])
-            g.remove_node(node)
+        # Incremental greedy min-fill (same key as the historical loop: fill,
+        # then neighbourhood size, then the node's position in the graph,
+        # which is what ``min`` over ``g.nodes`` tie-broke on), so the width
+        # is unchanged; only the cost drops from O(n) rescoring plus graph
+        # edits per step to rescoring the 2-neighbourhood of the eliminated
+        # node.
+        from nbn.inference._elimination_order import (
+            _greedy_min_fill,
+            _moral_adjacency,
+            induced_width,
+        )
+        adj = _moral_adjacency(self._g)
+        rank = {v: i for i, v in enumerate(self._g.nodes)}
+        order = _greedy_min_fill({v: set(x) for v, x in adj.items()}, set(), rank)
+        width = induced_width(adj, order)
         self._induced_width = width
         return width
 

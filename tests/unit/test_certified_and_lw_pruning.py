@@ -165,3 +165,73 @@ def test_lw_particle_chunking_same_answer():
     # continuous-style return path (weights, samples) keeps all particles
     w, x = eng.query(m, [tgt, names[6]], {names[8]: torch.tensor([1])})
     assert w.shape == (1, 60_000) and x.shape == (1, 60_000, 2)
+
+
+def test_dag_induced_width_fast_path_matches_reference():
+    import random
+
+    import networkx as nx
+
+    from nbn.core.dag import DAG
+
+    def ref(g):
+        g = nx.moral_graph(g)
+        width = 0
+        while g.number_of_nodes():
+            def fc(node):
+                nb = list(g.neighbors(node))
+                return (sum(not g.has_edge(nb[i], nb[j]) for i in range(len(nb))
+                            for j in range(i + 1, len(nb))), len(nb))
+            node = min(g.nodes, key=fc)
+            nb = list(g.neighbors(node))
+            width = max(width, len(nb))
+            for i in range(len(nb)):
+                for j in range(i + 1, len(nb)):
+                    g.add_edge(nb[i], nb[j])
+            g.remove_node(node)
+        return width
+
+    for t in range(60):
+        random.seed(t)
+        n = random.randint(2, 40)
+        names = [f"X{i}" for i in range(n)]
+        random.shuffle(names)
+        edges = [(names[i], names[j]) for j in range(n) for i in range(j)
+                 if random.random() < 0.25]
+        if not edges:
+            continue
+        d = DAG(edges)
+        assert d.induced_width() == ref(d._g)
+
+
+def test_router_query_width_check_routes_small_queries_exactly():
+    from nbn.inference.hybrid import HybridRouter
+
+    # a dense block (high global width) plus a separate small chain
+    m, names = _random_bn(0, n=9)
+    dense = [f"D{i}" for i in range(12)]
+    edges = [(a, b) for a, b in m.dag.networkx_graph.edges()]
+    edges += [(dense[i], dense[j]) for j in range(12) for i in range(j)]
+    k = 2
+    from nbn.core.network import NeuralBayesianNetwork
+    big = NeuralBayesianNetwork(edges, variables={v: ("discrete", k) for v in names + dense})
+    g = torch.Generator().manual_seed(0)
+    for v in names + dense:
+        pa = big.dag.parents(v)
+        mech = CategoricalTableMechanism()
+        mech._logits = nn.Parameter(torch.randn(k ** len(pa), k, generator=g))
+        mech._n_classes = k
+        mech._set_parent_layout([k] * len(pa))
+        mech._class_values = torch.arange(k, dtype=torch.float)
+        mech.output_dim = 1
+        big.set_mechanism(v, mech)
+    assert big.dag.induced_width() > 5
+    q = ([names[4]], {names[7]: 1})
+    off = HybridRouter(treewidth_threshold=5)
+    on = HybridRouter(treewidth_threshold=5, query_width_check=True)
+    big.query(*q, engine=off)
+    assert off.last_engine == "likelihood_weighting"
+    p = big.query(*q, engine=on)
+    assert on.last_engine == "tensor_ve"
+    exact = big.query(*q, engine=TensorVariableElimination())
+    assert torch.allclose(p, exact)

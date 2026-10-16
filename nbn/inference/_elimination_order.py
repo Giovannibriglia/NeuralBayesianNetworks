@@ -226,11 +226,12 @@ def _fill(adj: dict, node: str) -> int:
     return n * (n - 1) // 2 - inside
 
 
-def _greedy_min_fill(adj: dict, keep: set) -> List[str]:
+def _greedy_min_fill(adj: dict, keep: set, rank: dict | None = None) -> List[str]:
     """Greedy min-fill on ``adj`` (mutated), never eliminating ``keep``.
 
     Exact incremental form of the textbook loop that eliminates
-    ``argmin_v (fill(v), degree(v), name)`` at every step [Koller & Friedman
+    ``argmin_v (fill(v), degree(v), rank(v))`` at every step (``rank`` defaults
+    to the node name) [Koller & Friedman
     2009, Alg. 9.4, p. 314]: it returns the *same* order as rescoring every
     node at every step.  Eliminating ``v`` changes only the neighbourhoods of
     ``N(v)``, and only a node adjacent to a pair inside ``N(v)`` can gain an
@@ -243,18 +244,19 @@ def _greedy_min_fill(adj: dict, keep: set) -> List[str]:
     """
     import heapq
 
+    tb = (lambda v: v) if rank is None else rank.__getitem__
     key: dict = {}
     heap: list = []
     for v in adj:
         if v not in keep:
-            k = (_fill(adj, v), len(adj[v]), v)
+            k = (_fill(adj, v), len(adj[v]), tb(v), v)
             key[v] = k
             heap.append(k)
     heapq.heapify(heap)
     order: List[str] = []
     while heap:
         k = heapq.heappop(heap)
-        v = k[2]
+        v = k[-1]
         if key.get(v) != k:
             continue  # stale entry
         del key[v]
@@ -265,7 +267,7 @@ def _greedy_min_fill(adj: dict, keep: set) -> List[str]:
             touched |= adj[u]
         for u in touched:
             if u in key:
-                nk = (_fill(adj, u), len(adj[u]), u)
+                nk = (_fill(adj, u), len(adj[u]), tb(u), u)
                 if nk != key[u]:
                     key[u] = nk
                     heapq.heappush(heap, nk)
