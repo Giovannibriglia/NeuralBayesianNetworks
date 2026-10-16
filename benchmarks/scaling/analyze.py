@@ -33,7 +33,7 @@ COLOR = {
     "pgmpy": ORANGE, "pgmpy_ve": ORANGE,
     "nbn_lw": AQUA, "nbn_cert": MAGENTA,
     "pyro_svi": VERMILLION, "pyro_vec": VERMILLION, "pyro_is": INK,
-    "nbn_interval": BLUE, "nbn_l1": AQUA,
+    "nbn_interval": SKY, "nbn_intervals_batched": BLUE, "nbn_l1": AQUA,
 }
 LABEL = {
     "nbn": "NBN MLE", "pgmpy": "pgmpy MLE",
@@ -43,6 +43,7 @@ LABEL = {
     "pyro_svi": "Pyro SVI (MLE)", "pyro_vec": "Pyro IS (vectorised)",
     "pyro_is": "Pyro Importance", "nbn_interval": "NBN interval sets",
     "nbn_l1": "NBN L1 sets",
+    "nbn_intervals_batched": "NBN interval sets (batched)",
 }
 
 

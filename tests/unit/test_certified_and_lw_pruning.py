@@ -135,3 +135,17 @@ def test_certified_query_rejects_continuous_evidence():
     m.set_mechanism("A", LinearGaussianMechanism())
     with pytest.raises(NotImplementedError):
         evidence_weight_bound(m, {"A": 0.3})
+
+
+def test_interval_sets_identical_to_per_node():
+    from nbn.uncertainty import interval_set, interval_sets
+    m, names = _random_bn(3)
+    torch.manual_seed(0)
+    data = {k: v.reshape(-1).long() for k, v in m.sample(n=500).items()}
+    for meth in ("kl", "hoeffding"):
+        for sampling in ("iid", "trajectory"):
+            b = interval_sets(m, data, names, delta=0.01, method=meth, sampling=sampling)
+            for v in names:
+                a = interval_set(m, data, v, delta=0.01, method=meth, sampling=sampling)
+                assert torch.equal(a.lower, b[v].lower) and torch.equal(a.upper, b[v].upper)
+                assert torch.equal(a.unseen, b[v].unseen) and a.level == b[v].level

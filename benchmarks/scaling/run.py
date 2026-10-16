@@ -119,9 +119,9 @@ def sweep_specs(name):
         specs.append(("deg", "discrete", "er", DEGS, 100, "infer", ["nbn_cert"], {}))
     elif name == "discrete_sets":
         specs.append(("n", "discrete", "er", NODES, 2, "sets",
-                      ["nbn_interval", "nbn_l1"], {}))
+                      ["nbn_interval", "nbn_intervals_batched", "nbn_l1"], {}))
         specs.append(("deg", "discrete", "er", DEGS, 200, "sets",
-                      ["nbn_interval", "nbn_l1"], {}))
+                      ["nbn_interval", "nbn_intervals_batched", "nbn_l1"], {}))
     elif name == "cont_fit":
         specs.append(("n", "nongauss", "er", NODES, 2, "fit",
                       ["nbn_local", "nbn_stacked", "pyro_svi"], {}))

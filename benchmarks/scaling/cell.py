@@ -221,7 +221,11 @@ def d_infer(pr, method, dev, budget, opt):
         model = model.to(dev)
         if method == "nbn_ve":
             from nbn.inference.tensor_ve import TensorVariableElimination
-            eng = TensorVariableElimination(**({"order": opt["order"]} if "order" in opt else {}))
+            # Tell NBN the budget so its guard refuses a query it cannot fit
+            # (instead of the watchdog killing the process): 75% of the cap,
+            # the rest is the interpreter and the model.
+            eng = TensorVariableElimination(
+                memory_budget=float(opt.get("ve_mem_bytes", 0.75 * float(opt.get("mem_gb", 4)) * 2**30)))
         else:
             from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
             eng = LikelihoodWeightingEngine(n_samples=int(opt.get("n_samples", 100_000)))
@@ -248,6 +252,20 @@ def d_infer(pr, method, dev, budget, opt):
                 per_q.append(time.perf_counter() - t1)
         res["time_s"] = t.elapsed
         res["q_time_s"] = per_q
+        if method == "nbn_ve":
+            # width bounds per query (not timed): lower = minor-min-width on the
+            # pruned, evidence-reduced moral graph; upper = NBN's min-fill order
+            from nbn.inference._elimination_order import query_width_bounds
+            wb = []
+            for tgt, ev in qs:
+                _, rel = eng._plan_with_relevant(model, tgt, tuple(sorted(ev)))
+                g = model.dag.networkx_graph
+                scope = set(rel)
+                for v in rel:
+                    scope |= set(g.predecessors(v))
+                wb.append(list(query_width_bounds(g.subgraph(scope), targets=[tgt],
+                                                  evidence=list(ev))))
+            res["width_bounds"] = wb
         res["n_answered"] = sum(a is not None for a in answers)
         if res["n_answered"] == 0:
             raise RuntimeError("out of memory: every query refused by the VE guard; "
@@ -300,6 +318,12 @@ def d_sets(pr, method, dev, budget, opt):
     data = {v: pr["train"][v].to(dev) for v in nodes}
     delta = 0.05 / len(nodes)
     width = []
+    if method == "nbn_intervals_batched":
+        from nbn.uncertainty import interval_sets
+        with Timer(budget) as t:
+            sets = interval_sets(m, data, nodes, delta=delta, method=opt.get("imethod", "kl"))
+        width = [float((s.upper - s.lower).mean()) for s in sets.values()]
+        return {"time_s": t.elapsed, "mean_width": float(np.mean(width))}
     with Timer(budget) as t:
         for v in nodes:
             if method == "nbn_interval":

@@ -103,6 +103,51 @@ def _interval_set(counts: torch.Tensor, delta: float, method: IntervalMethod,
     )
 
 
+def interval_sets(
+    model,
+    data: Dict[str, torch.Tensor],
+    nodes=None,
+    delta: float = 0.05,
+    method: IntervalMethod = "kl",
+    sampling: Sampling = "iid",
+) -> Dict[str, IntervalSet]:
+    """:func:`interval_set` for many nodes at once: ``{node: IntervalSet}``.
+
+    Each node's set is **identical** to ``interval_set(model, data, node,
+    delta, method, sampling)`` (level ``1 - delta`` per node; split a global
+    budget yourself, e.g. ``delta / len(nodes)``).  The difference is cost:
+    the interval end points are element-wise functions of (count, trials,
+    level), so the entries of all tables are solved in one vectorised pass
+    instead of one small pass per node.  On a 1000-node network that removes
+    the per-node kernel-launch overhead that dominated the loop.
+    """
+    nodes = list(model.dag.topological_order()) if nodes is None else list(nodes)
+    tables, flat_c, flat_t, flat_d = [], [], [], []
+    for node in nodes:
+        counts, _ = count_table(model, data, node)
+        trials = counts.sum(dim=-1, keepdim=True).expand_as(counts)
+        per_entry = per_interval_delta(delta, counts.numel(), trials, sampling)
+        tables.append((node, counts.shape, trials))
+        flat_c.append(counts.reshape(-1))
+        flat_t.append(trials.reshape(-1))
+        flat_d.append(per_entry.reshape(-1).to(trials.dtype))
+    if not tables:
+        return {}
+    lower, upper = binomial_interval(torch.cat(flat_c), torch.cat(flat_t),
+                                     torch.cat(flat_d), method=method)
+    out: Dict[str, IntervalSet] = {}
+    start = 0
+    for node, shape, trials in tables:
+        n = int(torch.Size(shape).numel())
+        out[node] = IntervalSet(
+            level=1.0 - delta, guarantee="pac", unseen=trials[:, 0] == 0,
+            lower=lower[start:start + n].reshape(shape),
+            upper=upper[start:start + n].reshape(shape),
+        )
+        start += n
+    return out
+
+
 def l1_ball_set(
     model,
     data: Dict[str, torch.Tensor],

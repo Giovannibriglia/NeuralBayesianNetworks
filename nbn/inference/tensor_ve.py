@@ -367,6 +367,8 @@ class TensorVariableElimination(InferenceEngine):
             # do-nodes are clamped like evidence, so they are conditioned out
             # rather than eliminated — prune them from the moral graph too.
             evidence=list(evidence_keys) + list(do_keys),
+            cards={v: int(model.mechanisms[v].n_classes) for v in factor_scope
+                   if getattr(model.mechanisms[v], "n_classes", None)},
         )
         result = (elimination_order, relevant)
         return self._cache_put(self._plan_cache, key, model, result)
