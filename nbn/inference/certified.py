@@ -45,6 +45,7 @@ from typing import Mapping
 
 import torch
 
+from nbn.inference.state import get_inference_state
 from nbn.uncertainty.binomial import binomial_interval
 
 
@@ -99,12 +100,13 @@ def certified_query(
     n_samples: int = 200_000,
     delta: float = 0.05,
     do: Mapping[str, object] | None = None,
-    chunk: int = 1_000_000,
+    chunk: int | None = None,
 ) -> CertifiedAnswer:
     """Interval answer to ``P(target | evidence, do(...))`` at level ``1 - delta``.
 
     See the module docstring for the construction and its guarantee.
-    ``chunk`` bounds the particles held in memory at once.
+    ``chunk`` bounds the particles per pass (default: the likelihood-weighting
+    engine's memory-aware pass size, about 256 MiB of particle buffer).
     """
     from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
 
@@ -121,7 +123,11 @@ def certified_query(
         raise ValueError("certified_query: the evidence has probability 0 under every "
                          "parent configuration.")
 
-    eng = LikelihoodWeightingEngine(n_samples=chunk, prune_barren=True)
+    eng = LikelihoodWeightingEngine(n_samples=1, prune_barren=True)
+    if chunk is None:
+        from nbn.inference.state import get_inference_state as _gis
+        st = _gis(model, [target], tuple(sorted(evidence)), tuple(sorted(do)), eng._cache)
+        chunk = eng._particle_chunk(1, st.total_dim)
 
     def _t(v):
         t = v if isinstance(v, torch.Tensor) else torch.as_tensor(v)
@@ -135,7 +141,6 @@ def certified_query(
     while done < n_samples:
         s = min(chunk, n_samples - done)
         log_w, buf = eng._run(model, [target], ev, dd, s, prune=True)
-        from nbn.inference.state import get_inference_state
         state = get_inference_state(model, [target], tuple(sorted(ev)), tuple(sorted(dd)),
                                     eng._cache)
         sl = state.node_slices[state.node_to_idx[target]]
