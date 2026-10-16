@@ -35,7 +35,6 @@ for _v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
 
 import argparse  # noqa: E402
 import json  # noqa: E402
-import math  # noqa: E402
 import resource  # noqa: E402
 import signal  # noqa: E402
 import time  # noqa: E402
@@ -179,7 +178,7 @@ def d_fit(pr, method, dev, budget, opt):
         cls = CategoricalTableMechanism if method == "nbn" else SparseCategoricalTableMechanism
         data = {v: pr["train"][v].to(dev) for v in nodes}
         with Timer(budget) as t:
-            m = NeuralBayesianNetwork(pr["edges"], variables={v: ("discrete", k) for v in nodes},
+            m = NeuralBayesianNetwork(pr["edges"], variables=dict.fromkeys(nodes, ("discrete", k)),
                                       device=str(dev))
             for v in nodes:
                 m.set_mechanism(v, cls(alpha=0.0))
@@ -379,7 +378,7 @@ def d_sets(pr, method, dev, budget, opt):
     from nbn.uncertainty import interval_set, l1_ball_set
     k = pr["k"]
     nodes = pr["nodes"]
-    m = NeuralBayesianNetwork(pr["edges"], variables={v: ("discrete", k) for v in nodes},
+    m = NeuralBayesianNetwork(pr["edges"], variables=dict.fromkeys(nodes, ("discrete", k)),
                               device=str(dev))
     data = {v: pr["train"][v].to(dev) for v in nodes}
     delta = 0.05 / len(nodes)
@@ -430,7 +429,7 @@ def c_fit(pr, method, dev, budget, opt):
     torch.manual_seed(0)
     if method in ("nbn_local", "nbn_stacked"):
         data = {v: pr["train"][v].reshape(-1, 1).to(dev) for v in nodes}
-        m = NeuralBayesianNetwork(pr["edges"], variables={v: ("continuous", 1) for v in nodes},
+        m = NeuralBayesianNetwork(pr["edges"], variables=dict.fromkeys(nodes, ("continuous", 1)),
                                   device=str(dev))
         for v in nodes:
             m.set_mechanism(v, MDNMechanism(num_components=cfg["K"], hidden=cfg["hidden"]))
@@ -574,8 +573,8 @@ def c_infer(pr, method, dev, budget, opt):
                     xs = tr.nodes[tgt]["value"].reshape(S)
                     w = torch.softmax(lw, 0)
                 else:
-                    from pyro.infer import EmpiricalMarginal, Importance
-                    imp = Importance(lambda: pmodel(ev, 1)[tgt], guide=None,
+                    from pyro.infer import Importance
+                    imp = Importance(lambda ev=ev, tgt=tgt: pmodel(ev, 1)[tgt], guide=None,
                                      num_samples=S)
                     with torch.no_grad():
                         imp.run()

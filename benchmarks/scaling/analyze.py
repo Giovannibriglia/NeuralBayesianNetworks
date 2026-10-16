@@ -54,7 +54,7 @@ def load(*names):
     for nm in names:
         p = RES / f"{nm}.jsonl"
         if p.exists():
-            rows += [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+            rows += [json.loads(ln) for ln in p.read_text().splitlines() if ln.strip()]
     return rows
 
 
@@ -174,13 +174,13 @@ def fig_discrete_infer():
     ax.set_xlabel("nodes")
     ax.set_ylabel("queries answered exactly (%)")
     ax.set_title("Exact answers within budget, Erdős–Rényi (deg 2)\nhollow markers in other panels = partial")
-    h, l = [], []
+    h, labs = [], []
     for a in axs.flat[:3]:
         for hh, ll in zip(*a.get_legend_handles_labels()):
-            if ll not in l:
+            if ll not in labs:
                 h.append(hh)
-                l.append(ll)
-    fig.legend(h, l, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.5, -0.06))
+                labs.append(ll)
+    fig.legend(h, labs, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.5, -0.06))
     fig.tight_layout(rect=(0, 0.06, 1, 1))
     fig.savefig(FIG / "discrete_infer.png", dpi=200, bbox_inches="tight")
     fig.savefig(FIG / "discrete_infer.pdf", bbox_inches="tight")
@@ -213,7 +213,6 @@ def lw_errors(rows):
 
 def width_bound_stats(rows, k=3, budget_bytes=0.75 * 4 * 2**30, elem=4):
     """How often the tree-width lower bound *proves* a refused query infeasible."""
-    import math
     need = math.log(budget_bytes / elem, k) - 1  # lb above this => factor > budget
     tot = refused = proven = 0
     gaps = []
@@ -286,8 +285,8 @@ def fig_cont_fit():
     ax.set_ylabel("LL gap to truth\n(median row, nats / node)")
     ax.set_ylim(bottom=0)
     ax.set_title("Fit quality (same budget)")
-    h, l = axs[0].get_legend_handles_labels()
-    fig.legend(h, l, loc="lower center", ncol=4, frameon=False, bbox_to_anchor=(0.5, -0.08))
+    h, labs = axs[0].get_legend_handles_labels()
+    fig.legend(h, labs, loc="lower center", ncol=4, frameon=False, bbox_to_anchor=(0.5, -0.08))
     fig.tight_layout(rect=(0, 0.08, 1, 1))
     fig.savefig(FIG / "cont_fit.png", dpi=200, bbox_inches="tight")
     fig.savefig(FIG / "cont_fit.pdf", bbox_inches="tight")
@@ -302,8 +301,8 @@ def fig_cont_infer():
     plot_time(axs[1], rows, "deg", ylabel=False)
     axs[0].set_title("Non-Gaussian queries vs nodes\n(10 queries, 10k particles)")
     axs[1].set_title("Non-Gaussian queries vs edges (n=100)")
-    h, l = axs[0].get_legend_handles_labels()
-    fig.legend(h, l, loc="lower center", ncol=4, frameon=False, bbox_to_anchor=(0.5, -0.1))
+    h, labs = axs[0].get_legend_handles_labels()
+    fig.legend(h, labs, loc="lower center", ncol=4, frameon=False, bbox_to_anchor=(0.5, -0.1))
     fig.tight_layout(rect=(0, 0.1, 1, 1))
     fig.savefig(FIG / "cont_infer.png", dpi=200, bbox_inches="tight")
     fig.savefig(FIG / "cont_infer.pdf", bbox_inches="tight")
@@ -523,7 +522,7 @@ def main():
                            f"{np.median(ws):.3f}\n")
     klp = RES / "prelim" / "discrete_infer_cert_klonly.jsonl"
     if klp.exists():
-        kl_rows = [json.loads(l) for l in klp.read_text().splitlines() if l.strip()]
+        kl_rows = [json.loads(ln) for ln in klp.read_text().splitlines() if ln.strip()]
         base = [r for r in load("discrete_infer") if r["method"] in ("nbn_ve", "pgmpy_ve")]
         for r in kl_rows:
             r["method"] = "nbn_cert_klonly"

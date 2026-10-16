@@ -28,7 +28,6 @@ data generation is never charged to a method's budget.
 from __future__ import annotations
 
 import argparse
-import math
 import time
 from pathlib import Path
 
@@ -153,12 +152,12 @@ def build(family: str, topology: str, n: int, deg: float, *, k: int = 3,
     names = [f"X{i}" for i in range(n)]
     edges = [(names[a], names[b]) for a, b in edges_i]
     if family == "discrete":
-        spec = {v: ("discrete", k) for v in names}
+        spec = dict.fromkeys(names, ("discrete", k))
     else:
-        spec = {v: ("continuous", 1) for v in names}
+        spec = dict.fromkeys(names, ("continuous", 1))
     strong = family == "ngs"
     model = NeuralBayesianNetwork(edges, variables=spec, device="cpu")
-    kinds = {v: ("discrete" if family == "discrete" else "continuous") for v in names}
+    kinds = dict.fromkeys(names, "discrete" if family == "discrete" else "continuous")
     pilot: dict = {}
     for v in names:  # names are already a topological order
         pa = list(model.dag.parents(v))

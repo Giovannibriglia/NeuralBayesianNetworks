@@ -20,7 +20,7 @@ def _random_bn(seed=0, n=9, k=3):
         for i in range(max(0, j - 3), j):
             if torch.rand((), generator=g) < 0.6:
                 edges.append((names[i], names[j]))
-    m = NeuralBayesianNetwork(edges, variables={v: ("discrete", k) for v in names},
+    m = NeuralBayesianNetwork(edges, variables=dict.fromkeys(names, ("discrete", k)),
                               device="cpu")
     for v in names:
         pa = m.dag.parents(v)
@@ -214,7 +214,7 @@ def test_router_query_width_check_routes_small_queries_exactly():
     edges += [(dense[i], dense[j]) for j in range(12) for i in range(j)]
     k = 2
     from nbn.core.network import NeuralBayesianNetwork
-    big = NeuralBayesianNetwork(edges, variables={v: ("discrete", k) for v in names + dense})
+    big = NeuralBayesianNetwork(edges, variables=dict.fromkeys(names + dense, ("discrete", k)))
     g = torch.Generator().manual_seed(0)
     for v in names + dense:
         pa = big.dag.parents(v)

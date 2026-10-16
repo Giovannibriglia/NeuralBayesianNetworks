@@ -75,7 +75,7 @@ def test_sparse_in_a_network_matches_dense_queries():
         data[v] = (base + torch.randint(0, 2, (400,), generator=g)) % k
 
     def model(cls):
-        m = NeuralBayesianNetwork(edges, variables={v: ("discrete", k) for v in names})
+        m = NeuralBayesianNetwork(edges, variables=dict.fromkeys(names, ("discrete", k)))
         for v in names:
             m.set_mechanism(v, cls())
         m.fit(data)

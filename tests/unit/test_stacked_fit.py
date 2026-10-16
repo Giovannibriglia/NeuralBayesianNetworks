@@ -49,7 +49,7 @@ EDGES = [("A", "B"), ("A", "C"), ("B", "C"), ("C", "D"), ("A", "D"), ("B", "D")]
 
 def _model(hidden=(8,), K=3, extra_lg=False):
     m = NeuralBayesianNetwork(EDGES + ([("E", "D")] if extra_lg else []),
-                              variables={v: ("continuous", 1) for v in "ABCDE"},
+                              variables=dict.fromkeys("ABCDE", ("continuous", 1)),
                               device="cpu")
     for v in "ABCDE":
         if extra_lg and v == "E":

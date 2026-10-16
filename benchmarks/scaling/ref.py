@@ -31,7 +31,7 @@ def main():
     out = HERE / "results" / "cont_infer_ref.jsonl"
     done = set()
     if out.exists():
-        done = {json.loads(l)["problem"] for l in out.read_text().splitlines() if l.strip()}
+        done = {json.loads(ln)["problem"] for ln in out.read_text().splitlines() if ln.strip()}
     for p in sorted((HERE / "problems").glob("ngs_*.pt")):
         pr = torch.load(p, weights_only=False)
         if pr["name"] in done:
