@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Dict, List
 import torch
 
 from nbn.learning.weighting import select, validate_weights, weighted_mean
-from nbn.utils.batching import pack_parents
+from nbn.utils.batching import ensure_2d, pack_parents
 from nbn.utils.device import to_device
 from nbn.utils.grad import release_grads
 
@@ -192,69 +192,117 @@ def fit(
     history = TrainHistory(device=device)
     t0 = time.perf_counter()
 
+    def _fit_local_node(i: int, node: str) -> None:
+        if node not in model.mechanisms:
+            raise RuntimeError(f"No mechanism registered for node '{node}'.")
+        mech = model.mechanisms[node]
+        parents = model.dag.parents(node)
+        pa_tensor = pack_parents(data_dev, parents)
+        x = data_dev[node]
+
+        # None = "no global override": the mechanism keeps its own
+        # designed training budget (flow 300 epochs @ lr 5e-4, MDN 200,
+        # neural-categorical 100, ...). A former setdefault() here always
+        # fired (the keys were function defaults, never missing), silently
+        # flattening every mechanism to one global budget.
+        mech_kwargs = dict(kwargs)
+        if epochs is not None:
+            mech_kwargs["epochs"] = epochs
+        if lr is not None:
+            mech_kwargs["lr"] = lr
+        if batch_size is not None:
+            mech_kwargs["batch_size"] = batch_size
+        mech_kwargs["consolidate"] = consolidate
+        mech_kwargs["warm_start"] = warm_start
+        if w_vec is not None:
+            mech_kwargs["weights"] = w_vec
+
+        # Bug 1a (#127): thread declared cardinalities so tabular
+        # mechanisms span the full declared range rather than truncating
+        # to observed-distinct values (which caused query-time factor-axis
+        # mismatches on networks with rare states). Mechanisms that don't
+        # need them ignore the kwargs. Only supplied when available so the
+        # mechanism keeps its observed-data fallback otherwise.
+        node_var = model.variables.get(node)
+        if node_var is not None and node_var.cardinality is not None:
+            mech_kwargs.setdefault("n_classes", int(node_var.cardinality))
+        parent_vars = [model.variables.get(p) for p in parents]
+        if parents and all(
+            pv is not None and pv.cardinality is not None for pv in parent_vars
+        ):
+            mech_kwargs.setdefault(
+                "parent_cards", [int(pv.cardinality) for pv in parent_vars]
+            )
+
+        metrics = mech.fit_local(x, pa_tensor, **mech_kwargs)
+
+        # In-sample (training) mean log-likelihood, for logging only.
+        # This was labelled "held-out LL", which it has never been: it is
+        # scored on the very rows just fitted.  ``fit`` has no validation
+        # split and no early stopping — callers who need a held-out
+        # estimate must hold data out themselves and score it with
+        # ``NeuralBayesianNetwork.log_prob``.
+        # Weighted like the fit itself: an unweighted mean would report
+        # the LL of a data distribution the caller did not fit to.
+        with torch.no_grad():
+            lp = mech.log_prob(x, pa_tensor)
+            mean_ll = float(weighted_mean(lp, w_vec))
+        history.node_log_likelihoods.setdefault(node, []).append(mean_ll)
+
+        if (i + 1) % log_every == 0 or (i + 1) == len(model.dag.topological_order()):
+            logger.info(
+                "Fitted %d/%d nodes. Last: '%s' ll=%.3f",
+                i + 1, len(model.dag.topological_order()), node, mean_ll
+            )
+
     if method == "local":
         for i, node in enumerate(model.dag.topological_order()):
+            _fit_local_node(i, node)
+
+    elif method == "stacked":
+        # Same per-node objectives as "local", trained simultaneously; see
+        # nbn.learning.stacked for the equivalence argument.  Nodes that
+        # cannot be stacked (non-MDN mechanisms, root MDNs, warm starts)
+        # take the sequential local path unchanged.
+        from nbn.learning.stacked import fit_stacked, group_stackable
+
+        order = model.dag.topological_order()
+        for node in order:
             if node not in model.mechanisms:
                 raise RuntimeError(f"No mechanism registered for node '{node}'.")
-            mech = model.mechanisms[node]
-            parents = model.dag.parents(node)
-            pa_tensor = pack_parents(data_dev, parents)
-            x = data_dev[node]
-
-            # None = "no global override": the mechanism keeps its own
-            # designed training budget (flow 300 epochs @ lr 5e-4, MDN 200,
-            # neural-categorical 100, ...). A former setdefault() here always
-            # fired (the keys were function defaults, never missing), silently
-            # flattening every mechanism to one global budget.
-            mech_kwargs = dict(kwargs)
+        groups = {} if warm_start else group_stackable(model, order)
+        stacked_nodes = {v for g in groups.values() for v in g}
+        for i, node in enumerate(order):
+            if node not in stacked_nodes:
+                _fit_local_node(i, node)
+        for key, group in groups.items():
+            mechs = {v: model.mechanisms[v] for v in group}
+            m_kw = {}
             if epochs is not None:
-                mech_kwargs["epochs"] = epochs
+                m_kw["epochs"] = epochs
             if lr is not None:
-                mech_kwargs["lr"] = lr
+                m_kw["lr"] = lr
             if batch_size is not None:
-                mech_kwargs["batch_size"] = batch_size
-            mech_kwargs["consolidate"] = consolidate
-            mech_kwargs["warm_start"] = warm_start
-            if w_vec is not None:
-                mech_kwargs["weights"] = w_vec
-
-            # Bug 1a (#127): thread declared cardinalities so tabular
-            # mechanisms span the full declared range rather than truncating
-            # to observed-distinct values (which caused query-time factor-axis
-            # mismatches on networks with rare states). Mechanisms that don't
-            # need them ignore the kwargs. Only supplied when available so the
-            # mechanism keeps its observed-data fallback otherwise.
-            node_var = model.variables.get(node)
-            if node_var is not None and node_var.cardinality is not None:
-                mech_kwargs.setdefault("n_classes", int(node_var.cardinality))
-            parent_vars = [model.variables.get(p) for p in parents]
-            if parents and all(
-                pv is not None and pv.cardinality is not None for pv in parent_vars
-            ):
-                mech_kwargs.setdefault(
-                    "parent_cards", [int(pv.cardinality) for pv in parent_vars]
-                )
-
-            metrics = mech.fit_local(x, pa_tensor, **mech_kwargs)
-
-            # In-sample (training) mean log-likelihood, for logging only.
-            # This was labelled "held-out LL", which it has never been: it is
-            # scored on the very rows just fitted.  ``fit`` has no validation
-            # split and no early stopping — callers who need a held-out
-            # estimate must hold data out themselves and score it with
-            # ``NeuralBayesianNetwork.log_prob``.
-            # Weighted like the fit itself: an unweighted mean would report
-            # the LL of a data distribution the caller did not fit to.
-            with torch.no_grad():
-                lp = mech.log_prob(x, pa_tensor)
-                mean_ll = float(weighted_mean(lp, w_vec))
-            history.node_log_likelihoods.setdefault(node, []).append(mean_ll)
-
-            if (i + 1) % log_every == 0 or (i + 1) == len(model.dag.topological_order()):
-                logger.info(
-                    "Fitted %d/%d nodes. Last: '%s' ll=%.3f",
-                    i + 1, len(model.dag.topological_order()), node, mean_ll
-                )
+                m_kw["batch_size"] = batch_size
+            fit_stacked(
+                mechs,
+                {v: data_dev[v] for v in group},
+                {v: pack_parents(data_dev, model.dag.parents(v)) for v in group},
+                weights=w_vec,
+                node_chunk=kwargs.get("node_chunk"),
+                **m_kw,
+            )
+            for v in group:
+                mech = model.mechanisms[v]
+                x = data_dev[v]
+                pa_tensor = pack_parents(data_dev, model.dag.parents(v))
+                if consolidate:
+                    from nbn.update import online_laplace
+                    online_laplace.consolidate(mech, ensure_2d(x), pa_tensor, weights=w_vec)
+                with torch.no_grad():
+                    lp = mech.log_prob(x, pa_tensor)
+                    history.node_log_likelihoods.setdefault(v, []).append(
+                        float(weighted_mean(lp, w_vec)))
 
     elif method == "joint":
         # Joint training has no per-mechanism budget to defer to; None
@@ -321,7 +369,7 @@ def fit(
                 )
         _sync_update_state_after_joint(model, data_dev, nodes, consolidate, w_vec)
     else:
-        raise ValueError(f"Unknown method '{method}'. Use 'local' or 'joint'.")
+        raise ValueError(f"Unknown method '{method}'. Use 'local', 'stacked' or 'joint'.")
 
     # Training gradients must not outlive fit (#305).
     release_grads(model)

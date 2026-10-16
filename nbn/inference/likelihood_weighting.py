@@ -79,6 +79,24 @@ def _psis_khat_rows(log_w: torch.Tensor) -> torch.Tensor:
     return torch.tensor([float("nan") if v is None else v for v in ks])
 
 
+def _ancestral_closure(model, nodes, cache: Dict) -> frozenset:
+    """``nodes`` plus all their ancestors in the model DAG (memoised per model)."""
+    import networkx as nx
+
+    from nbn.inference._cache import cache_get, cache_put, structure_version
+
+    key = ("_anc", id(model), frozenset(nodes))
+    version = structure_version(model)
+    hit = cache_get(cache, key, model, version)
+    if hit is not None:
+        return hit
+    g = model.dag.networkx_graph
+    out = set(nodes)
+    for v in nodes:
+        out |= nx.ancestors(g, v)
+    return cache_put(cache, key, model, version, frozenset(out))
+
+
 class LikelihoodWeightingEngine(InferenceEngine):
     """Batched likelihood-weighting (self-normalised IS) inference engine.
 
@@ -95,13 +113,23 @@ class LikelihoodWeightingEngine(InferenceEngine):
     ----------
     n_samples: int
         Number of ancestral samples (particles) per query.
+    prune_barren: bool
+        Sample only the ancestral closure of ``targets ∪ evidence ∪ do``
+        (default True).  A node outside it is *barren* for the query: it is
+        neither read by the weights nor by the answer, and no kept node has it
+        as a parent, so dropping it leaves the joint law of (weights, target
+        samples) unchanged [Koller & Friedman 2009, Ex. 3.8, p. 98].  Only the
+        random stream differs.  The returned particle buffer then holds zeros
+        in the slices of pruned nodes; ``query`` never reads them.
     """
 
-    _transient_caches = ("_cache",)
+    _transient_caches = ("_cache", "_anc_cache")
 
-    def __init__(self, n_samples: int = 2048) -> None:
+    def __init__(self, n_samples: int = 2048, prune_barren: bool = True) -> None:
         self.n_samples = int(n_samples)
+        self.prune_barren = bool(prune_barren)
         self._cache: Dict = {}
+        self._anc_cache: Dict = {}
 
     def _run(
         self,
@@ -110,12 +138,25 @@ class LikelihoodWeightingEngine(InferenceEngine):
         evidence: Dict[str, torch.Tensor] | None,
         do: Dict[str, torch.Tensor] | None,
         n_samples: int,
+        prune: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Core IS loop.  Returns ``(log_weights [B, S], samples [B, S, total_dim])``."""
+        """Core IS loop.  Returns ``(log_weights [B, S], samples [B, S, total_dim])``.
+
+        ``prune=True`` skips nodes outside the ancestral closure of the
+        targets, evidence and do-nodes (see ``prune_barren``); their buffer
+        slices stay zero.
+        """
         evidence = evidence or {}
         do = do or {}
         device = model.device
         dtype = torch.float32
+        keep = None
+        if prune:
+            anc_cache = self.__dict__.setdefault("_anc_cache", {})
+            keep = _ancestral_closure(
+                model, list(targets) + list(evidence.keys()) + list(do.keys()),
+                anc_cache,
+            )
 
         state = get_inference_state(
             model, targets,
@@ -156,6 +197,8 @@ class LikelihoodWeightingEngine(InferenceEngine):
             fixed[idx] = v.unsqueeze(1).expand(b, s, -1)  # [B, S, D]
 
         for i, node in enumerate(state.topo_order):
+            if keep is not None and node not in keep:
+                continue
             sl = state.node_slices[i]
             mech = model.mechanisms[node]
 
@@ -239,7 +282,12 @@ class LikelihoodWeightingEngine(InferenceEngine):
         check_discrete_values(model, {**(evidence or {}), **(do or {})},
                               do_keys=(do or {}))
         s = n_samples or self.n_samples
-        log_w, buf = self._run(model, targets, evidence, do, s)
+        # Subclasses that override ``_run`` (amortised IS) keep their own
+        # proposal logic and are not pruned.
+        prune = (getattr(self, "prune_barren", False)
+                 and type(self)._run is LikelihoodWeightingEngine._run)
+        log_w, buf = (self._run(model, targets, evidence, do, s, prune=True) if prune
+                      else self._run(model, targets, evidence, do, s))
 
         # Normalise weights
         weights = torch.softmax(log_w, dim=-1)  # [B, S]
