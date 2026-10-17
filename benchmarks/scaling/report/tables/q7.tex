@@ -1,0 +1,18 @@
+\begin{table}[H]\centering\small
+\caption{Q7. Table size and measured cost vs number of parents (30 nodes, K = 3)}\label{tab:q7}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lrrrrrrr}\toprule
+parents & dense numbers/node & sparse numbers/node & time dense (s) & time sparse (s) & time pgmpy (s) & RSS dense (MB) & RSS sparse (MB) \\ \midrule
+2 & 27 & 30 & 0.0151 & 0.0187 & 0.0266 & 299 & 307 \\
+4 & 243 & 230 & 0.019 & 0.0274 & 0.0361 & 298 & 307 \\
+6 & 2 187 & 1 367 & 0.0251 & 0.0359 & 0.0626 & 300 & 309 \\
+8 & 19 683 & 4 288 & 0.0235 & 0.0359 & 0.339 & 311 & 311 \\
+10 & 177 147 & 9 133 & 0.0429 & 0.0433 & 2.79 & 344 & 314 \\
+12 & 1 594 323 & 14 516 & 0.182 & 0.0475 & 25.4 & 570 & 316 \\
+13 & 4 782 969 & 16 942 & 0.45 & 0.0485 & timeout & 1 147 & 315 \\
+14 & 14 348 907 & 21 936 & 1.29 & 0.0453 & -- & 2 601 & 317 \\
+16 & 129 140 163 & 24 513 & oom & 0.0473 & -- & 4 419 & 316 \\
+18 & 1 162 261 467 & 27 572 & -- & 0.0505 & -- & -- & 320 \\
+20 & 10 460 353 203 & 28 849 & -- & 0.0557 & -- & -- & 311 \\
+\bottomrule\end{tabular}}
+\end{table}

@@ -1,0 +1,10 @@
+\begin{table}[H]\centering\small
+\caption{Q5. Certified answers vs exact answers (all queries where exact VE answered)}\label{tab:q5}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lrrrrrr}\toprule
+arm & queries & covered & median abs. error & max abs. error & median width & 90\% width \\ \midrule
+plain LW, 100k samples (no guarantee) & 568 & n/a & 0.00273 & 0.0109 & -- & -- \\
+certified, KL bound, 200k & 518 & 518/518 & 0.00187 & 0.00732 & 0.0673 & 0.122 \\
+certified, KL $\cap$ Bernstein, 200k & 528 & 528/528 & 0.00186 & 0.00691 & 0.0328 & 0.051 \\
+\bottomrule\end{tabular}}
+\end{table}

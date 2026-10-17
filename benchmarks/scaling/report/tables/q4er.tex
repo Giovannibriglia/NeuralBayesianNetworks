@@ -1,0 +1,16 @@
+\begin{table}[H]\centering\small
+\caption{Q4. Width of exact queries, dense graph (3 seeds $\times$ 10 queries; a width above 17.7 cannot fit 3 GB with K = 3)}\label{tab:q4er}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lrrrrrrr}\toprule
+nodes & median width & max width & median lower bound & answered exactly & refused & proven infeasible & pgmpy answered \\ \midrule
+10 & 1.5 & 4 & 1.5 & 30/30 & 0 & 0 & 30/30 \\
+20 & 4 & 5 & 4 & 30/30 & 0 & 0 & 30/30 \\
+50 & 6 & 8 & 5 & 30/30 & 0 & 0 & 30/30 \\
+100 & 7 & 15 & 6 & 30/30 & 0 & 0 & 30/30 \\
+200 & 12.5 & 23 & 8 & 27/30 & 3 & 0 & 0 (oom) \\
+500 & 17.5 & 32 & 9 & 14/30 & 16 & 0 & -- \\
+1000 & 20.5 & 42 & 9.5 & 9/30 & 21 & 0 & -- \\
+2000 & 36 & 61 & 13 & 7/30 & 23 & 0 & -- \\
+5000 & 60 & 100 & 16 & 7/30 & 23 & 8 & -- \\
+\bottomrule\end{tabular}}
+\end{table}
