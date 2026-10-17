@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import math
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import matplotlib

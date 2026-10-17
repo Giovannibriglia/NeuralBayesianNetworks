@@ -28,7 +28,7 @@ for name in ("discrete_local_w5_n1000_deg2_k3_s0", "discrete_local_w5_n2000_deg2
     spent = [0.0]
     orig = tve.get_order
 
-    def timed(*a, _o=orig, **k):
+    def timed(*a, _o=orig, spent=spent, **k):
         t = time.perf_counter()
         r = _o(*a, **k)
         spent[0] += time.perf_counter() - t
