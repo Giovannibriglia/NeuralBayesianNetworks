@@ -73,7 +73,12 @@ class HybridRouter(InferenceEngine):
         plain likelihood weighting, no guarantee) or ``"certified"``
         (``certified_query``: the same point estimate plus simultaneous
         ``1 - certified_delta`` intervals in ``last_certificate``; one discrete
-        target, discrete evidence; other queries still use LW).
+        target, discrete evidence; other queries still use LW), or
+        ``"condition"``: answer a single-target discrete query that VE refuses
+        (memory, treewidth threshold, MPS tensor limits) *exactly* by
+        conditioning (``TensorVariableElimination(on_oom="condition")``):
+        slower, same answer.  If conditioning would need more than
+        ``condition_max_instantiations`` instantiations, LW answers.
     """
 
     # Bound on remembered "already warned" query shapes.
@@ -90,9 +95,10 @@ class HybridRouter(InferenceEngine):
         fallback: str = "lw",
         certified_samples: int = 200_000,
         certified_delta: float = 0.05,
+        condition_max_instantiations: int = 1_000_000,
     ) -> None:
-        if fallback not in ("lw", "certified"):
-            raise ValueError("fallback must be 'lw' or 'certified'.")
+        if fallback not in ("lw", "certified", "condition"):
+            raise ValueError("fallback must be 'lw', 'certified' or 'condition'.")
         self.fallback = fallback
         self._cert = None
         if fallback == "certified":
@@ -105,13 +111,20 @@ class HybridRouter(InferenceEngine):
         self._ve = TensorVariableElimination(
             treewidth_threshold, memory_budget=memory_budget,
         )
+        self._cond = None
+        if fallback == "condition":
+            self._cond = TensorVariableElimination(
+                treewidth_threshold, memory_budget=memory_budget, on_oom="condition",
+                max_conditioning=condition_max_instantiations,
+            )
         self._lw = LikelihoodWeightingEngine(n_samples)
         self._last_engine: str | None = None
         self._warned: set = set()
 
     @property
     def last_engine(self) -> str | None:
-        """``"tensor_ve"`` or ``"likelihood_weighting"``: who answered last."""
+        """Who answered last: ``"tensor_ve"``, ``"conditioning"``, ``"certified"``
+        or ``"likelihood_weighting"``."""
         return self._last_engine
 
     def _warn_once(self, key, msg: str, *args) -> None:
@@ -130,6 +143,10 @@ class HybridRouter(InferenceEngine):
         logger.warning(msg, *args)
 
     def _use_lw(self, reason: str, *args, warn_key=None) -> InferenceEngine:
+        if self.__dict__.get("_cond") is not None:
+            # fallback="condition": conditioning is tried next and warns
+            # itself if it is refused, so this is not (yet) a downgrade.
+            warn_key = None
         if warn_key is None:
             logger.debug(reason, *args)
         else:
@@ -248,6 +265,10 @@ class HybridRouter(InferenceEngine):
         if engine is self._lw and self._certify(model, targets, evidence, kwargs):
             engine = self._cert
             self._last_engine = "certified"
+        if engine is self._lw and self._conditionable(model, targets):
+            out = self._try_condition(method, model, targets, evidence, kwargs)
+            if out is not None:
+                return out
         try:
             call_kwargs = kwargs
             if engine is self._ve:
@@ -277,8 +298,35 @@ class HybridRouter(InferenceEngine):
         if self._certify(model, targets, evidence, kwargs):
             self._last_engine = "certified"
             return getattr(self._cert, method)(model, targets, evidence, **kwargs)
+        if self._conditionable(model, targets):
+            out = self._try_condition(method, model, targets, evidence, kwargs)
+            if out is not None:
+                return out
         self._last_engine = "likelihood_weighting"
         return getattr(self._lw, method)(model, targets, evidence, **kwargs)
+
+    def _conditionable(self, model, targets) -> bool:
+        cond = self.__dict__.get("_cond")
+        return (cond is not None and targets is not None and len(targets) == 1
+                and all(m.is_discrete for m in model.mechanisms.values()))
+
+    def _try_condition(self, method, model, targets, evidence, kwargs):
+        """Exact answer by conditioning, or ``None`` if it is refused."""
+        from nbn.inference.conditioning import ConditioningLimitError
+
+        try:
+            out = getattr(self._cond, method)(
+                model, targets, evidence,
+                **{**kwargs, "host_fraction": self.ve_host_fraction})
+        except ConditioningLimitError as exc:
+            self._warn_once(
+                ("cond",) + _shape_key(model, targets, evidence, kwargs.get("do")),
+                "HybridRouter: conditioning refused (%s); answering with likelihood "
+                "weighting (approximate).", str(exc)[:200])
+            return None
+        self._last_engine = ("conditioning" if self._cond.last_conditioning is not None
+                             else "tensor_ve")
+        return out
 
     def _certify(self, model, targets, evidence, kwargs) -> bool:
         cert = getattr(self, "_cert", None)

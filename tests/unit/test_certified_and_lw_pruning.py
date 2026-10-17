@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 from nbn.core.network import NeuralBayesianNetwork
-from nbn.inference.certified import certified_query, evidence_weight_bound
+from nbn.inference.certified import CertifiedEngine, certified_query, evidence_weight_bound
 from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
 from nbn.inference.tensor_ve import TensorVariableElimination
 from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
@@ -336,3 +336,92 @@ def test_certified_query_runs_on_mps_and_covers_exact():
     torch.manual_seed(1)
     a = certified_query(m, tgt, ev, n_samples=100_000, delta=0.05, chunk=30_000)
     assert bool((a.lower <= exact + 1e-9).all()) and bool((exact <= a.upper + 1e-9).all())
+
+
+# ---------------------------------------------------------------------- #
+# Anytime and collapsed certified sampling
+# ---------------------------------------------------------------------- #
+
+def _covers(a, exact, tol=1e-9):
+    e = exact.double().cpu()
+    return bool(((a.lower - tol <= e) & (e <= a.upper + tol)).all())
+
+
+def test_certified_default_path_unchanged_by_new_options():
+    m, names = _random_bn(2)
+    tgt, ev = names[4], {names[-1]: 1}
+    torch.manual_seed(5)
+    a = certified_query(m, tgt, ev, n_samples=30_000, chunk=7_000)
+    torch.manual_seed(5)
+    b = certified_query(m, tgt, ev, n_samples=30_000, chunk=7_000, time_budget_s=None,
+                        target_width=None, collapse=None)
+    assert torch.equal(a.lower, b.lower) and torch.equal(a.upper, b.upper)
+    assert torch.equal(a.estimate, b.estimate) and a.n_checkpoints == 1
+
+
+def test_certified_anytime_target_width_and_coverage():
+    m, names = _random_bn(3)
+    tgt, ev = names[4], {names[-1]: 1, names[6]: 0}
+    exact = m.query([tgt], evidence=ev, engine=TensorVariableElimination())
+    torch.manual_seed(0)
+    a = certified_query(m, tgt, ev, target_width=0.05, first_checkpoint=2048)
+    assert a.max_width <= 0.05 and _covers(a, exact)
+    # checkpoints are n_j = 2048 * 2^(j-1): the certified size is one of them
+    assert a.n_samples == 2048 * 2 ** (a.n_checkpoints - 1)
+    torch.manual_seed(0)
+    capped = certified_query(m, tgt, ev, target_width=1e-6, max_samples=40_000,
+                             first_checkpoint=2048)
+    assert capped.n_samples <= 40_000 and _covers(capped, exact)
+
+
+def test_certified_anytime_more_time_never_wider():
+    m, names = _random_bn(4)
+    tgt, ev = names[3], {names[-1]: 2}
+    exact = m.query([tgt], evidence=ev, engine=TensorVariableElimination())
+    widths = []
+    for limit in (8_192, 32_768, 131_072):
+        torch.manual_seed(1)   # same stream: a larger budget extends the same run
+        a = certified_query(m, tgt, ev, target_width=1e-9, max_samples=limit,
+                            first_checkpoint=4096)
+        assert _covers(a, exact)
+        widths.append(a.max_width)
+    assert widths[0] >= widths[1] >= widths[2]
+
+
+def test_certified_anytime_time_budget_returns_valid_interval():
+    m, names = _random_bn(1)
+    tgt, ev = names[4], {names[-1]: 0}
+    exact = m.query([tgt], evidence=ev, engine=TensorVariableElimination())
+    torch.manual_seed(0)
+    a = certified_query(m, tgt, ev, time_budget_s=0.3)
+    assert a.seconds is not None and _covers(a, exact)
+    assert a.n_samples == 0 or a.n_checkpoints >= 1
+
+
+@pytest.mark.parametrize("collapse", ["auto", "list"])
+def test_certified_collapsed_covers_exact(collapse):
+    m, names = _random_bn(6, n=12)
+    tgt, ev = names[4], {names[-1]: 1, names[8]: 0}
+    exact = m.query([tgt], evidence=ev, engine=TensorVariableElimination())
+    col = "auto" if collapse == "auto" else [names[2]]
+    peak = TensorVariableElimination().estimate_peak_bytes(m, tgt, ev)
+    torch.manual_seed(0)
+    a = certified_query(m, tgt, ev, n_samples=20_000, collapse=col,
+                        memory_budget=peak * 0.5)
+    assert _covers(a, exact)
+    assert float((a.estimate - exact.double()).abs().max()) < 0.05
+    if collapse == "list":
+        assert a.collapsed == (names[2],)
+    do = {names[1]: 2}
+    exd = m.query([tgt], evidence=ev, do=do, engine=TensorVariableElimination())
+    torch.manual_seed(0)
+    b = certified_query(m, tgt, ev, do=do, n_samples=20_000, collapse=col)
+    assert _covers(b, exd)
+
+
+def test_certified_engine_anytime_options():
+    m, names = _random_bn(2)
+    tgt, ev = names[4], {names[-1]: 1}
+    eng = CertifiedEngine(target_width=0.1)
+    m.query([tgt], evidence=ev, engine=eng)
+    assert eng.last_certificate.max_width <= 0.1
