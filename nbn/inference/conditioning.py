@@ -27,22 +27,44 @@ Two modes
   instantiation is enumerated; the answer equals VE's.  The factors are the
   ones VE itself would use (Bayes-ball relevant CPTs), conditioned on ``C``.
 * **Bounded conditioning** (``time_budget_s`` or ``enumerate_limit``): if the budget runs out
-  before every instantiation is done, the answer is a pair of *sound* bounds
-  [K&F, §12.5, Eqs. 12.35–12.36, pp. 536–540; Horvitz, Suermondt & Cooper
-  1989].  With the enumerated set ``S``, ``A_y = sum_{c in S} P(y, c, e)``,
-  ``A = sum_y A_y`` and the unexplored prior mass ``U = 1 - sum_{c in S}
-  P(c)`` (the rest of ``P(e)`` is at most ``U``):
+  before every instantiation is done, the answer is a pair of *sound*,
+  deterministic bounds [K&F, §12.5, pp. 536–540; Horvitz, Suermondt & Cooper,
+  UAI 1989, arXiv:1304.1512].  With the enumerated set ``S``,
+  ``A_y = sum_{c in S} P(y, c, e)``, ``A = sum_y A_y`` and any upper bound
+  ``U`` on the unexplored part ``sum_{c not in S} P(c, e)``:
 
       A_y / (A + U)  <=  P(y | e)  <=  (A_y + U) / (A + U).
 
-  Both ends move towards each other as ``S`` grows (adding an instantiation
-  raises ``A_y`` and lowers ``U``), and they meet when ``S`` is complete.  For
-  exact joint probabilities the factors are the CPTs of the *ancestral* set of
-  the target and the evidence (sums over it are probabilities), and ``P(c)``
-  comes from a second elimination over the ancestors of ``C``.  Instantiations
-  are visited in order of their frequency in a forward sample of ``C``, so the
-  likely ones come first; the bounds are useful only when a few
-  instantiations carry most of the mass [K&F, Ex. 12.21, p. 539].
+  (K&F Eq. 12.36 states the upper end as ``(A_y + U) / A``; the form here is
+  tighter and still sound: ``P(y|e) = (A_y + r_y) / (A + r)`` with
+  ``0 <= r_y <= r <= U``, which is largest at ``r_y = r = U`` because
+  ``A_y <= A``.)  Two bounds on the unexplored part are used, and the smaller
+  one is kept:
+
+  * ``U_prior = 1 - sum_{c in S} P(c)`` (the unexplored prior mass, since
+    ``P(c, e) <= P(c)``; K&F §12.5);
+  * ``U_lw = W (1 - sum_{c in S} Q(c))``, where ``Q`` is the
+    likelihood-weighting proposal (evidence clamped, K&F Def. 12.1, p. 499)
+    and ``W = prod_i max_pa P(e_i | pa)``: ``P(c, e) = Q(c) E_Q[w | c] <=
+    W Q(c)`` because every LW weight is at most ``W`` (K&F Alg. 12.2, p. 493;
+    p. 500).  This bound is ours (checked with the koller_claude expert, not
+    stated in the book).  It is much smaller than ``U_prior`` when the
+    evidence is unlikely (``W`` small) and no evidence is upstream of ``C``;
+    with evidence upstream of ``C`` it can be larger, hence the minimum.
+
+  Both ends move towards each other as ``S`` grows, and they meet when ``S``
+  is complete.  For exact joint probabilities the factors are the CPTs of the
+  *ancestral* set of the target and the evidence (sums over it are
+  probabilities); ``P(c)`` and ``Q(c)`` come from two more eliminations over
+  the ancestors of ``C``.  Instantiations are visited in decreasing order of
+  their frequency in a forward sample of ``C`` (prior order).  K&F suggest
+  visiting the instantiations likely *given e* first (p. 537); measured here
+  (small dense networks, 6 seeds x 3 budgets) that order was sometimes wider,
+  because it lowers the unexplored *prior* mass more slowly, while the prior
+  order with ``min(U_prior, U_lw)`` was never wider than ``U_prior`` alone.
+  ``_prior_order(..., ev_int=...)`` keeps the likelihood-weighted order
+  available.  The bounds are useful only when a few instantiations carry most
+  of the mass [K&F, Ex. 12.21, p. 539; pp. 540–541].
 
 Choosing ``C`` (a greedy "w-cutset", cf. Bidyuk & Dechter, JAIR 28, 2007):
 repeatedly add the variable of the plan's largest intermediate factor with the
@@ -308,11 +330,16 @@ def _digits(idx: torch.Tensor, cards: list) -> list:
     return list(reversed(out))
 
 
-def _prior_order(model, factors, graph, cutset, cards, do_int, n: int, seed: int):
-    """Instantiation indices of ``C`` by decreasing frequency in a forward sample."""
-    anc = _ancestral(graph, cutset)
+def _prior_order(model, factors, graph, cutset, cards, do_int, n: int, seed: int,
+                 ev_int=None):
+    """Instantiation indices of ``C`` by decreasing likelihood-weighted
+    frequency (an estimate of ``P(c, e)``) in a forward sample with the
+    evidence clamped; with no evidence, plain frequency (``P(c)``)."""
+    ev_int = dict(ev_int or {})
+    anc = _ancestral(graph, list(cutset) + list(ev_int))
     gen = torch.Generator(device="cpu").manual_seed(seed)
     vals = {}
+    logw = torch.zeros(n, dtype=torch.float64)
     for node in model.dag.topological_order():
         if node not in anc:
             continue
@@ -323,12 +350,19 @@ def _prior_order(model, factors, graph, cutset, cards, do_int, n: int, seed: int
         probs = f.log_values.detach().float().cpu().exp()
         idx = tuple(vals[p] for p in f.variables[:-1])
         p = probs[idx] if idx else probs.expand(n, -1)
-        vals[node] = torch.multinomial(p, 1, generator=gen).reshape(-1)
+        if node in ev_int:
+            v = int(ev_int[node])
+            vals[node] = torch.full((n,), v, dtype=torch.long)
+            logw = logw + torch.log(p[:, v].double().clamp_min(1e-300))
+        else:
+            vals[node] = torch.multinomial(p, 1, generator=gen).reshape(-1)
     code = torch.zeros(n, dtype=torch.long)
     for c, k in zip(cutset, cards):
         code = code * k + vals[c]
-    uniq, counts = torch.unique(code, return_counts=True)
-    return uniq[torch.argsort(counts, descending=True, stable=True)]
+    uniq, inv = torch.unique(code, return_inverse=True)
+    score = torch.zeros(len(uniq), dtype=torch.float64).index_add_(
+        0, inv, torch.exp(logw - logw.max()))
+    return uniq[torch.argsort(score, descending=True, stable=True)]
 
 
 @torch.no_grad()
@@ -417,6 +451,19 @@ def conditioned_query(
                                        cutset=plan_c.cutset, **common)
         else:  # pragma: no cover - the cutset only grows and is bounded
             raise ConditioningLimitError("conditioning plans did not settle")
+    plan_q = None
+    if plan_c is not None and ev_int:
+        # Q(c): the ancestors of C with the evidence clamped and its factors
+        # dropped (the LW proposal); used only if it fits with the same cutset
+        q_nodes = {n for n in _ancestral(graph, plan_y.cutset)
+                   if n not in do_int and n not in ev_int}
+        try:
+            pq = plan_conditioning(model, q_nodes, targets=(), cutset=plan_y.cutset,
+                                   forbid={target, *ev_int},
+                                   **{**common, "clamped": set(do_int) | set(ev_int)})
+            plan_q = pq if pq.cutset == plan_y.cutset else None
+        except ConditioningLimitError:
+            plan_q = None
     C = list(plan_y.cutset)
     cards = [int(model.mechanisms[c].n_classes) for c in C]
     n_total = math.prod(cards) if C else 1
@@ -424,6 +471,8 @@ def conditioned_query(
     all_factors = eng._extract_factors(model)
     f_y = {n: all_factors[n] for n in plan_y.scopes}
     f_c = {n: all_factors[n] for n in plan_c.scopes} if plan_c is not None else None
+    f_q = ({n: all_factors[n] for n in plan_q.scopes if n not in ev_int}
+           if plan_q is not None else None)
     dev_type = torch.device(device).type
 
     def fit_rows(plan):
@@ -440,10 +489,12 @@ def conditioned_query(
     rows_cap = fit_rows(plan_y)
     if plan_c is not None:
         rows_cap = min(rows_cap, fit_rows(plan_c))
+    if plan_q is not None:
+        rows_cap = min(rows_cap, fit_rows(plan_q))
 
     if bounded and C:
         first = _prior_order(model, all_factors, graph, C, cards, do_int,
-                             n=min(16384, 16 * n_total), seed=seed)
+                             n=min(16384, 16 * n_total), seed=seed, ev_int=None)
         seen = torch.zeros(n_total, dtype=torch.bool)
         seen[first] = True
         visit = torch.cat([first, torch.nonzero(~seen).reshape(-1)])
@@ -454,6 +505,7 @@ def conditioned_query(
     # reduced on the device first, so only [k] numbers cross per pass.
     log_acc = torch.full((k,), -math.inf, dtype=torch.float64)
     log_mass = torch.tensor(-math.inf, dtype=torch.float64)
+    log_qmass = torch.tensor(-math.inf, dtype=torch.float64)
     done = 0
     rows = min(rows_cap, _FIRST_ROWS) if (bounded or give_up is not None) else rows_cap
     stop = n_total if enumerate_limit is None else max(1, min(n_total, int(enumerate_limit)))
@@ -474,6 +526,13 @@ def conditioned_query(
                 cc[c] = d
             lm = _eliminate_rows(f_c, cc, plan_c.order, None, r)          # [r]
             log_mass = torch.logaddexp(log_mass, torch.logsumexp(lm, dim=0).cpu().double())
+        if f_q is not None:
+            cq = {kk: torch.full((r,), v, dtype=torch.long, device=device)
+                  for kk, v in {**ev_int, **do_int}.items()}
+            for c, d in zip(C, digits):
+                cq[c] = d
+            lq = _eliminate_rows(f_q, cq, plan_q.order, None, r)          # [r]
+            log_qmass = torch.logaddexp(log_qmass, torch.logsumexp(lq, dim=0).cpu().double())
         done += r
         if deadline is not None and time.perf_counter() >= deadline:
             break
@@ -494,7 +553,12 @@ def conditioned_query(
                                  done, mass, time.perf_counter() - t0)
     mass_s = float(torch.exp(log_mass)) if f_c is not None else 1.0
     a = float(a_y.sum())
-    u = max(0.0, 1.0 - mass_s) + bound_slack
+    u = max(0.0, 1.0 - mass_s)
+    if f_q is not None:
+        from nbn.inference.certified import evidence_weight_bound
+        w_bound = evidence_weight_bound(model, ev_int)
+        u = min(u, w_bound * max(0.0, 1.0 - float(torch.exp(log_qmass))))
+    u = u + bound_slack
     lower = (a_y / (a + u)).clamp(0.0, 1.0)
     upper = ((a_y + u) / (a + u)).clamp(0.0, 1.0)
     lower = torch.maximum(lower, (1.0 - (upper.sum() - upper)).clamp(min=0.0))
