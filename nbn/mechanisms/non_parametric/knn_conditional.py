@@ -521,7 +521,10 @@ class KNNConditionalMechanism(Mechanism):
         n = self._train_pa.shape[0]
         q = xs.detach().cpu().double().numpy()
         kk = min(k + 1, n)
-        dist, idx = tree.query(q, k=kk)
+        # Rows are independent, so SciPy may split them over torch's CPU threads;
+        # the answer does not depend on the number of workers.
+        workers = max(1, torch.get_num_threads()) if q.shape[0] >= 2048 else 1
+        dist, idx = tree.query(q, k=kk, workers=workers)
         dist = torch.from_numpy(dist).reshape(q.shape[0], kk)
         idx = torch.from_numpy(idx).reshape(q.shape[0], kk).long()
         out = idx[:, :k].sort(dim=1).values

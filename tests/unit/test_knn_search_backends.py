@@ -140,3 +140,19 @@ def test_two_stage_brute_equals_exact_rule(seed):
     xs = m._std_parents(torch.randn(300, d, generator=g) if seed % 2 == 0
                         else pa[torch.randint(0, n, (300,), generator=g)])
     assert torch.equal(m._brute_lowest_index(xs), m._exact_rows(xs))
+
+
+def test_kdtree_threads_do_not_change_neighbours():
+    g = torch.Generator().manual_seed(4)
+    pa = torch.randn(6000, 2, generator=g)
+    m = _fit(pa, torch.randn(6000, 1, generator=g), search="kdtree")
+    xs = m._std_parents(torch.randn(5000, 2, generator=g))
+    old = torch.get_num_threads()
+    try:
+        torch.set_num_threads(1)
+        a = m._knn_search_unique(xs)
+        torch.set_num_threads(4)
+        b = m._knn_search_unique(xs)
+    finally:
+        torch.set_num_threads(old)
+    assert torch.equal(a, b)
