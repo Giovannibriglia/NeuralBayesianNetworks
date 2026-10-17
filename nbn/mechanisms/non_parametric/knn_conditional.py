@@ -48,6 +48,34 @@ from nbn.utils.batching import _sanitise_parents, ensure_2d, flatten_samples
 _LOG_2PI = math.log(2.0 * math.pi)
 
 
+def _select_lowest_index(d: torch.Tensor, k: int) -> torch.Tensor:
+    """Indices ``[q, k]`` of the k smallest entries per row of ``d`` ``[q, N]``,
+    ties at the k-th value broken towards the lowest column index (ascending).
+
+    Fast path: the ``k + 1`` smallest by ``topk``; when the k-th and (k+1)-th
+    values differ, the first ``k`` are the unique answer.  Only rows where
+    they tie go through the exact mask rule (rows closer than the k-th value,
+    then the lowest-indexed rows at it).
+    """
+    q, n = d.shape
+    if k >= n:
+        return torch.arange(n, device=d.device).expand(q, n).clone()
+    vals, idx = torch.topk(d, k + 1, largest=False, dim=1, sorted=True)
+    out = idx[:, :k].sort(dim=1).values
+    tied = vals[:, k] == vals[:, k - 1]
+    if bool(tied.any()):
+        rows = tied.nonzero().squeeze(1)
+        dt = d[rows]
+        t = vals[rows, k - 1:k]
+        lt = dt < t
+        eq = dt == t
+        need = k - lt.sum(dim=1, keepdim=True)
+        rank = eq.long().cumsum(dim=1)
+        sel = lt | (eq & (rank <= need))
+        out[rows] = sel.nonzero()[:, 1].reshape(rows.shape[0], k)
+    return out
+
+
 def _clear_neighbour_cache_hook(module, incompatible_keys) -> None:
     """``load_state_dict`` post-hook: a module-level function so the module
     stays picklable (``torch.save(model)`` is how the benchmark's fit-once
@@ -104,6 +132,25 @@ class KNNConditionalMechanism(Mechanism):
     neighbour_cache_size:
         How many recent parent batches keep their neighbour indices
         memoised (``0`` disables the cache; see the module notes).
+    tie_break:
+        Which training rows count as the ``k`` nearest when several lie at
+        exactly the k-th distance (common with discrete parents).
+        ``"lowest_index"`` (default): distances in float64 (float32 on MPS,
+        which has no float64) and ties at the k-th distance go to the lowest
+        training-row index, so the neighbour set is a function of the data
+        alone, whatever search backend runs.  ``"any"``: the historical
+        behaviour, whatever ``torch.topk`` returns on float32 distances
+        (unspecified among ties).
+    search:
+        Neighbour-search backend; every backend returns the same neighbour
+        set under ``tie_break="lowest_index"``.  ``"brute"``: tiled
+        ``cdist`` + top-k (GPU friendly).  ``"kdtree"``: SciPy's ``cKDTree``
+        on the CPU, ``O(log N + k)`` per query instead of ``O(N)``; a query
+        whose k-th and (k+1)-th distances tie is re-resolved by the brute
+        rule.  ``"auto"`` (default): the k-d tree on CPU when the parents
+        have at most 4 dimensions, there are at least 4096 training rows and
+        SciPy is installed, brute force otherwise.  In every mode, identical
+        query rows are searched once.
     """
 
     def __init__(
@@ -115,8 +162,16 @@ class KNNConditionalMechanism(Mechanism):
         min_bandwidth: float = 1e-3,
         query_chunk: int = 1024,
         neighbour_cache_size: int = 4,
+        tie_break: str = "lowest_index",
+        search: str = "auto",
     ) -> None:
         super().__init__()
+        if tie_break not in ("lowest_index", "any"):
+            raise ValueError("tie_break must be 'lowest_index' or 'any'.")
+        if search not in ("auto", "brute", "kdtree"):
+            raise ValueError("search must be 'auto', 'brute' or 'kdtree'.")
+        self.tie_break = tie_break
+        self.search = search
         self.k = None if k is None else int(k)
         self.discrete_child = bool(discrete_child)
         self.is_discrete = bool(discrete_child)
@@ -132,6 +187,7 @@ class KNNConditionalMechanism(Mechanism):
         # Memoised neighbour searches: list of (standardised query batch,
         # indices), most recent last.  Plain attribute, never persisted.
         self._nbr_cache: list[tuple[torch.Tensor, torch.Tensor]] = []
+        self._kdtree = None
         # A loaded state dict swaps the stored sample under the cache.
         self.register_load_state_dict_post_hook(_clear_neighbour_cache_hook)
         self.register_buffer("_train_y", None)    # [N, D_x] (float) or [N] long for discrete
@@ -295,6 +351,14 @@ class KNNConditionalMechanism(Mechanism):
     # ------------------------------------------------------------------
     def _clear_neighbour_cache(self) -> None:
         self._nbr_cache = []
+        self._kdtree = None   # built lazily from the stored sample
+
+    def __getstate__(self):
+        state = super().__getstate__() if hasattr(super(), "__getstate__") else self.__dict__.copy()
+        state = dict(state)
+        state["_kdtree"] = None          # rebuilt on demand, never persisted
+        state["_nbr_cache"] = []
+        return state
 
     def _knn_indices(self, xs: torch.Tensor) -> torch.Tensor:
         """Return neighbour indices ``[M, k]`` for standardised queries ``xs`` ``[M, D_pa]``.
@@ -316,7 +380,33 @@ class KNNConditionalMechanism(Mechanism):
         return out
 
     def _knn_search(self, xs: torch.Tensor) -> torch.Tensor:
-        """The uncached neighbour search behind ``_knn_indices``."""
+        """The uncached neighbour search behind ``_knn_indices``.
+
+        Identical query rows (discrete parents, shared particles) are searched
+        once; the backend is chosen by ``search``; ties follow ``tie_break``.
+        """
+        m = xs.shape[0]
+        if m > 1:
+            uniq, inv = torch.unique(xs, dim=0, return_inverse=True)
+            if uniq.shape[0] < m:
+                return self._knn_search_unique(uniq)[inv]
+        return self._knn_search_unique(xs)
+
+    def _knn_search_unique(self, xs: torch.Tensor) -> torch.Tensor:
+        tie = getattr(self, "tie_break", "lowest_index")
+        if tie == "any":
+            return self._brute_any(xs)
+        mode = getattr(self, "search", "auto")
+        if mode == "kdtree" or (mode == "auto" and self._kdtree_ok(xs)):
+            try:
+                return self._kdtree_search(xs)
+            except ImportError:
+                if mode == "kdtree":
+                    raise
+        return self._brute_lowest_index(xs)
+
+    def _brute_any(self, xs: torch.Tensor) -> torch.Tensor:
+        """Historical search: float32 ``cdist`` + ``topk`` (ties unspecified)."""
         tpa = self._train_pa
         m = xs.shape[0]
         k = self._k_eff
@@ -326,6 +416,117 @@ class KNNConditionalMechanism(Mechanism):
             d = torch.cdist(xs[sl], tpa)              # [q, N]
             out[sl] = torch.topk(d, k, largest=False, dim=1).indices
         return out
+
+    def _exact_dtype(self, device) -> torch.dtype:
+        return torch.float32 if torch.device(device).type == "mps" else torch.float64
+
+    def _brute_lowest_index(self, xs: torch.Tensor) -> torch.Tensor:
+        """Exact k nearest, ties at the k-th distance to the lowest index.
+
+        Two stages per query tile, both exact in result:
+
+        1. Fast float32 squared distances (matmul form) give the ``k + m``
+           best candidates.
+        2. Exact distances (float64; float32 by differences on MPS) are
+           computed for those candidates only, and the ``k`` nearest are taken
+           with the lowest-index rule.  The set is accepted when its largest
+           exact distance is below what the (k+m)-th fast distance guarantees
+           for every excluded row, after a rigorous bound on the float32
+           rounding of the fast form (with a 10x safety factor): then no
+           training row outside the candidates can be as close.  Rows that
+           fail the check are re-solved by :meth:`_exact_rows` over all
+           training rows.
+        """
+        tpa = self._train_pa.float()
+        n = tpa.shape[0]
+        k = self._k_eff
+        if k >= n:
+            return torch.arange(n, device=xs.device).expand(xs.shape[0], n).clone()
+        dt = self._exact_dtype(xs.device)
+        extra = min(n - k, max(8, k // 8))
+        kk = k + extra
+        out = torch.empty(xs.shape[0], k, dtype=torch.long, device=xs.device)
+        for start in range(0, xs.shape[0], self.query_chunk):
+            sl = slice(start, start + self.query_chunk)
+            xq = xs[sl].float()
+            q_norm = xq.pow(2).sum(1, keepdim=True)
+            # cdist's fast (matmul-form) path; its squared values carry the
+            # rounding error bounded below.
+            dist = torch.cdist(xq, tpa)                                  # [q, N]
+            vals, cand = torch.topk(dist, kk, largest=False, dim=1, sorted=False)
+            v_last = vals.amax(dim=1).pow(2)             # the (k+m)-th fast squared distance
+            diff = xq.to(dt).unsqueeze(1) - self._train_pa.to(dt)[cand]  # [q, kk, D]
+            e2 = diff.pow(2).sum(-1)                                     # exact, [q, kk]
+            # order candidates by (exact distance, index): stable sorts
+            o1 = cand.sort(dim=1, stable=True)
+            e2_by_idx = e2.gather(1, o1.indices)
+            o2 = e2_by_idx.sort(dim=1, stable=True)
+            chosen = o1.values.gather(1, o2.indices[:, :k])
+            kth = o2.values[:, k - 1]
+            if kk < n:
+                # Rounding of the fast form: |err| <= 2 (D + 2) u (|x|^2 + |y|^2)
+                # and |y|^2 <= 2|x|^2 + 2|x - y|^2, so every excluded row has a
+                # true squared distance >= (v - 3 c |x|^2) / (1 + 2 c), with
+                # c = 2 (D + 2) u (here x10 for safety); the chosen k-th must
+                # be below that, allowing the same relative slack on it.
+                c = 20.0 * (tpa.shape[1] + 2) * 6e-8
+                qn = q_norm.squeeze(1).to(dt)
+                bound = (v_last.to(dt) - 3.0 * c * qn) / (1.0 + 2.0 * c)
+                ok = kth * (1.0 + c) + 1e-30 < bound
+            else:
+                ok = torch.ones_like(kth, dtype=torch.bool)
+            res = chosen.sort(dim=1).values
+            if not bool(ok.all()):
+                bad = (~ok).nonzero().squeeze(1)
+                res[bad] = self._exact_rows(xq[bad])
+            out[sl] = res
+        return out
+
+    def _exact_rows(self, xq: torch.Tensor) -> torch.Tensor:
+        """The lowest-index rule over all training rows, by direct differences."""
+        dt = self._exact_dtype(xq.device)
+        d = torch.cdist(xq.to(dt), self._train_pa.to(dt),
+                        compute_mode="donot_use_mm_for_euclid_dist")
+        return _select_lowest_index(d, self._k_eff)
+
+    def _kdtree_ok(self, xs: torch.Tensor) -> bool:
+        if xs.device.type != "cpu" or self._d_pa == 0 or self._d_pa > 4:
+            return False
+        if self._train_pa is None or self._train_pa.shape[0] < 4096:
+            return False
+        try:
+            import scipy.spatial  # noqa: F401
+        except ImportError:
+            return False
+        return True
+
+    def _kdtree_search(self, xs: torch.Tensor) -> torch.Tensor:
+        """k-d tree search; rows with a tie at the k-th distance go to the brute rule."""
+        from scipy.spatial import cKDTree
+
+        tree = getattr(self, "_kdtree", None)
+        if tree is None:
+            tree = cKDTree(self._train_pa.detach().cpu().double().numpy())
+            self._kdtree = tree
+        k = self._k_eff
+        n = self._train_pa.shape[0]
+        q = xs.detach().cpu().double().numpy()
+        kk = min(k + 1, n)
+        dist, idx = tree.query(q, k=kk)
+        dist = torch.from_numpy(dist).reshape(q.shape[0], kk)
+        idx = torch.from_numpy(idx).reshape(q.shape[0], kk).long()
+        out = idx[:, :k].sort(dim=1).values
+        if kk > k:
+            # The set is ambiguous only if the (k+1)-th row ties the k-th; the
+            # tree's own order inside a tie is not the documented rule.
+            tied = dist[:, k] <= dist[:, k - 1]
+            # A tie anywhere at the k-th distance can also hide rows *inside*
+            # the first k that share it with outside rows; the brute rule
+            # settles both cases.
+            if bool(tied.any()):
+                rows = tied.nonzero().squeeze(1)
+                out[rows] = self._brute_lowest_index(xs[rows.to(xs.device)]).cpu()
+        return out.to(xs.device)
 
     def _std_parents(self, parents: torch.Tensor) -> torch.Tensor:
         parents = _sanitise_parents(parents.float(), mech_name="KNNConditional")
@@ -480,7 +681,9 @@ class KNNConditionalMechanism(Mechanism):
         """Enumerating P parent configurations, buffer by buffer: the int64
         grid and its standardised float copies (and their cached copy), one
         ``query_chunk x N`` distance block with its top-k, the neighbour
-        indices / labels, and the count / probability tables."""
+        indices / labels, and the count / probability tables; with
+        ``tie_break="lowest_index"`` also the row de-duplication, the
+        exact-dtype distance block and the tie-break masks."""
         if not self.discrete_child:
             return super().tabulate_working_bytes(parent_cards)
         es = self._train_pa.element_size() if self._train_pa is not None else 4
@@ -489,7 +692,16 @@ class KNNConditionalMechanism(Mechanism):
         p, d = math.prod(parent_cards), len(parent_cards)
         n = int(self._train_y.shape[0])
         k, q, kc = int(self._k_eff), min(p, int(self.query_chunk)), self._n_classes
-        return ([p * d * 8, p * d] + [p * d * es] * 6       # grid, mask, float copies
+        base = ([p * d * 8, p * d] + [p * d * es] * 6       # grid, mask, float copies
                 + [q * n * es] * 2 + [q * k * es, q * k * 8]  # distances, top-k
                 + [p * k * 8, p * k * 8, p * k * es]          # indices, labels, ones
                 + [p * kc * es] * 5)                          # counts, probabilities
+        if getattr(self, "tie_break", "lowest_index") == "any":
+            return base
+        ed = torch.empty((), dtype=self._exact_dtype(self._train_pa.device)).element_size()
+        return (base
+                + [p * d * es, p * 8, p * d * 8, p * 8]       # unique rows, inverse, sort
+                + [n * d * ed, q * d * ed, q * n * ed]        # exact-dtype copies, distances
+                + [q * k * ed, q * k * 8]                     # k-th value top-k
+                + [q * n] * 3 + [q * n * 8]                   # lt / eq / sel masks, rank
+                + [q * k * 16, q * k * 8])                    # nonzero, selected
