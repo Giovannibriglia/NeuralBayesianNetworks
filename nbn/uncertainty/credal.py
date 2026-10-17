@@ -104,6 +104,9 @@ class CredalSets(dict):
 
     def __init__(self, sets, level: float, guarantee: str, delta: float):
         super().__init__(sets)
+        # the joint level holds for these sets only: an entry replaced or
+        # added later falls back to the union bound in credal_query
+        self._ids = {n: id(v) for n, v in self.items()}
         self.level = level
         self.guarantee = guarantee
         self.delta = delta
@@ -188,7 +191,9 @@ class _Row:
         shape = (*pcards, k)
         if isinstance(pset, L1BallSet):
             self.kind = "l1"
-            self.c = pset.center.detach().double().cpu().reshape(shape)
+            c = pset.center.detach().double().cpu().reshape(shape).clamp_min(0.0)
+            # the closed form needs sum(c) == 1 (a float32 centre may miss by ~1e-7)
+            self.c = c / c.sum(-1, keepdim=True).clamp_min(1e-300)
             self.r = pset.radius.detach().double().cpu().reshape(*pcards, 1)
         else:
             self.kind = "box"
@@ -236,54 +241,101 @@ def _iproduct(mine, scope, cards, max_elements):
 
 
 def _eliminate(nodes_topo, parents_fn, rows, cards, clamp, do_nodes, event, max_elements):
-    """Bounds ``(lo, up)`` on ``sum_x P(x, clamp) g(x_target)`` over the sets.
+    """Bounds on ``sum_x P(x, clamp) g(x_target)`` over the sets, as
+    ``(lo, up, log_scale)``: the bounds are ``lo * exp(log_scale)`` and
+    ``up * exp(log_scale)``.
 
     Messages carry an interval ``[lo, up]`` per entry.  They are
     non-negative except downstream of the target when ``g`` is signed (the
     generalized Bayes rule); the inner problems are valid for signed
     messages because the rows are non-negative, and products use interval
-    arithmetic."""
+    arithmetic.  Every new message is divided by its largest magnitude (one
+    positive scalar for ``lo`` and ``up``, kept in ``log_scale``), so many
+    evidence factors cannot underflow float64; ratios and signs are
+    unchanged by the scale.
+
+    Order: a node is eliminated once all its children are (so its own row is
+    the only free parameter in the product); among those, the one with the
+    smallest resulting scope first (greedy, independent of node names).
+    """
     msgs = []                                  # (scope tuple, lo, up)
     tgt, ind = event
-    for x in reversed(nodes_topo):
+    nodes = set(nodes_topo)
+    children = {n: set() for n in nodes}
+    for n in nodes:
+        for q in parents_fn(n):
+            if q in nodes:
+                children[q].add(n)
+    done, log_scale = set(), 0.0
+
+    def scope_of(x):
+        sc = {x} | set(parents_fn(x)) if x not in do_nodes else {x}
+        for s_, _, _ in msgs:
+            if x in s_:
+                sc |= set(s_)
+        return sc
+
+    while len(done) < len(nodes):
+        ready = [n for n in nodes if n not in done and children[n] <= done]
+        x = min(ready, key=lambda n: (math.prod(cards[v] for v in scope_of(n)), n))
+        done.add(x)
         mine = [m for m in msgs if x in m[0]]
         msgs = [m for m in msgs if x not in m[0]]
         scope = [x]
-        for s, _, _ in mine:
-            scope += [v for v in s if v not in scope]
+        for s_, _, _ in mine:
+            scope += [v for v in s_ if v not in scope]
         if x in do_nodes:
-            if mine:                           # a do-node has no factor: fix its value
-                lo, up = _iproduct(mine, scope, cards, max_elements)
-                i = scope.index(x)
-                lo, up = lo.select(i, int(clamp[x])), up.select(i, int(clamp[x]))
-                msgs.append((tuple(v for v in scope if v != x), lo, up))
-            continue
-        pa = list(parents_fn(x))
-        z = [v for v in scope if v != x and v not in pa]
-        full = pa + z + [x]
-        if mine:
-            glo, gup = _iproduct(mine, full, cards, max_elements)
+            if not mine:
+                continue
+            lo, up = _iproduct(mine, scope, cards, max_elements)
+            i = scope.index(x)
+            lo, up = lo.select(i, int(clamp[x])), up.select(i, int(clamp[x]))
+            out_scope = tuple(v for v in scope if v != x)
         else:
-            glo = torch.ones([cards[v] for v in full], dtype=torch.float64)
-            gup = glo.clone()
-        if x == tgt:
-            w = ind.reshape(*([1] * (len(full) - 1)), -1)
-            glo, gup = torch.minimum(glo * w, gup * w), torch.maximum(glo * w, gup * w)
-        row = rows[x]
-        if x in clamp:
-            v = int(clamp[x])
-            shape = (*row.lo.shape[:-1], *([1] * len(z)))
-            elo = row.entry(v, False).reshape(shape)
-            eup = row.entry(v, True).reshape(shape)
-            lo, up = _imul(elo, eup, glo[..., v], gup[..., v])
-        else:
-            lo, up = row.opt(glo, False), row.opt(gup, True)
-        msgs.append((tuple(pa + z), lo, up))
+            pa = list(parents_fn(x))
+            z = [v for v in scope if v != x and v not in pa]
+            full = pa + z + [x]
+            if mine:
+                glo, gup = _iproduct(mine, full, cards, max_elements)
+            else:
+                glo = torch.ones([cards[v] for v in full], dtype=torch.float64)
+                gup = glo.clone()
+            if x == tgt:
+                w = ind.reshape(*([1] * (len(full) - 1)), -1)
+                glo, gup = torch.minimum(glo * w, gup * w), torch.maximum(glo * w, gup * w)
+            row = rows[x]
+            if x in clamp:
+                v = int(clamp[x])
+                shape = (*row.lo.shape[:-1], *([1] * len(z)))
+                lo, up = _imul(row.entry(v, False).reshape(shape),
+                               row.entry(v, True).reshape(shape), glo[..., v], gup[..., v])
+            else:
+                lo, up = row.opt(glo, False), row.opt(gup, True)
+            out_scope = tuple(pa + z)
+        m = float(torch.maximum(lo.abs().max(), up.abs().max())) if lo.numel() else 0.0
+        if m > 0.0 and math.isfinite(m):
+            lo, up = lo / m, up / m
+            log_scale += math.log(m)
+        msgs.append((out_scope, lo, up))
     lo = torch.ones((), dtype=torch.float64)
     up = lo.clone()
     for _, tlo, tup in msgs:
         lo, up = _imul(lo, up, tlo.reshape(()), tup.reshape(()))
-    return float(lo), float(up)
+    return float(lo), float(up), log_scale
+
+
+def _ratio(a, b):
+    """``a / (a + b)`` for scaled non-negative numbers ``(mantissa, log_scale)``;
+    ``None`` when both are 0."""
+    (am, al), (bm, bl) = a, b
+    if am <= 0.0 and bm <= 0.0:
+        return None
+    if am <= 0.0:
+        return 0.0
+    if bm <= 0.0:
+        return 1.0
+    t = math.log(bm) + bl - math.log(am) - al
+    return 0.0 if t > 745.0 else 1.0 / (1.0 + math.exp(t))
 
 
 def credal_query(
@@ -318,6 +370,9 @@ def credal_query(
     do = {k: int(torch.as_tensor(v).reshape(-1)[0]) for k, v in (do or {}).items()}
     if target in evidence or target in do:
         raise ValueError("credal_query: the target is observed or intervened.")
+    if set(evidence) & set(do):
+        raise ValueError(f"credal_query: {sorted(set(evidence) & set(do))} are both "
+                         f"observed and intervened.")
 
     def parents_fn(n):
         return [] if n in do else _parents_of(model, n)
@@ -349,25 +404,38 @@ def credal_query(
         return _eliminate(topo, parents_fn, rows, card, clamp, set(do), (target, ind),
                           max_elements)
 
+    def scaled(v, end):                       # (mantissa, log_scale) of one end
+        return (max(v[end], 0.0), v[2])
+
+    def value(v, end):
+        return v[end] * math.exp(v[2]) if v[end] != 0.0 else 0.0
+
     ones = torch.ones(k, dtype=torch.float64)
+    pe = bound(ones)
+    if pe[1] <= 0.0:
+        raise ValueError("credal_query: the evidence has probability 0 under every network "
+                         "in the sets; P(target | evidence) is undefined.")
     jl, ju, lo, up = [], [], [], []
     for y in range(k):
         e_y = torch.zeros(k, dtype=torch.float64)
         e_y[y] = 1.0
-        a_lo, a_up = bound(e_y)
-        b_lo, b_up = bound(ones - e_y)
-        jl.append(a_lo)
-        ju.append(a_up)
-        l_y = a_lo / (a_lo + b_up) if a_lo + b_up > 0 else 0.0
-        u_y = a_up / (a_up + b_lo) if a_up + b_lo > 0 else 1.0
+        a = bound(e_y)
+        b_ = bound(ones - e_y)
+        jl.append(value(a, 0))
+        ju.append(value(a, 1))
+        r_lo = _ratio(scaled(a, 0), scaled(b_, 1))
+        r_up = _ratio(scaled(a, 1), scaled(b_, 0))
+        l_y = 0.0 if r_lo is None else r_lo
+        u_y = 1.0 if r_up is None else r_up
         if tight and u_y - l_y > tol:
             # generalized Bayes rule: P(y|e) >= mu  iff  min_th P(y,e) - mu P(e) >= 0
-            # (P(e) > 0); a lower bound >= 0 of that minimum certifies mu.
+            # (P(e) > 0); a lower bound >= 0 of that minimum certifies mu.  The
+            # sign of a scaled bound is the sign of its mantissa.
             g = lambda mu: e_y - mu * ones          # noqa: E731
             lo_m, hi_m = l_y, u_y
             for _ in range(bisect_iters):
                 mid = 0.5 * (lo_m + hi_m)
-                if bound(g(mid))[0] >= 0.0:
+                if bound(g(mid))[0] > 0.0:
                     lo_m = mid
                 else:
                     hi_m = mid
@@ -377,7 +445,7 @@ def credal_query(
             lo_m, hi_m = l_y, u_y
             for _ in range(bisect_iters):
                 mid = 0.5 * (lo_m + hi_m)
-                if bound(g(mid))[1] <= 0.0:
+                if bound(g(mid))[1] < 0.0:
                     hi_m = mid
                 else:
                     lo_m = mid
@@ -386,7 +454,7 @@ def credal_query(
             l_y, u_y = max(l_y, new_l), min(u_y, hi_m)
         lo.append(l_y)
         up.append(u_y)
-    pe_lo, pe_up = bound(ones)
+    pe_lo, pe_up = value(pe, 0), value(pe, 1)
     slack = 1e-9
     lower = (torch.tensor(lo, dtype=torch.float64) - slack).clamp(0.0, 1.0)
     upper = (torch.tensor(up, dtype=torch.float64) + slack).clamp(0.0, 1.0)
@@ -394,10 +462,17 @@ def credal_query(
     upper = torch.minimum(upper, (1.0 - (lower.sum() - lower)).clamp(max=1.0))
 
     used = [sets[n] for n in need]
-    if hasattr(sets, "level") and isinstance(sets, CredalSets):
+
+    def miss(s_):                 # failure probability of one set
+        lv = float(s_.level)
+        if getattr(s_, "simultaneous", True) is False:   # per-entry level
+            lo_, _ = s_.bounds()
+            return min(1.0, lo_.numel() * (1.0 - lv))
+        return 1.0 - lv
+    if isinstance(sets, CredalSets) and all(sets._ids.get(n) == id(sets[n]) for n in need):
         level = sets.level
-    elif all(getattr(s, "level", None) is not None for s in used):
-        level = max(0.0, 1.0 - sum(1.0 - float(s.level) for s in used))
+    elif all(getattr(s_, "level", None) is not None for s_ in used):
+        level = max(0.0, 1.0 - sum(miss(s_) for s_ in used))
     else:
         level = None
     gs = [getattr(s, "guarantee", "pac") for s in used]
@@ -474,6 +549,7 @@ def pac_query(
     method: str = "kl",
     sampling: str = "iid",
     max_elements: int = 2 ** 26,
+    **query_kwargs,
 ) -> QueryBounds:
     """PAC answer from data: with probability ``>= 1 - delta`` over the data,
     ``lower <= P_true(target | evidence, do) <= upper``.
@@ -493,7 +569,8 @@ def pac_query(
     need = [n for n in model.dag.topological_order()
             if n in _ancestral(parents_fn, [target, *evidence, *do]) and n not in do]
     sets = pac_sets(model, data, need, delta, kind=kind, method=method, sampling=sampling)
-    return credal_query(model, sets, target, evidence, do=do, max_elements=max_elements)
+    return credal_query(model, sets, target, evidence, do=do, max_elements=max_elements,
+                        **query_kwargs)
 
 
 __all__ = ["QueryBounds", "CredalSets", "credal_query", "pac_sets", "pac_query"]

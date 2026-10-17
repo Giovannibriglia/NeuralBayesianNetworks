@@ -164,3 +164,82 @@ def test_pac_sets_hold_jointly_for_many_queries():
         b = credal_query(m, sets, tgt, ev, point=False)
         ex = _exact(m, tgt, ev or None)
         assert ((ex >= b.lower) & (ex <= b.upper)).all()
+
+
+# --- from the adversarial review -------------------------------------------
+def _point_sets(tables):
+    return {n: IntervalSet(level=1.0, guarantee="pac",
+                           unseen=torch.zeros(t.shape[0], dtype=torch.bool), lower=t, upper=t)
+            for n, t in tables.items()}
+
+
+def test_many_evidence_factors_do_not_underflow():
+    n = 120
+    parents = {"T": []}
+    tables = {"T": torch.tensor([[0.5, 0.5]], dtype=torch.float64)}
+    for i in range(n):
+        parents[f"E{i}"] = ["T"]
+        tables[f"E{i}"] = torch.tensor([[1 - 1e-3, 1e-3], [1 - 1.05e-3, 1.05e-3]],
+                                       dtype=torch.float64)
+    b = credal_query(parents, _point_sets(tables), "T", {f"E{i}": 1 for i in range(n)})
+    log_r = n * (torch.log(torch.tensor(1e-3)) - torch.log(torch.tensor(1.05e-3)))
+    exact = float(1 / (1 + torch.exp(-log_r)))
+    assert abs(float(b.lower[0]) - exact) < 1e-6 and abs(float(b.upper[0]) - exact) < 1e-6
+
+
+def test_impossible_evidence_raises():
+    parents = {"A": [], "B": ["A"]}
+    tables = {"A": torch.tensor([[0.3, 0.7]], dtype=torch.float64),
+              "B": torch.tensor([[1.0, 0.0], [1.0, 0.0]], dtype=torch.float64)}
+    with pytest.raises(ValueError, match="probability 0"):
+        credal_query(parents, _point_sets(tables), "A", {"B": 1})
+
+
+def test_order_does_not_depend_on_node_names():
+    # ladder X_i <- (A_i, X_{i-1}); roots named to sort first
+    m_len = 20
+    parents, tables = {}, {}
+    for i in range(m_len):
+        parents[f"a{i:02d}"] = []
+        tables[f"a{i:02d}"] = torch.tensor([[0.4, 0.6]], dtype=torch.float64)
+        parents[f"x{i:02d}"] = [f"a{i:02d}"] + ([f"x{i - 1:02d}"] if i else [])
+        r = 2 ** len(parents[f"x{i:02d}"])
+        tables[f"x{i:02d}"] = torch.full((r, 2), 0.5, dtype=torch.float64)
+    sets = _point_sets(tables)
+    b = credal_query(parents, sets, "x00", {f"x{m_len - 1:02d}": 1}, max_elements=64)
+    assert torch.allclose(b.lower, torch.tensor([0.5, 0.5], dtype=torch.float64), atol=1e-6)
+
+
+@pytest.mark.parametrize("k", [2, 4])
+def test_other_target_cardinalities(k):
+    m, names = _dense_bn(4, n=8, k=k, window=2, p=0.8)
+    sets = _box(m, names, 0.05, torch.Generator().manual_seed(k))
+    tgt, ev = names[3], {names[-1]: 1}
+    b = credal_query(m, sets, tgt, ev, point=False)
+    ex = _exact(m, tgt, ev)
+    assert b.lower.shape == (k,) and ((ex >= b.lower) & (ex <= b.upper)).all()
+
+
+def test_modified_credal_sets_fall_back_to_the_union_bound():
+    m, names = _dense_bn(3, n=8, k=3, window=2, p=0.8)
+    torch.manual_seed(0)
+    data = {kk: v.reshape(-1).long() for kk, v in m.sample(5000).items()}
+    sets = pac_sets(m, data, delta=0.05)
+    tgt, ev = names[2], {names[-1]: 1}
+    assert credal_query(m, sets, tgt, ev, point=False).level == pytest.approx(0.95)
+    weak = sets[names[0]]
+    sets[names[0]] = IntervalSet(level=0.5, guarantee="pac", unseen=weak.unseen,
+                                 lower=weak.lower, upper=weak.upper)
+    lvl = credal_query(m, sets, tgt, ev, point=False).level
+    if names[0] in credal_query(m, sets, tgt, ev, point=False).nodes:
+        assert lvl <= 0.5
+
+
+def test_pac_query_with_l1_sets_covers():
+    m, names = _dense_bn(3, n=8, k=3, window=2, p=0.8)
+    tgt, ev = names[2], {names[-1]: 1}
+    truth = _exact(m, tgt, ev)
+    torch.manual_seed(1)
+    data = {kk: v.reshape(-1).long() for kk, v in m.sample(20000).items()}
+    b = pac_query(m, data, tgt, ev, delta=0.1, kind="l1")
+    assert ((truth >= b.lower) & (truth <= b.upper)).all()
