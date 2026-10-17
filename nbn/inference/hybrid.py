@@ -321,8 +321,16 @@ class HybridRouter(InferenceEngine):
         except ConditioningLimitError as exc:
             self._warn_once(
                 ("cond",) + _shape_key(model, targets, evidence, kwargs.get("do")),
-                "HybridRouter: conditioning refused (%s); answering with likelihood "
-                "weighting (approximate).", str(exc)[:200])
+                "HybridRouter: conditioning refused (%s); answering with the "
+                "fallback sampler (approximate).", str(exc)[:200])
+            return None
+        except Exception as exc:  # noqa: BLE001 - only allocator OOM is a fallback
+            if not (is_oom_error(exc) or isinstance(exc, MPSTensorLimitError)):
+                raise
+            self._warn_once(
+                ("cond-oom",) + _shape_key(model, targets, evidence, kwargs.get("do")),
+                "HybridRouter: conditioning ran out of memory (%s); answering with the "
+                "fallback sampler (approximate).", str(exc)[:200])
             return None
         self._last_engine = ("conditioning" if self._cond.last_conditioning is not None
                              else "tensor_ve")
@@ -335,9 +343,12 @@ class HybridRouter(InferenceEngine):
 
     @property
     def last_certificate(self):
-        """The interval answer of the last certified query (``None`` otherwise)."""
+        """The interval answer of the last query if the certified engine
+        answered it (``None`` otherwise; after ``query_batch``, the last row)."""
         cert = getattr(self, "_cert", None)
-        return None if cert is None else cert.last_certificate
+        if cert is None or getattr(self, "_last_engine", None) != "certified":
+            return None
+        return cert.last_certificate
 
     def query(
         self,

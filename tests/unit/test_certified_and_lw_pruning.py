@@ -425,7 +425,7 @@ def test_certified_collapsed_auto_exact_when_query_fits():
     exact = m.query([tgt], evidence=ev, engine=TensorVariableElimination())
     a = certified_query(m, tgt, ev, collapse="auto", memory_budget=2 ** 30)
     assert a.collapsed == () and a.n_samples == 0 and a.level == 1.0
-    assert a.max_width <= 2.1e-6 and _covers(a, exact)
+    assert a.max_width <= 1e-3 and _covers(a, exact)   # forward error bound
     assert torch.allclose(a.estimate, exact.double(), atol=1e-6)
 
 

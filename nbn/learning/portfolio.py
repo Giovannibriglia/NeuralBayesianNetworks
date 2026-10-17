@@ -12,12 +12,16 @@ candidates and a final budget ``R`` epochs, the cost is about
 ``n r_0 + (n / eta) r_0 eta + ... ~ r_0 n log_eta(n) + R`` epochs instead of
 ``n R``.
 
-Selection is per node.  With complete data the log-likelihood of a network
-is a sum of one term per family, so the held-out score decomposes and the
-best mechanism of each node can be chosen separately [Koller & Friedman 2009,
-decomposable scores, Prop. 18.3 (the likelihood score) and §18.3; held-out
-evaluation, Box 16.A].  Nodes are independent, so ``workers`` threads can
-handle several at once.
+Selection is per node.  With complete data and disjoint per-node parameters
+the likelihood of a network is a product of one local likelihood per family,
+for any parameterisation of the CPDs [Koller & Friedman 2009, §17.2.2,
+Prop. 17.1, pp. 725–726]; on a validation set too, so the held-out score is a
+sum of per-node terms and the best mechanism of each node can be chosen
+separately (the per-node argmax is our step; it needs the same split for
+every node, which this function uses).  Holdout over training likelihood:
+the training likelihood never prefers the simpler model (K&F §18.3.1.3,
+pp. 793–794).  Nodes are independent, so ``workers`` threads can handle
+several at once.
 
 Caveats
 -------
@@ -25,11 +29,15 @@ Caveats
   the early scores rank candidates, not final quality.  ``min_epochs``
   controls how early that is.
 * The chosen mechanism's validation score is optimistic (it won on those
-  rows).  Calibration or PAC tools that need held-out data must use rows
-  that were *not* used here (see ``nbn.structure.continuous`` and
+  rows; K&F Box 16.A, pp. 705–708): report performance on a separate test
+  set.  Calibration or PAC tools that need held-out data must use rows that
+  were *not* used here (see ``nbn.structure.continuous`` and
   ``nbn.scm.calibration``).
 * Scores compare densities (continuous) or probabilities (discrete) of one
-  node, so all candidates of a node must model the same variable type.
+  node, so all candidates of a node must model the same variable on the same
+  scale: do not mix a discretised (binned) table with a density without the
+  bin widths, and a candidate that transforms the variable must report the
+  log-density of the original variable (with its log-Jacobian).
 """
 from __future__ import annotations
 

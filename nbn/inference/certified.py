@@ -144,6 +144,18 @@ def _bounds_from_sums(sum_w, sum_wy, sq_w, sq_wy, done: int, delta: float, k: in
     return lower, upper, lo_e, hi_e
 
 
+def _unit(x: torch.Tensor) -> torch.Tensor:
+    """Clamp a statistic that the weight bound puts in ``[0, 1]``; a value
+    clearly above 1 means ``W`` does not bound the weights (e.g. a mechanism
+    whose ``log_prob`` differs from its table), and is raised, not hidden."""
+    if x.numel() and float(x.max()) > 1.0 + 1e-4:
+        raise RuntimeError(
+            f"certified_query: a likelihood weight exceeds the bound W by "
+            f"{float(x.max()):.6g}x; the evidence mechanisms' log_prob must equal "
+            f"their tabulated CPT for the certificate to hold.")
+    return x.clamp(0.0, 1.0)
+
+
 def _sum_to_one(lower, upper):
     lower = torch.maximum(lower, (1.0 - (upper.sum() - upper)).clamp(min=0.0))
     upper = torch.minimum(upper, (1.0 - (lower.sum() - lower)).clamp(max=1.0))
@@ -205,8 +217,9 @@ def certified_query(
     ``P(y, e_d | x_p, e_p)``.  ``"auto"`` picks the smallest greedy cutset
     whose exact remainder, for a batch of ``first_checkpoint`` particles at
     once, fits ``memory_budget`` (``nbn.inference.conditioning``); when the
-    whole query fits (empty cutset, nothing to sample) the answer is exact:
-    ``estimate +- 1e-6`` (floating-point slack), ``level = 1``, ``n_samples = 0``.  Each particle's statistics ``w_p P(y, e_d | x_p, e_p)``
+    whole query fits (empty cutset, nothing to sample) the answer is exact up
+    to a forward floating-point error bound (relative ``eta = 4 u (F + sum
+    max|log f|)``), ``level = 1``, ``n_samples = 0``.  Each particle's statistics ``w_p P(y, e_d | x_p, e_p)``
     stay in ``[0, W]`` (``P(e_d | x_p, e_p) <= prod_{e in E_d} max_pa
     P(e | pa)``, the LW identity [K&F, Eq. 12.11]), so the same certificate
     applies.  Collapsing removes the sampling variance of the exact part; it
@@ -230,6 +243,9 @@ def certified_query(
     do = dict(do or {})
     if target in evidence or target in do:
         raise ValueError("certified_query: the target is observed or intervened.")
+    if set(evidence) & set(do):
+        raise ValueError(f"certified_query: {sorted(set(evidence) & set(do))} are both "
+                         f"observed and intervened.")
     mech_t = model.mechanisms[target]
     if not getattr(mech_t, "is_discrete", False):
         raise NotImplementedError("certified_query needs a discrete target.")
@@ -263,8 +279,7 @@ def certified_query(
                                     eng._cache)
         sl = state.node_slices[state.node_to_idx[target]]
         y = buf[0, :, sl].reshape(-1).long().cpu()
-        w = torch.exp(log_w[0].cpu().double()) / W        # in [0, 1]; CPU: MPS has no float64
-        w = w.clamp(0.0, 1.0)
+        w = _unit(torch.exp(log_w[0].cpu().double()) / W)   # in [0, 1]; CPU: MPS has no float64
         sum_w += w.sum()
         sum_wy += torch.bincount(y, weights=w, minlength=k)[:k]
         sq_w += (w * w).sum()
@@ -312,7 +327,7 @@ class _PlainDraw:
                                     tuple(sorted(self.dd)), self.eng._cache)
         sl = state.node_slices[state.node_to_idx[self.target]]
         y = buf[0, :, sl].reshape(-1).long().cpu()
-        w = (torch.exp(log_w[0].cpu().double()) / self.W).clamp(0.0, 1.0)
+        w = _unit(torch.exp(log_w[0].cpu().double()) / self.W)
         wy = torch.zeros(s, self.k, dtype=torch.float64)
         wy[torch.arange(s), y] = w
         return w, wy
@@ -408,10 +423,10 @@ class _CollapsedDraw:
             lv = torch.zeros(s, device=dev)
         if self.keep is not None:
             stat = torch.exp((log_w1[:, None] + lv).cpu().double()) / self.W   # [s, k]
+            w = _unit(stat.sum(1))
             stat = stat.clamp(0.0, 1.0)
-            w = stat.sum(1).clamp(0.0, 1.0)
         else:
-            w = (torch.exp((log_w1 + lv).cpu().double()) / self.W).clamp(0.0, 1.0)
+            w = _unit(torch.exp((log_w1 + lv).cpu().double()) / self.W)
             stat = torch.zeros(s, self.k, dtype=torch.float64)
             stat[torch.arange(s), vals[self.target].cpu()] = w
         return w, stat
@@ -426,6 +441,9 @@ def _certified_general(model, target, evidence, *, delta, do, chunk, bound, n_sa
     do = dict(do or {})
     if target in evidence or target in do:
         raise ValueError("certified_query: the target is observed or intervened.")
+    if set(evidence) & set(do):
+        raise ValueError(f"certified_query: {sorted(set(evidence) & set(do))} are both "
+                         f"observed and intervened.")
     mech_t = model.mechanisms[target]
     if not getattr(mech_t, "is_discrete", False):
         raise NotImplementedError("certified_query needs a discrete target.")
@@ -443,16 +461,30 @@ def _certified_general(model, target, evidence, *, delta, do, chunk, bound, n_sa
                               {a: _int(b) for a, b in do.items()}, k, W, chunk, collapse,
                               memory_budget, batch_rows=first_checkpoint)
         if not draw.Xp:
-            # nothing left to sample: the whole query fits the exact remainder,
-            # every particle would be the same exact value -- return it (level 1;
-            # widened by 1e-6 for the floating-point error of the elimination)
+            # Nothing left to sample: the whole query fits the exact remainder
+            # and every particle would be the same value.  Return it (level 1)
+            # with a forward error bound for the floating-point elimination:
+            # each log-factor entry carries a relative error <= u |log f| and
+            # each product / sum <= u, so a joint over F factors is within a
+            # relative eta = 4 u (F + sum_f max |log f|) (u: unit roundoff of
+            # the factors' dtype); a ratio of two such joints within
+            # (1 +- eta) / (1 -+ eta).  (A fixed 1e-6 was not enough in float32.)
             w, wy = draw(1)
             pe = float(w[0]) * W
             if pe <= 0.0:
                 raise ValueError("certified_query: the evidence has probability 0.")
             est = wy[0] / w[0]
-            return CertifiedAnswer(est, (est - 1e-6).clamp(min=0.0), (est + 1e-6).clamp(max=1.0),
-                                   1.0, 0, W, pe, pe, 0, time.perf_counter() - t0, ())
+            facs = list(draw.inner.values())
+            u = torch.finfo(facs[0].log_values.dtype).eps if facs else 2.0 ** -52
+            mx = sum(float(f.log_values[torch.isfinite(f.log_values)].abs().max())
+                     if torch.isfinite(f.log_values).any() else 0.0 for f in facs)
+            eta = min(0.5, 4.0 * u * (len(facs) + mx))
+            lo_r, hi_r = (1.0 - eta) / (1.0 + eta), (1.0 + eta) / (1.0 - eta)
+            lower = (est * lo_r).clamp(0.0, 1.0)
+            upper = (est * hi_r).clamp(0.0, 1.0)
+            lower, upper = _sum_to_one(lower, upper)
+            return CertifiedAnswer(est, lower, upper, 1.0, 0, W, pe * (1.0 - eta),
+                                   min(1.0, pe * (1.0 + eta)), 0, time.perf_counter() - t0, ())
     sums = [torch.zeros((), dtype=torch.float64), torch.zeros(k, dtype=torch.float64),
             torch.zeros((), dtype=torch.float64), torch.zeros(k, dtype=torch.float64)]
     done = 0
@@ -544,6 +576,10 @@ class CertifiedEngine(InferenceEngine):
         for node, v in (evidence or {}).items():
             if not getattr(model.mechanisms[node], "is_discrete", False):
                 return False
+            # W needs every parent row of an evidence node: discrete parents
+            for p in model.dag.parents(node):
+                if not getattr(model.mechanisms[p], "is_discrete", False):
+                    return False
         return True
 
     def _one(self, model, target, evidence, do):
