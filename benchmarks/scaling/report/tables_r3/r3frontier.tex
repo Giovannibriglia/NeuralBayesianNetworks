@@ -1,0 +1,22 @@
+\begin{table}[H]\centering\small
+\caption{R3-3. Largest graph (nodes) finished: reference budget (1 thread, 4 GB, 30 s) vs large budget (8 threads, 16 GB, 120 s)}\label{tab:r3frontier}
+
+\begin{tabular}{lrrrrr}\toprule
+computation & reference: largest & stopped by & large: largest & stopped by & gain in nodes \\ \midrule
+exact VE, loose ER graphs & 100 & ok at 200 & 100 & ok at 200 & 1$\times$ \\
+pgmpy VE, loose ER graphs & 100 & oom at 200 & 100 & crash at 200 & 1$\times$ \\
+LW queries, ER & 5e+03 & none (max tested) & 1e+04 & none (max tested) & 2$\times$ \\
+LW queries, local graphs & 5e+03 & none (max tested) & 1e+04 & none (max tested) & 2$\times$ \\
+certified queries, local & 1e+03 & timeout at 2000 & 1e+04 & none (max tested) & 10$\times$ \\
+MDN fit (stacked) & 500 & timeout at 1000 & 5e+03 & timeout at 10000 & 10$\times$ \\
+Pyro SVI (MDN) & 200 & timeout at 500 & 500 & timeout at 1000 & 2$\times$ \\
+neural categorical fit & 1e+03 & none (max tested) & 5e+03 & none (max tested) & 5$\times$ \\
+Pyro SVI (categorical) & 500 & timeout at 1000 & 2e+03 & timeout at 5000 & 4$\times$ \\
+FlexCode fit & 1e+03 & none (max tested) & 5e+03 & none (max tested) & 5$\times$ \\
+flow fit & 200 & timeout at 500 & 1e+03 & timeout at 2000 & 5$\times$ \\
+kNN LW queries & 200 & timeout at 500 & 2e+03 & timeout at 5000 & 10$\times$ \\
+FlexCode LW queries & 1e+03 & none (max tested) & 5e+03 & none (max tested) & 5$\times$ \\
+amortized IS & 1e+03 & none (max tested) & 5e+03 & none (max tested) & 5$\times$ \\
+amortized VI (10 epochs) & 1e+03 & none (max tested) & 5e+03 & none (max tested) & 5$\times$ \\
+\bottomrule\end{tabular}
+\end{table}
