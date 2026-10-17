@@ -14,6 +14,7 @@ import torch
 
 from nbn.uncertainty import confounded_interval_set, confounding_gate
 from nbn.uncertainty.confounded import (
+    ASSUMPTIONS,
     IVProgram,
     ProgramTooLarge,
     RefutedAssumption,
@@ -234,7 +235,7 @@ def test_rows_contain_the_interventional_kernel(method, interval_method):
     expected = "lp" if method == "auto" else "intersection"
     assert set(res.method_used) <= {expected, "unvisited"} and expected in set(res.method_used)
     assert res.set.guarantee == "pac_under_model" and res.set.level == pytest.approx(0.95)
-    assert len(res.assumptions) == 5
+    assert len(res.assumptions) == len(ASSUMPTIONS)
 
 
 @pytest.mark.parametrize("device", available_devices())

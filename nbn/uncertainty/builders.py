@@ -92,8 +92,19 @@ def interval_set_from_counts(
     return _interval_set(_check_counts(counts, integer=True), delta, method, sampling)
 
 
+def _exact_counts(counts: torch.Tensor) -> torch.Tensor:
+    """Refuse counts a float32 table cannot hold exactly (>= 2**24, MPS)."""
+    if counts.dtype == torch.float32 and counts.numel() and float(counts.max()) >= 2 ** 24:
+        raise ValueError(
+            "A count of 2**24 or more cannot be held exactly in float32 (the MPS "
+            "accumulation dtype), so the PAC set would not hold; count on the CPU "
+            "(move the data with .cpu()).")
+    return counts
+
+
 def _interval_set(counts: torch.Tensor, delta: float, method: IntervalMethod,
                   sampling: Sampling) -> IntervalSet:
+    counts = _exact_counts(counts)
     trials = counts.sum(dim=-1, keepdim=True).expand_as(counts)
     per_entry = per_interval_delta(delta, counts.numel(), trials, sampling)
     lower, upper = binomial_interval(counts, trials, per_entry, method=method)
@@ -201,6 +212,7 @@ def l1_ball_set_from_counts(
 
 
 def _l1_ball_set(counts: torch.Tensor, delta: float, sampling: Sampling) -> L1BallSet:
+    counts = _exact_counts(counts)
     trials = counts.sum(dim=-1)
     n_rows, k = counts.shape
     per_row = per_interval_delta(delta, n_rows, trials, sampling)
@@ -209,6 +221,9 @@ def _l1_ball_set(counts: torch.Tensor, delta: float, sampling: Sampling) -> L1Ba
     else:
         log_patterns = k * math.log(2.0) + math.log1p(-(2.0 ** (1 - k)))  # log(2^K - 2)
         radius = torch.sqrt(2.0 * (log_patterns + torch.log(1.0 / per_row)) / trials.clamp_min(1))
+        # outward: the radius and the centre's division both round (float32 on MPS)
+        radius = radius * (1.0 + 4 * torch.finfo(radius.dtype).eps) \
+            + 4 * k * torch.finfo(radius.dtype).eps
     radius = torch.where(trials == 0, torch.full_like(radius, 2.0), radius.clamp_max(2.0))
     center = counts / trials.clamp_min(1).unsqueeze(-1)
     center = torch.where(trials.unsqueeze(-1) == 0, torch.full_like(center, 1.0 / k), center)

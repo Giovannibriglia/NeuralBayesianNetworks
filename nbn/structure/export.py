@@ -493,7 +493,9 @@ def _param_record(pid: str, obj: NoiseParameterSet, arrays: Dict[str, np.ndarray
         "n_expressions": int(obj.expressions.shape[0]), "guarantee": obj.guarantee,
         "level": float(obj.level), "delta": float(1.0 - obj.level), "nodes": sorted(obj.index),
         "constraints": "q in the simplex and lower_e <= expressions[e] @ q <= upper_e for every e; "
-                       "table entry (r, k) of a tied node is expressions[index[r, k]] @ q",
+                       "table entry (r, k) of a tied node is expressions[index[r, k]] @ q, "
+                       "except for rows marked unseen in the factor: their location is a guess, "
+                       "so those rows are unconstrained (the whole simplex)",
     }
 
 

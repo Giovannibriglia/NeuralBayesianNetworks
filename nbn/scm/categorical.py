@@ -117,17 +117,39 @@ def counterfactual_bounds_from_sets(
     (The hull over a confidence set is our construction; the bounds per
     kernel are the attributed ones above.)
     """
+    # Computed in float64 on the CPU and rounded outward back: in float32 the
+    # simplex tightening cancels and (p + q - 1) / p multiplies that error by
+    # 1 / p (a lower end above the true hull was found at p ~ 1e-7).
+    out_dtype, out_device = q_lower.dtype, q_lower.device
+    eps_in = (torch.finfo(out_dtype).eps if out_dtype.is_floating_point else 0.0)
+    q_lower = q_lower.detach().cpu().double()
+    q_upper = q_upper.detach().cpu().double()
+    k = q_lower.shape[-1]
     q_lower, q_upper = tighten_box_to_simplex(q_lower, q_upper)
-    if bool((q_lower > q_upper + 1e-12).any()):
+    if bool((q_lower > q_upper + k * max(eps_in, 1e-15)).any()):
         raise ValueError("the q box does not meet the probability simplex in some row: no kernel is in the set.")
-    p_x = _observed_probability(p_observed_lower, x_observed, allow_zero=True)
-    safe = p_x.clamp_min(torch.finfo(p_x.dtype).tiny)
-    lower = ((safe + q_lower - 1.0) / safe).clamp(0.0, 1.0)
-    upper = (q_upper / safe).clamp(0.0, 1.0)
+    p_x = _observed_probability(p_observed_lower.detach().cpu().double(),
+                                x_observed.detach().cpu() if isinstance(x_observed, torch.Tensor)
+                                else x_observed, allow_zero=True)
+    safe = p_x.clamp_min(torch.finfo(torch.float64).tiny)
+    rest = (1.0 - q_lower).clamp(0.0, 1.0)          # float64: error ~1e-16, in the margin
+    margin = 4 * k * torch.finfo(torch.float64).eps / safe
+    lower = (1.0 - rest / safe - margin).clamp(0.0, 1.0)
+    upper = (q_upper / safe + margin).clamp(0.0, 1.0)
     impossible = (p_x <= 0).expand_as(lower)
     lower = torch.where(impossible, (q_lower >= 1.0).to(lower.dtype), lower)
     upper = torch.where(impossible, (q_upper > 0.0).to(upper.dtype), upper)
-    return _point_where_same(lower, upper, x_observed, same_parents)
+    lower, upper = _point_where_same(lower, upper,
+                                     x_observed.detach().cpu() if isinstance(x_observed, torch.Tensor)
+                                     else x_observed,
+                                     same_parents.detach().cpu() if isinstance(same_parents, torch.Tensor)
+                                     else same_parents)
+    if out_dtype != torch.float64:
+        lo, up = lower.to(out_dtype), upper.to(out_dtype)
+        lo = torch.where(lo.double() > lower, torch.nextafter(lo, torch.zeros_like(lo)), lo)
+        up = torch.where(up.double() < upper, torch.nextafter(up, torch.ones_like(up)), up)
+        lower, upper = lo, up
+    return lower.to(out_device), upper.to(out_device)
 
 
 def _observed_probability(p: torch.Tensor, x: torch.Tensor, allow_zero: bool = False) -> torch.Tensor:

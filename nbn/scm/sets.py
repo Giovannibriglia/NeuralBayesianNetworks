@@ -76,15 +76,21 @@ def noise_parameter_set(
     pooled_k.scatter_add_(0, inverse, torch.cat(successes))
     pooled_n.scatter_add_(0, inverse, torch.cat(trials))
 
-    # Budget: every non-empty expression of a location used by some observed
-    # row.  Given the locations this set is fixed, so the union bound is valid
-    # under the model; expressions of unused locations have no data and get
-    # [0, 1] without spending budget.  An empty expression (a value
-    # unreachable from its location) is exactly 0.
+    # Budget.  i.i.d. rows: every non-empty expression of a location used by
+    # some observed row; given the parent values (hence the locations used)
+    # this set is fixed, so the union bound is valid under the model, and the
+    # expressions of unused locations get [0, 1] without spending budget.
+    # Trajectories: which rows are visited depends on earlier child draws, so
+    # a data-dependent count would void the union bound; every non-empty
+    # expression the model can produce is budgeted (fixed in advance).  An
+    # empty expression (a value unreachable from its location) is exactly 0.
     empty = expressions.sum(-1) == 0
-    in_use = torch.zeros(expressions.shape[0], dtype=torch.bool, device=inverse.device)
-    in_use[inverse[torch.cat(used)]] = True
-    n_budgeted = max(int((in_use & ~empty).sum()), 1)
+    if sampling == "trajectory":
+        n_budgeted = max(int((~empty).sum()), 1)
+    else:
+        in_use = torch.zeros(expressions.shape[0], dtype=torch.bool, device=inverse.device)
+        in_use[inverse[torch.cat(used)]] = True
+        n_budgeted = max(int((in_use & ~empty).sum()), 1)
     per_expr = per_interval_delta(delta, n_budgeted, pooled_n, sampling)
     lower, upper = binomial_interval(pooled_k, pooled_n, per_expr, method=method)
     lower = torch.where(empty, torch.zeros_like(lower), lower)
@@ -113,6 +119,8 @@ def cdf_band_set(
     pass ``data`` that were *not* used to fit ``g`` (a held-out split), or the
     guarantee is only approximate.
     """
+    if not 0.0 < float(delta) < 1.0:
+        raise ValueError(f"delta must lie in (0, 1); got {delta}.")
     data = to_device(dict(data), model.device)
     mech = model.mechanisms[node]
     if not isinstance(mech, AdditiveNoiseMechanism) or not mech.is_fitted:
@@ -121,6 +129,8 @@ def cdf_band_set(
     if residual.shape[1] != 1:
         raise ValueError("cdf_band_set supports 1-D nodes only.")
     n = residual.shape[0]
+    if n == 0:
+        raise ValueError("cdf_band_set needs at least one data row.")
     return CDFBandSet(
         sorted_residuals=residual[:, 0].sort().values,
         epsilon=math.sqrt(math.log(2.0 / delta) / (2.0 * n)),

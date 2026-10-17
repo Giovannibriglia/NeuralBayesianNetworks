@@ -196,7 +196,8 @@ def pit_values(model, data: Mapping[str, torch.Tensor], node: str,
 class PITBandSet:
     """A uniform band on the calibration map ``G`` of one fitted continuous mechanism.
 
-    ``cdf_bounds`` returns ``[G_hat(F_hat(x | pa)) - eps, G_hat(F_hat(x | pa)) + eps]``.
+    ``cdf_bounds`` returns ``[G_hat(F_hat(x | pa)^-) - eps, G_hat(F_hat(x | pa)) + eps]``
+    (strict count for the lower end, see :meth:`bounds_from_cdf`).
     With probability ``>= level`` the band contains ``G`` everywhere; it bounds
     ``P(X <= x | pa)`` for every ``pa`` *if* the PIT is independent of the
     parents (see the module docstring).
@@ -216,9 +217,25 @@ class PITBandSet:
         return torch.where(torch.isnan(cdf_values), cdf_values, g)
 
     def bounds_from_cdf(self, cdf_values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Bounds on ``P(X <= x | pa)`` given ``F_hat(x | pa)`` (any shape)."""
-        g = self.calibrated(cdf_values)
-        return (g - self.epsilon).clamp(0.0, 1.0), (g + self.epsilon).clamp(0.0, 1.0)
+        """Bounds on ``P(X <= x | pa)`` given ``F_hat(x | pa)`` (any shape).
+
+        ``{W < F_hat(x)} ⊆ {X <= x} ⊆ {W <= F_hat(x)}`` for any non-decreasing
+        ``F_hat`` (also the randomized PIT of a discrete node), so the lower
+        end uses the *strict* empirical count and the upper end the
+        inclusive one; DKW bounds both limits at once.  (Using the inclusive
+        count for both ends was unsound where ``F_hat`` is flat, e.g. a
+        Gaussian CDF that rounds to 1 far in the tail, or a class with
+        ``p_hat`` ~ 0: the band then excluded the truth.)
+        """
+        pit = self.sorted_pit.to(cdf_values)
+        v = cdf_values.contiguous()
+        n = pit.numel()
+        g_strict = torch.searchsorted(pit, v, right=False).to(cdf_values.dtype) / n
+        g_incl = torch.searchsorted(pit, v, right=True).to(cdf_values.dtype) / n
+        nan = torch.isnan(cdf_values)
+        lo = torch.where(nan, cdf_values, (g_strict - self.epsilon).clamp(0.0, 1.0))
+        up = torch.where(nan, cdf_values, (g_incl + self.epsilon).clamp(0.0, 1.0))
+        return lo, up
 
     def cdf_bounds(self, mechanism, x: torch.Tensor, parents: torch.Tensor | None):
         """Bounds on ``P(X <= x | pa)`` for a batch of rows, ``[B]`` each."""

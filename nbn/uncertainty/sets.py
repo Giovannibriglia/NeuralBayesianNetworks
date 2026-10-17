@@ -49,8 +49,10 @@ def tighten_box_to_simplex(
     """
     upper_others = upper.sum(dim=-1, keepdim=True) - upper
     lower_others = lower.sum(dim=-1, keepdim=True) - lower
-    new_lower = torch.maximum(lower, 1.0 - upper_others).clamp(0.0, 1.0)
-    new_upper = torch.minimum(upper, 1.0 - lower_others).clamp(0.0, 1.0)
+    # ``1 - sum`` rounds; a slack of K ulps keeps the step outward.
+    slack = upper.shape[-1] * torch.finfo(upper.dtype).eps if upper.is_floating_point() else 0.0
+    new_lower = torch.maximum(lower, 1.0 - upper_others - slack).clamp(0.0, 1.0)
+    new_upper = torch.minimum(upper, 1.0 - lower_others + slack).clamp(0.0, 1.0)
     return new_lower, new_upper
 
 
@@ -230,13 +232,17 @@ class NoiseParameterSet:
             for sign, store in ((1.0, new_lo), (-1.0, new_hi)):
                 res = linprog(sign * e_mat[e], A_ub=a_ub, b_ub=b_ub, A_eq=a_eq,
                               b_eq=b_eq, bounds=[(0.0, 1.0)] * m, method="highs")
-                if res.status != 0:
+                if res.status == 2:
                     raise RuntimeError(
                         "The noise polytope is empty: the intervals are mutually "
                         "inconsistent, which suggests the shared-noise model is "
                         "wrong for these data (see noise_sharing_test)."
                     )
-                store[e] = sign * res.fun
+                if res.status != 0:
+                    raise RuntimeError(f"tightened(): the LP solver failed ({res.message}).")
+                # widen by the solver's feasibility tolerance (HiGHS ~1e-7) so a
+                # tightened end never cuts into the exact range
+                store[e] = sign * res.fun - sign * 1e-6
         as_tensor = lambda a: torch.as_tensor(a, dtype=self.lower.dtype, device=self.lower.device)  # noqa: E731
         return NoiseParameterSet(
             expressions=self.expressions, lower=torch.maximum(self.lower, as_tensor(new_lo)),

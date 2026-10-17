@@ -61,12 +61,16 @@ def scatter_counts(
     if values.numel() and (int(values.min()) < 0 or int(values.max()) >= n_classes):
         raise ValueError(f"Child values outside the {n_classes} declared states.")
     dtype = accum_dtype(values.device)
-    contrib = (
-        torch.ones(values.shape[0], dtype=dtype, device=values.device)
-        if weights is None else to_device_dtype(weights, values.device, dtype)
-    )
+    index = rows.reshape(-1) * n_classes + values
+    if weights is None:
+        # Unweighted counts accumulate in int64: a float32 sum (MPS) stops
+        # growing at 2**24 (16777216 + 1 == 16777216 in float32).
+        counts = torch.zeros(n_rows * n_classes, dtype=torch.long, device=values.device)
+        counts.scatter_add_(0, index, torch.ones_like(index))
+        return counts.to(dtype).reshape(n_rows, n_classes)
+    contrib = to_device_dtype(weights, values.device, dtype)
     counts = torch.zeros(n_rows * n_classes, dtype=dtype, device=values.device)
-    counts.scatter_add_(0, rows.reshape(-1) * n_classes + values, contrib)
+    counts.scatter_add_(0, index, contrib)
     return counts.reshape(n_rows, n_classes)
 
 
