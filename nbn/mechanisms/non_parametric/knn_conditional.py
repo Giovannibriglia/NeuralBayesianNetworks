@@ -132,6 +132,12 @@ class KNNConditionalMechanism(Mechanism):
     neighbour_cache_size:
         How many recent parent batches keep their neighbour indices
         memoised (``0`` disables the cache; see the module notes).
+    neighbour_cache_max_bytes:
+        Largest neighbour-index block that is memoised (default 4 MiB).  The
+        cache serves ``forward`` → ``log_prob`` + ``sample`` on the *same*
+        rows; particle blocks of likelihood weighting are never reused, and
+        caching them held ``4 x particles x k`` indices per node (3 GB on a
+        100-node network).  A pure memo: answers do not depend on it.
     tie_break:
         Which training rows count as the ``k`` nearest when several lie at
         exactly the k-th distance (common with discrete parents).
@@ -164,6 +170,7 @@ class KNNConditionalMechanism(Mechanism):
         neighbour_cache_size: int = 4,
         tie_break: str = "lowest_index",
         search: str = "auto",
+        neighbour_cache_max_bytes: int = 4 * 2**20,
     ) -> None:
         super().__init__()
         if tie_break not in ("lowest_index", "any"):
@@ -172,6 +179,7 @@ class KNNConditionalMechanism(Mechanism):
             raise ValueError("search must be 'auto', 'brute' or 'kdtree'.")
         self.tie_break = tie_break
         self.search = search
+        self.neighbour_cache_max_bytes = int(neighbour_cache_max_bytes)
         self.k = None if k is None else int(k)
         self.discrete_child = bool(discrete_child)
         self.is_discrete = bool(discrete_child)
@@ -374,7 +382,8 @@ class KNNConditionalMechanism(Mechanism):
                         and key.dtype == xs.dtype and torch.equal(key, xs)):
                     return idx
         out = self._knn_search(xs)
-        if self.neighbour_cache_size > 0:
+        cap = getattr(self, "neighbour_cache_max_bytes", 4 * 2**20)
+        if self.neighbour_cache_size > 0 and out.numel() * out.element_size() <= cap:
             self._nbr_cache.append((xs.detach().clone(), out))
             del self._nbr_cache[:-self.neighbour_cache_size]
         return out
