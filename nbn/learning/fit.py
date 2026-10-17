@@ -272,6 +272,33 @@ def fit(
                 raise RuntimeError(f"No mechanism registered for node '{node}'.")
         groups = {} if warm_start else group_stackable(model, order)
         stacked_nodes = {v for g in groups.values() for v in g}
+        # Other gradient-trained mechanisms (neural categorical, FlexCode,
+        # normalising flows): the generic torch.func trainer, same argument;
+        # see nbn.learning.stacked_modules.
+        if not warm_start:
+            from nbn.learning.stacked_modules import fit_stacked_modules
+
+            g_kw = {k: v for k, v in kwargs.items() if k != "node_chunk"}
+            if epochs is not None:
+                g_kw["epochs"] = epochs
+            if lr is not None:
+                g_kw["lr"] = lr
+            if batch_size is not None:
+                g_kw["batch_size"] = batch_size
+            g_kw["consolidate"] = consolidate
+            generic = fit_stacked_modules(
+                model, data_dev, [v for v in order if v not in stacked_nodes],
+                kw=g_kw, weights=w_vec, pack_parents=pack_parents,
+                node_chunk=kwargs.get("node_chunk"),
+            )
+            for v in generic:
+                mech = model.mechanisms[v]
+                pa_tensor = pack_parents(data_dev, model.dag.parents(v))
+                with torch.no_grad():
+                    lp = mech.log_prob(data_dev[v], pa_tensor)
+                    history.node_log_likelihoods.setdefault(v, []).append(
+                        float(weighted_mean(lp, w_vec)))
+            stacked_nodes = stacked_nodes | generic
         for i, node in enumerate(order):
             if node not in stacked_nodes:
                 _fit_local_node(i, node)
