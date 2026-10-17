@@ -291,10 +291,12 @@ class LikelihoodWeightingEngine(InferenceEngine):
         check_discrete_values(model, {**(evidence or {}), **(do or {})},
                               do_keys=(do or {}))
         s = n_samples or self.n_samples
-        # Subclasses that override ``_run`` (amortised IS) keep their own
-        # proposal logic and are not pruned.
+        # Subclasses that override ``_run`` are pruned only when they declare
+        # ``_run_accepts_prune`` (their proposal for a kept node must not read
+        # a pruned node; amortised IS qualifies).
         prune = (getattr(self, "prune_barren", False)
-                 and type(self)._run is LikelihoodWeightingEngine._run)
+                 and (type(self)._run is LikelihoodWeightingEngine._run
+                      or getattr(type(self), "_run_accepts_prune", False)))
         state = get_inference_state(model, targets, tuple(sorted((evidence or {}).keys())),
                                      tuple(sorted((do or {}).keys())), self._cache)
         full_slices = [state.node_slices[state.node_to_idx[t]] for t in targets]

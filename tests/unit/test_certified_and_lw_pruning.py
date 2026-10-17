@@ -253,3 +253,49 @@ def test_certified_bounds_cover_and_bernstein_is_not_wider(bound):
         assert a.max_width <= kl.max_width * 1.1
     with pytest.raises(ValueError):
         certified_query(m, tgt, ev, n_samples=10, bound="nope")
+
+
+def test_amortized_is_pruning_same_target_and_not_worse_ess():
+    from nbn.inference.amortized_is import AmortizedISEngine
+
+    m, names = _random_bn(7, n=12)
+    torch.manual_seed(0)
+    eng = AmortizedISEngine(n_samples=40_000, per_query_fallback=False)
+    eng.train_proposal(m, device="cpu")
+    if eng.recognition_net is None:
+        pytest.skip("proposal rejected by the fit-time ESS gate")
+    tgt, ev = names[3], {names[5]: 1}       # many later nodes are barren
+    exact = m.query([tgt], evidence=ev, engine=TensorVariableElimination())
+    res = {}
+    for prune in (True, False):
+        eng.prune_barren = prune
+        torch.manual_seed(1)
+        p, ess = m.query([tgt], evidence=ev, engine=eng, return_ess=True)
+        res[prune] = (p, float(ess))
+        assert (p - exact).abs().max() < 0.03
+    assert res[True][1] >= res[False][1] - 0.02
+
+
+def test_amortized_is_prunes_barren_nodes():
+    from nbn.inference.amortized_is import AmortizedISEngine
+
+    m, names = _random_bn(8, n=10)
+    torch.manual_seed(0)
+    eng = AmortizedISEngine(n_samples=2000, per_query_fallback=False)
+    eng.train_proposal(m, device="cpu")
+    if eng.recognition_net is None:
+        pytest.skip("proposal rejected by the fit-time ESS gate")
+    net = eng.recognition_net
+    seen = []
+    orig = net.node_params
+
+    def spy(i, *a, **k):
+        seen.append(net.node_order[i])
+        return orig(i, *a, **k)
+
+    net.node_params = spy
+    m.query([names[2]], evidence={names[1]: 0}, engine=eng)
+    import networkx as nx
+    g = m.dag.networkx_graph
+    anc = nx.ancestors(g, names[2]) | nx.ancestors(g, names[1]) | {names[1], names[2]}
+    assert set(seen) <= anc
