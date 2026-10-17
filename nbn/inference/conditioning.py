@@ -75,8 +75,9 @@ dimensions and ``2**27`` elements.
 
 The result is about the model, not about the data: no statistical guarantee
 is implied.  Numerics: probabilities are accumulated in log space in the
-factors' dtype; the bounded mode adds ``bound_slack`` to ``U`` so that
-rounding cannot make the bounds unsound.
+factors' dtype; the bounded mode widens the bounds by a relative forward
+error bound (at least ``bound_slack``) so that rounding cannot make them
+unsound.
 """
 from __future__ import annotations
 
@@ -558,7 +559,16 @@ def conditioned_query(
         from nbn.inference.certified import evidence_weight_bound
         w_bound = evidence_weight_bound(model, ev_int)
         u = min(u, w_bound * max(0.0, 1.0 - float(torch.exp(log_qmass))))
-    u = u + bound_slack
+    # float slack, relative to the joint mass (an absolute slack made the
+    # bounds vacuous when P(e) is tiny): forward error bound of the
+    # elimination, eta = 4 u (F + sum_f max |log f|), at least bound_slack
+    unit = torch.finfo(next(iter(f_y.values())).log_values.dtype).eps if f_y else 2.0 ** -52
+    mx = sum(float(f.log_values[torch.isfinite(f.log_values)].abs().max())
+             if torch.isfinite(f.log_values).any() else 0.0 for f in f_y.values())
+    eta = max(bound_slack, 4.0 * unit * (len(f_y) + mx))
+    u = u + eta * (a + u) + 1e-300
+    a_y = a_y * (1.0 - eta)
+    a = a * (1.0 - eta)
     lower = (a_y / (a + u)).clamp(0.0, 1.0)
     upper = ((a_y + u) / (a + u)).clamp(0.0, 1.0)
     lower = torch.maximum(lower, (1.0 - (upper.sum() - upper)).clamp(min=0.0))
