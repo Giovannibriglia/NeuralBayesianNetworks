@@ -64,7 +64,7 @@ class Table:
         wide = len(self.header) >= 7
         lines = ["\\begin{table}[H]\\centering\\small",
                  f"\\caption{{{esc(self.title)}}}\\label{{tab:{self.key}}}",
-                 ("\\resizebox{\\linewidth}{!}{%" if wide else ""),
+                 ("\\resizebox{\\ifdim\\width>\\linewidth\\linewidth\\else\\width\\fi}{!}{%" if wide else ""),
                  f"\\begin{{tabular}}{{{cols}}}\\toprule",
                  " & ".join(esc(h) for h in self.header) + " \\\\ \\midrule"]
         lines += [" & ".join(esc(c) for c in r) + " \\\\" for r in self.rows]

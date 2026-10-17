@@ -1,0 +1,17 @@
+\begin{table}[H]\centering\small
+\caption{R2-2. Ten likelihood-weighting queries (10k samples) on networks of kNN or FlexCode mechanisms (s)}\label{tab:r2q}
+\resizebox{\ifdim\width>\linewidth\linewidth\else\width\fi}{!}{%
+\begin{tabular}{lrrrrrr}\toprule
+mechanism & nodes & master & first branch & this branch & vs master & vs first branch \\ \midrule
+knn & 10 & 20.3 & 13.3 & 5.89 & 3.5$\times$ & 2.3$\times$ \\
+knn & 20 & timeout & 15.8 & 6.49 & -- & 2.4$\times$ \\
+knn & 50 & -- & 30 & 10.3 & -- & 2.9$\times$ \\
+knn & 100 & -- & timeout & 14 & -- & -- \\
+knn & 200 & -- & -- & 17.9 & -- & -- \\
+flex & 10 & 3.26 & 2 & 0.247 & 13.2$\times$ & 8.1$\times$ \\
+flex & 50 & 17.2 & 4.62 & 0.629 & 27.4$\times$ & 7.3$\times$ \\
+flex & 100 & timeout & 5.99 & 0.825 & -- & 7.3$\times$ \\
+flex & 500 & -- & 14.3 & 2.08 & -- & 6.9$\times$ \\
+flex & 1000 & -- & 16 & 2.35 & -- & 6.8$\times$ \\
+\bottomrule\end{tabular}}
+\end{table}

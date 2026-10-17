@@ -1,0 +1,11 @@
+\begin{table}[H]\centering\small
+\caption{R2-3b. Amortized IS, same estimator: mean absolute error vs exact VE and median ESS/N across seeds (10 queries per seed)}\label{tab:r2aisseeds}
+\resizebox{\ifdim\width>\linewidth\linewidth\else\width\fi}{!}{%
+\begin{tabular}{lrrrrrr}\toprule
+nodes & version & seeds & mean error & sd across seeds & median ESS/N & mean time (s) \\ \midrule
+200 & master & 6 & 0.0299 & 0.0298 & 0.204 & 2.44 \\
+200 & this branch & 6 & 0.0151 & 0.00676 & 0.233 & 0.709 \\
+1000 & master & 6 & 0.00871 & 0.00122 & 0.271 & 8.22 \\
+1000 & this branch & 6 & 0.00985 & 0.00257 & 0.271 & 1.06 \\
+\bottomrule\end{tabular}}
+\end{table}

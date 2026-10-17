@@ -590,7 +590,177 @@ def c_infer(pr, method, dev, budget, opt):
             "n_q": len(qs), "n_samples": S}
 
 
+
+# --------------------------------------------------------------------- #
+# Round 2: other mechanisms and engines
+# --------------------------------------------------------------------- #
+
+def _mech_factory(kind):
+    if kind == "ncat":
+        from nbn.mechanisms.parametric.neural_categorical import NeuralCategoricalMechanism
+        return lambda: NeuralCategoricalMechanism(n_classes=3, hidden=(32,))
+    if kind == "flex":
+        from nbn.mechanisms.non_parametric.flexcode import FlexCodeMechanism
+        return lambda: FlexCodeMechanism(hidden=(32,))
+    if kind == "flow":
+        from nbn.mechanisms.parametric.normalizing_flow import NormalizingFlowMechanism
+        return lambda: NormalizingFlowMechanism(num_transforms=2, hidden=(32,))
+    if kind == "knn":
+        from nbn.mechanisms.non_parametric.knn_conditional import KNNConditionalMechanism
+        return lambda: KNNConditionalMechanism()
+    raise ValueError(kind)
+
+
+def _model_with(pr, kind, dev):
+    from nbn.core.network import NeuralBayesianNetwork
+    nodes = pr["nodes"]
+    disc = pr["family"] in ("discrete", "discadd")
+    spec = {v: ("discrete", pr["k"]) if disc else ("continuous", 1) for v in nodes}
+    m = NeuralBayesianNetwork(pr["edges"], variables=spec, device=str(dev))
+    make = _mech_factory(kind)
+    for v in nodes:
+        m.set_mechanism(v, make())
+    data = {v: (pr["train"][v] if disc else pr["train"][v].reshape(-1, 1)).to(dev) for v in nodes}
+    return m, data
+
+
+def nn_fit(pr, method, dev, budget, opt):
+    """Neural-mechanism fitting: '<kind>_local' | '<kind>_stacked' | 'pyro_ncat'."""
+    epochs = int(opt.get("epochs", 10))
+    nodes = pr["nodes"]
+    torch.manual_seed(0)
+    if method == "pyro_ncat":
+        return _pyro_ncat(pr, dev, budget, epochs)
+    kind, how = method.split("_")
+    m, data = _model_with(pr, kind, dev)
+    with Timer(budget) as t:
+        m.fit(data, method="stacked" if how == "stacked" else "local", epochs=epochs,
+              consolidate=False)
+        if dev.type == "mps":
+            torch.mps.synchronize()
+    m = m.to("cpu")
+    disc = pr["family"] == "discrete"
+    test = {v: (pr["test"][v] if disc else pr["test"][v].reshape(-1, 1)) for v in nodes}
+    with torch.no_grad():
+        rows = m.log_prob({k: v.reshape(-1, 1) for k, v in test.items()})
+    return {"time_s": t.elapsed, "test_ll": float(rows.mean()) / len(nodes),
+            "test_ll_median": float(rows.median()) / len(nodes), "epochs": epochs}
+
+
+def _pyro_ncat(pr, dev, budget, epochs):
+    import pyro
+    import pyro.distributions as dist
+    from pyro.infer import SVI, Trace_ELBO
+    from pyro.optim import Adam
+    pyro.set_rng_seed(0)
+    pyro.clear_param_store()
+    nodes = pr["nodes"]
+    X = torch.stack([pr["train"][v] for v in nodes], 1).to(dev)
+    Xt = torch.stack([pr["test"][v] for v in nodes], 1).to(dev)
+    col = {v: i for i, v in enumerate(nodes)}
+    pa_idx = {v: [col[a] for a, b in pr["edges"] if b == v] for v in nodes}
+    K = pr["k"]
+    nets = {v: torch.nn.Sequential(torch.nn.Linear(len(pa_idx[v]), 32), torch.nn.ReLU(),
+                                   torch.nn.Linear(32, K)).to(dev)
+            for v in nodes if pa_idx[v]}
+
+    def logits_of(v, Z):
+        if v in nets:
+            return pyro.module(f"net_{v}", nets[v])(Z[:, pa_idx[v]].float())
+        return pyro.param(f"root_{v}", torch.zeros(K, device=dev)).expand(Z.shape[0], K)
+
+    def model(Xb, n_total):
+        with pyro.plate("data", n_total, subsample=torch.arange(Xb.shape[0], device=dev)):
+            for v in nodes:
+                pyro.sample(v, dist.Categorical(logits=logits_of(v, Xb)), obs=Xb[:, col[v]])
+
+    def guide(Xb, n_total):
+        pass
+
+    svi = SVI(model, guide, Adam({"lr": 1e-3}), loss=Trace_ELBO())
+    N, bs = X.shape[0], 512
+    with Timer(budget) as t:
+        for _ in range(epochs):
+            perm = torch.randperm(N, device=dev)
+            for i in range(0, N, bs):
+                svi.step(X[perm[i:i + bs]], N)
+    with torch.no_grad():
+        rows = torch.zeros(Xt.shape[0], device=dev)
+        for v in nodes:
+            rows += dist.Categorical(logits=logits_of(v, Xt)).log_prob(Xt[:, col[v]])
+    return {"time_s": t.elapsed, "test_ll": float(rows.mean()) / len(nodes),
+            "test_ll_median": float(rows.median()) / len(nodes), "epochs": epochs}
+
+
+def mech_query(pr, method, dev, budget, opt):
+    """LW queries on a network of kNN or FlexCode mechanisms: '<kind>_lw'."""
+    kind = method.split("_")[0]
+    m, data = _model_with(pr, kind, dev)
+    m.fit(data, method="local", epochs=int(opt.get("fit_epochs", 1)), consolidate=False)
+    from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
+    eng = LikelihoodWeightingEngine(n_samples=int(opt.get("n_samples", 10_000)))
+    answers, per_q = [], []
+    with Timer(budget) as t:
+        for tgt, ev, thr in continuous_queries(pr):
+            t1 = time.perf_counter()
+            w, x = m.query([tgt], evidence=ev, engine=eng)
+            answers.append(float((w.reshape(-1) * (x.reshape(-1) > thr).float()).sum()))
+            per_q.append(time.perf_counter() - t1)
+    return {"time_s": t.elapsed, "q_time_s": per_q, "answers": answers, "n_q": len(answers)}
+
+
+def ais_query(pr, method, dev, budget, opt):
+    """Amortized IS: train (untimed), then 10 timed queries; error vs exact VE."""
+    from nbn.inference.amortized_is import AmortizedISEngine
+    from nbn.inference.tensor_ve import TensorVariableElimination
+    model = pr["true_model"].to(dev)
+    torch.manual_seed(0)
+    eng = AmortizedISEngine(n_samples=int(opt.get("n_samples", 10_000)), per_query_fallback=False)
+    eng.train_proposal(model, steps_per_node=int(opt.get("steps_per_node", 10)),
+                       time_budget_s=float(opt.get("train_budget_s", 120)), device=str(dev))
+    learned = eng.recognition_net is not None
+    qs = discrete_queries(pr)
+    answers, ess, per_q = [], [], []
+    with Timer(budget) as t:
+        for tgt, ev in qs:
+            t1 = time.perf_counter()
+            p, e = model.query([tgt], evidence=ev, engine=eng, return_ess=True)
+            answers.append([float(x) for x in p.reshape(-1)])
+            ess.append(float(e.reshape(-1)[0]))
+            per_q.append(time.perf_counter() - t1)
+    ve = TensorVariableElimination(memory_budget=2.0 * 2**30)
+    errs = []
+    for (tgt, ev), a in zip(qs, answers):
+        try:
+            ex = model.query([tgt], evidence=ev, engine=ve).reshape(-1).tolist()
+            errs.append(max(abs(x - y) for x, y in zip(a, ex)))
+        except Exception:  # noqa: BLE001
+            errs.append(None)
+    return {"time_s": t.elapsed, "q_time_s": per_q, "answers": answers, "ess_frac": ess,
+            "abs_err": errs, "learned_proposal": learned, "n_q": len(qs)}
+
+
+def avi_train(pr, method, dev, budget, opt):
+    """Amortized VI: a fixed number of ELBO steps, timed."""
+    from nbn.inference.amortized_vi import AmortizedVIEngine
+    model = pr["true_model"].to(dev)
+    torch.manual_seed(0)
+    eng = AmortizedVIEngine()
+    epochs = int(opt.get("avi_epochs", 10))
+    with Timer(budget) as t:
+        info = eng.train_proposal(model, n_training_samples=4096, n_epochs=epochs,
+                                  batch_size=1024, early_stop=False, quality_gate=False,
+                                  time_budget_s=1e9, device=str(dev))
+    return {"time_s": t.elapsed, "grad_steps": info.get("grad_steps"),
+            "time_per_step_s": t.elapsed / max(1, info.get("grad_steps") or 1)}
+
+
 TASKS = {
+    ("discrete", "fitnn"): nn_fit,
+    ("ngs", "fitnn"): nn_fit,
+    ("ngs", "mechq"): mech_query,
+    ("discrete", "ais"): ais_query,
+    ("discrete", "avi"): avi_train,
     ("discrete", "fit"): d_fit,
     ("discadd", "fit"): d_fit,
     ("discrete", "infer"): d_infer,

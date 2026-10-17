@@ -126,6 +126,23 @@ def sweep_specs(name):
     elif name == "discrete_fit_indeg":
         specs.append(("deg", "discadd", "fixed", [2, 4, 6, 8, 10, 12, 13, 14, 16, 18, 20],
                       30, "fit", ["nbn", "nbn_sparse", "pgmpy"], {}))
+    elif name == "r2_fit_ncat":
+        specs.append(("n", "discrete", "er", NODES[:7], 2, "fitnn",
+                      ["ncat_local", "ncat_stacked", "pyro_ncat"], {}))
+    elif name == "r2_fit_flex":
+        specs.append(("n", "ngs", "er", NODES[:7], 2, "fitnn",
+                      ["flex_local", "flex_stacked"], {}))
+    elif name == "r2_fit_flow":
+        specs.append(("n", "ngs", "er", NODES[:7], 2, "fitnn",
+                      ["flow_local", "flow_stacked"], {}))
+    elif name == "r2_knn_query":
+        specs.append(("n", "ngs", "er", NODES[:7], 2, "mechq", ["knn_lw"], {}))
+    elif name == "r2_flex_query":
+        specs.append(("n", "ngs", "er", NODES[:7], 2, "mechq", ["flex_lw"], {}))
+    elif name == "r2_ais":
+        specs.append(("n", "discrete", "local", NODES[:7], 2, "ais", ["ais"], {}))
+    elif name == "r2_avi":
+        specs.append(("n", "discrete", "er", NODES[:7], 2, "avi", ["avi"], {}))
     elif name == "discrete_sets":
         specs.append(("n", "discrete", "er", NODES, 2, "sets",
                       ["nbn_interval", "nbn_intervals_batched", "nbn_l1"], {}))
@@ -163,10 +180,13 @@ def main():
     ap.add_argument("--sizes", type=float, nargs="*", default=None,
                     help="override the sweep's x-axis values")
     ap.add_argument("--axes", nargs="*", default=None, help="restrict to 'n' and/or 'deg'")
+    ap.add_argument("--slack", type=float, default=60.0,
+                    help="extra wall-clock seconds for untimed set-up (fits, proposal training)")
+    ap.add_argument("--tag", default=None, help="label appended to the method names")
     ap.add_argument("--topologies", nargs="*", default=None)
     a = ap.parse_args()
     code_root = None if a.code == "branch" else Path(a.code)
-    tag = "" if a.code == "branch" else "@master"
+    tag = ("" if a.code == "branch" else "@master") if a.tag is None else a.tag
     out = Path(a.out or HERE / "results" / f"{a.sweep}.jsonl")
     out.parent.mkdir(parents=True, exist_ok=True)
     extra_opt = dict(kv.split("=", 1) for kv in a.opt)
@@ -196,7 +216,8 @@ def main():
                 for m in live:
                     rec = run_cell(p, task, m, device=a.device, threads=a.threads,
                                    budget_s=a.budget_s, mem_gb=a.mem_gb,
-                                   opt={**kw, **extra_opt}, code_root=code_root)
+                                   opt={**kw, **extra_opt}, code_root=code_root,
+                                   slack_s=a.slack)
                     rec["method"] = m + tag
                     rec["code"] = a.code
                     rec.update({k: v for k, v in meta.items() if k not in rec})
