@@ -58,6 +58,7 @@ from typing import Mapping
 
 import torch
 
+from nbn.inference.base import InferenceEngine
 from nbn.inference.state import get_inference_state
 from nbn.uncertainty.binomial import binomial_interval
 
@@ -208,4 +209,67 @@ def certified_query(
     )
 
 
-__all__: list[str] = ["CertifiedAnswer", "certified_query", "evidence_weight_bound"]
+class CertifiedEngine(InferenceEngine):
+    """Engine wrapper: answers a discrete query with ``certified_query``.
+
+    ``query`` returns the point estimate (``[K]`` probabilities, the same
+    self-normalised estimate plain likelihood weighting gives) and keeps the
+    interval in ``last_certificate``; ``query_batch`` loops over rows and keeps
+    ``last_certificates``.  Used by ``HybridRouter(fallback="certified")``.
+    """
+
+    def __init__(self, n_samples: int = 200_000, delta: float = 0.05,
+                 bound: str = "kl+bernstein") -> None:
+        super().__init__()
+        self.n_samples = int(n_samples)
+        self.delta = float(delta)
+        self.bound = bound
+        self.last_certificate: CertifiedAnswer | None = None
+        self.last_certificates: list[CertifiedAnswer] = []
+
+    @staticmethod
+    def applicable(model, targets, evidence, do=None) -> bool:
+        """One discrete target, discrete evidence, at most one row per value."""
+        if targets is None or len(targets) != 1:
+            return False
+        if not getattr(model.mechanisms[targets[0]], "is_discrete", False):
+            return False
+        for node, v in (evidence or {}).items():
+            if not getattr(model.mechanisms[node], "is_discrete", False):
+                return False
+        return True
+
+    def _one(self, model, target, evidence, do):
+        a = certified_query(model, target, evidence, n_samples=self.n_samples,
+                            delta=self.delta, do=do, bound=self.bound)
+        return a
+
+    def query(self, model, targets, evidence=None, do=None, **kwargs):
+        a = self._one(model, targets[0], evidence or {}, do)
+        self.last_certificate = a
+        self.last_certificates = [a]
+        return a.estimate.to(device=model.device, dtype=torch.float32)
+
+    def query_batch(self, model, targets, evidence, do=None, **kwargs):
+        evidence = evidence or {}
+        do = do or {}
+        rows = max([1] + [torch.as_tensor(v).reshape(-1).shape[0]
+                          for v in list(evidence.values()) + list(do.values())])
+
+        def row(d, i):
+            out = {}
+            for k_, v in d.items():
+                t = torch.as_tensor(v).reshape(-1)
+                out[k_] = t[i if t.shape[0] > 1 else 0]
+            return out
+
+        answers = [self._one(model, targets[0], row(evidence, i), row(do, i) or None)
+                   for i in range(rows)]
+        self.last_certificates = answers
+        self.last_certificate = answers[-1]
+        return torch.stack([a.estimate for a in answers]).to(device=model.device,
+                                                              dtype=torch.float32)
+
+
+__all__: list[str] = ["CertifiedAnswer", "CertifiedEngine", "certified_query",
+                      "evidence_weight_bound"]

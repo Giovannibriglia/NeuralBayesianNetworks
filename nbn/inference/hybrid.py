@@ -68,6 +68,12 @@ class HybridRouter(InferenceEngine):
         VE if that is within the threshold (and the plan fits memory).  More
         answers become exact; some of them can be slow.  Default False keeps
         the historical routing.
+    fallback: str
+        What answers a discrete query that exact VE cannot: ``"lw"`` (default,
+        plain likelihood weighting, no guarantee) or ``"certified"``
+        (``certified_query``: the same point estimate plus simultaneous
+        ``1 - certified_delta`` intervals in ``last_certificate``; one discrete
+        target, discrete evidence; other queries still use LW).
     """
 
     # Bound on remembered "already warned" query shapes.
@@ -81,7 +87,17 @@ class HybridRouter(InferenceEngine):
         ve_host_fraction: float = 0.75,
         max_joint_elements: int = 1 << 20,
         query_width_check: bool = False,
+        fallback: str = "lw",
+        certified_samples: int = 200_000,
+        certified_delta: float = 0.05,
     ) -> None:
+        if fallback not in ("lw", "certified"):
+            raise ValueError("fallback must be 'lw' or 'certified'.")
+        self.fallback = fallback
+        self._cert = None
+        if fallback == "certified":
+            from nbn.inference.certified import CertifiedEngine
+            self._cert = CertifiedEngine(certified_samples, certified_delta)
         self.treewidth_threshold = treewidth_threshold
         self.query_width_check = bool(query_width_check)
         self.max_joint_elements = int(max_joint_elements)
@@ -229,6 +245,9 @@ class HybridRouter(InferenceEngine):
             model, targets, evidence, kwargs.get("do"),
             kwargs.get("order", "min_fill"),
         )
+        if engine is self._lw and self._certify(model, targets, evidence, kwargs):
+            engine = self._cert
+            self._last_engine = "certified"
         try:
             call_kwargs = kwargs
             if engine is self._ve:
@@ -239,7 +258,7 @@ class HybridRouter(InferenceEngine):
         except Exception as exc:
             # An MPS plan past the reliable tensor size is refused by VE; like
             # an OOM, LW can still answer it.
-            if engine is self._lw or not (
+            if engine is self._lw or engine is self.__dict__.get("_cert") or not (
                     is_oom_error(exc) or isinstance(exc, MPSTensorLimitError)):
                 raise  # LW itself failed, or not a resource limit at all.
             oom = type(exc).__name__
@@ -255,8 +274,22 @@ class HybridRouter(InferenceEngine):
             "HybridRouter: exact VE ran out of memory on %s (%s); answering "
             "with likelihood weighting (approximate).", device, oom,
         )
+        if self._certify(model, targets, evidence, kwargs):
+            self._last_engine = "certified"
+            return getattr(self._cert, method)(model, targets, evidence, **kwargs)
         self._last_engine = "likelihood_weighting"
         return getattr(self._lw, method)(model, targets, evidence, **kwargs)
+
+    def _certify(self, model, targets, evidence, kwargs) -> bool:
+        cert = getattr(self, "_cert", None)
+        return cert is not None and cert.applicable(model, targets, evidence,
+                                                     kwargs.get("do"))
+
+    @property
+    def last_certificate(self):
+        """The interval answer of the last certified query (``None`` otherwise)."""
+        cert = getattr(self, "_cert", None)
+        return None if cert is None else cert.last_certificate
 
     def query(
         self,

@@ -299,3 +299,27 @@ def test_amortized_is_prunes_barren_nodes():
     g = m.dag.networkx_graph
     anc = nx.ancestors(g, names[2]) | nx.ancestors(g, names[1]) | {names[1], names[2]}
     assert set(seen) <= anc
+
+
+def test_router_certified_fallback():
+    from nbn.inference.hybrid import HybridRouter
+
+    m, names = _random_bn(9, n=10)
+    tgt, ev = names[6], {names[8]: 1, names[2]: 0}
+    exact = m.query([tgt], evidence=ev, engine=TensorVariableElimination()).double()
+    plain = HybridRouter(treewidth_threshold=0, n_samples=5000)
+    m.query([tgt], evidence=ev, engine=plain)
+    assert plain.last_engine == "likelihood_weighting" and plain.last_certificate is None
+    r = HybridRouter(treewidth_threshold=0, fallback="certified", certified_samples=60_000)
+    torch.manual_seed(0)
+    p = m.query([tgt], evidence=ev, engine=r)
+    assert r.last_engine == "certified"
+    c = r.last_certificate
+    assert c is not None and bool((c.lower <= exact + 1e-9).all() and (exact <= c.upper + 1e-9).all())
+    assert torch.allclose(p.double(), c.estimate, atol=1e-6)
+    # batch rows each get their own certificate
+    pb = m.query_batch([tgt], evidence={names[8]: torch.tensor([0, 1, 2])}, engine=r)
+    assert pb.shape == (3, 3) and len(r._cert.last_certificates) == 3
+    # a continuous target is not certifiable: the router keeps LW
+    with pytest.raises(ValueError):
+        HybridRouter(fallback="exact")
