@@ -99,7 +99,7 @@ def evidence_weight_bound(model, evidence: Mapping[str, object]) -> float:
             )
         parents = model.dag.parents(node)
         cards = [model.mechanisms[p].n_classes for p in parents]
-        probs = torch.softmax(mech.tabulate(cards).detach().double(), -1)
+        probs = torch.softmax(mech.tabulate(cards).detach().cpu().double(), -1)  # MPS has no float64
         v = int(torch.as_tensor(val).reshape(-1)[0])
         u *= float(probs[..., v].max())
     return u
@@ -172,7 +172,7 @@ def certified_query(
                                     eng._cache)
         sl = state.node_slices[state.node_to_idx[target]]
         y = buf[0, :, sl].reshape(-1).long().cpu()
-        w = torch.exp(log_w[0].double()).cpu() / W        # in [0, 1] up to rounding
+        w = torch.exp(log_w[0].cpu().double()) / W        # in [0, 1]; CPU: MPS has no float64
         w = w.clamp(0.0, 1.0)
         sum_w += w.sum()
         sum_wy += torch.bincount(y, weights=w, minlength=k)[:k]

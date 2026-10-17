@@ -323,3 +323,16 @@ def test_router_certified_fallback():
     # a continuous target is not certifiable: the router keeps LW
     with pytest.raises(ValueError):
         HybridRouter(fallback="exact")
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="needs Apple MPS")
+def test_certified_query_runs_on_mps_and_covers_exact():
+    # MPS has no float64: the bound and the weight accumulation run on the CPU
+    m, names = _random_bn(1)
+    tgt = names[4]
+    ev = {names[7]: 2, names[2]: 1}
+    exact = m.query([tgt], evidence=ev, engine=TensorVariableElimination()).double()
+    m = m.to("mps")
+    torch.manual_seed(1)
+    a = certified_query(m, tgt, ev, n_samples=100_000, delta=0.05, chunk=30_000)
+    assert bool((a.lower <= exact + 1e-9).all()) and bool((exact <= a.upper + 1e-9).all())
