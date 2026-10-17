@@ -1,0 +1,15 @@
+\begin{table}[H]\centering\small
+\caption{R4-3. Bounded conditioning (sound bounds, no probability): median width by time budget; skew = factor on the CPT logits}\label{tab:r4e3}
+\resizebox{\ifdim\width>\linewidth\linewidth\else\width\fi}{!}{%
+\begin{tabular}{lrrrrrrr}\toprule
+config & skew & 1 s & 4 s & 16 s & 64 s & exact at largest & median prior mass covered \\ \midrule
+CPU, 1 thread & 1 & 1 & 1 & 1 & 1 & 1/5 & 0.000464 \\
+CPU, 1 thread & 3 & 1 & 1 & 1 & 1 & 1/5 & 0.0518 \\
+CPU, 20 threads & 1 & 1 & 1 & 1 & 1 & 1/5 & 0.00153 \\
+CPU, 20 threads & 3 & 1 & 1 & 1 & 1 & 1/5 & 0.148 \\
+CUDA (TITAN X) & 1 & 1 & 1 & 1 & 1 & 1/5 & 0.00613 \\
+CUDA (TITAN X) & 3 & 1 & 1 & 0.999 & 0.998 & 1/5 & 0.523 \\
+Apple MPS & 1 & 1 & 1 & 1 & 1 & 1/5 & 0.000116 \\
+Apple MPS & 3 & 1 & 1 & 1 & 0.999 & 1/5 & 0.248 \\
+\bottomrule\end{tabular}}
+\end{table}

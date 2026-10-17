@@ -61,7 +61,7 @@ class Table:
                     .replace("∩", "$\\cap$").replace("→", "$\\to$").replace("~", "$\\sim$")
                     .replace("^", "\\^{}"))
         cols = "l" + "r" * (len(self.header) - 1)
-        wide = len(self.header) >= 7
+        wide = True   # shrinks only when wider than the line
         lines = ["\\begin{table}[H]\\centering\\small",
                  f"\\caption{{{esc(self.title)}}}\\label{{tab:{self.key}}}",
                  ("\\resizebox{\\ifdim\\width>\\linewidth\\linewidth\\else\\width\\fi}{!}{%" if wide else ""),

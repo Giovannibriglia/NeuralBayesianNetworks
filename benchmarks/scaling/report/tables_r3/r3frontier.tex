@@ -1,6 +1,6 @@
 \begin{table}[H]\centering\small
 \caption{R3-3. Largest graph (nodes) finished: reference budget (1 thread, 4 GB, 30 s) vs large budget (8 threads, 16 GB, 120 s)}\label{tab:r3frontier}
-
+\resizebox{\ifdim\width>\linewidth\linewidth\else\width\fi}{!}{%
 \begin{tabular}{lrrrrr}\toprule
 computation & reference: largest & stopped by & large: largest & stopped by & gain in nodes \\ \midrule
 exact VE, loose ER graphs & 100 & ok at 200 & 100 & ok at 200 & 1$\times$ \\
@@ -18,5 +18,5 @@ kNN LW queries & 200 & timeout at 500 & 2e+03 & timeout at 5000 & 10$\times$ \\
 FlexCode LW queries & 1e+03 & none (max tested) & 5e+03 & none (max tested) & 5$\times$ \\
 amortized IS & 1e+03 & none (max tested) & 5e+03 & none (max tested) & 5$\times$ \\
 amortized VI (10 epochs) & 1e+03 & none (max tested) & 5e+03 & none (max tested) & 5$\times$ \\
-\bottomrule\end{tabular}
+\bottomrule\end{tabular}}
 \end{table}

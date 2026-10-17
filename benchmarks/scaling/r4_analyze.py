@@ -68,10 +68,13 @@ def e1(tables):
     for r in rows:
         by[(cfg(r), r["mem_gb"], r["deg"])].append(r)
     T = Table("r4e1", "R4-1. Exact queries answered (of 10) on denser graphs (ER, 100 nodes, "
-              "K = 3): plain VE vs conditioning within 20 s per query; the time a query "
-              "would need (projected from the measured rate) for those that did not finish",
+              "K = 3): plain VE vs conditioning within 20 s per query.  Not finished: "
+              "conditioning started (at most 10^6 instantiations) but stopped at 20 s, with "
+              "the time it would need projected from its measured rate; over cap: more "
+              "than 10^6 instantiations, not attempted",
               ["config", "memory", "avg degree", "plain VE", "conditioning <= 20 s",
-               "median s (answered)", "max cutset", "projected s (others, median / max)"])
+               "median s (answered)", "cutset |C| (median / max)",
+               "not finished: n, projected s (median / max)", "over cap"])
     for (c, mem, deg), rs in sorted(by.items(), key=lambda kv: (CFG_ORDER.index(kv[0][0])
                                                                 if kv[0][0] in CFG_ORDER else 9,
                                                                 kv[0][1], kv[0][2])):
@@ -82,50 +85,86 @@ def e1(tables):
         cuts = [r["cutset"] for r in co if r.get("cutset") is not None]
         proj = [r["cond_projected_s"] for r in rs if r.get("cond_status") == "gave_up"]
         cuts = [r["cutset"] for r in rs if r.get("cutset") is not None]
+        cap = sum(r.get("cond_status") == "over_cap" for r in rs)
         T.add(c, f"{mem:g} GB", f"{deg:g}", f"{pl}/{len(rs)}", f"{len(co)}/{len(rs)}",
-              f"{np.median(ts):.3g}" if ts else "—", str(max(cuts)) if cuts else "—",
-              f"{np.median(proj):.3g} / {max(proj):.3g}" if proj else "—")
+              f"{np.median(ts):.3g}" if ts else "—",
+              f"{np.median(cuts):g} / {max(cuts)}" if cuts else "—",
+              f"{len(proj)}: {np.median(proj):.3g} / {max(proj):.3g}" if proj else "0",
+              str(cap))
     tables.append(T)
 
     # Figure 1: answered vs degree, per memory budget (best CPU config + CUDA)
     mems = sorted({r["mem_gb"] for r in rows})
-    fig, axs = plt.subplots(1, len(mems), figsize=(DOUBLE, 2.4), sharey=True, squeeze=False)
-    for ax, mem in zip(axs[0], mems):
+    tiers = [m for m in mems if m != 10]           # CUDA's 10 GB (12 GB card) joins 16 GB
+
+    def tier(m):
+        return 16 if m == 10 else m
+    fig, axs = plt.subplots(1, len(tiers), figsize=(DOUBLE, 2.6), sharey=True, squeeze=False)
+    for ax, mem in zip(axs[0], tiers):
         for c in CFG_ORDER:
-            sub = {deg: rs for (cc, m, deg), rs in by.items() if cc == c and m == mem}
+            sub = {deg: rs for (cc, m, deg), rs in by.items() if cc == c and tier(m) == mem}
             if not sub:
                 continue
             degs = sorted(sub)
             ax.plot(degs, [sum(r.get("cond_status") == "ok" for r in sub[d]) for d in degs],
                     "-o", ms=3, color=CFG_COLOR[c], label=f"conditioning, {c}")
-        sub = {deg: rs for (cc, m, deg), rs in by.items() if m == mem}
+        sub = {deg: rs for (cc, m, deg), rs in by.items() if tier(m) == mem}
         degs = sorted(sub)
         ax.plot(degs, [max(sum(r["plain_status"] == "ok" for r in rs2)
-                           for (cc, m, d2), rs2 in by.items() if m == mem and d2 == d)
-                       for d in degs], ":s", ms=3, color=INK, label="plain VE (any config)")
-        ax.set_title(f"memory budget {mem:g} GB")
+                           for (cc, m, d2), rs2 in by.items() if tier(m) == mem and d2 == d)
+                       for d in degs], ":s", ms=3, color=INK, label="plain VE (best config)")
+        ax.set_title(f"memory budget {mem:g} GB" + (" (CUDA: 10 GB)" if mem == 16 else ""))
         ax.set_xlabel("average degree")
         ax.set_ylim(-0.5, 10.5)
     axs[0][0].set_ylabel("queries answered exactly (of 10)")
-    axs[0][-1].legend(frameon=False, fontsize=5.5, loc="lower left")
-    fig.tight_layout()
+    h, l = axs[0][0].get_legend_handles_labels()
+    fig.legend(h, l, frameon=False, fontsize=6, loc="lower center", ncol=5,
+               bbox_to_anchor=(0.5, -0.04))
+    fig.tight_layout(rect=(0, 0.08, 1, 1))
     save(fig, "r4_1_exact_answered")
 
-    # Figure 2: time of a conditioned answer vs instantiations, per config
-    fig, ax = plt.subplots(figsize=(DOUBLE * 0.55, 2.6))
-    for c in CFG_ORDER:
-        pts = [(r["n_inst"], r["cond_s"]) for r in rows if cfg(r) == c
-               and r.get("cond_status") == "ok" and r.get("conditioned")]
+    # Figure 2: the same conditioned query on each config vs CPU, 1 thread
+    def qtime(r):
+        if r.get("cond_status") == "ok" and r.get("conditioned"):
+            return r["cond_s"], True
+        if r.get("cond_status") == "gave_up":
+            return r["cond_projected_s"], False
+        return None, None
+    ref = {(r["mem_gb"], r["deg"], r["q"]): qtime(r) for r in rows
+           if cfg(r) == "CPU, 1 thread"}
+    fig, ax = plt.subplots(figsize=(DOUBLE * 0.55, 2.8))
+    lo, hi = 1e-2, 1e7
+    for f, txt in ((1, "same"), (10, "10x faster"), (100, "100x faster")):
+        ax.plot([lo * f, hi], [lo, hi / f], ":", color=GREY, lw=0.7)
+        ax.text(3e-2 * f, 5e-2, txt, fontsize=5.5, color=GREY, ha="left", va="bottom",
+                rotation=45, rotation_mode="anchor")
+    for c in CFG_ORDER[1:]:
+        pts = []
+        for r in rows:
+            if cfg(r) != c:
+                continue
+            m = r["mem_gb"] if r["mem_gb"] != 10 else 16
+            x, xa = ref.get((m, r["deg"], r["q"]), (None, None))
+            y, ya = qtime(r)
+            if x is not None and y is not None:
+                pts.append((x, y, xa and ya))
         if pts:
-            x, y = zip(*pts)
-            ax.scatter(x, y, s=8, color=CFG_COLOR[c], label=c, alpha=0.8)
+            for done, mk in ((True, "o"), (False, "^")):
+                sel = [(x, y) for x, y, d in pts if d == done]
+                if sel:
+                    xs, ys = zip(*sel)
+                    ax.scatter(xs, ys, s=10, marker=mk, color=CFG_COLOR[c], alpha=0.85,
+                               label=c if done else None)
+    ax.scatter([], [], s=10, marker="^", color=GREY, label="projected (did not finish in 20 s)")
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlabel("instantiations of the cutset $K^{|C|}$")
-    ax.set_ylabel("time of the exact answer (s)")
-    ax.set_title("Conditioning: time grows with $K^{|C|}$; workers divide it")
-    ax.legend(frameon=False, fontsize=6)
-    save(fig, "r4_2_time_vs_instantiations")
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(lo, hi)
+    ax.set_xlabel("CPU, 1 thread: time of the exact answer (s)")
+    ax.set_ylabel("same query, other config (s)")
+    ax.set_title("Conditioning: workers divide the time\n(each point a query and memory budget)")
+    ax.legend(frameon=False, fontsize=5.5, loc="upper left")
+    save(fig, "r4_2_conditioning_speedup")
 
     # Figure 3: answered within a time limit T (memory 1 GB): time buys answers
     mem = min(mems)
@@ -145,8 +184,8 @@ def e1(tables):
     axs[0].set_xlabel("time limit per query (s)")
     axs[0].set_ylabel(f"queries answered exactly (of {10 * len(degs_all)})")
     axs[0].set_title(f"Memory {mem:g} GB: time now buys exact answers\n"
-                     "(solid: conditioning, dotted: plain VE; beyond 20 s projected)")
-    axs[0].legend(frameon=False, fontsize=6)
+                     "(solid: conditioning; dotted: plain VE)")
+    axs[0].legend(frameon=False, fontsize=6, loc="lower right")
     for c in CFG_ORDER:
         rs = [r for r in rows if cfg(r) == c]
         if not rs:
@@ -159,8 +198,9 @@ def e1(tables):
     axs[1].set_xscale("log", base=2)
     plain(axs[1].xaxis, sorted({r["mem_gb"] for r in rows}), "{:g} GB")
     axs[1].set_xlabel("memory budget")
-    axs[1].set_ylabel("queries answered exactly")
-    axs[1].set_title("Memory: plain VE gains slowly;\nconditioning answers (almost) all")
+    axs[1].set_ylabel(f"queries answered exactly (of {10 * len(degs_all)})")
+    axs[1].yaxis.set_major_locator(FixedLocator(range(0, 31, 2)))
+    axs[1].set_title("Memory: plain VE gains slowly;\nconditioning adds the moderate-width queries")
     fig.tight_layout()
     save(fig, "r4_3_budget_buys_answers")
 
@@ -178,6 +218,7 @@ def e2(tables):
                "covers exact"])
     fig, axs = plt.subplots(1, len(probs), figsize=(DOUBLE, 2.5), squeeze=False)
     for ax, (topo, n, deg) in zip(axs[0], probs):
+        exact_cfgs = []
         for c in CFG_ORDER:
             for mode, ls in (("plain", "-"), ("collapsed", "--")):
                 rs = [r for r in rows if (r["topology"], r["n"], r["deg"]) == (topo, n, deg)
@@ -187,8 +228,11 @@ def e2(tables):
                 tbs = sorted({r["time_budget_s"] for r in rs})
                 med = [float(np.median([r["width"] for r in rs if r["time_budget_s"] == t]))
                        for t in tbs]
-                ax.plot(tbs, med, ls, marker="o", ms=3, color=CFG_COLOR[c],
-                        label=f"{mode}, {c}")
+                if max(med) < 1e-4:     # collapse="auto" found the query fits: exact
+                    exact_cfgs.append(c)
+                else:
+                    ax.plot(tbs, med, ls, marker="o", ms=3, color=CFG_COLOR[c],
+                            label=f"{mode}, {c}")
                 cov = [r["covers"] for r in rs if "covers" in r]
                 T.add(f"{topo} n={n} deg {deg:g}", c, mode, *[f"{m:.3g}" for m in med],
                       f"{sum(cov)}/{len(cov)}" if cov else "—")
@@ -198,9 +242,17 @@ def e2(tables):
         ax.set_yscale("log")
         ax.set_title(f"{topo}, {n} nodes, degree {deg:g}")
         ax.set_xlabel("time budget per query (s)")
+        plain(ax.xaxis, [0.25, 1, 4, 16])
+        if exact_cfgs:
+            names = ", ".join(x.replace(" (TITAN X)", "") for x in exact_cfgs)
+            ax.text(0.97, 0.97, "collapsed (auto) = exact answer,\nthe whole query fits:\n"
+                    + names.replace(", CPU", ";\nCPU").replace(", CUDA", ";\nCUDA"),
+                    transform=ax.transAxes, fontsize=5.5, color=INK, va="top", ha="right")
     axs[0][0].set_ylabel("certified width (median)")
-    axs[0][-1].legend(frameon=False, fontsize=5, loc="lower left")
-    fig.tight_layout()
+    h, l = axs[0][0].get_legend_handles_labels()
+    fig.legend(h, l, frameon=False, fontsize=6, loc="lower center", ncol=5,
+               bbox_to_anchor=(0.5, -0.06))
+    fig.tight_layout(rect=(0, 0.12, 1, 1))
     save(fig, "r4_4_certified_anytime")
     tables.append(T)
 
@@ -214,7 +266,7 @@ def e3(tables):
               "width by time budget; skew = factor on the CPT logits",
               ["config", "skew", *[f"{t:g} s" for t in sorted({r['time_budget_s'] for r in rows})],
                "exact at largest", "median prior mass covered"])
-    fig, ax = plt.subplots(figsize=(DOUBLE * 0.55, 2.5))
+    fig, axs = plt.subplots(1, 2, figsize=(DOUBLE, 2.5))
     for c in CFG_ORDER:
         for skew, ls in ((1.0, "-"), (3.0, "--")):
             rs = [r for r in rows if cfg(r) == c and r["skew"] == skew]
@@ -223,17 +275,27 @@ def e3(tables):
             tbs = sorted({r["time_budget_s"] for r in rs})
             med = [float(np.median([r["width"] for r in rs if r["time_budget_s"] == t]))
                    for t in tbs]
-            ax.plot(tbs, med, ls, marker="o", ms=3, color=CFG_COLOR[c],
-                    label=f"skew {skew:g}, {c}")
+            mass = [float(np.median([r["mass"] or 0 for r in rs if r["time_budget_s"] == t]))
+                    for t in tbs]
+            axs[0].plot(tbs, mass, ls, marker="o", ms=3, color=CFG_COLOR[c],
+                        label=f"skew {skew:g}, {c}")
+            axs[1].plot(tbs, med, ls, marker="o", ms=3, color=CFG_COLOR[c])
             last = [r for r in rs if r["time_budget_s"] == tbs[-1]]
             T.add(c, f"{skew:g}", *[f"{m:.3g}" for m in med],
                   f"{sum(r['exact'] for r in last)}/{len(last)}",
                   f"{np.median([r['mass'] or 0 for r in last]):.3g}")
-    ax.set_xscale("log")
-    ax.set_xlabel("time budget per query (s)")
-    ax.set_ylabel("width of the bounds (median)")
-    ax.set_title("Bounded conditioning: sound bounds tighten with time")
-    ax.legend(frameon=False, fontsize=5.5)
+    for ax in axs:
+        ax.set_xscale("log")
+        ax.set_xlabel("time budget per query (s)")
+        plain(ax.xaxis, [1, 4, 16, 64])
+    axs[0].set_yscale("log")
+    axs[0].set_ylabel("prior mass enumerated (median)")
+    axs[0].set_title("Workers and time enumerate more mass")
+    h, l = axs[0].get_legend_handles_labels()
+    axs[1].legend(h, l, frameon=False, fontsize=5, loc="lower left", ncol=2)
+    axs[1].set_ylabel("width of the sound bounds (median)")
+    axs[1].set_title("but the width stays near 1: the unseen prior\nmass dwarfs P(evidence)")
+    fig.tight_layout()
     save(fig, "r4_5_bounded_conditioning")
     tables.append(T)
 

@@ -1,6 +1,6 @@
 \begin{table}[H]\centering\small
 \caption{R3-4. Exact inference on denser graphs (100 nodes, 10 queries): queries answered and the largest elimination width answered}\label{tab:r3vewidth}
-
+\resizebox{\ifdim\width>\linewidth\linewidth\else\width\fi}{!}{%
 \begin{tabular}{lrrrrr}\toprule
 avg degree & budget & NBN answered & NBN max width answered & NBN time (s) & pgmpy \\ \midrule
 1 & 1 thread, 4 GB, 30 s & 10/10 & 5 & 0.0108 & 10/10 (0.00925 s) \\
@@ -18,5 +18,5 @@ avg degree & budget & NBN answered & NBN max width answered & NBN time (s) & pgm
 4.5 & 8 threads, 16 GB, 120 s & 1/10 & 16 & 1.01 & -- \\
 5 & 8 threads, 16 GB, 120 s & 2/10 & 17 & 1.8 & -- \\
 5.5 & 8 threads, 16 GB, 120 s & 0/10 & -- & oom & -- \\
-\bottomrule\end{tabular}
+\bottomrule\end{tabular}}
 \end{table}
