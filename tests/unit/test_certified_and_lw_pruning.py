@@ -419,6 +419,32 @@ def test_certified_collapsed_covers_exact(collapse):
     assert _covers(b, exd)
 
 
+def test_certified_collapsed_auto_exact_when_query_fits():
+    m, names = _random_bn(6, n=12)
+    tgt, ev = names[4], {names[-1]: 1, names[8]: 0}
+    exact = m.query([tgt], evidence=ev, engine=TensorVariableElimination())
+    a = certified_query(m, tgt, ev, collapse="auto", memory_budget=2 ** 30)
+    assert a.collapsed == () and a.n_samples == 0 and a.level == 1.0
+    assert a.max_width <= 2.1e-6 and _covers(a, exact)
+    assert torch.allclose(a.estimate, exact.double(), atol=1e-6)
+
+
+def test_certified_collapsed_auto_sizes_cutset_for_a_batch():
+    from tests.unit.test_conditioning import _dense_bn
+    m, names = _dense_bn(0)
+    tgt, ev = names[3], {names[-1]: 1, names[9]: 0}
+    exact = m.query([tgt], evidence=ev, engine=TensorVariableElimination())
+    peak = TensorVariableElimination().estimate_peak_bytes(m, tgt, ev)
+    torch.manual_seed(0)
+    one = certified_query(m, tgt, ev, n_samples=8192, collapse="auto",
+                          memory_budget=peak * 2, first_checkpoint=1)
+    torch.manual_seed(0)
+    many = certified_query(m, tgt, ev, n_samples=8192, collapse="auto",
+                           memory_budget=peak * 2, first_checkpoint=4096)
+    assert one.collapsed == ()                  # one particle fits: exact
+    assert len(many.collapsed) >= 1 and _covers(many, exact)
+
+
 def test_certified_engine_anytime_options():
     m, names = _random_bn(2)
     tgt, ev = names[4], {names[-1]: 1}

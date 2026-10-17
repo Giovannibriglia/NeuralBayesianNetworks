@@ -180,12 +180,15 @@ def plan_conditioning(
     cutset=(),
     order: str = "min_fill",
     forbid=(),
+    rows: int = 1,
 ) -> _Plan:
     """Smallest greedy cutset ``C`` (containing ``cutset``) whose plan fits.
 
     ``factor_nodes``: nodes whose CPT is a factor.  ``clamped``: evidence and
     do-nodes (never eliminated, never in ``C``).  ``targets``: kept variables
     (``()`` to sum everything out).  ``forbid``: never put these in ``C``.
+    ``rows``: the plan must fit with this many instantiations eliminated in
+    one batch (collapsed sampling asks for a whole batch of particles).
     """
     do_graph = model.dag.networkx_graph
     scope_nodes = set(factor_nodes)
@@ -209,11 +212,11 @@ def plan_conditioning(
                            targets=tuple(targets),
                            target_cards={t: cards[t] for t in targets},
                            joint=None if len(targets) != 1 else False)
-        if floor.peak(1, dtype_bytes, dev) > budget:
+        if floor.peak(rows, dtype_bytes, dev) > budget:
             raise ConditioningLimitError(
                 f"conditioning cannot fit {budget / 2 ** 20:.3f} MiB: even with every "
                 f"variable clamped the plan needs "
-                f"{floor.peak(1, dtype_bytes, dev) / 2 ** 20:.3f} MiB.")
+                f"{floor.peak(rows, dtype_bytes, dev) / 2 ** 20:.3f} MiB.")
     while True:
         clamp = set(clamped) | set(C)
         plan_order = get_order(order, sub, targets=list(targets), evidence=sorted(clamp),
@@ -227,9 +230,9 @@ def plan_conditioning(
             for u in adj.pop(e, ()):
                 adj[u].discard(e)
         most, cliques = _cliques(adj, plan_order, cards)
-        ok = budget is None or cost.peak(1, dtype_bytes, dev) <= budget
+        ok = budget is None or cost.peak(rows, dtype_bytes, dev) <= budget
         if elem_cap is not None:
-            ok = ok and max(cost.tensor) <= elem_cap
+            ok = ok and max(cost.tensor) * rows <= elem_cap
         if max_dims is not None:
             ok = ok and most + 1 <= max_dims     # + the batch (instantiation) axis
         if ok:

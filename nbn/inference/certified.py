@@ -203,8 +203,10 @@ def certified_query(
     evidence inside it clamped and weighted, as in LW); for each particle the
     rest of the query is computed *exactly* by variable elimination:
     ``P(y, e_d | x_p, e_p)``.  ``"auto"`` picks the smallest greedy cutset
-    whose exact remainder fits ``memory_budget`` (``nbn.inference.
-    conditioning``).  Each particle's statistics ``w_p P(y, e_d | x_p, e_p)``
+    whose exact remainder, for a batch of ``first_checkpoint`` particles at
+    once, fits ``memory_budget`` (``nbn.inference.conditioning``); when the
+    whole query fits (empty cutset, nothing to sample) the answer is exact:
+    ``estimate +- 1e-6`` (floating-point slack), ``level = 1``, ``n_samples = 0``.  Each particle's statistics ``w_p P(y, e_d | x_p, e_p)``
     stay in ``[0, W]`` (``P(e_d | x_p, e_p) <= prod_{e in E_d} max_pa
     P(e | pa)``, the LW identity [K&F, Eq. 12.11]), so the same certificate
     applies.  Collapsing removes the sampling variance of the exact part; it
@@ -321,9 +323,10 @@ class _CollapsedDraw:
     rest exactly by batched elimination (see ``certified_query``)."""
 
     def __init__(self, model, target, ev_int, do_int, k, W, chunk, collapse,
-                 memory_budget):
+                 memory_budget, batch_rows=4096):
         from nbn.inference.conditioning import (
-            _ancestral, _eliminate_rows, _mutilated, plan_conditioning)
+            ConditioningLimitError, _ancestral, _eliminate_rows, _mutilated,
+            plan_conditioning)
         from nbn.inference.tensor_ve import TensorVariableElimination, _require_discrete
         from nbn.inference._ve_memory import _factor_dtype_bytes, _max_fitting_rows
 
@@ -342,7 +345,19 @@ class _CollapsedDraw:
                       max_instantiations=float("inf"))
         clamped = set(ev_int) | set(do_int)
         if collapse == "auto":
-            C = plan_conditioning(model, A, targets=(target,), clamped=clamped, **common).cutset
+            # the exact remainder of a whole batch of particles must fit, not
+            # of one: a remainder as costly as plain VE leaves too few particles
+            # (halve the batch only if not even the all-clamped floor fits it)
+            rows = max(1, min(int(batch_rows), int(chunk) if chunk is not None else 65536))
+            while True:
+                try:
+                    C = plan_conditioning(model, A, targets=(target,), clamped=clamped,
+                                          rows=rows, **common).cutset
+                    break
+                except ConditioningLimitError:
+                    if rows == 1:
+                        raise
+                    rows = max(1, rows // 2)
         else:
             C = list(collapse)
             unknown = [c for c in C if c not in model.mechanisms]
@@ -426,7 +441,18 @@ def _certified_general(model, target, evidence, *, delta, do, chunk, bound, n_sa
             return int(torch.as_tensor(v).reshape(-1)[0])
         draw = _CollapsedDraw(model, target, {a: _int(b) for a, b in evidence.items()},
                               {a: _int(b) for a, b in do.items()}, k, W, chunk, collapse,
-                              memory_budget)
+                              memory_budget, batch_rows=first_checkpoint)
+        if not draw.Xp:
+            # nothing left to sample: the whole query fits the exact remainder,
+            # every particle would be the same exact value -- return it (level 1;
+            # widened by 1e-6 for the floating-point error of the elimination)
+            w, wy = draw(1)
+            pe = float(w[0]) * W
+            if pe <= 0.0:
+                raise ValueError("certified_query: the evidence has probability 0.")
+            est = wy[0] / w[0]
+            return CertifiedAnswer(est, (est - 1e-6).clamp(min=0.0), (est + 1e-6).clamp(max=1.0),
+                                   1.0, 0, W, pe, pe, 0, time.perf_counter() - t0, ())
     sums = [torch.zeros((), dtype=torch.float64), torch.zeros(k, dtype=torch.float64),
             torch.zeros((), dtype=torch.float64), torch.zeros(k, dtype=torch.float64)]
     done = 0
