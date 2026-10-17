@@ -149,3 +149,13 @@ def test_flow_stacked_early_stopping_runs_and_restores_best():
     assert all(math.isfinite(v[0]) for v in h.node_log_likelihoods.values())
     s = m.sample(n=20)
     assert all(torch.isfinite(t).all() for t in s.values())
+
+
+def test_flexcode_grid_density_matmul_equals_broadcast():
+    g = torch.Generator().manual_seed(0)
+    m = FlexCodeMechanism(epochs=2, hidden=(8,))
+    pa = torch.randn(600, 2, generator=g)
+    m.fit_local(pa.sum(1, keepdim=True) + 0.3 * torch.randn(600, 1, generator=g), pa)
+    coef = m._coef(torch.randn(500, 2, generator=g), 500).detach()
+    ref = (coef.unsqueeze(1) * m._basis_grid.unsqueeze(0)).sum(-1).clamp_min(0.0)
+    assert torch.allclose(m._grid_density(coef), ref, atol=1e-5)

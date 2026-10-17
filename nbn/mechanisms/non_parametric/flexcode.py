@@ -432,7 +432,9 @@ class FlexCodeMechanism(Mechanism):
 
     def _grid_density(self, coef: torch.Tensor) -> torch.Tensor:
         """Per-query density on the grid ``[m, G]`` (clipped + sharpened)."""
-        dens = (coef.unsqueeze(1) * self._basis_grid.unsqueeze(0)).sum(-1).clamp_min(0.0)  # [m, G]
+        # A matrix product: the broadcast-multiply-sum built an [m, G, J]
+        # intermediate for the same numbers (equal up to summation order).
+        dens = (coef @ self._basis_grid.T).clamp_min(0.0)                 # [m, G]
         if self.sharpen != 1.0:
             dens = dens.pow(self.sharpen)
         return dens
