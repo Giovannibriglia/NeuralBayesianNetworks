@@ -186,3 +186,12 @@ def test_mps_rank_limit_is_conditioned_away():
     p = cond.query(md, [tgt], ev)
     assert cond.last_conditioning is not None
     assert torch.allclose(p.cpu(), exact, atol=1e-5)
+
+
+def test_exact_conditioning_gives_up_after_max_seconds():
+    m, names = _dense_bn(0)
+    tgt, ev = _query(m, names)
+    peak = TensorVariableElimination().estimate_peak_bytes(m, tgt, ev)
+    a = conditioned_query(m, tgt, ev, memory_budget=peak * 0.01, max_seconds=0.0)
+    assert not a.exact and a.n_enumerated < a.n_instantiations
+    assert torch.all(a.lower == 0) and torch.all(a.upper == 1)

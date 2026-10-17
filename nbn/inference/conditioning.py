@@ -338,6 +338,7 @@ def conditioned_query(
     memory_budget: float | None = None,
     time_budget_s: float | None = None,
     enumerate_limit: int | None = None,
+    max_seconds: float | None = None,
     max_instantiations: int = 1_000_000,
     max_rows: int | None = None,
     order: str = "min_fill",
@@ -352,7 +353,11 @@ def conditioned_query(
     ``time_budget_s``: if given, the bounded-conditioning mode (see the module
     docstring); without it every instantiation is enumerated and the answer is
     exact.  ``enumerate_limit``: stop after this many instantiations (a
-    deterministic budget; also selects the bounded mode).
+    deterministic budget; also selects the bounded mode).  ``max_seconds``
+    (exact mode only): give up when this time is spent; the answer is then
+    ``exact=False`` with the trivial bounds ``[0, 1]`` and ``n_enumerated``
+    reports the progress (the remaining time is about proportional to the
+    remaining instantiations).
     ``max_instantiations``: refuse (``ConditioningLimitError``) a
     cutset with more instantiations.  ``max_rows``: cap on instantiations per
     pass (default: as many as fit the budget).
@@ -361,6 +366,7 @@ def conditioned_query(
 
     t0 = time.perf_counter()
     deadline = None if time_budget_s is None else t0 + float(time_budget_s)
+    give_up = None if max_seconds is None else t0 + float(max_seconds)
     eng = engine if engine is not None else TensorVariableElimination(memory_budget=memory_budget)
     evidence = dict(evidence or {})
     do = dict(do or {})
@@ -446,7 +452,7 @@ def conditioned_query(
     log_acc = torch.full((k,), -math.inf, dtype=torch.float64)
     log_mass = torch.tensor(-math.inf, dtype=torch.float64)
     done = 0
-    rows = min(rows_cap, _FIRST_ROWS) if bounded else rows_cap
+    rows = min(rows_cap, _FIRST_ROWS) if (bounded or give_up is not None) else rows_cap
     stop = n_total if enumerate_limit is None else max(1, min(n_total, int(enumerate_limit)))
     while done < stop:
         r = min(rows, stop - done)
@@ -468,6 +474,12 @@ def conditioned_query(
         done += r
         if deadline is not None and time.perf_counter() >= deadline:
             break
+        if give_up is not None and done < stop and time.perf_counter() >= give_up:
+            ones = torch.ones(k, dtype=torch.float64)
+            return ConditionedAnswer(torch.full((k,), float("nan"), dtype=torch.float64),
+                                     torch.zeros(k, dtype=torch.float64), ones, False,
+                                     tuple(C), n_total, done, None,
+                                     time.perf_counter() - t0)
         rows = min(rows_cap, 2 * rows)
 
     exact = done >= n_total
