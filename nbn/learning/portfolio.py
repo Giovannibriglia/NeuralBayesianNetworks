@@ -90,6 +90,24 @@ def _iterative(mech) -> bool:
         return False
 
 
+def _make(factory, node: str, n_classes: int | None):
+    """A fresh candidate; ``n_classes`` goes to factories that take it (a
+    mechanism such as ``NeuralCategoricalMechanism`` fixes its class count at
+    construction, so a bare ``factory()`` would get the default)."""
+    takes = False
+    if n_classes is not None:
+        try:
+            takes = "n_classes" in inspect.signature(factory).parameters
+        except (TypeError, ValueError):  # pragma: no cover - builtins
+            takes = False
+    mech = factory(n_classes=n_classes) if takes else factory()
+    k = getattr(mech, "n_classes", None)
+    if n_classes is not None and isinstance(k, int) and k > 0 and k != n_classes:
+        raise ValueError(f"select_mechanisms: candidate {type(mech).__name__} for '{node}' has "
+                         f"{k} classes, the variable {n_classes}; pass a factory that sets them.")
+    return mech
+
+
 def select_mechanisms(
     model,
     data: Mapping[str, torch.Tensor],
@@ -109,8 +127,9 @@ def select_mechanisms(
     """Pick and fit one mechanism per node by successive halving on held-out
     log-likelihood; the winner is installed in ``model``.
 
-    ``candidates``: ``{name: factory}`` (zero-argument callables returning a
-    fresh mechanism) used for every node in ``nodes``, or
+    ``candidates``: ``{name: factory}`` (callables returning a fresh
+    mechanism; a factory with an ``n_classes`` parameter, e.g. a mechanism
+    class, gets the node's cardinality) used for every node in ``nodes``, or
     ``{node: {name: factory}}`` per node.  ``val_data``: held-out rows
     (default: a random ``val_fraction`` of ``data``, fixed by ``seed``).
     Rungs follow Hyperband's schedule: with ``n`` trainable candidates there
@@ -164,7 +183,8 @@ def select_mechanisms(
         x_tr, pa_tr = train[node], pack_parents(train, parents)
         x_va, pa_va = val[node], pack_parents(val, parents)
         kw = node_kwargs(node)
-        alive = {name: f() for name, f in cands.items()}
+        k_node = kw.get("n_classes")
+        alive = {name: _make(f, node, k_node) for name, f in cands.items()}
         n_iter = sum(1 for m in alive.values() if _iterative(m))
         # Hyperband's schedule: s rungs so that the last one is max_epochs
         s_rungs = math.ceil(math.log(n_iter) / math.log(eta) - 1e-9) if n_iter > 1 else 0
@@ -198,7 +218,7 @@ def select_mechanisms(
         winner = max(alive, key=lambda n: scores[n])
         mech = alive[winner]
         if refit:
-            mech = cands[winner]()
+            mech = _make(cands[winner], node, k_node)
             if _iterative(mech):
                 mech.fit_local(full[node], pack_parents(full, parents),
                                epochs=max(trained[winner], 1), **kw)

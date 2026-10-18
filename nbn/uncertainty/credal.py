@@ -192,15 +192,15 @@ class _Row:
         shape = (*pcards, k)
         if isinstance(pset, L1BallSet):
             self.kind = "l1"
-            c = pset.center.detach().double().cpu().reshape(shape).clamp_min(0.0)
+            c = pset.center.detach().cpu().double().reshape(shape).clamp_min(0.0)
             # the closed form needs sum(c) == 1 (a float32 centre may miss by ~1e-7)
             self.c = c / c.sum(-1, keepdim=True).clamp_min(1e-300)
-            self.r = pset.radius.detach().double().cpu().reshape(*pcards, 1)
+            self.r = pset.radius.detach().cpu().double().reshape(*pcards, 1)
         else:
             self.kind = "box"
         lo, up = pset.bounds()
-        self.lo = lo.detach().double().cpu().reshape(shape)
-        self.up = up.detach().double().cpu().reshape(shape)
+        self.lo = lo.detach().cpu().double().reshape(shape)
+        self.up = up.detach().cpu().double().reshape(shape)
         # rows without data are the whole simplex, whatever the set stores
         # (e.g. prior quantiles of a Dirichlet set, a refit bootstrap box)
         unseen = getattr(pset, "unseen", None)
@@ -504,7 +504,7 @@ def credal_query(
     if point and not isinstance(model, Mapping):
         try:
             pt = model.query([target], evidence=evidence or None, do=do or None).detach() \
-                .double().cpu().reshape(-1)
+                .cpu().double().reshape(-1)
         except Exception:  # noqa: BLE001  the comparison is optional
             pt = None
     return QueryBounds(lower, upper, level, guarantee,

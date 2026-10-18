@@ -16,16 +16,30 @@ Each worker uses its own deep copy of the engine, so per-engine caches and
 same law as sequential calls; with a sampling engine the random streams
 interleave, so results are not bit-reproducible across runs (seed per query
 with an engine that takes a generator if that matters).
+
+Devices: on CPU and CUDA the threads run as described (CUDA kernels of
+different threads share the default stream and run in order).  On MPS the
+queries run sequentially: concurrent Metal encoding from several threads
+aborts the process ("A command encoder is already encoding to this command
+buffer", seen with PyTorch 2.x on Apple silicon).
 """
 from __future__ import annotations
 
 import copy
 import os
 import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Mapping, Sequence
 
 __all__ = ["query_many"]
+
+_WARNED: dict = {}
+
+
+def _device_type(model) -> str:
+    dev = getattr(model, "device", "cpu")
+    return getattr(dev, "type", str(dev).split(":")[0])
 
 
 def query_many(
@@ -50,6 +64,12 @@ def query_many(
         do = q[2] if len(q) > 2 else None
         qs.append((tg, ev, do))
     workers = int(workers or os.cpu_count() or 1)
+    if workers > 1 and _device_type(model) == "mps":
+        if not _WARNED.get("mps"):
+            _WARNED["mps"] = True
+            warnings.warn("query_many: MPS is not thread-safe; running the queries "
+                          "sequentially.", stacklevel=2)
+        workers = 1
     if workers <= 1 or len(qs) <= 1:
         return [model.query(tg, evidence=ev, do=do, engine=engine, **kwargs)
                 for tg, ev, do in qs]

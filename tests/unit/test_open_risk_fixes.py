@@ -294,3 +294,41 @@ def test_safe_lp_bound_survives_underflow():
     s = safe_lower_bound(np.array([-t]), np.array([[2 * t]]), np.array([t]), None, None,
                          np.array([-0.5]), None, 0.0, 1.0)
     assert Fraction(s) <= -Fraction(t) / 2         # true optimum -t/2
+
+
+# ---------------------------------------------------------------- device smoke follow-ups
+
+def test_portfolio_gives_the_class_count_to_neural_candidates():
+    from nbn.learning import select_mechanisms
+    from nbn.mechanisms import NeuralCategoricalMechanism
+    m, names = _dense_bn(0, n=3, k=3, window=1, p=1.0)
+    data = m.sample(600)
+    rep = select_mechanisms(m, data, {"neural": NeuralCategoricalMechanism}, nodes=[names[1]],
+                            max_epochs=5, min_epochs=2)
+    assert m.mechanisms[names[1]].n_classes == 3 and rep.chosen[names[1]] == "neural"
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS only")
+def test_query_many_runs_sequentially_on_mps():
+    from nbn.inference import query_many
+    from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
+    m, names = _dense_bn(0, n=8, k=3, window=2, p=0.8)
+    m = copy.deepcopy(m)
+    m.to("mps")
+    out = query_many(m, [([names[i]], {names[-1]: 1}) for i in range(4)],
+                     engine=LikelihoodWeightingEngine(n_samples=2000), workers=4)
+    assert len(out) == 4
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS only")
+def test_credal_query_accepts_sets_on_mps():
+    from nbn.uncertainty.credal import credal_query
+    m, names = _dense_bn(0, n=3, k=2, window=1, p=1.0)
+    sets = {}
+    for n in names:
+        p = torch.softmax(m.mechanisms[n]._logits.detach(), -1).float()
+        sets[n] = IntervalSet(level=1.0, guarantee="pac", unseen=torch.zeros(p.shape[0], dtype=torch.bool,
+                              device="mps"), lower=(p - 0.01).clamp(0, 1).to("mps"),
+                              upper=(p + 0.01).clamp(0, 1).to("mps"))
+    q = credal_query(m, sets, names[-1])
+    assert (q.lower <= q.upper).all()
