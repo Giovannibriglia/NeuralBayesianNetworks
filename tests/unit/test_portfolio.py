@@ -18,7 +18,7 @@ def _data(n=2000):
 
 def _model():
     return NeuralBayesianNetwork([("a", "b"), ("a", "c")],
-                                 {k: ("continuous", 1) for k in "abc"}, device="cpu")
+                                 dict.fromkeys("abc", ("continuous", 1)), device="cpu")
 
 
 def test_picks_a_nonlinear_mechanism_where_needed_and_spends_less():

@@ -1,6 +1,6 @@
 from nbn.inference.base import InferenceEngine
 from nbn.inference.certified import CertifiedAnswer, CertifiedEngine, certified_query
-from nbn.inference.conditioning import ConditionedAnswer, conditioned_query
+from nbn.inference.conditioning import ConditionedAnswer, ConditioningLimitError, conditioned_query
 from nbn.inference.hybrid import HybridRouter
 from nbn.inference.likelihood_weighting import LikelihoodWeightingEngine
 from nbn.inference.parallel import query_many
@@ -16,5 +16,6 @@ __all__ = [
     "CertifiedEngine",
     "conditioned_query",
     "ConditionedAnswer",
+    "ConditioningLimitError",
     "query_many",
 ]

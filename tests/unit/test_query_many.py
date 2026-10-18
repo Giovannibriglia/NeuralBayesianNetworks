@@ -29,5 +29,5 @@ def test_query_many_sampling_engine_is_close_to_exact():
 
 def test_query_many_raises_the_error_of_a_query():
     m, names = _dense_bn(0, n=6, k=3, window=2, p=0.7)
-    with pytest.raises(Exception):
+    with pytest.raises(KeyError):
         query_many(m, [(names[1], {}), ("not_a_node", {})], workers=2)

@@ -238,7 +238,7 @@ def test_evidence_child_of_a_knn_parent_is_certified_not_crashed():
     a = torch.randint(0, k, (n, 1)).float()
     b = ((a + torch.randint(0, 2, (n, 1))) % k).float()
     c = ((b + torch.randint(0, 2, (n, 1))) % k).float()
-    m = NeuralBayesianNetwork([("A", "B"), ("B", "C")], variables={v: ("discrete", k) for v in "ABC"},
+    m = NeuralBayesianNetwork([("A", "B"), ("B", "C")], variables=dict.fromkeys("ABC", ("discrete", k)),
                               device="cpu")
     m.set_mechanism("A", CategoricalTableMechanism())
     m.set_mechanism("C", CategoricalTableMechanism())

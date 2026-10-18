@@ -47,8 +47,8 @@ Two modes
     likelihood-weighting proposal (evidence clamped, K&F Def. 12.1, p. 499)
     and ``W = prod_i max_pa P(e_i | pa)``: ``P(c, e) = Q(c) E_Q[w | c] <=
     W Q(c)`` because every LW weight is at most ``W`` (K&F Alg. 12.2, p. 493;
-    p. 500).  This bound is ours (checked with the koller_claude expert, not
-    stated in the book).  It is much smaller than ``U_prior`` when the
+    p. 500).  This bound follows from the LW weight bound;
+    it is not stated in the book.  It is much smaller than ``U_prior`` when the
     evidence is unlikely (``W`` small) and no evidence is upstream of ``C``;
     with evidence upstream of ``C`` it can be larger, hence the minimum.
 

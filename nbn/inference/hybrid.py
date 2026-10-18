@@ -143,6 +143,12 @@ class HybridRouter(InferenceEngine):
         change the caller must be able to see; repeating it per row of a
         sweep would drown the log.
         """
+        if getattr(self, "fallback", "lw") == "certified":
+            # The certified engine answers next when it applies; say so.
+            msg = msg.replace(
+                "with likelihood weighting (approximate).",
+                "with the certified fallback (intervals at the declared level; "
+                "plain likelihood weighting if the query cannot be certified).")
         if key in self._warned:
             logger.debug(msg, *args)
             return

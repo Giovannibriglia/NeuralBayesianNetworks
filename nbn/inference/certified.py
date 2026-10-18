@@ -9,7 +9,7 @@ class of a discrete target that holds **simultaneously, with probability at
 least 1 - delta**, under assumptions that are checked, not assumed.
 
 Construction (ours, from standard pieces; audited against K&F and AfV)
----------------------------------------------------------------------
+----------------------------------------------------------------------
 Run unnormalised likelihood weighting [K&F, Alg 12.2, p. 493] a fixed number
 ``M`` of times (``M`` is chosen before sampling; a data-dependent stopping
 rule would need a different argument, cf. K&F Alg 12.3 / Thm 12.1, p. 502).
@@ -46,9 +46,11 @@ classical relative-error bounds [K&F, Eqs. 12.17–12.18, p. 501; Dagum &
 Luby 1997].  Nothing depends on the tree-width.  The guarantee is about the
 *model's* posterior: it says nothing about model error.
 
-Scope: discrete target; evidence on discrete table mechanisms (their CPD is
-available to compute ``W``); ``do`` nodes are clamped and carry no weight.
-Continuous evidence has an unbounded density, so it is rejected.
+Scope: discrete target; discrete evidence nodes with discrete parents
+(``W`` is computed from each evidence mechanism's ``log_prob`` on every
+parent row and checked against its table; a mismatch is refused); ``do``
+nodes are clamped and carry no weight.  Continuous evidence has an unbounded
+density, so it is rejected.
 """
 from __future__ import annotations
 

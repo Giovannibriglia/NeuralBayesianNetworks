@@ -12,7 +12,7 @@ whose rows lie in the given sets.  If the sets hold jointly with probability
 *true* answer with the same probability: the computation after the sets is
 deterministic, so the confidence is spent only once, on the data
 [the scheme of model-based statistical model checking: Ashok et al., CAV
-2019, arXiv:1904.00185, proof of Thm 1; Meggendorfer et al. 2025, §2.2].
+2019, arXiv:1905.04403, proof of Thm 1; Meggendorfer et al. 2025, §2.2].
 Every query computed from the same sets holds simultaneously.
 
 How (credal variable elimination, outer bound)
@@ -32,8 +32,7 @@ How (credal variable elimination, outer bound)
    row take different values in different contexts: a relaxation (sound, not
    tight), like dropping parameter dependencies in parameter lifting /
    rectangular robust MDPs [Badings, *Robust Verification of Stochastic
-   Systems*, 2025, Lemma 3.32 and p. 149].  The soundness argument is ours,
-   checked with the koller_claude and badings_claude experts.
+   Systems*, 2025, Lemma 3.32 and p. 149].  Soundness is the induction just above.
 4. The inner problems are solved exactly: for an interval row, start at the
    lower bounds and give the remaining mass to the largest ``m`` first (the
    ordering algorithm of interval MDPs: Haddad & Monmege, TCS 2018, Lemma 6;
@@ -63,8 +62,8 @@ from __future__ import annotations
 
 import math
 import warnings
-from dataclasses import dataclass, field
-from typing import Dict, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Mapping, Sequence
 
 import torch
 
@@ -452,7 +451,7 @@ def credal_query(
             # generalized Bayes rule: P(y|e) >= mu  iff  min_th P(y,e) - mu P(e) >= 0
             # (P(e) > 0); a lower bound >= 0 of that minimum certifies mu.  The
             # sign of a scaled bound is the sign of its mantissa.
-            g = lambda mu: e_y - mu * ones          # noqa: E731
+            g = lambda mu, e_y=e_y: e_y - mu * ones          # noqa: E731
             lo_m, hi_m = l_y, u_y
             for _ in range(bisect_iters):
                 mid = 0.5 * (lo_m + hi_m)

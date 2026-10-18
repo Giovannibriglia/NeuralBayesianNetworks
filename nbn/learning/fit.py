@@ -62,7 +62,12 @@ def fit(
         Dict mapping node name → data tensor of shape ``[N, D]`` or ``[N]``.
     method:
         ``"local"`` — calls ``mechanism.fit_local(x, parents, **kwargs)``
-        for each node independently (parallelisable in the future).
+        for each node independently, one node after the other.
+        ``"stacked"`` — the same per-node objectives as ``"local"``, trained
+        at the same time as one batched network per architecture (MDN,
+        neural categorical, FlexCode, normalising flow); roots, warm starts
+        and other mechanisms take the ``"local"`` path.  Same estimator, only
+        the minibatch order is shared (see :mod:`nbn.learning.stacked`).
         ``"joint"`` — single gradient pass over ``-sum_i log p(x_i | pa_i)``.
     epochs:
         Number of training epochs (used by neural mechanisms). ``None``

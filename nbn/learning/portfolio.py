@@ -47,7 +47,7 @@ import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Sequence
 
 import torch
 
@@ -71,8 +71,8 @@ class PortfolioReport:
     # is a fit row).  Both count as "fit" rows for calibration: map them to
     # global row ids (the same space as the calibration rows' ids) and pass
     # them as ``fit_ids``.
-    train_index: torch.Tensor | None = None
-    val_index: torch.Tensor | None = None
+    train_index: torch.Tensor | None = field(default=None, repr=False)
+    val_index: torch.Tensor | None = field(default=None, repr=False)
 
     def summary(self) -> str:
         lines = []
@@ -189,7 +189,7 @@ def select_mechanisms(
         # Hyperband's schedule: s rungs so that the last one is max_epochs
         s_rungs = math.ceil(math.log(n_iter) / math.log(eta) - 1e-9) if n_iter > 1 else 0
         budget = max(int(min_epochs), int(max_epochs) // eta ** s_rungs)
-        trained = {name: 0 for name in alive}
+        trained = dict.fromkeys(alive, 0)
         rungs, spent = [], 0
         while True:
             scores = {}

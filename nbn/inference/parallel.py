@@ -30,7 +30,7 @@ import os
 import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Mapping, Sequence
+from typing import Any, Sequence
 
 __all__ = ["query_many"]
 

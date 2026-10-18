@@ -97,8 +97,8 @@ def test_inner_problems_match_brute_force():
         box = ((pts >= lo) & (pts <= up)).all(-1)
         ball = (pts - c).abs().sum(-1) <= r
         vals = pts @ g
-        for sel, opt in ((box, lambda mx: _interval_opt(g, lo, up, mx)),
-                         (ball, lambda mx: _l1_opt(g, c, r.reshape(1), mx))):
+        for sel, opt in ((box, lambda mx, g=g, lo=lo, up=up: _interval_opt(g, lo, up, mx)),
+                         (ball, lambda mx, g=g, c=c, r=r: _l1_opt(g, c, r.reshape(1), mx))):
             if sel.sum() == 0:
                 continue
             assert float(opt(True)) >= float(vals[sel].max()) - 1e-9
