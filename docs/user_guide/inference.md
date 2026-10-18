@@ -143,6 +143,98 @@ print(info["proposal_used"], round(info["ess_fraction"], 2))
 print(hybrid.query_batch(["Rain"], {"Soil": grid}, engine=ais)[:, 1])
 ```
 
+## Answers with a guarantee, within a budget
+
+Exact inference costs time and memory exponential in the width of the
+elimination; sampling scales but gives no error bound. The tools below are all
+opt-in (the defaults above do not change) and work on discrete targets.
+
+| Call | Returns | Guarantee |
+|---|---|---|
+| `certified_query(model, target, evidence)` | an interval `[lower, upper]` for every class | all intervals hold together with probability at least `1 - delta` over the sampling |
+| `TensorVariableElimination(on_oom="condition")` | the exact answer when plain VE does not fit in memory | exact (conditioning on a cutset) |
+| `conditioned_query(..., enumerate_limit=k)` or `time_budget_s=` | bounds that tighten as more of the cutset is enumerated | holds with probability 1; exact once everything is enumerated |
+| `HybridRouter(fallback="certified" or "condition")` | the router's answer, with a certificate when sampling answered | as above |
+| `query_many(model, queries, workers=4)` | a list of answers, computed in parallel | the same answers as a loop of `query` |
+
+These bound the *inference* error for the fitted model. They say nothing
+about how far the fitted model is from the truth; for that, see the PAC
+answers in {doc}`probability_sets`.
+
+**Certified sampling.** `certified_query` runs likelihood weighting a fixed
+number of times and turns concentration bounds on the weights into an
+interval for every class of the target. The width falls like
+`1 / sqrt(n_samples)` and grows like `W / P(e)` for unlikely evidence (`W`
+bounds the likelihood weight), never with the tree-width.
+
+```python
+from nbn.inference import certified_query
+
+ans = certified_query(disc, "Rain", {"WetGrass": 1}, n_samples=200_000, delta=0.05)
+print(ans.lower, ans.upper)       # tensor([0.2963, 0.6925]) tensor([0.3075, 0.7037])
+print(ans.estimate)               # inside the intervals; exact VE gives [0.3013, 0.6987]
+
+fast = certified_query(disc, "Rain", {"WetGrass": 1}, time_budget_s=1.0, target_width=0.02)
+print(fast.n_samples, fast.max_width)
+```
+
+With `time_budget_s=` or `target_width=` the query samples at checkpoints of
+doubling size and stops at the first one that meets the width, or when time
+runs out. The confidence budget is split over the checkpoints, so the interval
+is valid whatever the stopping time. `collapse="auto"` samples only a cutset
+and computes the rest exactly; it returns the exact answer when the whole
+query fits, and helps most on a GPU.
+
+Evidence nodes must be discrete with discrete parents, so that the weight
+bound `W` can be computed from each evidence mechanism's `log_prob` (it is
+checked against the mechanism's table). Continuous evidence has unbounded
+densities and is refused, and so is evidence with several rows: certify one
+row at a time.
+
+**Exact answers when memory is short.** By default, plain VE raises
+`OutOfMemoryError` when a query does not fit the memory budget. With
+`on_oom="condition"` it picks a small set of variables (a cutset), runs exact
+VE for each of their joint values in one batched computation, and adds the
+results. The answer is the same as plain VE; the time grows with the number of
+cutset values (at most `max_conditioning`), and threads or a GPU divide it.
+
+```python
+from nbn import TensorVariableElimination
+from nbn.inference import conditioned_query
+
+ve = TensorVariableElimination(memory_budget=2**30, on_oom="condition")
+print(disc.query(["Rain"], {"WetGrass": 1}, engine=ve))      # exact
+
+b = conditioned_query(disc, "Rain", {"WetGrass": 1}, enumerate_limit=1)
+print(b.exact, b.lower, b.upper)      # sound bounds; exact when everything was enumerated
+```
+
+`conditioned_query` with `enumerate_limit=` or `time_budget_s=` stops early
+and returns bounds that hold with probability 1 (bounded conditioning). They
+are tight only when a few cutset values carry most of the probability; with
+unlikely evidence they can stay close to `[0, 1]`.
+
+**Routing and many queries.** `HybridRouter(fallback="certified")` answers a
+discrete query that is too large for VE with `certified_query` instead of
+plain LW; `router.last_certificate` holds the intervals when that happened
+(`None` otherwise). `fallback="condition"` tries conditioning first.
+`query_width_check=True` makes the router compute each query's own elimination
+width before choosing (some dense networks then get more exact answers).
+
+```python
+from nbn.inference import LikelihoodWeightingEngine, query_many
+
+queries = [(["Rain"], {"WetGrass": w}) for w in (0, 1)] + [(["Cloudy"], {"Sprinkler": s}) for s in (0, 1)]
+answers = query_many(disc, queries, engine=LikelihoodWeightingEngine(n_samples=20_000), workers=4)
+```
+
+`query_many` gives one engine copy to each worker thread. It pays off for
+sampling engines, whose per-node loop cannot use more threads on its own. On
+Apple MPS it runs the queries one after the other, because Metal does not
+accept work from several threads at once.
+
 `query` and `query_batch` are not differentiable (see {doc}`autograd`). The
 notebook {doc}`../examples/02_inference` compares every engine with the exact
-answer, including error against particles and a continuous target.
+answer, including error against particles and a continuous target;
+{doc}`../examples/19_certified_and_budgeted_inference` shows the certified,
+conditioned and parallel answers above on a dense network.

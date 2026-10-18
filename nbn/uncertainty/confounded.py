@@ -32,10 +32,14 @@ Steps (one parent configuration ``u`` at a time, batched where closed form)
      Manski), intersected.  Needs SciPy for non-point boxes.
    * ``"auto"`` — ``"lp"`` if the program is small enough and SciPy is
      installed, else ``"intersection"``.
-3. **Refutation.**  An empty intersection or an infeasible LP means the
+3. **Refutation.**  An empty intersection or an infeasible LP (confirmed
+   without presolve and by an elastic phase-1 program) means: either the
    instrument assumptions are violated for that configuration (the
-   instrumental inequality, Pearl 2e §8.4, Eq. 8.22, pp. 274–275); it is
-   reported (``refuted``), never silently widened.
+   instrumental inequality, Pearl 2e §8.4, Eq. 8.22, pp. 274–275), or the
+   confidence box missed (probability at most ``delta``, the box's budget).
+   It is a test at level ``delta``, not a proof; it is reported
+   (``refuted``) and the row becomes the whole simplex, never silently
+   widened.
 4. **No data for an action** in every regime: the whole simplex.
 
 Declared assumptions (in the result)
@@ -83,6 +87,7 @@ from nbn.core.variables import DiscreteVariable
 from nbn.uncertainty.binomial import IntervalMethod, binomial_interval
 from nbn.uncertainty.builders import Sampling, per_interval_delta
 from nbn.uncertainty.counts import count_table_for, parent_grid, parent_row_index
+from nbn.uncertainty._safe_lp import safe_min
 from nbn.uncertainty.sets import IntervalSet, tighten_box_to_simplex
 from nbn.utils.device import to_device
 
@@ -102,11 +107,18 @@ ASSUMPTIONS = (
     "trajectory data: the other parents include every observed variable the loggers read, so successive "
     "visits to a configuration give i.i.d. (action, child) draws",
     "declared_unconfounded regimes do not read the hidden variable (used by the LP only)",
+    "the other parents are pre-treatment: not descendants of the action or the hidden variable",
 )
+#: Added to ``assumptions`` when ``method="sensitivity"`` (with the value of lam).
+SENSITIVITY_ASSUMPTION = ("sensitivity (lam={lam}): in every regime the odds ratio of the logging "
+                          "policy given the hidden variable to P_k(a | u) lies in [1/lam, lam], and "
+                          "the hidden variable is a sufficient confounder")
 
 
 class RefutedAssumption(ValueError):
-    """The data contradict the declared model (empty intersection or infeasible IV program)."""
+    """The data contradict the declared model, or the confidence box missed
+    (probability at most ``delta``): an empty intersection or an infeasible
+    IV program."""
 
 
 class ProgramTooLarge(RuntimeError):
@@ -308,20 +320,58 @@ class IVProgram:
         return clone
 
     def bounds(self, c_mu: np.ndarray) -> Tuple[float, float]:
-        """Min and max of ``sum_t c_mu[t] mu_t`` over the feasible set (widened outward)."""
+        """Min and max of ``sum_t c_mu[t] mu_t`` over the feasible set (widened outward).
+
+        Each end is the solver's optimum widened by ``slack``, or further when
+        the weak-duality bound from the solver's own duals (:mod:`._safe_lp`)
+        says the slack is not enough: every variable is a probability mass in
+        ``[0, 1]`` (``sum mu = 1`` exactly and ``sum_a x[k, t, a] = mu_t``), so
+        that bound is rigorous whatever the solver's tolerances.
+        """
         _, linprog = _scipy()
         c = np.zeros(self.n_var)
         c[: self.nT] = c_mu
         out = []
+        safe = []
         for sign in (1.0, -1.0):
             res = linprog(sign * c, A_ub=self.A_ub, b_ub=self.b_ub, A_eq=self.A_eq, b_eq=self.b_eq,
                           bounds=(0, None), method="highs")
+            if res.status == 2:
+                # HiGHS presolve can declare a feasible program infeasible
+                # (seen on point boxes at valid laws); confirm before refuting.
+                res = linprog(sign * c, A_ub=self.A_ub, b_ub=self.b_ub, A_eq=self.A_eq,
+                              b_eq=self.b_eq, bounds=(0, None), method="highs",
+                              options={"presolve": False})
+            if res.status == 2 and self._elastic_violation() <= 1e-9:
+                res = linprog(sign * c, A_ub=self.A_ub, b_ub=self.b_ub, A_eq=self.A_eq,
+                              b_eq=self.b_eq, bounds=(0, None), method="highs-ipm",
+                              options={"presolve": False})
             if res.status == 2:
                 raise RefutedAssumption("no shared environment fits the regimes (IV model refuted)")
             if res.status != 0:
                 raise LPFailure(f"LP failed: {res.message}")
             out.append(sign * res.fun)
-        return out[0] - self.slack, out[1] + self.slack
+            safe.append(safe_min(res, sign * c, self.A_ub, self.b_ub, self.A_eq, self.b_eq, 0.0, 1.0))
+        lo, hi = out[0] - self.slack, out[1] + self.slack
+        if safe[0] is not None:
+            lo = min(lo, safe[0])
+        if safe[1] is not None:
+            hi = max(hi, -safe[1])
+        return lo, hi
+
+    def _elastic_violation(self) -> float:
+        """Smallest total violation of the box constraints (phase 1 with
+        elastic slacks): ``> 0`` certifies infeasibility independently of the
+        solver's status code."""
+        sparse, linprog = _scipy()
+        m = self.A_ub.shape[0]
+        a_ub = sparse.hstack([self.A_ub, -sparse.identity(m)], format="csr")
+        a_eq = sparse.hstack([self.A_eq, sparse.csr_matrix((self.A_eq.shape[0], m))],
+                             format="csr")
+        c = np.concatenate([np.zeros(self.n_var), np.ones(m)])
+        res = linprog(c, A_ub=a_ub, b_ub=self.b_ub, A_eq=a_eq, b_eq=self.b_eq,
+                      bounds=(0, None), method="highs", options={"presolve": False})
+        return float(res.fun) if res.status == 0 else float("inf")
 
     def indicator(self, a: int, y: int) -> np.ndarray:
         """Coefficients of ``P(X'=y | do(A=a)) = sum_{t: t_a = y} mu_t``."""
@@ -416,14 +466,20 @@ def sensitivity_row_box(box: RegimeBox, k: int, a: int, lam: float) -> Tuple[np.
     for y in range(nY):
         c = np.zeros(2 * nY)
         c[y] = c[nY + y] = 1
-        vals = []
+        vals, safe = [], []
         for sign in (1.0, -1.0):
             res = linprog(sign * c, A_ub=A_ub_arr, b_ub=b, A_eq=A_eq_arr, b_eq=b_eq,
                           bounds=(0, None), method="highs")
             if res.status != 0:
                 return fallback
             vals.append(sign * res.fun)
+            # every variable is in [0, 1]: they are >= 0 and sum to one exactly
+            safe.append(safe_min(res, sign * c, A_ub_arr, b, A_eq_arr, b_eq, 0.0, 1.0))
         lo[y], hi[y] = vals[0] - SOLVER_SLACK, vals[1] + SOLVER_SLACK
+        if safe[0] is not None:
+            lo[y] = min(lo[y], safe[0])
+        if safe[1] is not None:
+            hi[y] = max(hi[y], -safe[1])
     return np.clip(lo, 0, 1), np.clip(hi, 0, 1)
 
 
@@ -731,6 +787,9 @@ def confounded_interval_set(
         node=node, action=action, parents=parents, set=result, others=others, method_used=used,
         refuted=refuted_d, refuted_rows=refuted_rows, counts=visits, n_regimes=K, delta=delta, sampling=sampling,
         interval_method=interval_method, declared_unconfounded=tuple(declared), notes=notes,
+        assumptions=(ASSUMPTIONS + (SENSITIVITY_ASSUMPTION.format(lam=lam),)
+                     if "sensitivity" in (used if isinstance(used, (list, tuple)) else [used])
+                     else ASSUMPTIONS),
     )
 
 

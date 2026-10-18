@@ -664,6 +664,13 @@ class AmortizedVIEngine(InferenceEngine):
 
         Normalized by the number of latent entries in the batch.
         """
+        tables = (self._table_layout(model, net)
+                  if getattr(self, "vectorize_tables", True) else None)
+        if tables is not None:
+            # All-table network: the same ELBO with every per-node step
+            # batched (one draw per row from the same q, factor terms and
+            # local-expectation substitutions by indexed gathers).
+            return self._elbo_loss_tables(net, xb, mask, tables)
         params = net(xb * mask, mask)                     # [Bb, total_param]
         Bb = xb.shape[0]
         val: Dict[str, torch.Tensor] = {}                 # assignment column per node [Bb]
@@ -735,6 +742,132 @@ class AmortizedVIEngine(InferenceEngine):
 
         n_latent = (1.0 - mask).sum().clamp_min(1.0)
         return -elbo / n_latent
+
+    # ------------------------------------------------------------------
+    # Vectorised factor terms for all-table networks
+    # ------------------------------------------------------------------
+    def _table_layout(self, model, net):
+        """Stacked log-CPTs and parent strides, or ``None`` if not all-table.
+
+        Only exact ``CategoricalTableMechanism`` nodes qualify (their rows are
+        ``sum_p value_p * stride_p``); anything else keeps the per-node loop.
+        Rebuilt when the model's structure or any table changes.
+        """
+        from nbn.inference._cache import structure_version, tensor_versions
+        from nbn.mechanisms.parametric.categorical_table import CategoricalTableMechanism
+
+        nodes = list(net.node_order)
+        mechs = [model.mechanisms[v] for v in nodes]
+        if not all(type(m) is CategoricalTableMechanism and m._logits is not None
+                   for m in mechs) or not all(net.is_discrete(v) for v in nodes):
+            return None
+        tensors = [m._logits for m in mechs]
+        key = (id(model), structure_version(model), tensor_versions(tensors))
+        cached = getattr(self, "_table_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        dev = mechs[0]._logits.device
+        ks = [int(m._n_classes) for m in mechs]
+        if any(net.param_slices[v].stop - net.param_slices[v].start != k
+               for v, k in zip(nodes, ks)):
+            return None
+        kmax = max(ks)
+        parents = [self._parent_names[v] for v in nodes]
+        pmax = max([len(p) for p in parents] + [1])
+        rows, bases, base = [], [], 0
+        for m, k in zip(mechs, ks):
+            lp = torch.softmax(m._logits.detach(), dim=-1).clamp_min(1e-12).log()   # as _log_table
+            pad = torch.zeros(lp.shape[0], kmax, device=dev, dtype=lp.dtype)
+            pad[:, :k] = lp
+            rows.append(pad)
+            bases.append(base)
+            base += lp.shape[0]
+        lp_flat = torch.cat(rows, 0)                                   # [sum R, Kmax]
+        n = len(nodes)
+        pi = torch.zeros(n, pmax, dtype=torch.long, device=dev)
+        st = torch.zeros(n, pmax, dtype=torch.long, device=dev)
+        pv = torch.zeros(n, pmax, dtype=torch.bool, device=dev)
+        rmax = torch.zeros(n, dtype=torch.long, device=dev)
+        for j, (m, pa) in enumerate(zip(mechs, parents)):
+            rmax[j] = bases[j] + m._logits.shape[0] - 1
+            for s_, (pname, stride) in enumerate(zip(pa, m._parent_strides)):
+                pi[j, s_] = net.node_index[pname]
+                st[j, s_] = int(stride)
+                pv[j, s_] = True
+        kvec = torch.tensor(ks, device=dev)
+        kvalid = torch.arange(kmax, device=dev)[None, :] < kvec[:, None]
+        # column of q's parameter for (node, class); padded classes point at
+        # the node's first column and are masked to -inf
+        pidx = torch.zeros(n, kmax, dtype=torch.long, device=dev)
+        for j, v in enumerate(nodes):
+            sl = net.param_slices[v]
+            pidx[j, : ks[j]] = torch.arange(sl.start, sl.start + ks[j], device=dev)
+            pidx[j, ks[j]:] = sl.start
+        layout = dict(lp=lp_flat, base=torch.tensor(bases, device=dev), rmax=rmax, pi=pi,
+                      st=st, pv=pv, k=kvec, kmax=kmax, kvalid=kvalid, pidx=pidx)
+        self._table_cache = (key, layout)
+        return layout
+
+    def _elbo_loss_tables(self, net, xb, mask, t, draws=None) -> torch.Tensor:
+        """``_elbo_loss`` for an all-table network, batched over nodes.
+
+        Same estimator: q's parameters for every node come from one network
+        pass; one categorical draw per (row, latent node) from the same
+        ``q``; the analytic entropy; the own terms and the local-expectation
+        surrogates of :meth:`_table_terms`.  Only the random stream differs
+        from the per-node loop (one call instead of one per node).  ``draws``
+        ``[Bb, n]`` (tests) fixes the draw.
+        """
+        params = net(xb * mask, mask)                                     # [Bb, total]
+        p = params[:, t["pidx"]]                                          # [Bb, n, Kmax]
+        p = p.masked_fill(~t["kvalid"], float("-inf"))
+        lq = torch.log_softmax(p, dim=-1)                                 # pads: -inf
+        if draws is None:
+            draws = Categorical(logits=lq.detach()).sample()              # [Bb, n]
+        V = (mask * xb + (1.0 - mask) * draws.to(xb.dtype)).round().long()
+        Q = lq.exp()                                                      # pads: 0
+        lat = 1.0 - mask
+        plogp = torch.where(t["kvalid"], Q * lq, torch.zeros_like(lq))
+        elbo = -(lat * plogp.sum(-1)).sum()
+        elbo = elbo + self._table_terms(t, V, Q, mask)
+        n_latent = lat.sum().clamp_min(1.0)
+        return -elbo / n_latent
+
+    def _table_terms(self, t, V, Q, mask) -> torch.Tensor:
+        """``sum_j own_j`` plus the local-expectation surrogates, vectorised.
+
+        ``V`` ``[Bb, n]`` long assignment, ``Q`` ``[Bb, n, Kmax]`` q
+        probabilities (0 on padded classes).  Same quantities as the per-node
+        loop of ``_elbo_loss`` (the energy terms of the ELBO decompose over
+        factors, K&F Thm 11.2, p. 385; table rows are stride sums, K&F
+        Box 10.A): own term ``lat * sum_k q_j(k) log p(k | pa) + (1 - lat) *
+        log p(x_j | pa)``, and for each discrete latent parent ``i`` of ``j``
+        the zero-valued surrogate whose gradient is ``sum_k q_i(k) *
+        own_j(pa_{-i}, x_i = k)``.  Padded classes carry ``q = 0``.
+        """
+        kmax = t["kmax"]
+        lat = 1.0 - mask                                                  # [Bb, n]
+        pv = t["pv"]
+        vp = V[:, t["pi"]]                                                # [Bb, n, P]
+        ri = t["base"] + (vp * t["st"] * pv).sum(-1)                       # [Bb, n]
+        T = t["lp"][ri]                                                   # [Bb, n, Kmax]
+        own_lat = (Q * T).sum(-1)
+        own_obs = T.gather(-1, V.unsqueeze(-1)).squeeze(-1)
+        total = (lat * own_lat + (1.0 - lat) * own_obs).sum()
+        with torch.no_grad():
+            kar = torch.arange(kmax, device=V.device)
+            rik = ri[..., None, None] + (kar - vp[..., None]) * (t["st"] * pv)[None, :, :, None]
+            rik = torch.minimum(rik, t["rmax"][None, :, None, None])     # [Bb, n, P, Kmax]
+            Tk = t["lp"][rik]                                             # [Bb, n, P, Kmax, Kmax]
+            qd = Q.detach()[:, :, None, None, :]
+            f_lat = (qd * Tk).sum(-1)
+            f_obs = Tk.gather(-1, V[:, :, None, None, None].expand(-1, -1, *Tk.shape[2:4], 1)).squeeze(-1)
+            f = lat[..., None, None] * f_lat + (1.0 - lat)[..., None, None] * f_obs
+            f = f * t["kvalid"][t["pi"]]                                  # [n, P, Kmax]
+        qp = Q[:, t["pi"]]                                                # [Bb, n, P, Kmax]
+        acc = (qp * f).sum(-1)                                            # [Bb, n, P]
+        lat_p = lat[:, t["pi"]]                                           # [Bb, n, P]
+        return total + (lat_p * (acc - acc.detach()) * pv).sum()
 
     def _discrete_term(self, mech, pa, rows, lat, q_j, idx) -> torch.Tensor:
         """Own likelihood term of a discrete node: ``Σ_k q_j(k) log p(k | pa)``

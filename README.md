@@ -179,15 +179,17 @@ print(model.log_prob(data).mean())
 ```
 
 To choose a mechanism per node instead of `auto_mechanisms()`, call
-`model.set_mechanism("SoilMoisture", LinearGaussianMechanism())` (all
-mechanisms import from `nbn`) before `fit`.
+`model.set_mechanism("SoilMoisture", LinearGaussianMechanism())` before `fit`
+(the common mechanisms import from `nbn`, all of them from `nbn.mechanisms`).
 
 **Examples.** [`examples/`](examples) has one executed notebook with plots per
 feature, each checked against a known ground truth: parameter learning,
 inference engines, interventions, sampling, incremental updates, a gallery of
 the continuous mechanisms, batching / devices / persistence, and autograd
 (01–08), then structural causal models and probability sets (`nbn.scm`,
-`nbn.uncertainty`; 09–13). More end-to-end examples are in
+`nbn.uncertainty`, `nbn.structure`; 09–18), then answers with guarantees and
+scaling: certified and budgeted inference, PAC answers from data, and fast
+fitting with a per-node mechanism portfolio (19–21). More end-to-end examples are in
 [`tests/integration/`](tests/integration).
 
 ## Core concepts
@@ -202,7 +204,7 @@ retraining), `query` / `query_batch`, `sample`, `log_prob` and `intervene`.
 
 | Node type | Mechanisms |
 |---|---|
-| Discrete | `CategoricalTableMechanism` (closed-form counts), `NeuralCategoricalMechanism` (MLP), `SmoothedEmpiricalCategoricalMechanism`, `BinningCategoricalTable` (continuous parents) |
+| Discrete | `CategoricalTableMechanism` (closed-form counts), `SparseCategoricalTableMechanism` (the same table, rows stored only where data exist), `NeuralCategoricalMechanism` (MLP), `SmoothedEmpiricalCategoricalMechanism`, `BinningCategoricalTable` (continuous parents) |
 | Continuous, parametric | `LinearGaussianMechanism` (closed form), `MDNMechanism` (mixture density network), `NormalizingFlowMechanism` / `ConditionalFlowMechanism` (`[neural]` extra) |
 | Continuous, non-parametric | `ConditionalKDEMechanism`, `KNNConditionalMechanism`, `FlexCodeMechanism` |
 | Fixed | `DeterministicMechanism`, `DiracGaussianMechanism` |
@@ -214,8 +216,14 @@ retraining), `query` / `query_batch`, `sample`, `log_prob` and `intervene`.
 | `TensorVariableElimination` | Exact, log-domain, einsum-based VE for discrete networks; batched over evidence rows |
 | `LikelihoodWeightingEngine` | Batched importance sampling; works with any mechanism |
 | `HybridRouter` (default) | VE when every node is discrete and the treewidth is ≤ 25, otherwise likelihood weighting |
+| `CertifiedEngine` / `certified_query` | Sampling answers with an interval per class that holds with probability ≥ 1 − δ (discrete targets) |
+| `TensorVariableElimination(on_oom="condition")` / `conditioned_query` | Exact answers when VE does not fit in memory (conditioning on a cutset); sound bounds when stopped early |
 
 Pass `engine=` to `query` / `query_batch` to override the default.
+`query_many` runs independent queries on a thread pool. For bounds that also
+cover the learning error, `nbn.uncertainty.pac_query` and `credal_query` give
+PAC answers from data (see the
+[probability-sets guide](https://nbn.readthedocs.io/en/latest/user_guide/probability_sets.html)).
 
 **Gradients.** `log_prob` and `sample` (including `sample(n, do=...)`) are
 differentiable with respect to the parameters, and parent values or `do=`
@@ -309,7 +317,7 @@ Repository layout:
     tests/bench/         nbn.bench tests (bench/integration/: runner, CLI, bnlearn)
     tests/perf/          wall-clock assertions (-m perf)
     tests/data/          fixtures, incl. vendored bnlearn .bif networks
-    examples/            executed Jupyter notebooks: one per feature, then SCMs and probability sets
+    examples/            executed Jupyter notebooks: one per feature, SCMs and probability sets, guarantees and scaling
     scripts/             run_all_benchmarks.sh and other helpers
     docs/                Sphinx documentation site (https://nbn.readthedocs.io), incl. the benchmark guides
 
@@ -319,14 +327,15 @@ and uploads to PyPI. Known limitations and the roadmap are tracked in the
 
 ## Citing NBN
 
-If you use NBN in your research, please cite the software:
+If you use NBN in your research, please cite the paper
+([arXiv:2610.16902](https://arxiv.org/abs/2610.16902)):
 
 ```bibtex
-@software{briglia_nbn,
-  author  = {Briglia, Giovanni},
-  title   = {{NeuralBayesianNetworks}: PyTorch-native Bayesian networks with neural mechanisms and GPU-batched inference},
-  url     = {https://github.com/Giovannibriglia/NeuralBayesianNetworks},
-  license = {Apache-2.0}
+@article{briglia2026neural,
+  title   = {Neural {B}ayesian Networks for Modular and Scalable Decision-Making Under Uncertainty},
+  author  = {Briglia, Giovanni and Lippi, Marco and Mariani, Stefano and Zambonelli, Franco},
+  journal = {arXiv preprint arXiv:2610.16902},
+  year    = {2026}
 }
 ```
 

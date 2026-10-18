@@ -1,0 +1,37 @@
+\begin{table}[H]\centering\small
+\caption{R3-1. CPU threads: time (s) at 1, 2, 4, 8 threads and speed-up 1$\to$8 (budget 120 s, 16 GB; same size per row)}\label{tab:r3threads}
+\resizebox{\ifdim\width>\linewidth\linewidth\else\width\fi}{!}{%
+\begin{tabular}{lrrrrrrrr}\toprule
+computation & version & size & 1 & 2 & 4 & 8 & speed-up 1$\to$4 & speed-up 1$\to$8 \\ \midrule
+MLE fit (discrete) & this branch & 5000 & 1.51 & 1.48 & 1.4 & 1.49 & 1.08$\times$ & 1.02$\times$ \\
+MLE fit (discrete) & master & 5000 & error & error & error & error & -- & -- \\
+pgmpy MLE fit & baseline & 5000 & 3.97 & 4.14 & 3.95 & 3.99 & 1.00$\times$ & 0.99$\times$ \\
+exact VE (discrete) & this branch & 3 & 10.5 & 6.82 & 4.55 & 3.53 & 2.32$\times$ & 2.98$\times$ \\
+exact VE (discrete) & master & 3 & 10.5 & 6.23 & 4.29 & 3.29 & 2.45$\times$ & 3.19$\times$ \\
+pgmpy VE & baseline & 2 & 0.909 & 1.02 & 0.999 & 1.01 & 0.91$\times$ & 0.90$\times$ \\
+S4 interval sets & this branch & 8 & 1.83 & 1.89 & 1.85 & 1.87 & 0.99$\times$ & 0.98$\times$ \\
+MDN fit (sequential) & master & 200 & 19.2 & 20.4 & 21.5 & 23.8 & 0.89$\times$ & 0.81$\times$ \\
+MDN fit (stacked) & this branch & 500 & 15.1 & 11.8 & 10.8 & 10.3 & 1.40$\times$ & 1.47$\times$ \\
+Pyro SVI (MDN) & baseline & 100 & 13.3 & 14.2 & 14.1 & 16.5 & 0.95$\times$ & 0.81$\times$ \\
+amortized VI training & this branch & 500 & 14 & 8.89 & 6.82 & 5.25 & 2.06$\times$ & 2.68$\times$ \\
+amortized VI training & master & 500 & 24.9 & 25.6 & 30.1 & 36 & 0.83$\times$ & 0.69$\times$ \\
+FlexCode fit & master & 200 & 13.5 & 11.1 & 10.6 & 10.5 & 1.28$\times$ & 1.28$\times$ \\
+FlexCode fit & this branch & 1000 & 18.5 & 16.2 & 15.2 & 15.8 & 1.22$\times$ & 1.17$\times$ \\
+flow fit & master & 100 & 18.3 & 19.4 & 20.7 & 23.3 & 0.88$\times$ & 0.78$\times$ \\
+flow fit & this branch & 200 & 15.4 & 13.8 & 13.2 & 15.2 & 1.17$\times$ & 1.02$\times$ \\
+neural categorical fit & master & 500 & 10.8 & 12.9 & 14.9 & 20 & 0.73$\times$ & 0.54$\times$ \\
+neural categorical fit & this branch & 1000 & 10 & 7.78 & 7.37 & 7.21 & 1.36$\times$ & 1.39$\times$ \\
+Pyro SVI (categorical) & baseline & 500 & 23.9 & 24.1 & 23.8 & 24.8 & 1.00$\times$ & 0.96$\times$ \\
+FlexCode LW queries & this branch & 1000 & 2.43 & 1.88 & 1.64 & 1.58 & 1.49$\times$ & 1.54$\times$ \\
+FlexCode LW queries & master & 50 & 17.4 & 10.9 & 8.62 & 6.74 & 2.01$\times$ & 2.58$\times$ \\
+kNN LW queries & this branch & 100 & 13.9 & 7.92 & 5.22 & 3.72 & 2.67$\times$ & 3.75$\times$ \\
+kNN LW queries & master & 10 & 21.4 & 12 & 9.48 & 6.92 & 2.26$\times$ & 3.10$\times$ \\
+LW queries (non-Gaussian) & this branch & 5000 & 1.85 & 1.67 & 1.61 & 1.69 & 1.14$\times$ & 1.09$\times$ \\
+Pyro vectorised LW & baseline & 1000 & 11.8 & 11.5 & 11 & 11.7 & 1.07$\times$ & 1.01$\times$ \\
+LW queries (discrete) & this branch & 1000 & 11.3 & 9.63 & 9.67 & 10.7 & 1.17$\times$ & 1.05$\times$ \\
+LW queries (discrete) & master & 1000 & 84.8 & 58.6 & 53.3 & 49.7 & 1.59$\times$ & 1.71$\times$ \\
+certified queries & this branch & 500 & 15.7 & 12.1 & 10.7 & 11 & 1.46$\times$ & 1.42$\times$ \\
+amortized IS & this branch & 1000 & 1.2 & 1.53 & 1.83 & 1.52 & 0.65$\times$ & 0.79$\times$ \\
+amortized IS & master & 1000 & 9.78 & 7.7 & 7.22 & 7.55 & 1.35$\times$ & 1.30$\times$ \\
+\bottomrule\end{tabular}}
+\end{table}

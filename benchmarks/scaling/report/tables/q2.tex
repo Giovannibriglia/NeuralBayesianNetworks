@@ -1,0 +1,16 @@
+\begin{table}[H]\centering\small
+\caption{Q2. Before / after for each change (same answers)}\label{tab:q2}
+
+\begin{tabular}{lrrrr}\toprule
+change & setting & before & after & factor \\ \midrule
+Incremental min-fill & exact, loose, 1000 nodes (s) & 3.66 & 0.0714 & 51.2$\times$ \\
+Incremental min-fill & exact, loose, 2000 nodes (s) & 6.08 & 0.186 & 32.7$\times$ \\
+Barren pruning + inverse CDF & LW, dense, 200 nodes (s) & 17.8 & 1.55 & 11.5$\times$ \\
+Barren pruning + inverse CDF & LW, loose, 200 nodes (s) & 15.8 & 3.45 & 4.6$\times$ \\
+Barren pruning & non-Gaussian LW, 2000 nodes (s) & 20.5 & 0.643 & 31.9$\times$ \\
+Stacked fit & non-Gaussian, 200 nodes (s) & 19 & 5.62 & 3.4$\times$ \\
+Batched interval sets & 5000 nodes (s) & 6.27 & 1.04 & 6.0$\times$ \\
+Sparse table & 14 parents, peak memory (MB) & 2 601 & 317 & 8.2$\times$ \\
++ empirical Bernstein & certified width, median of all queries & 0.074 & 0.0349 & 2.1$\times$ \\
+\bottomrule\end{tabular}
+\end{table}

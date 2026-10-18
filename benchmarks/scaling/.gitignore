@@ -1,0 +1,3 @@
+problems/
+__pycache__/
+results/log_*.txt

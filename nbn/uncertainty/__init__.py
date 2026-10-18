@@ -15,6 +15,9 @@ Rows of a possibly confounded action effect from several logging regimes
 (Manski / intersection / IV linear program / sensitivity; the confidence box
 first): :func:`confounded_interval_set`, with :func:`confounding_gate`.
 
+Query bounds over the sets (every network whose rows lie in them), and PAC
+answers from data: :func:`credal_query`, :func:`pac_sets`, :func:`pac_query`.
+
 Structural sets that pool shared noise live in :mod:`nbn.scm`.
 User guide: https://nbn.readthedocs.io/en/latest/user_guide/probability_sets.html
 """
@@ -25,6 +28,7 @@ from nbn.uncertainty.builders import (
     dirichlet_set_from_counts,
     interval_set,
     interval_set_from_counts,
+    interval_sets,
     l1_ball_set,
     l1_ball_set_from_counts,
     per_interval_delta,
@@ -39,6 +43,7 @@ from nbn.uncertainty.confounded import (
     confounding_gate,
 )
 from nbn.uncertainty.counts import count_table, count_table_for, parent_grid, parent_row_index
+from nbn.uncertainty.credal import CredalSets, QueryBounds, credal_query, pac_query, pac_sets
 from nbn.uncertainty.sets import (
     CDFBandSet,
     IntervalSet,
@@ -50,6 +55,11 @@ from nbn.uncertainty.sets import (
 )
 
 __all__ = [
+    "credal_query",
+    "pac_query",
+    "pac_sets",
+    "QueryBounds",
+    "CredalSets",
     "ProbabilitySet",
     "IntervalSet",
     "L1BallSet",
@@ -57,6 +67,7 @@ __all__ = [
     "NoiseParameterSet",
     "CDFBandSet",
     "interval_set",
+    "interval_sets",
     "l1_ball_set",
     "dirichlet_set",
     "bootstrap_set",

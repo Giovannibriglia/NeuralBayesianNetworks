@@ -1,0 +1,17 @@
+\begin{table}[H]\centering\small
+\caption{Q1. Largest graph (nodes) handled within 1 thread / 4 GB / 30 s (median over seeds; 5000 = largest size tested)}\label{tab:q1}
+
+\begin{tabular}{lrrr}\toprule
+task & NBN branch & NBN before & pgmpy / Pyro \\ \midrule
+Discrete fit & 5000 & n/a & 5000 \\
+Exact query, loose graph & 5000 & 5000 & 5000 \\
+Exact query, dense graph & 100 & 100 & 100 \\
+Sampling query (LW), dense graph & 5000 & 200 & n/a \\
+Certified query, dense graph & 5000 & n/a & n/a \\
+S4 per-factor sets & 5000 & 5000 & n/a \\
+Non-Gaussian fit, 1 thread & 500 & 200 & 200 \\
+Non-Gaussian fit, GPU (MPS) & 1000 & 20 & 10 \\
+Non-Gaussian query & 5000 & 2000 & 2000 \\
+\bottomrule\end{tabular}
+\par\smallskip\footnotesize Exact queries count only if all 10 queries are answered exactly.
+\end{table}

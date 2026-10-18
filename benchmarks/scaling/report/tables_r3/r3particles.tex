@@ -1,0 +1,13 @@
+\begin{table}[H]\centering\small
+\caption{R3-5. Likelihood weighting with more particles: time (s) for 10 queries at 1 and 8 threads, and mean max-abs error vs exact VE (discrete only)}\label{tab:r3particles}
+\resizebox{\ifdim\width>\linewidth\linewidth\else\width\fi}{!}{%
+\begin{tabular}{lrrrrrr}\toprule
+network & particles & 1 thread & 8 threads & speed-up & error vs exact & ESS/N \\ \midrule
+discrete, local, 1,000 nodes & 100,000 & 12.1 & 10.6 & 1.14$\times$ & 0.0039 & 0.314 \\
+discrete, local, 1,000 nodes & 300,000 & 36.1 & 28.7 & 1.26$\times$ & 0.0019 & 0.316 \\
+discrete, local, 1,000 nodes & 1,000,000 & 126 & 100 & 1.26$\times$ & 0.0010 & 0.315 \\
+non-Gaussian MDN, ER, 5,000 nodes & 10,000 & 1.83 & 1.63 & 1.12$\times$ & -- & 0.164 \\
+non-Gaussian MDN, ER, 5,000 nodes & 100,000 & 16.6 & 16.2 & 1.03$\times$ & -- & 0.167 \\
+non-Gaussian MDN, ER, 5,000 nodes & 300,000 & 51.6 & 49.8 & 1.04$\times$ & -- & 0.167 \\
+\bottomrule\end{tabular}}
+\end{table}

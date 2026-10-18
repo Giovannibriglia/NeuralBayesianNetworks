@@ -337,13 +337,18 @@ def calibrate_factors(
     groups: torch.Tensor | None = None,
     generator: torch.Generator | None = None,
     discrete_score: ConformalScore = "exclusive",
+    *,
+    fit_ids: torch.Tensor | None = None,
+    ids: torch.Tensor | None = None,
 ) -> CalibratedFactorSets:
     """One calibrated set per neural / linear factor, the level split over factors.
 
     Discrete neural factors get conformal sets with ``discrete_score``
     (``"exclusive"``, ``"inclusive"`` or ``"randomized"``; see
     :func:`nbn.scm.conformal_sets`), checked before any work; ``method="pit"``
-    does not use it.
+    does not use it.  ``fit_ids`` / ``ids``: optional ids of the rows the
+    factors were fitted (or selected) on and of the calibration rows; a
+    shared id raises (:func:`nbn.scm.calibration.check_held_out`).
     """
     from nbn.scm import conformal_intervals, conformal_sets, pit_band_set
     from nbn.scm.calibration import check_conformal_score
@@ -379,13 +384,15 @@ def calibrate_factors(
         discrete = hs.variables[node].is_discrete
         if method == "pit":
             res = pit_band_set(model, calibration_data, node, delta=per_factor, groups=groups,
-                               generator=generator)
+                               generator=generator, fit_ids=fit_ids, ids=ids)
         elif discrete:
             res = conformal_sets(model, calibration_data, node, alpha=per_factor, groups=groups,
-                                 generator=generator, score=discrete_score)
+                                 generator=generator, score=discrete_score,
+                                 fit_ids=fit_ids, ids=ids)
         else:
             res = conformal_intervals(model, calibration_data, node, alpha=per_factor,
-                                      method=method, groups=groups, generator=generator)
+                                      method=method, groups=groups, generator=generator,
+                                      fit_ids=fit_ids, ids=ids)
         sets[f] = res
         guarantees[f] = res.guarantee
     return CalibratedFactorSets(

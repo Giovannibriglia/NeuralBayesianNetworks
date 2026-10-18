@@ -157,7 +157,12 @@ def test_min_fill_n20_case_pins_order_and_invariants() -> None:
         edge_density=0.20, seed=0, device="cpu",
         n_train=200, n_test=50, n_reference=500,
     )
-    order = min_fill_order(bn.dag, targets={"X2"}, evidence={"X0", "X10"})
+    # The pinned order is the historical (v0.25) heuristic; the default now
+    # also tries the evidence-reduced graph and keeps the cheaper order
+    # (tested below).
+    order = get_order("min_fill_legacy", bn.dag, targets={"X2"}, evidence={"X0", "X10"})
+    new = min_fill_order(bn.dag, targets={"X2"}, evidence={"X0", "X10"})
+    assert set(new) == set(order)
 
     # Invariants
     expected_set = (set(bn.dag.nodes()) - {"X2"} - {"X0", "X10"})
@@ -171,3 +176,58 @@ def test_min_fill_n20_case_pins_order_and_invariants() -> None:
         "X16", "X9", "X15", "X11", "X14", "X19", "X5", "X13",
         "X1", "X12", "X17", "X18", "X3", "X4", "X6", "X7", "X8",
     ], f"min-fill order changed; got {order}"
+
+
+def _reduced(dag, evidence):
+    from nbn.inference._elimination_order import _moral_adjacency
+    adj = _moral_adjacency(dag)
+    for ev in evidence:
+        for u in adj.pop(ev, ()):
+            adj[u].discard(ev)
+    return adj
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_min_fill_never_costlier_than_legacy(seed) -> None:
+    """Best-of-two: the default order is never costlier than the v0.25 one,
+    measured by the VE factor sizes on the evidence-reduced graph."""
+    import random
+
+    from nbn.inference._elimination_order import elimination_cost
+
+    rng = random.Random(seed)
+    n = rng.randint(5, 40)
+    names = [f"X{i}" for i in range(n)]
+    dag = nx.DiGraph()
+    dag.add_nodes_from(names)
+    for j in range(n):
+        for i in range(max(0, j - 6), j):
+            if rng.random() < 0.35:
+                dag.add_edge(names[i], names[j])
+    nodes = names[:]
+    rng.shuffle(nodes)
+    targets, evidence = {nodes[0]}, set(nodes[1:1 + rng.randint(0, 6)])
+    cards = {v: rng.choice([2, 3, 4]) for v in names}
+    new = min_fill_order(dag, targets=targets, evidence=evidence, cards=cards)
+    old = get_order("min_fill_legacy", dag, targets=targets, evidence=evidence)
+    assert set(new) == set(old) == set(names) - targets - evidence
+    red = _reduced(dag, evidence)
+    assert elimination_cost(red, new, cards) <= elimination_cost(red, old, cards)
+
+
+def test_min_fill_evidence_reduction_beats_legacy_on_a_star() -> None:
+    """An observed hub: conditioning removes it without fill, so its many
+    parents stay unconnected except for the marriage edges of its children."""
+    from nbn.inference._elimination_order import elimination_cost
+
+    # chain of leaves each with the hub as a parent; hub observed
+    dag = nx.DiGraph()
+    leaves = [f"L{i}" for i in range(12)]
+    for i, leaf in enumerate(leaves):
+        dag.add_edge("H", leaf)
+        if i:
+            dag.add_edge(leaves[i - 1], leaf)
+    new = min_fill_order(dag, targets={"L11"}, evidence={"H"})
+    old = get_order("min_fill_legacy", dag, targets={"L11"}, evidence={"H"})
+    red = _reduced(dag, {"H"})
+    assert elimination_cost(red, new) <= elimination_cost(red, old)

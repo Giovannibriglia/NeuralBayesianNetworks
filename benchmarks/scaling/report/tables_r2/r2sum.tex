@@ -1,0 +1,19 @@
+\begin{table}[H]\centering\small
+\caption{R2-0. Speed-ups of this branch at the largest size both versions finished}\label{tab:r2sum}
+
+\begin{tabular}{lrr}\toprule
+what & compared with & speed-up \\ \midrule
+Neural categorical fit (1000 nodes) & master & 2.2$\times$ \\
+Neural categorical fit (500 nodes) & Pyro & 4.6$\times$ \\
+FlexCode fit (200 nodes) & master & 3.3$\times$ \\
+Flow fit (100 nodes) & master & 2.4$\times$ \\
+kNN LW queries (10 nodes) & master & 3.5$\times$ \\
+kNN LW queries (50 nodes) & first branch & 2.9$\times$ \\
+FlexCode LW queries (50 nodes) & master & 27.4$\times$ \\
+FlexCode LW queries (1000 nodes) & first branch & 6.8$\times$ \\
+Amortized IS queries (1000 nodes) & master & 6.6$\times$ \\
+Amortized IS queries (1000 nodes) & first branch & 2.0$\times$ \\
+Amortized VI step (500 nodes) & master & 1.7$\times$ \\
+\bottomrule\end{tabular}
+\par\smallskip\footnotesize Where the older version timed out at every larger size, the gap is larger than shown.
+\end{table}

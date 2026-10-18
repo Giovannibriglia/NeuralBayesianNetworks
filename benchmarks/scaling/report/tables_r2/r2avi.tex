@@ -1,0 +1,11 @@
+\begin{table}[H]\centering\small
+\caption{R2-4. Amortized VI: time per ELBO training step (ms)}\label{tab:r2avi}
+
+\begin{tabular}{lrrrr}\toprule
+nodes & master & first branch & this branch & speed-up vs master \\ \midrule
+50 & 49.9 & 50.1 & 38.1 & 1.3$\times$ \\
+200 & 211 & 211 & 143 & 1.5$\times$ \\
+500 & 572 & 582 & 341 & 1.7$\times$ \\
+1000 & timeout & timeout & 665 & -- \\
+\bottomrule\end{tabular}
+\end{table}

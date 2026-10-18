@@ -92,8 +92,19 @@ def interval_set_from_counts(
     return _interval_set(_check_counts(counts, integer=True), delta, method, sampling)
 
 
+def _exact_counts(counts: torch.Tensor) -> torch.Tensor:
+    """Refuse counts a float32 table cannot hold exactly (>= 2**24, MPS)."""
+    if counts.dtype == torch.float32 and counts.numel() and float(counts.max()) >= 2 ** 24:
+        raise ValueError(
+            "A count of 2**24 or more cannot be held exactly in float32 (the MPS "
+            "accumulation dtype), so the PAC set would not hold; count on the CPU "
+            "(move the data with .cpu()).")
+    return counts
+
+
 def _interval_set(counts: torch.Tensor, delta: float, method: IntervalMethod,
                   sampling: Sampling) -> IntervalSet:
+    counts = _exact_counts(counts)
     trials = counts.sum(dim=-1, keepdim=True).expand_as(counts)
     per_entry = per_interval_delta(delta, counts.numel(), trials, sampling)
     lower, upper = binomial_interval(counts, trials, per_entry, method=method)
@@ -101,6 +112,68 @@ def _interval_set(counts: torch.Tensor, delta: float, method: IntervalMethod,
         level=1.0 - delta, guarantee="pac", unseen=trials[:, 0] == 0,
         lower=lower, upper=upper,
     )
+
+
+def interval_sets(
+    model,
+    data: Dict[str, torch.Tensor],
+    nodes=None,
+    delta: float = 0.05,
+    method: IntervalMethod = "kl",
+    sampling: Sampling = "iid",
+) -> Dict[str, IntervalSet]:
+    """:func:`interval_set` for many nodes at once: ``{node: IntervalSet}``.
+
+    Each node's set is **identical** to ``interval_set(model, data, node,
+    delta, method, sampling)`` (level ``1 - delta`` per node; split a global
+    budget yourself, e.g. ``delta / len(nodes)``).  The difference is cost:
+    the interval end points are element-wise functions of (count, trials,
+    level), so the entries of all tables are solved in one vectorised pass
+    instead of one small pass per node.  On a 1000-node network that removes
+    the per-node kernel-launch overhead that dominated the loop.
+    """
+    nodes = list(model.dag.topological_order()) if nodes is None else list(nodes)
+    out: Dict[str, IntervalSet] = {}
+    group: list = []
+    size = 0
+
+    def flush():
+        if not group:
+            return
+        lower, upper = binomial_interval(
+            torch.cat([c.reshape(-1) for _, c, _, _ in group]),
+            torch.cat([t.reshape(-1) for _, _, t, _ in group]),
+            torch.cat([d.reshape(-1).to(t.dtype) for _, _, t, d in group]),
+            method=method)
+        start = 0
+        for node, counts, trials, _ in group:
+            n = counts.numel()
+            out[node] = IntervalSet(
+                level=1.0 - delta, guarantee="pac", unseen=trials[:, 0] == 0,
+                lower=lower[start:start + n].reshape(counts.shape),
+                upper=upper[start:start + n].reshape(counts.shape),
+            )
+            start += n
+        group.clear()
+
+    for node in nodes:
+        counts, _ = count_table(model, data, node)
+        trials = counts.sum(dim=-1, keepdim=True).expand_as(counts)
+        per_entry = per_interval_delta(delta, counts.numel(), trials, sampling)
+        # Small tables share one vectorised pass; a pass is closed once it
+        # holds ``_BATCH_ENTRIES`` entries, so big tables stay cache-sized
+        # (one huge concatenation made the bisection memory-bound).
+        if group and size + counts.numel() > _BATCH_ENTRIES:
+            flush()
+            size = 0
+        group.append((node, counts, trials, per_entry))
+        size += counts.numel()
+    flush()
+    return {node: out[node] for node in nodes}
+
+
+#: Entries per vectorised pass of :func:`interval_sets`.
+_BATCH_ENTRIES = 1 << 14
 
 
 def l1_ball_set(
@@ -139,6 +212,7 @@ def l1_ball_set_from_counts(
 
 
 def _l1_ball_set(counts: torch.Tensor, delta: float, sampling: Sampling) -> L1BallSet:
+    counts = _exact_counts(counts)
     trials = counts.sum(dim=-1)
     n_rows, k = counts.shape
     per_row = per_interval_delta(delta, n_rows, trials, sampling)
@@ -147,6 +221,9 @@ def _l1_ball_set(counts: torch.Tensor, delta: float, sampling: Sampling) -> L1Ba
     else:
         log_patterns = k * math.log(2.0) + math.log1p(-(2.0 ** (1 - k)))  # log(2^K - 2)
         radius = torch.sqrt(2.0 * (log_patterns + torch.log(1.0 / per_row)) / trials.clamp_min(1))
+        # outward: the radius and the centre's division both round (float32 on MPS)
+        radius = radius * (1.0 + 4 * torch.finfo(radius.dtype).eps) \
+            + 4 * k * torch.finfo(radius.dtype).eps
     radius = torch.where(trials == 0, torch.full_like(radius, 2.0), radius.clamp_max(2.0))
     center = counts / trials.clamp_min(1).unsqueeze(-1)
     center = torch.where(trials.unsqueeze(-1) == 0, torch.full_like(center, 1.0 / k), center)
@@ -167,7 +244,11 @@ def dirichlet_set(
     """Posterior draws of the table under independent ``Dirichlet(prior)`` rows.
 
     Bayesian credibility, not a frequentist guarantee; useful as genuine
-    posterior weights and as a sanity check of the PAC sets.  Seed with
+    posterior weights and as a sanity check of the PAC sets.  Rows without
+    data (``unseen``) are draws from the prior alone: their ``bounds()`` are
+    prior quantiles, a statement about the prior and not about the data.
+    Frequentist consumers treat them as the whole simplex
+    (:func:`nbn.structure.joint_row_bounds`, :func:`nbn.uncertainty.credal_query`).  Seed with
     ``torch.manual_seed`` for reproducible draws.  Same as
     :func:`dirichlet_set_from_counts` on :func:`count_table`.
     """
@@ -206,6 +287,7 @@ def bootstrap_set(
     n_boot: int = 200,
     delta: float = 0.05,
     generator: torch.Generator | None = None,
+    unseen: torch.Tensor | None = None,
 ) -> SampleSet:
     """Episode (cluster) bootstrap of any statistic of a fitted model.
 
@@ -222,6 +304,14 @@ def bootstrap_set(
     groups:
         ``[N]`` integer group id of each data row (episode id).  Use
         ``torch.arange(N)`` for i.i.d. rows.
+    unseen:
+        Optional ``[R]`` mask of the statistic's rows that have no data (e.g.
+        ``count_table(model, data, node)[0].sum(-1) == 0`` for a node's
+        table).  The bootstrap cannot see them: every replicate refits the
+        same prior or smoothing there, so their box is narrow and says
+        nothing.  Without the mask the set carries none (``unseen`` is
+        empty) and :func:`nbn.structure.export_factored_sets` derives it from
+        the counts when it has them.
     """
     groups = groups.reshape(-1).long()
     group_ids, inverse = torch.unique(groups, return_inverse=True)
@@ -238,7 +328,9 @@ def bootstrap_set(
     samples = torch.stack(draws)
     return SampleSet(
         level=1.0 - delta, guarantee="asymptotic",
-        unseen=torch.zeros(0, dtype=torch.bool), samples=samples,
+        unseen=(torch.zeros(0, dtype=torch.bool) if unseen is None
+                else torch.as_tensor(unseen, dtype=torch.bool).reshape(-1)),
+        samples=samples,
     )
 
 

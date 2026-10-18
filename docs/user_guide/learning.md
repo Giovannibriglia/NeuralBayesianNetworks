@@ -43,7 +43,14 @@ print({node: round(history.mean_ll(node), 3) for node in VARIABLES})
 
 `fit` walks the DAG and calls each mechanism's `fit_local` on its own column
 and its parents' columns (`method="local"`, the default; `method="joint"`
-trains every parameter with one optimiser). It returns a
+trains every parameter with one optimiser). `method="stacked"` trains the
+same per-node objectives at the same time, as one batched network per
+architecture (MDN, neural categorical, FlexCode, normalising flow). It is the
+same estimator: the likelihood splits per node, Adam acts element-wise, and
+clipping and early stopping stay per node; only the minibatch order is shared.
+It is several times faster on networks with many neural nodes, and it is what
+makes a GPU pay off for them. Roots, warm starts and other mechanisms take the
+`local` path. It returns a
 {class}`~nbn.learning.fit.TrainHistory`: the **in-sample** mean
 log-likelihood per node, the wall-clock time and the device. There is no
 validation split, so it is a fit trace, not a test score.
@@ -54,6 +61,40 @@ validation split, so it is a fit trace, not a test score.
 | `consolidate=True` | after the fit, neural mechanisms record what `update()` needs (an extra Fisher pass). Pass `False` when you will never call `update()`, for example when fitting in a loop |
 | `weights=None` | per-row multiplicities, see below |
 | `warm_start=False` | continue from the current parameters, see below |
+
+## Choosing a mechanism per node
+
+`select_mechanisms` tries several mechanism types for each node and keeps the
+one with the best held-out log-likelihood. It trains every candidate briefly,
+keeps the best third, trains those longer, and so on (successive halving, the
+schedule of Hyperband), so the cost is close to one full fit, not the sum of
+all candidates. The held-out likelihood splits per node, so choosing node by
+node is exact once the parents are fixed. The winner is installed in the
+model.
+
+```python
+from nbn import CategoricalTableMechanism, MDNMechanism, NeuralCategoricalMechanism
+from nbn.learning import select_mechanisms
+
+model = new_model()
+report = select_mechanisms(model, data, {"table": CategoricalTableMechanism,
+                                         "neural": NeuralCategoricalMechanism},
+                           nodes=["WetGrass"], max_epochs=30)
+print(report.chosen)               # {'WetGrass': 'table'}
+
+report = select_mechanisms(model, data, {"linear": LinearGaussianMechanism,
+                                         "mdn": lambda: MDNMechanism(num_components=2)},
+                           nodes=["Soil"], max_epochs=30)
+print(report.rungs["Soil"])        # (candidate, epochs, held-out log-likelihood) per rung
+```
+
+- A candidate is a class or a factory with no required argument; a factory
+  that takes `n_classes` gets the node's number of classes.
+- By default 20% of the rows are held out (`val_fraction`); pass
+  `val_data=` to use your own split, and `refit=True` to refit the winner on
+  all rows. `report.train_index` and `report.val_index` say which rows were
+  used: both count as *fit* rows for any later calibration
+  (`fit_ids=`, {doc}`scm`), and a final test score needs rows outside both.
 
 ## Weighted fitting
 

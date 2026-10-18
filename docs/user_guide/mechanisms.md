@@ -15,6 +15,7 @@ The columns *update* and *weights* say whether the mechanism supports
 | Mechanism | Model | Update | Weights | When to use |
 |---|---|---|---|---|
 | `CategoricalTableMechanism(alpha=0.0)` | a table of counts (closed form), optional pseudo-count | yes | yes | discrete parents; the default. Set `alpha > 0` when some parent configurations are rare |
+| `SparseCategoricalTableMechanism(alpha=0.0)` | the same table, storing only the parent rows seen in the data plus one shared uniform row | no | yes | many parents: memory grows with the data, not with `K^(p+1)`; same answers as the dense table |
 | `SmoothedEmpiricalCategoricalMechanism(alpha=1.0)` | a table with Lidstone smoothing | yes | yes | the same, with smoothing on by default |
 | `NeuralCategoricalMechanism(n_classes)` | an MLP from the parents to logits | yes | yes | continuous parents with a smooth effect, or too many parent configurations for a table |
 | `BinningCategoricalTable(parent_kinds, n_bins, n_categories)` | a table over quantile bins of continuous parents | no | yes | continuous parents, closed form; what `auto_mechanisms()` assigns there |

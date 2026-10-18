@@ -478,6 +478,15 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
     # Core IS loop — overrides LW._run to use the learned proposal
     # ------------------------------------------------------------------
 
+    #: Barren-node pruning is valid here: the proposal for a latent node reads
+    #: the evidence context and that node's own parents only, so a kept node
+    #: never depends on a pruned one, and each pruned factor
+    #: ``p(x|pa)/q(x|e,pa)`` has conditional mean 1 -- dropping it keeps the
+    #: target and cannot increase the asymptotic variance (and removes a bias
+    #: if ``q`` misses part of a barren node's support).  Checked with the
+    #: koller and moss experts (K&F Prop 12.1, Eqs 12.12-12.14).
+    _run_accepts_prune = True
+
     def _run(
         self,
         model,
@@ -485,18 +494,19 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
         evidence: Dict[str, torch.Tensor] | None,
         do: Dict[str, torch.Tensor] | None,
         n_samples: int,
+        prune: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.recognition_net is None:
             # No trained proposal → fall back to prior-proposal LW.
-            return super()._run(model, targets, evidence, do, n_samples)
-        log_w, buf = self._run_learned(model, targets, evidence, do, n_samples)
+            return super()._run(model, targets, evidence, do, n_samples, prune=prune)
+        log_w, buf = self._run_learned(model, targets, evidence, do, n_samples, prune=prune)
         if not self.per_query_fallback:
             return log_w, buf
         return self._apply_query_fallback(
-            model, targets, evidence, do, n_samples, log_w, buf)
+            model, targets, evidence, do, n_samples, log_w, buf, prune=prune)
 
     def _apply_query_fallback(
-        self, model, targets, evidence, do, n_samples, log_w, buf,
+        self, model, targets, evidence, do, n_samples, log_w, buf, prune: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Per-query ESS fallback (#250): re-run low-ESS rows with the prior proposal.
 
@@ -523,7 +533,7 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
                 return {k: (v[idx] if v.shape[0] == b else v) for k, v in d.items()}
 
             lw_log_w, lw_buf = super()._run(
-                model, targets, _rows(evidence), _rows(do), n_samples)
+                model, targets, _rows(evidence), _rows(do), n_samples, prune=prune)
             better = _ess_fraction_rows(lw_log_w) > ess[idx]           # [b']
             if bool(better.any()):
                 take = idx[better]
@@ -542,8 +552,13 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
         evidence: Dict[str, torch.Tensor] | None,
         do: Dict[str, torch.Tensor] | None,
         n_samples: int,
+        prune: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Learned-proposal IS loop (no fallback).  Returns ``(log_w [B, S], buf)``."""
+        """Learned-proposal IS loop (no fallback).  Returns ``(log_w [B, S], buf)``.
+
+        ``prune=True`` skips nodes outside the ancestral closure of the
+        targets, evidence and do-nodes (see ``_run_accepts_prune``).
+        """
         evidence = _norm_batch(evidence)
         do = _norm_batch(do)
         device = model.device
@@ -586,7 +601,17 @@ class AmortizedISEngine(LikelihoodWeightingEngine):
         ctx = net.context(ev_values, ev_mask)                              # [B, d_ctx]
         ctx_bs = ctx.unsqueeze(1).expand(b, s, -1).reshape(b * s, -1)      # [B*S, d_ctx]
 
+        keep = None
+        if prune:
+            from nbn.inference.likelihood_weighting import _ancestral_closure
+            keep = _ancestral_closure(
+                model, list(targets) + list(evidence.keys()) + list(do.keys()),
+                self.__dict__.setdefault("_anc_cache", {}),
+            )
+
         for i, node in enumerate(state.topo_order):
+            if keep is not None and node not in keep:
+                continue
             sl = state.node_slices[i]
             mech = model.mechanisms[node]
             psl = state.parent_slices[i]

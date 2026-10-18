@@ -654,7 +654,9 @@ def test_cuda_estimate_follows_the_process_allocator_conf(monkeypatch, models):
     eng = TensorVariableElimination()
     eng._extract_factors(model)
     monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
-    pm = eng._peak_model(model, "V10", ev, B=B)
+    # The reserved bytes below were measured with the v0.25 elimination
+    # order; price that same plan.
+    pm = eng._peak_model(model, "V10", ev, B=B, order="min_fill_legacy")
     pm.device_type = "cuda"
     default = pm.bytes(B)
     assert default < 1_012_924_416
@@ -665,9 +667,14 @@ def test_cuda_estimate_follows_the_process_allocator_conf(monkeypatch, models):
     ev = _evidence(model36, [f"V{i}" for i in range(0, 36, 3) if i != 18], B)
     eng = TensorVariableElimination()
     eng._extract_factors(model36)
-    pm = eng._peak_model(model36, "V18", ev, B=B)
+    pm = eng._peak_model(model36, "V18", ev, B=B, order="min_fill_legacy")
     pm.device_type = "cuda"
     assert pm.bytes(B) >= 339_738_624
+    # The default order conditions the evidence out without fill and is far
+    # cheaper on this scattered-evidence case.
+    pm_new = eng._peak_model(model36, "V18", ev, B=B)
+    pm_new.device_type = "cuda"
+    assert pm_new.bytes(B) < pm.bytes(B)
     assert "roundup_power2_divisions:4" in _ve_memory.cuda_allocator_confs()
 
 

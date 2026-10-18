@@ -453,8 +453,7 @@ class CategoricalTableMechanism(Mechanism):
             parents_exp = parents_2d.unsqueeze(1).expand(-1, n, -1)  # [B, n, P]
             flat, _, _ = flatten_samples(parents_exp)
             row_idx = self._parent_to_row_idx(flat)  # [B*n]
-            logits_flat = self._logits[row_idx]  # [B*n, K]
-            idx = Categorical(logits=logits_flat).sample()  # [B*n]
+            idx = self._sample_rows(row_idx)  # [B*n]
             vals = to_device_dtype(self._class_values, idx.device, torch.float)
             out = vals[idx].reshape(b, n, 1)
             return out
@@ -462,6 +461,26 @@ class CategoricalTableMechanism(Mechanism):
         idx = Categorical(logits=logits.unsqueeze(1).expand(-1, n, -1).reshape(b * n, -1)).sample()
         vals = to_device_dtype(self._class_values, idx.device, torch.float)
         return vals[idx].reshape(b, n, 1)
+
+    def _sample_rows(self, row_idx: torch.Tensor) -> torch.Tensor:
+        """One class index per entry of ``row_idx``, drawn from that CPT row.
+
+        Inverse-CDF sampling on the normalised table: the ``[R, K]`` table is
+        normalised once (R parent rows, usually far fewer than particles),
+        then each particle needs one gather and one uniform draw.  The law is
+        exactly ``Categorical(logits=self._logits[row])``: class ``j`` is
+        drawn iff ``cdf[j-1] <= u < cdf[j]`` with ``u ~ U[0, 1)``, so a
+        zero-probability class (an empty interval) is never drawn, and the
+        cdf is divided by its last entry so it ends at exactly 1.  It replaces
+        a softmax + multinomial over the gathered ``[B*n, K]`` logits, which
+        dominated likelihood weighting on discrete networks.
+        """
+        probs = torch.softmax(self._logits.detach(), dim=-1)  # [R, K]
+        cdf = probs.cumsum(-1)
+        cdf = cdf / cdf[:, -1:]
+        rows = cdf[row_idx, :-1]  # [M, K-1]
+        u = torch.rand(row_idx.shape[0], 1, device=rows.device, dtype=rows.dtype)
+        return (u >= rows).sum(-1)
 
     def log_prob(
         self, x: torch.Tensor, parents: torch.Tensor | None

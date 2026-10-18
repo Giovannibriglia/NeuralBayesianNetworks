@@ -1,0 +1,2 @@
+[{"code": "master", "problem": "discrete_local_w5_n1000_deg2_k3_s0", "n": 1000, "total_s": 3.481546334005543, "ordering_s": 3.297304207997513}, {"code": "master", "problem": "discrete_local_w5_n2000_deg2_k3_s0", "n": 2000, "total_s": 5.904382332999376, "ordering_s": 5.636697039983119}]
+[{"code": "branch", "problem": "discrete_local_w5_n1000_deg2_k3_s0", "n": 1000, "total_s": 0.27040758400107734, "ordering_s": 0.09211716500431066}, {"code": "branch", "problem": "discrete_local_w5_n2000_deg2_k3_s0", "n": 2000, "total_s": 0.385669000002963, "ordering_s": 0.12853533200541278}]

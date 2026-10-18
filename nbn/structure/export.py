@@ -83,6 +83,7 @@ def export_factored_sets(
     max_rows: int = 1 << 22,
     overwrite: bool = False,
     parents: Mapping[str, Sequence[str]] | None = None,
+    extra_events: Mapping[str, Union[float, Tuple[float, str]]] | None = None,
 ) -> Path:
     """Write ``manifest.json`` + ``arrays.npz`` for a factored transition model.
 
@@ -127,6 +128,25 @@ def export_factored_sets(
         Optional ``node -> parent tuple`` for :class:`ProbabilitySet` values
         (see ``sets``); with a model as ``source`` it must name the DAG's
         parents, in any order.
+    extra_events:
+        Optional ``name -> delta`` (or ``name -> (delta, guarantee)``,
+        default guarantee ``"pac"``) failure probabilities spent *before* the
+        sets were built, added to the union bound of ``composition``.  Use it
+        when the exported family itself was chosen from data outside NBN
+        (e.g. a structure-learning test at level ``delta_s``, or a model
+        selected among several on the same rows).  Valid when "the selection
+        was right" means "the chosen family is one fixed family" (e.g. the
+        true parents): on that event the exported sets are those of a fixed
+        family, which fail with probability at most their own deltas even on
+        the same rows, so ``P(fail) <= delta_s + sum_i delta_i``.  If no
+        single family is the target, export the sets of every candidate
+        instead (a :class:`FactorSets`: a union over candidates; cf. the
+        confidence split over every candidate in Badings, *Robust
+        Verification of Stochastic Systems*, 2025, §9.5, proof of Cor. 9.15).  The PAC-IMDP literature fixes the
+        structure in advance or charges a structural error to the interval
+        events (Ashok et al. 2019, Thm 1); it has no separate selection
+        term.  (NBN's :func:`~nbn.structure.agreement_set` already spends its
+        test inside its own level and needs no extra event.)
 
     Returns
     -------
@@ -220,7 +240,12 @@ def export_factored_sets(
         if lower.shape != (n_expected, k):
             raise ValueError(f"The set of '{node}' has shape {tuple(lower.shape)}; its parents {f_parents} "
                              f"and {k} classes give {(n_expected, k)} (wrong set or wrong parent order).")
-        if ps.unseen.numel() == 0:                  # e.g. bootstrap sets: no unseen info
+        if ps.unseen.numel() == 0 and counts is not None:
+            # no unseen mask (e.g. a bootstrap set): rows without data are
+            # unseen whatever the set says (a refit gives them a narrow,
+            # prior-driven box that no data support)
+            unseen = (torch.as_tensor(counts).reshape(n_expected, -1).sum(-1) == 0).to(lower.device)
+        elif ps.unseen.numel() == 0:                # no mask and no counts: nothing known
             unseen = torch.zeros(n_expected, dtype=torch.bool, device=lower.device)
         elif ps.unseen.numel() == n_expected:
             unseen = ps.unseen.reshape(-1)
@@ -251,6 +276,18 @@ def export_factored_sets(
             record["row_index"] = key
         factors.append(record)
 
+    extra = {}
+    for name, d in (extra_events or {}).items():
+        d, g = (d if isinstance(d, (tuple, list)) else (d, "pac"))
+        d = float(d)
+        if not 0.0 <= d <= 1.0:
+            raise ValueError(f"extra_events['{name}'] = {d} is not a probability.")
+        if g not in ("pac", "pac_under_model", "bayesian", "asymptotic"):
+            raise ValueError(f"extra_events['{name}']: unknown guarantee {g!r}.")
+        if any(e == str(name) for e, _, _ in events):
+            raise ValueError(f"extra_events: '{name}' clashes with a factor or parameter id.")
+        events.append((str(name), d, g))
+        extra[str(name)] = d
     delta_total = float(sum(d for _, d, _ in events))
     guarantees = sorted({g for _, _, g in events})
     manifest = {
@@ -274,6 +311,7 @@ def export_factored_sets(
         "composition": {
             "rule": "union_bound",
             "events": [e for e, _, _ in events],
+            "extra_events": extra,
             "delta_total": delta_total,
             "level": max(0.0, 1.0 - delta_total),
             "guarantees": guarantees,
@@ -363,21 +401,39 @@ def joint_row_bounds(
     planning row uses, so its bounds are products of the factor bounds (all
     non-negative).  Returns ``lower``, ``upper`` with one axis per node (C
     order) and the node order.  Unseen factor rows contribute ``[0, 1]``
-    whatever their stored bounds (e.g. a prior-only Dirichlet row).  Works
-    with or without stored row maps.
+    whatever their stored bounds (e.g. a prior-only Dirichlet row).  Each
+    factor row is first tightened with the fact that it sums to one
+    (``p_k >= 1 - sum_{j != k} upper_j``, ``p_k <= 1 - sum_{j != k} lower_j``,
+    as :func:`nbn.uncertainty.tighten_box_to_simplex`), and the products are
+    rounded outward.  Works with or without stored row maps.
     """
     nodes = list(hypothesis)
     lower = np.ones(())
     upper = np.ones(())
+    eps = np.finfo(np.float64).eps
     for node in nodes:
         fid = hypothesis[node]
         r = export.factor_row(fid, row)
-        lo, hi = export.array(fid, "lower")[r], export.array(fid, "upper")[r]
+        lo = np.asarray(export.array(fid, "lower")[r], dtype=np.float64)
+        hi = np.asarray(export.array(fid, "upper")[r], dtype=np.float64)
         if bool(export.array(fid, "unseen")[r]):
             lo, hi = np.zeros_like(lo), np.ones_like(hi)
+        k = lo.shape[-1]
+        slack = k * eps                    # ``1 - sum`` rounds: keep the step outward
+        if lo.sum() > 1.0 + slack or hi.sum() < 1.0 - slack:
+            raise ValueError(f"joint_row_bounds: factor '{fid}' row {r} does not meet the simplex "
+                             f"(sum lower {lo.sum():.6g}, sum upper {hi.sum():.6g}).")
+        lo, hi = (np.clip(np.maximum(lo, 1.0 - (hi.sum() - hi) - slack), 0.0, 1.0),
+                  np.clip(np.minimum(hi, 1.0 - (lo.sum() - lo) + slack), 0.0, 1.0))
         lower = np.multiply.outer(lower, lo)
         upper = np.multiply.outer(upper, hi)
-    return lower, np.minimum(upper, 1.0), nodes
+    # a product of n factors carries a relative rounding error <= n u
+    n = max(len(nodes), 1)
+    tiny = np.finfo(np.float64).tiny     # below it products may have underflowed
+    lower = np.where(lower < tiny, 0.0, np.clip(lower * (1.0 - 2 * n * eps), 0.0, 1.0))
+    upper = np.clip(upper * (1.0 + 2 * n * eps) + n * float(np.finfo(np.float64).smallest_subnormal),
+                    0.0, 1.0)
+    return lower, upper, nodes
 
 
 # ---------------------------------------------------------------------------
@@ -493,7 +549,9 @@ def _param_record(pid: str, obj: NoiseParameterSet, arrays: Dict[str, np.ndarray
         "n_expressions": int(obj.expressions.shape[0]), "guarantee": obj.guarantee,
         "level": float(obj.level), "delta": float(1.0 - obj.level), "nodes": sorted(obj.index),
         "constraints": "q in the simplex and lower_e <= expressions[e] @ q <= upper_e for every e; "
-                       "table entry (r, k) of a tied node is expressions[index[r, k]] @ q",
+                       "table entry (r, k) of a tied node is expressions[index[r, k]] @ q, "
+                       "except for rows marked unseen in the factor: their location is a guess, "
+                       "so those rows are unconstrained (the whole simplex)",
     }
 
 

@@ -36,6 +36,7 @@ from nbn.mechanisms import (
     MDNMechanism,
     NeuralCategoricalMechanism,
     SmoothedEmpiricalCategoricalMechanism,
+    SparseCategoricalTableMechanism,
 )
 from tests.conftest import available_devices
 
@@ -70,6 +71,8 @@ def _flow(cls_name):
 _REGISTRY = {
     "CategoricalTableMechanism": lambda: (
         CategoricalTableMechanism(), *_disc(), {"parent_cards": [3], "n_classes": 2}),
+    "SparseCategoricalTableMechanism": lambda: (
+        SparseCategoricalTableMechanism(), *_disc(), {"parent_cards": [3], "n_classes": 2}),
     "SmoothedEmpiricalCategoricalMechanism": lambda: (
         SmoothedEmpiricalCategoricalMechanism(), *_disc(),
         {"parent_cards": [3], "n_classes": 2}),

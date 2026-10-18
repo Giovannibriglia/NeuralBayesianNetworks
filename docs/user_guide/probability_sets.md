@@ -318,7 +318,19 @@ lower, upper, nodes = joint_row_bounds(ex, h, row=5)   # bounds on P(s' | s, a) 
   counted in.
 - Turning factor sets into joint rows is the tool's job. A joint row is the
   product of its factor rows (multilinear in the factor parameters), and
-  `joint_row_bounds` gives the entry-wise box of that product.
+  `joint_row_bounds` gives the entry-wise box of that product. It first
+  tightens each factor row with the fact that the row sums to one, rounds the
+  products outward, and raises on a row whose bounds cannot sum to one.
+- Rows without data are marked `unseen` (the whole simplex). For a set that
+  has no mask but whose factor has `counts`, the export derives the mask from
+  the counts.
+- **A family chosen from the data.** If the exported family was itself
+  selected from data outside NBN (for example by a structure test at level
+  `delta_s`), pass `extra_events={"structure_test": delta_s}`: the event is
+  added to the union bound and the manifest's level drops by `delta_s`. This
+  is valid when "the selection was right" means "the chosen family is one
+  fixed family" (such as the true parents). Otherwise export the sets of every
+  candidate (a `FactorSets`), which pays for all of them.
 
 Worked example: {doc}`../examples/16_export_factored_sets`.
 
@@ -393,6 +405,68 @@ for a declared node, but a test that passes never certifies a node: there is
 no statistical test for confounding.
 
 Worked example: {doc}`../examples/18_confounded_rows`.
+
+## From sets to query answers: credal and PAC queries
+
+A probability set bounds each row of a table; a planner or an analyst often
+needs a bound on a *query*, such as `P(y | e)` or `P(y | do(x))`. The
+answer of the fitted model is a point and says nothing about learning error.
+`credal_query` bounds the query over **every** network whose rows lie in the
+sets, so with sets learned at level `1 - delta` the true answer is inside
+with probability at least `1 - delta`.
+
+```python
+import torch
+from nbn import NeuralBayesianNetwork, seed_all
+from nbn.uncertainty import credal_query, pac_query, pac_sets
+
+seed_all(0)
+n = 5000
+cloudy = torch.bernoulli(torch.full((n,), 0.5)).long()
+rain = torch.bernoulli(torch.where(cloudy == 1, 0.8, 0.2)).long()
+sprinkler = torch.bernoulli(torch.where(cloudy == 1, 0.1, 0.5)).long()
+wet = torch.bernoulli(torch.where((rain | sprinkler) == 1, 0.9, 0.05)).long()
+data = {"Cloudy": cloudy, "Rain": rain, "Sprinkler": sprinkler, "WetGrass": wet}
+disc = NeuralBayesianNetwork(
+    [("Cloudy", "Rain"), ("Cloudy", "Sprinkler"), ("Rain", "WetGrass"), ("Sprinkler", "WetGrass")],
+    dict.fromkeys(data, ("discrete", 2)), device="cpu",
+)
+disc.auto_mechanisms()
+disc.fit(data)
+
+# one query: sets for its ancestors only, at level 0.95
+q = pac_query(disc, data, "Rain", {"WetGrass": 1}, delta=0.05)
+print(q.lower, q.upper)   # [0.234, 0.623] and [0.377, 0.766]: P_true(Rain | WetGrass=1) is inside w.p. >= 0.95
+print(q.point)            # [0.301, 0.699]: the fitted model's answer, for comparison
+
+# many queries from the same sets: they hold together
+sets = pac_sets(disc, data, delta=0.05)          # delta split over every table entry
+a = credal_query(disc, sets, "Rain", {"WetGrass": 1})
+b = credal_query(disc, sets, "WetGrass", do={"Sprinkler": 1})
+```
+
+- `pac_sets` builds one set per node (`kind="interval"` or `"l1"`) and splits
+  `delta` over all table entries, so every query computed from the same sets
+  holds jointly. `pac_query` builds the sets for one query's ancestors only:
+  its `delta` is split over fewer entries, so its intervals are never wider.
+- The bounds are computed by variable elimination over the sets, children
+  before parents, with each row's worst case solved exactly (the ordering
+  algorithm of interval MDPs for interval rows, a closed form for L1 balls).
+  They are sound; they are not always tight, because a row may take different
+  values in different contexts (as in rectangular robust MDPs). In tests they
+  were within 1.07–1.40 times the range a local search reaches.
+- Rows with no data are the whole simplex. A set without an `unseen` mask
+  that is not a PAC set (asymptotic or Bayesian) triggers a warning.
+- The width shrinks like `1 / sqrt(N)` with the number of rows. The cost is
+  that of exact VE with a children-first order, times `2 (2K + 1)` for a
+  `K`-class target; `max_elements` caps the largest table.
+- The guarantee needs what the sets need: discrete variables, the right DAG
+  (or parent sets that contain the true parents), and the declared sampling
+  (`sampling="iid"` or `"trajectory"`).
+
+Compare with `certified_query` ({doc}`inference`): it bounds the sampling
+error of one fitted model; `credal_query` bounds the learning error. Worked
+example: {doc}`../examples/20_pac_answers_credal_queries`.
 
 ## How the guarantee is built
 

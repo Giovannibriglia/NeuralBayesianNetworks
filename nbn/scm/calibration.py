@@ -162,6 +162,47 @@ def _one_row_per_group(groups: torch.Tensor, generator: torch.Generator | None) 
     return order[first].sort().values
 
 
+def check_held_out(fit_ids: torch.Tensor | None, ids: torch.Tensor | None = None,
+                   groups: torch.Tensor | None = None, n_rows: int | None = None) -> None:
+    """Raise if a calibration row was also used to fit or select the mechanism.
+
+    Every calibration guarantee here (DKW / PIT bands, split conformal)
+    needs calibration rows that the fitted mechanism has not seen: reusing a
+    fit row makes its score optimistic and the level void.  Row *values*
+    cannot tell (discrete data repeat), so the check compares row ids:
+    ``fit_ids`` are the ids of the rows used for fitting or model selection
+    (e.g. the training and validation indices of ``select_mechanisms``, or
+    episode ids), ``ids`` the ids of the calibration rows, in the *same*
+    id space (global row ids, or episode ids on both sides: with trajectory
+    data the episodes must be disjoint too).  ``ids`` is required with
+    ``fit_ids`` (it is never taken from ``groups``, whose ids may live in
+    another space).  ``fit_ids=None`` skips the check (the default
+    everywhere: the caller vouches for the split).
+    """
+    if fit_ids is None:
+        return
+    cal = ids
+    if cal is None:
+        raise ValueError("fit_ids is given: pass the calibration rows' ids (ids=), in the same "
+                         "id space as fit_ids.")
+    cal = torch.as_tensor(cal).reshape(-1).cpu()
+    if n_rows is not None and cal.numel() != n_rows:
+        raise ValueError(f"ids has {cal.numel()} entries for {n_rows} calibration rows.")
+    fit = torch.as_tensor(fit_ids).reshape(-1).cpu()
+    if cal.is_floating_point() or fit.is_floating_point():
+        raise TypeError("fit_ids and ids must be integer row or episode ids.")
+    shared = torch.isin(cal, fit)
+    if bool(shared.any()):
+        ex = cal[shared].unique()[:5].tolist()
+        raise ValueError(
+            f"{int(shared.sum())} calibration rows (ids {ex}...) were also used to fit or select "
+            "the mechanism; the calibration guarantee needs held-out rows.")
+
+
+def _n_rows(data: Mapping[str, torch.Tensor], node: str) -> int:
+    return int(data[node].shape[0])
+
+
 def _check_bound(stored: str, mechanism) -> None:
     if stored != _fingerprint(mechanism):
         raise ValueError(
@@ -196,7 +237,8 @@ def pit_values(model, data: Mapping[str, torch.Tensor], node: str,
 class PITBandSet:
     """A uniform band on the calibration map ``G`` of one fitted continuous mechanism.
 
-    ``cdf_bounds`` returns ``[G_hat(F_hat(x | pa)) - eps, G_hat(F_hat(x | pa)) + eps]``.
+    ``cdf_bounds`` returns ``[G_hat(F_hat(x | pa)^-) - eps, G_hat(F_hat(x | pa)) + eps]``
+    (strict count for the lower end, see :meth:`bounds_from_cdf`).
     With probability ``>= level`` the band contains ``G`` everywhere; it bounds
     ``P(X <= x | pa)`` for every ``pa`` *if* the PIT is independent of the
     parents (see the module docstring).
@@ -216,9 +258,25 @@ class PITBandSet:
         return torch.where(torch.isnan(cdf_values), cdf_values, g)
 
     def bounds_from_cdf(self, cdf_values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Bounds on ``P(X <= x | pa)`` given ``F_hat(x | pa)`` (any shape)."""
-        g = self.calibrated(cdf_values)
-        return (g - self.epsilon).clamp(0.0, 1.0), (g + self.epsilon).clamp(0.0, 1.0)
+        """Bounds on ``P(X <= x | pa)`` given ``F_hat(x | pa)`` (any shape).
+
+        ``{W < F_hat(x)} ⊆ {X <= x} ⊆ {W <= F_hat(x)}`` for any non-decreasing
+        ``F_hat`` (also the randomized PIT of a discrete node), so the lower
+        end uses the *strict* empirical count and the upper end the
+        inclusive one; DKW bounds both limits at once.  (Using the inclusive
+        count for both ends was unsound where ``F_hat`` is flat, e.g. a
+        Gaussian CDF that rounds to 1 far in the tail, or a class with
+        ``p_hat`` ~ 0: the band then excluded the truth.)
+        """
+        pit = self.sorted_pit.to(cdf_values)
+        v = cdf_values.contiguous()
+        n = pit.numel()
+        g_strict = torch.searchsorted(pit, v, right=False).to(cdf_values.dtype) / n
+        g_incl = torch.searchsorted(pit, v, right=True).to(cdf_values.dtype) / n
+        nan = torch.isnan(cdf_values)
+        lo = torch.where(nan, cdf_values, (g_strict - self.epsilon).clamp(0.0, 1.0))
+        up = torch.where(nan, cdf_values, (g_incl + self.epsilon).clamp(0.0, 1.0))
+        return lo, up
 
     def cdf_bounds(self, mechanism, x: torch.Tensor, parents: torch.Tensor | None):
         """Bounds on ``P(X <= x | pa)`` for a batch of rows, ``[B]`` each."""
@@ -236,10 +294,17 @@ class PITBandSet:
 
 def pit_band_set(model, calibration_data: Mapping[str, torch.Tensor], node: str,
                  delta: float = 0.05, groups: torch.Tensor | None = None,
-                 generator: torch.Generator | None = None) -> PITBandSet:
-    """DKW–Massart band on the PIT of held-out ``calibration_data`` (not the fit data)."""
+                 generator: torch.Generator | None = None, *,
+                 fit_ids: torch.Tensor | None = None,
+                 ids: torch.Tensor | None = None) -> PITBandSet:
+    """DKW–Massart band on the PIT of held-out ``calibration_data`` (not the fit data).
+
+    ``fit_ids`` / ``ids``: optional row (or episode) ids of the fit and the
+    calibration rows; a shared id raises (:func:`check_held_out`).
+    """
     if not 0.0 < delta < 1.0:
         raise ValueError(f"delta must lie in (0, 1), got {delta}.")
+    check_held_out(fit_ids, ids, groups, _n_rows(calibration_data, node))
     pit = pit_values(model, calibration_data, node, groups, generator)
     n = pit.numel()
     if n == 0:
@@ -288,7 +353,9 @@ def conformal_intervals(model, calibration_data: Mapping[str, torch.Tensor], nod
                         alpha: float = 0.1,
                         method: Literal["cqr", "residual"] = "cqr",
                         groups: torch.Tensor | None = None,
-                        generator: torch.Generator | None = None) -> ConformalIntervals:
+                        generator: torch.Generator | None = None, *,
+                        fit_ids: torch.Tensor | None = None,
+                        ids: torch.Tensor | None = None) -> ConformalIntervals:
     """Calibrate intervals of level ``1 - alpha`` on held-out ``calibration_data``.
 
     Scores: ``max(q_lo - x, x - q_hi)`` for ``"cqr"`` (the mechanism's
@@ -301,6 +368,7 @@ def conformal_intervals(model, calibration_data: Mapping[str, torch.Tensor], nod
         raise ValueError(f"alpha must lie in (0, 1), got {alpha}.")
     if method not in ("cqr", "residual"):
         raise ValueError(f"method must be 'cqr' or 'residual', got {method!r}.")
+    check_held_out(fit_ids, ids, groups, _n_rows(calibration_data, node))
     mech = _mechanism(model, node)
     x, parents = _calibration_rows(model, calibration_data, node, groups, generator)
     with torch.no_grad():
@@ -392,7 +460,9 @@ class ConformalSets:
 def conformal_sets(model, calibration_data: Mapping[str, torch.Tensor], node: str,
                    alpha: float = 0.1, groups: torch.Tensor | None = None,
                    generator: torch.Generator | None = None,
-                   score: ConformalScore = "exclusive") -> ConformalSets:
+                   score: ConformalScore = "exclusive", *,
+                   fit_ids: torch.Tensor | None = None,
+                   ids: torch.Tensor | None = None) -> ConformalSets:
     """Calibrate prediction sets of level ``1 - alpha`` for a discrete node on held-out rows.
 
     Classes are ranked by decreasing ``p_hat``; the score of class ``y`` is the
@@ -426,6 +496,7 @@ def conformal_sets(model, calibration_data: Mapping[str, torch.Tensor], node: st
     if not 0.0 < alpha < 1.0:
         raise ValueError(f"alpha must lie in (0, 1), got {alpha}.")
     check_conformal_score(score)
+    check_held_out(fit_ids, ids, groups, _n_rows(calibration_data, node))
     mech = _mechanism(model, node, need=("probs", "class_index"))
     x, parents = _calibration_rows(model, calibration_data, node, groups, generator)
     with torch.no_grad():

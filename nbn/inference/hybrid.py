@@ -14,6 +14,15 @@ from nbn.inference.tensor_ve import MPSTensorLimitError, TensorVariableEliminati
 logger = logging.getLogger(__name__)
 
 
+def _batched(*dicts) -> bool:
+    """True when some evidence / do value holds more than one row."""
+    for d in dicts:
+        for v in (d or {}).values():
+            if torch.as_tensor(v).numel() > 1:
+                return True
+    return False
+
+
 class HybridRouter(InferenceEngine):
     """Auto-selecting inference engine.
 
@@ -24,7 +33,10 @@ class HybridRouter(InferenceEngine):
        row) when the joint table has at most ``max_joint_elements``
        entries, else LW's ``(weights, samples)`` particles (R6; a
        multi-target query used to crash VE, B6).
-    3. Induced treewidth > τ → LW (a cheap structural pre-filter).
+    3. Induced treewidth > τ → LW (a cheap structural pre-filter).  With
+       ``query_width_check=True``, a network over τ is given a second look:
+       the width of the query's own pruned plan decides (a query touching a
+       small part of a large dense network can still be answered exactly).
     4. Otherwise price the *actual* VE plan of this query: its estimated
        peak bytes for one row against the device memory budget (VE splits
        larger batches into rows-chunks that fit).  Fits → exact
@@ -59,6 +71,23 @@ class HybridRouter(InferenceEngine):
         this fraction of the stable memory capacity (leaving room for the
         rest of the process).  Called directly, VE itself rejects only plans
         beyond the whole capacity.
+    query_width_check: bool
+        When the whole network's width exceeds ``treewidth_threshold``, also
+        measure the width of the query's own pruned plan and route to exact
+        VE if that is within the threshold (and the plan fits memory).  More
+        answers become exact; some of them can be slow.  Default False keeps
+        the historical routing.
+    fallback: str
+        What answers a discrete query that exact VE cannot: ``"lw"`` (default,
+        plain likelihood weighting, no guarantee) or ``"certified"``
+        (``certified_query``: the same point estimate plus simultaneous
+        ``1 - certified_delta`` intervals in ``last_certificate``; one discrete
+        target, discrete evidence; other queries still use LW), or
+        ``"condition"``: answer a single-target discrete query that VE refuses
+        (memory, treewidth threshold, MPS tensor limits) *exactly* by
+        conditioning (``TensorVariableElimination(on_oom="condition")``):
+        slower, same answer.  If conditioning would need more than
+        ``condition_max_instantiations`` instantiations, LW answers.
     """
 
     # Bound on remembered "already warned" query shapes.
@@ -71,20 +100,40 @@ class HybridRouter(InferenceEngine):
         memory_budget: float | None = None,
         ve_host_fraction: float = 0.75,
         max_joint_elements: int = 1 << 20,
+        query_width_check: bool = False,
+        fallback: str = "lw",
+        certified_samples: int = 200_000,
+        certified_delta: float = 0.05,
+        condition_max_instantiations: int = 1_000_000,
     ) -> None:
+        if fallback not in ("lw", "certified", "condition"):
+            raise ValueError("fallback must be 'lw', 'certified' or 'condition'.")
+        self.fallback = fallback
+        self._cert = None
+        if fallback == "certified":
+            from nbn.inference.certified import CertifiedEngine
+            self._cert = CertifiedEngine(certified_samples, certified_delta)
         self.treewidth_threshold = treewidth_threshold
+        self.query_width_check = bool(query_width_check)
         self.max_joint_elements = int(max_joint_elements)
         self.ve_host_fraction = float(ve_host_fraction)
         self._ve = TensorVariableElimination(
             treewidth_threshold, memory_budget=memory_budget,
         )
+        self._cond = None
+        if fallback == "condition":
+            self._cond = TensorVariableElimination(
+                treewidth_threshold, memory_budget=memory_budget, on_oom="condition",
+                max_conditioning=condition_max_instantiations,
+            )
         self._lw = LikelihoodWeightingEngine(n_samples)
         self._last_engine: str | None = None
         self._warned: set = set()
 
     @property
     def last_engine(self) -> str | None:
-        """``"tensor_ve"`` or ``"likelihood_weighting"``: who answered last."""
+        """Who answered last: ``"tensor_ve"``, ``"conditioning"``, ``"certified"``
+        or ``"likelihood_weighting"``."""
         return self._last_engine
 
     def _warn_once(self, key, msg: str, *args) -> None:
@@ -94,6 +143,12 @@ class HybridRouter(InferenceEngine):
         change the caller must be able to see; repeating it per row of a
         sweep would drown the log.
         """
+        if getattr(self, "fallback", "lw") == "certified":
+            # The certified engine answers next when it applies; say so.
+            msg = msg.replace(
+                "with likelihood weighting (approximate).",
+                "with the certified fallback (intervals at the declared level; "
+                "plain likelihood weighting if the query cannot be certified).")
         if key in self._warned:
             logger.debug(msg, *args)
             return
@@ -103,6 +158,10 @@ class HybridRouter(InferenceEngine):
         logger.warning(msg, *args)
 
     def _use_lw(self, reason: str, *args, warn_key=None) -> InferenceEngine:
+        if self.__dict__.get("_cond") is not None:
+            # fallback="condition": conditioning is tried next and warns
+            # itself if it is refused, so this is not (yet) a downgrade.
+            warn_key = None
         if warn_key is None:
             logger.debug(reason, *args)
         else:
@@ -149,6 +208,21 @@ class HybridRouter(InferenceEngine):
             # bugs and must propagate, not silently downgrade the engine.
             tw = self.treewidth_threshold + 1
 
+        if (tw > self.treewidth_threshold and targets is not None
+                and getattr(self, "query_width_check", False)):
+            # The global width is a property of the whole network; the query
+            # only eliminates its own pruned scope.  Before giving up on
+            # exactness, measure that scope's plan width (cheap: the plan is
+            # cached and reused by VE if it is chosen).  The memory check
+            # below still prices the plan.
+            try:
+                qw = self._ve.plan_width(
+                    model, tuple(targets) if multi else targets[0],
+                    tuple(evidence or {}), tuple(do or {}), order=order)
+            except (nx.NetworkXError, ValueError, KeyError):
+                qw = None
+            if qw is not None and qw <= self.treewidth_threshold:
+                tw = qw
         if tw > self.treewidth_threshold:
             return self._use_lw(
                 "HybridRouter: induced treewidth %d > threshold %d for %s; "
@@ -203,6 +277,13 @@ class HybridRouter(InferenceEngine):
             model, targets, evidence, kwargs.get("do"),
             kwargs.get("order", "min_fill"),
         )
+        if engine is self._lw and self._certify(model, targets, evidence, kwargs, method):
+            engine = self._cert
+            self._last_engine = "certified"
+        if engine is self._lw and self._conditionable(model, targets):
+            out = self._try_condition(method, model, targets, evidence, kwargs)
+            if out is not None:
+                return out
         try:
             call_kwargs = kwargs
             if engine is self._ve:
@@ -213,7 +294,7 @@ class HybridRouter(InferenceEngine):
         except Exception as exc:
             # An MPS plan past the reliable tensor size is refused by VE; like
             # an OOM, LW can still answer it.
-            if engine is self._lw or not (
+            if engine is self._lw or engine is self.__dict__.get("_cert") or not (
                     is_oom_error(exc) or isinstance(exc, MPSTensorLimitError)):
                 raise  # LW itself failed, or not a resource limit at all.
             oom = type(exc).__name__
@@ -229,8 +310,65 @@ class HybridRouter(InferenceEngine):
             "HybridRouter: exact VE ran out of memory on %s (%s); answering "
             "with likelihood weighting (approximate).", device, oom,
         )
+        if self._certify(model, targets, evidence, kwargs, method):
+            self._last_engine = "certified"
+            return getattr(self._cert, method)(model, targets, evidence, **kwargs)
+        if self._conditionable(model, targets):
+            out = self._try_condition(method, model, targets, evidence, kwargs)
+            if out is not None:
+                return out
         self._last_engine = "likelihood_weighting"
         return getattr(self._lw, method)(model, targets, evidence, **kwargs)
+
+    def _conditionable(self, model, targets) -> bool:
+        cond = self.__dict__.get("_cond")
+        return (cond is not None and targets is not None and len(targets) == 1
+                and all(m.is_discrete for m in model.mechanisms.values()))
+
+    def _try_condition(self, method, model, targets, evidence, kwargs):
+        """Exact answer by conditioning, or ``None`` if it is refused."""
+        from nbn.inference.conditioning import ConditioningLimitError
+
+        try:
+            out = getattr(self._cond, method)(
+                model, targets, evidence,
+                **{**kwargs, "host_fraction": self.ve_host_fraction})
+        except ConditioningLimitError as exc:
+            self._warn_once(
+                ("cond",) + _shape_key(model, targets, evidence, kwargs.get("do")),
+                "HybridRouter: conditioning refused (%s); answering with the "
+                "fallback sampler (approximate).", str(exc)[:200])
+            return None
+        except Exception as exc:  # noqa: BLE001 - only allocator OOM is a fallback
+            if not (is_oom_error(exc) or isinstance(exc, MPSTensorLimitError)):
+                raise
+            self._warn_once(
+                ("cond-oom",) + _shape_key(model, targets, evidence, kwargs.get("do")),
+                "HybridRouter: conditioning ran out of memory (%s); answering with the "
+                "fallback sampler (approximate).", str(exc)[:200])
+            return None
+        self._last_engine = ("conditioning" if self._cond.last_conditioning is not None
+                             else "tensor_ve")
+        return out
+
+    def _certify(self, model, targets, evidence, kwargs, method="query") -> bool:
+        cert = getattr(self, "_cert", None)
+        if cert is None:
+            return False
+        if method == "query" and _batched(evidence, kwargs.get("do")):
+            # A certificate is per row; batched rows go through query_batch.
+            # Plain LW answers a batched ``query`` as before (no certificate).
+            return False
+        return cert.applicable(model, targets, evidence, kwargs.get("do"))
+
+    @property
+    def last_certificate(self):
+        """The interval answer of the last query if the certified engine
+        answered it (``None`` otherwise; after ``query_batch``, the last row)."""
+        cert = getattr(self, "_cert", None)
+        if cert is None or getattr(self, "_last_engine", None) != "certified":
+            return None
+        return cert.last_certificate
 
     def query(
         self,

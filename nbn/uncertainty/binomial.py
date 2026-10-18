@@ -79,17 +79,27 @@ def binomial_interval(
 
     Returns
     -------
-    (lower, upper), tensors shaped like ``trials`` in the accumulation dtype of
-    the device (float64 where available).
+    (lower, upper), tensors shaped like ``trials`` on its device, in the
+    accumulation dtype of the device (float64 where available).  The end
+    points are always computed in float64 and rounded outward, so a float32
+    result (MPS) never cuts into the interval.
     """
     if isinstance(delta, float):
         _check_delta(delta)
-    dtype = accum_dtype(trials.device)
-    k = successes.to(dtype)
-    n = trials.to(dtype)
+    out_dtype = accum_dtype(trials.device)
+    out_device = trials.device
+    # The end points are computed in float64 on the CPU whatever the device:
+    # in float32 (MPS) the KL of a small q cancels and the bisection could
+    # stop inside the true interval.  They are cast back outward below.
+    dtype = torch.float64
+    # two steps: an MPS tensor must reach the CPU before becoming float64
+    k = successes.detach().cpu().to(dtype)
+    n = trials.detach().cpu().to(dtype)
     if bool((k < 0).any()) or bool((k > n).any()):
         raise ValueError("successes must lie in [0, trials].")
-    delta_t = torch.as_tensor(delta, dtype=dtype, device=n.device).expand_as(n)
+    delta_t = torch.as_tensor(delta).detach().cpu().to(dtype).expand_as(n)
+    if bool(((delta_t <= 0) | (delta_t >= 1)).any()):
+        raise ValueError("delta must lie in (0, 1).")
 
     if method == "kl":
         lower, upper = _kl_interval(k, n, delta_t)
@@ -103,7 +113,22 @@ def binomial_interval(
     unseen = n == 0
     lower = torch.where(unseen, torch.zeros_like(lower), lower)
     upper = torch.where(unseen, torch.ones_like(upper), upper)
-    return lower, upper
+    # Outward by a few ulps: bisection and the end-point formulas are exact
+    # only to rounding, and at k = 0 or n = 1 the bound is attained, so an
+    # inward ulp is a real (tiny) coverage loss.
+    lower = (lower * (1.0 - 1e-12)).clamp(0.0, 1.0)
+    upper = (upper * (1.0 + 1e-12) + 1e-300).clamp(0.0, 1.0)
+    return _outward_cast(lower, upper, out_dtype, out_device)
+
+
+def _outward_cast(lower, upper, dtype, device):
+    """Cast float64 end points to ``dtype`` rounding lower down and upper up."""
+    if dtype == torch.float64:
+        return lower.to(device), upper.to(device)
+    lo, up = lower.to(dtype), upper.to(dtype)
+    lo = torch.where(lo.double() > lower, torch.nextafter(lo, torch.zeros_like(lo)), lo)
+    up = torch.where(up.double() < upper, torch.nextafter(up, torch.ones_like(up)), up)
+    return lo.clamp(0.0, 1.0).to(device), up.clamp(0.0, 1.0).to(device)
 
 
 # ---------------------------------------------------------------------------

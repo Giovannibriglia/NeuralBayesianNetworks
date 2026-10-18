@@ -1,0 +1,16 @@
+\begin{table}[H]\centering\small
+\caption{Q9. Share of nodes a sampling query must touch, and LW time (10 queries, before / after)}\label{tab:q9}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lrrrrrrr}\toprule
+nodes & touched, loose & touched, dense & touched, non-Gauss. & LW dense before (s) & LW dense after (s) & non-Gauss. before (s) & non-Gauss. after (s) \\ \midrule
+10 & 100\% & 90\% & 75\% & 0.499 & 0.22 & 0.0874 & 0.05 \\
+20 & 95\% & 72\% & 40\% & 1.33 & 0.379 & 0.19 & 0.0662 \\
+50 & 81\% & 48\% & 27\% & 4.02 & 0.629 & 0.509 & 0.128 \\
+100 & 76\% & 34\% & 19\% & 8.79 & 1.04 & 1.01 & 0.169 \\
+200 & 78\% & 26\% & 12\% & 17.8 & 1.55 & 2.03 & 0.218 \\
+500 & 70\% & 17\% & 8\% & timeout & 2.78 & 4.98 & 0.406 \\
+1000 & 59\% & 10\% & 5\% & timeout & 3.25 & 10.1 & 0.49 \\
+2000 & 52\% & 6\% & 3\% & timeout & 4.69 & 20.5 & 0.643 \\
+5000 & 24\% & 5\% & 3\% & timeout & 7.75 & timeout & 1.8 \\
+\bottomrule\end{tabular}}
+\end{table}

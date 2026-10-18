@@ -91,6 +91,8 @@ class TensorVariableElimination(InferenceEngine):
         memory_budget: float | None = None,
         memory_safety: float = 0.9,
         host_memory_fraction: float = 1.0,
+        on_oom: str = "raise",
+        max_conditioning: int = 1_000_000,
     ) -> None:
         """
         Parameters
@@ -109,7 +111,25 @@ class TensorVariableElimination(InferenceEngine):
             exceeds the whole pool — plans that could not have completed
             without swapping or being OOM-killed.  ``HybridRouter`` prices
             routes with a smaller fraction of its own.
+        on_oom:
+            What a single-target query does when its plan does not fit the
+            memory budget (or, on MPS, the tensor limits): ``"raise"``
+            (default, as before: ``OutOfMemoryError`` /
+            ``MPSTensorLimitError``) or ``"condition"``: answer it *exactly*
+            by conditioning on a small set of variables, one batched pass per
+            group of instantiations (``nbn.inference.conditioning``; more
+            time, same answer).  Joint (several-target) queries always raise.
+        max_conditioning:
+            With ``on_oom="condition"``: refuse (``ConditioningLimitError``,
+            an out-of-memory error) a query that would need more
+            instantiations.
         """
+        if on_oom not in ("raise", "condition"):
+            raise ValueError("on_oom must be 'raise' or 'condition'.")
+        self.on_oom = on_oom
+        self.max_conditioning = int(max_conditioning)
+        # The last answer obtained by conditioning (``ConditionedAnswer``), or None.
+        self.last_conditioning = None
         self.treewidth_threshold = treewidth_threshold
         self.memory_budget = memory_budget
         self.memory_safety = float(memory_safety)
@@ -367,6 +387,8 @@ class TensorVariableElimination(InferenceEngine):
             # do-nodes are clamped like evidence, so they are conditioned out
             # rather than eliminated — prune them from the moral graph too.
             evidence=list(evidence_keys) + list(do_keys),
+            cards={v: int(model.mechanisms[v].n_classes) for v in factor_scope
+                   if getattr(model.mechanisms[v], "n_classes", None)},
         )
         result = (elimination_order, relevant)
         return self._cache_put(self._plan_cache, key, model, result)
@@ -571,6 +593,39 @@ class TensorVariableElimination(InferenceEngine):
         head = device_headroom_bytes(device)
         return float("inf") if head is None else self.memory_safety * head
 
+    def plan_width(self, model, target, evidence_keys=(), do_keys=(), *,
+                   order: str = "min_fill") -> int | None:
+        """Induced width of this query's elimination plan (``None``: nothing to eliminate).
+
+        Measured on the query's own pruned factor scope after conditioning
+        (the graph the plan is computed on), not on the whole network: on a
+        large network with a high global width, a query whose relevant part
+        is small still has a small width [Koller & Friedman 2009, §9.3.2 and
+        §9.4, pp. 303–310].
+        """
+        from nbn.inference._elimination_order import _moral_adjacency, induced_width
+
+        do_set = set(do_keys)
+        ev = tuple(sorted(k for k in evidence_keys if k not in do_set))
+        do_t = tuple(sorted(do_set))
+        plan_target = _plan_target(target, set(ev) | do_set)
+        if plan_target is None:
+            return None
+        order_list, relevant = self._plan_with_relevant(model, plan_target, ev,
+                                                        do_keys=do_t, order=order)
+        graph = model.dag.networkx_graph
+        if do_t:
+            graph = graph.copy()
+            graph.remove_edges_from([(u, v) for (u, v) in list(graph.in_edges(do_t))])
+        scope = set(relevant)
+        for node in relevant:
+            scope.update(graph.predecessors(node))
+        adj = _moral_adjacency(graph.subgraph(scope))
+        for e in set(ev) | do_set:
+            for u in adj.pop(e, ()):
+                adj[u].discard(e)
+        return induced_width(adj, order_list)
+
     def fits_memory(self, model, target, evidence_keys=(), do_keys=(), *,
                     order: str = "min_fill",
                     host_fraction: float | None = None) -> bool:
@@ -637,6 +692,63 @@ class TensorVariableElimination(InferenceEngine):
         **kwargs,
     ) -> torch.Tensor:
         """Posterior for ``targets`` given one row of evidence / do-values.
+
+        With ``on_oom="condition"``, a single-target query that the memory
+        guard refuses is answered exactly by conditioning (see ``__init__``).
+        """
+        if self.on_oom == "raise" or len(targets) != 1:
+            return self._query_impl(model, targets, evidence, do=do, order=order,
+                                    host_fraction=host_fraction, **kwargs)
+        self.last_conditioning = None
+        if self._mps_rank_ok(model, targets[0], evidence, do, order):
+            try:
+                return self._query_impl(model, targets, evidence, do=do, order=order,
+                                        host_fraction=host_fraction, **kwargs)
+            except (OutOfMemoryError, MPSTensorLimitError):
+                pass
+        # Outside the except block, so the refused attempt's frames are freed.
+        return self._condition_row(model, targets[0], dict(evidence or {}),
+                                   dict(do or {}), order, host_fraction)
+
+    def _condition_row(self, model, target, evidence, do, order, host_fraction):
+        """One row answered exactly by ``conditioned_query``."""
+        from nbn.inference.conditioning import conditioned_query
+
+        budget = self.memory_budget_bytes(model.device, host_fraction=host_fraction)
+        ans = conditioned_query(model, target, evidence, do=do, memory_budget=budget,
+                                max_instantiations=self.max_conditioning, order=order,
+                                engine=self)
+        self.last_conditioning = ans
+        logger.info("TensorVariableElimination: answered P(%s | ...) by conditioning "
+                    "on %s (%d instantiations).", target, list(ans.cutset),
+                    ans.n_instantiations)
+        factors = self._cached_factors(model)
+        dtype = factors[target].log_values.dtype if factors else torch.float32
+        return ans.estimate.to(dtype=dtype).to(model.device)
+
+    def _mps_rank_ok(self, model, target, evidence, do, order) -> bool:
+        """MPS tensors have at most 16 dimensions: a plan whose largest product
+        (width + 1 variables, plus the batch axis) has more would crash."""
+        if torch.device(model.device).type != "mps":
+            return True
+        ev, dd = dict(evidence or {}), dict(do or {})
+        if target in ev or target in dd:
+            return True
+        w = self.plan_width(model, target, tuple(ev), tuple(dd), order=order)
+        return w is None or w + 2 <= 16
+
+    def _query_impl(
+        self,
+        model,
+        targets: List[str],
+        evidence: Dict[str, torch.Tensor] | None = None,
+        *,
+        do: Mapping[str, torch.Tensor] | None = None,
+        order: str = "min_fill",
+        host_fraction: float | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """``query`` without the conditioning fallback.
 
         ``host_fraction`` overrides ``host_memory_fraction`` for this call
         (``HybridRouter`` passes its ``ve_host_fraction``).
@@ -767,6 +879,46 @@ class TensorVariableElimination(InferenceEngine):
     # ------------------------------------------------------------------ #
 
     def query_batch(
+        self,
+        model,
+        targets: List[str],
+        evidence: Dict[str, torch.Tensor],
+        *,
+        do: Mapping[str, torch.Tensor] | None = None,
+        order: str = "min_fill",
+        host_fraction: float | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Vectorised batched VE (see ``_query_batch_impl``).
+
+        With ``on_oom="condition"``, a single-target batch that the memory
+        guard refuses is answered row by row by conditioning (exact).
+        """
+        if (self.on_oom == "raise" or len(targets) != 1
+                or kwargs.get("_guarded", False)):
+            return self._query_batch_impl(model, targets, evidence, do=do, order=order,
+                                          host_fraction=host_fraction, **kwargs)
+        self.last_conditioning = None
+        if self._mps_rank_ok(model, targets[0], evidence, do, order):
+            try:
+                return self._query_batch_impl(model, targets, evidence, do=do,
+                                              order=order, host_fraction=host_fraction,
+                                              **kwargs)
+            except (OutOfMemoryError, MPSTensorLimitError):
+                pass
+        cols = {k: torch.as_tensor(v).reshape(-1)
+                for k, v in {**dict(evidence or {}), **dict(do or {})}.items()}
+        B = max([1] + [t.shape[0] for t in cols.values()])
+
+        def row(keys, i):
+            return {k_: int(cols[k_][i if cols[k_].shape[0] > 1 else 0]) for k_ in keys}
+
+        return torch.stack([
+            self._condition_row(model, targets[0], row(evidence or {}, i),
+                                row(do or {}, i), order, host_fraction)
+            for i in range(B)])
+
+    def _query_batch_impl(
         self,
         model,
         targets: List[str],

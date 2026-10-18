@@ -34,9 +34,17 @@ force the CPU.
 | {doc}`13_discrete_counterfactuals` | Two declared couplings giving different counterfactuals from one kernel, sharp bounds over every compatible SCM, and calibration with a PIT band and conformal sets. |
 | {doc}`14_structure_uncertainty_hypothesis_sets` | Candidate parent sets per node with `HypothesisSet`: the factor cache, one set per factor with the budget split over factors, supersets against a missing parent, and `model_for`. |
 | {doc}`15_agreement_rule` | One valid set per row under structure uncertainty with `agreement_set`: refutation by one-variable extensions, coverage of never-visited joint values, a coverage check, a wrong bound, and the union over a given family (`refute=False`). |
-| {doc}`16_export_factored_sets` | Export factored sets with their sharing for robust / interval / parametric MDP tools, read them back, and rebuild the joint bounds of a never-visited row. |
-| {doc}`17_continuous_hypothesis_sets` | Continuous and mixed factors: batched candidate fits, one calibrated set per factor, marginal vs conditional coverage, and `model_for`. |
+| {doc}`16_export_factored_sets` | Export factored sets with their sharing for robust / interval / parametric MDP tools, read them back, rebuild the joint bounds of a never-visited row, and charge a family chosen from the data with `extra_events`. |
+| {doc}`17_continuous_hypothesis_sets` | Continuous and mixed factors: batched candidate fits, one calibrated set per factor, marginal vs conditional coverage, the opt-in held-out check (`fit_ids=` / `ids=`), and `model_for`. |
 | {doc}`18_confounded_rows` | Sound interval rows for a confounded action from several regimes: the gate, intersection vs IV linear program, a declared randomised trial, refutation, and coverage. |
+
+## Answers with guarantees, and scaling
+
+| Notebook | What it shows |
+|---|---|
+| {doc}`19_certified_and_budgeted_inference` | Certified sampling intervals checked against exact VE, the anytime mode, exact answers by conditioning under a shrinking memory budget, bounded conditioning, router fallbacks with `last_certificate`, and `query_many`. |
+| {doc}`20_pac_answers_credal_queries` | PAC answers from data with `pac_query` and `credal_query`: intervals that contain the true conditional and interventional answers, width against N, coverage over 50 datasets, joint answers from one set of tables, rows without data, and learning vs inference error. |
+| {doc}`21_scaling_fitting_and_portfolio` | Stacked fitting against one node at a time, sparse tables against dense ones, query widths and peak memory before running with `query_width_check`, and the per-node mechanism portfolio `select_mechanisms`. |
 
 ```{toctree}
 :hidden:
@@ -60,4 +68,7 @@ force the CPU.
 16_export_factored_sets
 17_continuous_hypothesis_sets
 18_confounded_rows
+19_certified_and_budgeted_inference
+20_pac_answers_credal_queries
+21_scaling_fitting_and_portfolio
 ```

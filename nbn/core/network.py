@@ -462,7 +462,10 @@ class NeuralBayesianNetwork(nn.Module):
         data:
             Dict of node_name → tensor ``[N, D]`` or ``[N]``. Auto-moved.
         method:
-            ``"local"`` (node-wise, default) or ``"joint"`` (shared optimiser).
+            ``"local"`` (node-wise, default), ``"stacked"`` (the same per-node
+            objectives trained together as one batched network per
+            architecture; see :func:`nbn.learning.fit`) or ``"joint"``
+            (shared optimiser).
         epochs, batch_size, lr:
             Training hyperparameters.
         weights:
