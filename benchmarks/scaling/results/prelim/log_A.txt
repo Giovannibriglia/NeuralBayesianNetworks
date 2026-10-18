@@ -84,8 +84,8 @@
 [discrete_infer] n=200    local nbn_lw@master  ok       t=17.564s rss=391MB E=417
 [discrete_infer] n=500    local nbn_ve@master  ok       t=0.605s rss=280MB E=979
 [discrete_infer] n=500    local nbn_lw@master  timeout  t=nans rss=536MB E=979  
-[discrete_infer] n=1000   local nbn_ve@master  error    t=nans rss=325MB E=2009  ImportError: cannot import name 'query_width_bounds' from 'nbn.inference._elimination_order' (/Users/giovanni/PycharmProjects/NeuralBayesianNetworks/nbn/inferen
-[discrete_infer] deg=1      er    nbn_ve@master  error    t=nans rss=224MB E=112  ImportError: cannot import name 'query_width_bounds' from 'nbn.inference._elimination_order' (/Users/giovanni/PycharmProjects/NeuralBayesianNetworks/nbn/inferen
+[discrete_infer] n=1000   local nbn_ve@master  error    t=nans rss=325MB E=2009  ImportError: cannot import name 'query_width_bounds' from 'nbn.inference._elimination_order' (NeuralBayesianNetworks/nbn/inferen
+[discrete_infer] deg=1      er    nbn_ve@master  error    t=nans rss=224MB E=112  ImportError: cannot import name 'query_width_bounds' from 'nbn.inference._elimination_order' (NeuralBayesianNetworks/nbn/inferen
 [discrete_infer] deg=1      er    nbn_lw@master  ok       t=8.050s rss=322MB E=112
 [discrete_infer] deg=1.5    er    nbn_lw@master  ok       t=9.631s rss=392MB E=156
 [discrete_infer] deg=2      er    nbn_lw@master  ok       t=8.748s rss=348MB E=211

@@ -208,7 +208,15 @@ for trajectory-valid probability sets ({doc}`probability_sets`).
 
 - The polytope of a shared noise law depends on fitted locations: fit them on
   a separate split for an exact `pac_under_model` statement.
-- `cdf_band_set` is valid given the location `g`; pass held-out data.
+- `cdf_band_set` is valid given the location `g`; pass held-out data. The
+  band records which mechanism it was built from, and
+  `band.check(mechanism)` (or `noise_cdf_bounds(t, mechanism=...)`) refuses a
+  refitted or edited one.
+- Calibration rows must not have been used to fit or select the mechanism.
+  `pit_band_set`, `conformal_intervals`, `conformal_sets`, `cdf_band_set`,
+  `calibrate_factors` and `HypothesisSet.calibrated_sets` accept
+  `fit_ids=` / `ids=` (row or episode ids, in one id space) and raise if they
+  overlap (`check_held_out`). The check is opt-in.
 - Continuous probability sets are band or bootstrap only; a finite-sample set
   for neural locations is open.
 - Hidden confounders are declared (`bidirected`) and tested for, not fitted;

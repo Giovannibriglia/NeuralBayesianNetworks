@@ -1,0 +1,710 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{fontspec}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,graphicx,float,xcolor,array,longtable}
+\usepackage[font=small,labelfont=bf]{caption}
+\usepackage{enumitem}
+\usepackage[most]{tcolorbox}
+\usepackage[colorlinks=true,linkcolor=blue!50!black,urlcolor=blue!50!black,citecolor=blue!50!black]{hyperref}
+\setlist{itemsep=2pt,topsep=3pt}
+\newcommand{\R}{..}
+\graphicspath{{\R/figures/}{\R/figures/explained/}{\R/figures/round2/}{\R/figures/round3/}{\R/figures/round4/}}
+\newcommand{\tabin}[1]{\IfFileExists{\R/report/#1.tex}{\input{\R/report/#1.tex}}{\textbf{[missing table #1]}}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\old}{\textbf{v0.25.0}}
+\newcommand{\new}{\textbf{dev}}
+\newtcolorbox{keybox}[1]{colback=blue!3,colframe=blue!40!black,fonttitle=\bfseries,title=#1,boxrule=0.5pt,arc=1pt}
+\newtcolorbox{warnbox}[1]{colback=orange!4,colframe=orange!60!black,fonttitle=\bfseries,title=#1,boxrule=0.5pt,arc=1pt}
+\setlength{\parindent}{0pt}\setlength{\parskip}{4pt}
+
+\title{\textbf{NBN: last release (v0.25.0) vs the new, unreleased version}\\[4pt]
+\large One report for speed, scale, budget, new capabilities and guarantees\\
+with pgmpy and Pyro as external baselines}
+\author{Alfredo (\code{alfredo\_claude}) for Giovanni Briglia}
+\date{18 October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{keybox}{What is compared (read this first)}
+\begin{tabular}{@{}p{0.2\linewidth}p{0.74\linewidth}@{}}
+\old & The \textbf{last release on PyPI}: \code{nbn 0.25.0}, tag \code{v0.25.0}, commit \code{61831fa} (14 Oct 2026). This is also \code{master} today.\\
+\new & The \textbf{new, not yet released} version: branch \code{feat/scaling-mechanisms}, commit \code{31732ab}. It has 42 commits on top of v0.25.0: 38 library files and about 4\,900 added lines in \code{nbn/}.\\
+pgmpy & \code{pgmpy 1.1.2}: discrete fitting (\code{MaximumLikelihoodEstimator}) and exact queries (\code{VariableElimination}).\\
+Pyro & \code{pyro-ppl 1.9.2}: the same neural models fitted with SVI, and importance sampling for queries.\\
+\end{tabular}
+
+\smallskip
+\textbf{Naming in the figures.} The figures and tables come from four benchmark rounds. In them,
+``\emph{master}'', ``\emph{NBN before}'' and ``\emph{before}'' all mean \old.
+``\emph{this branch}'', ``\emph{NBN branch}'' and ``\emph{after}'' mean \new.
+``\emph{first branch}'' (round 2 only) is the state after round 1.
+\end{keybox}
+
+\tableofcontents
+\newpage
+
+%=====================================================================
+\section{Summary}
+%=====================================================================
+
+\textbf{The short answer.} \new{} computes the same answers as \old, faster and on larger
+graphs. Every speed change keeps the answers: exactly for exact methods, and in distribution
+for samplers. Each change has an equivalence test.
+
+On top of that, \new{} adds new, opt-in ways to answer queries:
+\begin{itemize}
+\item exact answers when memory is short;
+\item sampling answers with a guaranteed interval;
+\item bounds that cover learning error from data (PAC);
+\item parallel queries;
+\item automatic choice of mechanism per node.
+\end{itemize}
+A review of all stated guarantees found real bugs, several of them already present in \old.
+All are fixed in \new.
+
+\subsection{Headline numbers}
+Unless stated otherwise, every run had 1 CPU thread, 4\,GB of memory and 30\,s on an Apple M5.
+Speed-ups compare times on the same problem.
+
+\begin{table}[H]\centering\small
+\caption{Headline comparison. ``$\times$'' is the speed-up of \new{} over the other column on the same problem.}\label{tab:headline}
+\resizebox{\linewidth}{!}{%
+\renewcommand{\arraystretch}{1.18}
+\begin{tabular}{>{\raggedright\arraybackslash}p{0.25\linewidth}>{\raggedright\arraybackslash}p{0.2\linewidth}>{\raggedright\arraybackslash}p{0.2\linewidth}>{\raggedright\arraybackslash}p{0.2\linewidth}>{\raggedright\arraybackslash}p{0.17\linewidth}}\toprule
+task & \new & \old & pgmpy / Pyro & answers \\ \midrule
+Discrete fit, 5\,000 nodes & 1.48\,s & same code (not changed) & pgmpy 3.95\,s (2.7$\times$) & identical tables \\
+Discrete fit, 14 parents per node & 0.05\,s, 0.32\,GB (sparse table, new) & 1.3\,s, 2.6\,GB (OOM at 16 parents) & pgmpy: timeout at 13 parents & identical tables \\
+Exact queries, sparse graph, 1\,000 / 2\,000 nodes (10 queries) & 0.071 / 0.186\,s & 3.66 / 6.08\,s (51$\times$ / 33$\times$) & pgmpy 1.36\,s at 5\,000 (dev 0.17\,s, 8$\times$) & agree to $1.9\cdot10^{-7}$ \\
+Exact queries, dense graph, 200 nodes & 90\% answered, rest refused cleanly & about the same share, slower & pgmpy: out of memory & exact \\
+Sampling queries (LW), dense, 200 nodes & 1.55\,s & 17.8\,s (11.5$\times$) & --- & same estimator \\
+Largest dense graph for LW within budget & 5\,000 nodes & 200 nodes & --- & \\
+Certified queries (interval, 95\%) & new: 528/528 intervals cover the exact answer; 5\,000 nodes & not available & not available & guaranteed \\
+S4 per-factor sets, 5\,000 nodes & 1.04\,s & 6.27\,s (6.0$\times$) & --- & bit-identical \\
+Non-Gaussian (MDN) fit, 200 nodes & 5.62\,s (stacked) & 19\,s (3.4$\times$) & Pyro SVI $\approx$27\,s (4.9$\times$) & same fit quality \\
+Non-Gaussian fit on the GPU (MPS) & 1\,000 nodes & 20 nodes & Pyro: 10 nodes & same \\
+Non-Gaussian queries, 2\,000 nodes & 0.64\,s & 20.5\,s (32$\times$) & Pyro vectorised 23\,s; OOM at 5\,000 & same accuracy \\
+Neural categorical fit, 500 nodes & 5.18\,s & 11.2\,s (2.2$\times$) & Pyro SVI 23.7\,s (4.6$\times$) & same log-lik. \\
+FlexCode fit, 200 nodes & 4.25\,s & 13.8\,s (3.3$\times$) & --- & same log-lik. \\
+Flow fit, 50 nodes & 3.96\,s & 9.52\,s (2.4$\times$) & --- & same log-lik. \\
+FlexCode LW queries, 50 nodes & --- & --- (27$\times$) & --- & same \\
+Amortized IS, 1\,000 nodes & --- & --- (6.6$\times$) & --- & same estimator \\
+Amortized VI step, 500 nodes & 14\,s & 24.9\,s (1.7$\times$; only dev finishes 1\,000) & --- & same loss \\ \bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.85\linewidth]{01_overview_frontier.pdf}
+\caption{Largest graph each method handles within 1 thread, 4\,GB and 30\,s. Dark circles:
+\new; light squares: \old; diamonds: pgmpy (discrete) or Pyro (continuous). 5\,000 is the largest
+size tested.}
+\end{figure}
+
+\subsection{What is new in \new{} (nothing of this exists in \old)}
+\begin{table}[H]\centering\small
+\caption{New capabilities. All are opt-in: code written for \old{} does not call them.}
+\resizebox{\linewidth}{!}{%
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{>{\raggedright\arraybackslash}p{0.3\linewidth}>{\raggedright\arraybackslash}p{0.33\linewidth}>{\raggedright\arraybackslash}p{0.33\linewidth}}\toprule
+capability & how to call it & measured result \\ \midrule
+Certified sampling answers & \code{certified\_query}, \code{CertifiedEngine}, \code{HybridRouter(}\allowbreak\code{fallback="certified")} & 95\% intervals; 528/528 and 584/584 covered the exact answer \\
+Exact answers when memory is short (conditioning) & \code{TensorVariable-}\allowbreak\code{Elimination(}\allowbreak\code{on\_oom="condition")}, \code{HybridRouter(}\allowbreak\code{fallback="condition")}, \code{conditioned\_query} & at 1\,GB, degree-3 graphs: plain VE answers 6/10 queries; conditioning answers 8/10 (1 thread), 9 (20 threads), 10 (CUDA) and 9 (MPS, where plain VE answered 0/10)\\
+Anytime certified sampling & \code{certified\_query(}\allowbreak\code{time\_budget\_s=,}\allowbreak\code{ target\_width=)}, \code{collapse="auto"} & width falls like $1/\sqrt{t}$; GPU reaches a given width 4--16$\times$ sooner \\
+Bounded conditioning (sound with probability 1) & \code{conditioned\_query(}\allowbreak\code{time\_budget\_s= /}\allowbreak\code{ enumerate\_limit=)} & always sound, but wide on these networks (honest negative result) \\
+PAC answers from data (learning error included) & \code{credal\_query}, \code{pac\_sets}, \code{pac\_query} & 100/100 covered at level 0.9; width 0.81 $\to$ 0.31 $\to$ 0.097 for $N=10^3\to10^5$ rows \\
+Parallel independent queries & \code{query\_many} & 2.1--2.3$\times$ with 4--8 workers on CPU \\
+Mechanism portfolio per node & \code{select\_mechanisms} & 11 candidates: 6.7\,s vs 25.2\,s to train all, picks within 0.03 nats of the best \\
+Sparse tables & \code{SparseCategoricalTableMechanism} & memory $O(N)$, not $O(K^{p+1})$; identical answers \\
+Width diagnostics & \code{query\_width\_bounds}, \code{minor\_min\_width}, \code{plan\_width}, \code{HybridRouter(}\allowbreak\code{query\_width\_check=True)} & predicts which exact queries fit \\ \bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{warnbox}{Guarantee bugs found in \old{} (all fixed in \new)}
+A review of every stated bound found these problems in the released code (details in §\ref{sec:guar}):
+\begin{itemize}
+\item \textbf{Counts on MPS} stopped growing at $2^{24}$ (float32), so a PAC set could exclude the truth with certainty. \emph{Serious.}
+\item The \textbf{PIT band} had a wrong lower end where the fitted CDF is flat. It missed the truth in 100\% of replicates. \emph{Serious.}
+\item \textbf{KL intervals on MPS} undercovered at small counts (float32 rounding).
+\item \textbf{Counterfactual bounds in float32} returned a lower end of 0.62 where the correct value is 0.083.
+\item The \textbf{IV linear program} could call a valid model ``infeasible'' and refute it wrongly.
+\item The \textbf{noise polytope from trajectories} used a union bound that depended on the data, which voids the proof.
+\item The \textbf{LP end points} (IV rows, sensitivity rows, noise polytope) used a fixed slack, not a proven bound.
+\item Exported \textbf{joint row bounds} did not use the fact that each row sums to one.
+\end{itemize}
+Users of \old{} who rely on these bounds, especially on Apple GPUs, should upgrade once \new{} is released.
+\end{warnbox}
+
+%=====================================================================
+\section{Set-up}
+%=====================================================================
+
+\paragraph{Machines.}
+\begin{itemize}
+\item \textbf{Mac}: Apple M5 (4 performance and 6 efficiency cores), 32\,GB of memory, Apple GPU (MPS), torch 2.14.1.
+\item \textbf{Server}: 20 CPU cores, 125\,GB of memory, NVIDIA TITAN X (Pascal, 12\,GB), torch 2.7.1+cu126.
+\end{itemize}
+Rounds 1--3 ran on the Mac. Round 4 ran its CPU and CUDA configurations on the server and its MPS configuration on the Mac.
+
+\paragraph{Budget.} The reference budget is \textbf{1 CPU thread, 4\,GB and 30\,s}, with each measurement in a fresh process:
+\begin{itemize}
+\item torch and BLAS are pinned to 1 thread;
+\item a memory watchdog kills the run at 4\,GB (``oom'');
+\item a timer stops the measured part at 30\,s (``timeout'').
+\end{itemize}
+Imports and data loading are not timed. Exact inference is told its memory budget, so it refuses a query it cannot fit instead of crashing.
+
+Rounds 3--4 also vary the budget:
+\begin{itemize}
+\item 1--20 CPU threads;
+\item GPU (MPS or CUDA);
+\item 1--16\,GB of memory;
+\item 0.25--64\,s per query.
+\end{itemize}
+
+\paragraph{Graphs.} Random DAGs in a fixed topological order:
+\begin{center}\small\resizebox{0.95\linewidth}{!}{\begin{tabular}{lll}\toprule
+family & parents of node $j$ & what it stresses \\ \midrule
+dense (Erdős--Rényi) & $\min(j,8,\mathrm{Poisson}(d))$ among all earlier nodes & size and complexity: tree-width grows with $n$\\
+sparse (``loose'', window 5) & same count, among the 5 previous nodes & size only: tree-width $\le 5$\\
+fixed in-degree & exactly $\min(j,d)$ earlier nodes & table size $K^{d+1}$\\ \bottomrule
+\end{tabular}}\end{center}
+
+\paragraph{Sizes.} Graphs have $n\in\{10,\dots,5000\}$ nodes at mean in-degree 2. Edge sweeps use mean in-degree 1--8 at fixed $n$.
+
+\paragraph{Data and truth.}
+\begin{itemize}
+\item \textbf{Discrete networks}: $K=3$ values per variable, random logits drawn from $\mathcal N(0,1)$.
+\item \textbf{Continuous networks}: non-Gaussian; each node is a 3-component Gaussian mixture with skewed offsets.
+\item \textbf{Data}: 10\,000 training rows and 2\,000 test rows.
+\end{itemize}
+
+\paragraph{Queries.}
+\begin{itemize}
+\item \textbf{Discrete}: $P(Y\mid 5$ observed nodes$)$, 10 queries per graph, 3 seeds.
+\item \textbf{Continuous}: $P(Y>\text{median}\mid 3$ observed nodes in $Y$'s Markov blanket$)$.
+\end{itemize}
+
+\paragraph{Fairness of the baselines.}
+\begin{itemize}
+\item \textbf{pgmpy} fits the same maximum-likelihood tables (identical checksums) and runs exact variable elimination with its default order. Its \code{MinFill} order ran out of memory at 100 nodes.
+\item \textbf{Pyro} fits the same model class for the same number of Adam steps; with no latent variables, SVI is maximum likelihood. Pyro answers queries with the same estimator, importance sampling from the prior, in two versions: a vectorised \code{plate} and the idiomatic \code{pyro.infer.Importance}.
+\item pgmpy has no neural, kNN or flow mechanisms and no amortized engines, so it is a baseline only for discrete tables.
+\end{itemize}
+
+\paragraph{When the numbers were measured.}
+\begin{itemize}
+\item Each round was measured at its own commit.
+\item The later commits (the guarantee fixes, \code{b435236}--\code{31732ab}) change correctness checks and add opt-in features, not the benchmarked fast paths. They were checked by the test suites and the device smoke test, not re-benchmarked.
+\item Some Mac timings in round 3 overlapped with another job. Those rows were re-run with an idle check, so the remaining Mac timings are conservative.
+\end{itemize}
+
+%=====================================================================
+\section{Part A --- Same answers, faster: v0.25.0 vs dev vs pgmpy/Pyro}
+%=====================================================================
+
+\subsection{What was changed, and why the answers stay the same}
+\begin{table}[H]\centering\small
+\caption{Speed and memory changes (rounds 1 and 2). Each one has an equivalence test.}
+\resizebox{\linewidth}{!}{%
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{>{\raggedright\arraybackslash}p{0.3\linewidth}>{\raggedright\arraybackslash}p{0.66\linewidth}}\toprule
+change & why the answers do not change \\ \midrule
+Incremental greedy min-fill (elimination order) & gives the same order as the old loop (tested on 500 random graphs); only the bookkeeping is faster \\
+Evidence removed from the ordering graph; the cheaper of the old and new orders is kept & the order changes the cost, never the answer; the result is never costlier \\
+Incremental \code{DAG.induced\_width} & same value and same tie-break (300 random graphs) \\
+LW samples only the ancestors of target, evidence and do-nodes & other (``barren'') nodes cannot change weights or targets (K\&F Ex.~3.8) \\
+Inverse-CDF categorical sampling; particles in passes & exactly the same law; particles are i.i.d. \\
+Stacked fitting (MDN, neural categorical, FlexCode, flows) & the likelihood splits per node (K\&F Prop.~17.1); per-node objective, Adam, clipping and early stopping are unchanged; with full batches it equals the old path to $2\cdot10^{-6}$ \\
+Sparse table mechanism (new, opt-in) & the dense MLE table is uniform on rows without data; same log-probabilities, tables and sampling \\
+Batched \code{interval\_sets} & bit-identical to per-node \code{interval\_set} \\
+kNN: exact k-d tree, defined tie-break, repeated rows searched once & same neighbour sets on all backends; \textbf{note:} ties now go to the lowest index (see §\ref{sec:changes}) \\
+Amortized IS: barren-node pruning & same target, asymptotic variance not higher \\
+Amortized VI: batched ELBO for all-table networks & the same sums, reordered (K\&F Thm~11.2) \\
+FlexCode grid density as one matrix product & same values to $3\cdot10^{-6}$ \\ \bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.78\linewidth]{02_what_each_change_bought.pdf}
+\caption{Before (\old) / after (\new) factor of each round-1 change, at a representative size.}
+\end{figure}
+\tabin{tables/q2}
+
+\subsection{Discrete fitting (vs pgmpy)}
+\textbf{Question.} Does fitting tables scale with nodes, edges and parents?
+
+\textbf{Answer.} Yes. The answers are identical to pgmpy's (same tables and the same error to the truth):
+\begin{itemize}
+\item at 5\,000 nodes, NBN takes 1.48\,s and pgmpy 3.95\,s;
+\item as edges grow, pgmpy slows 8$\times$ while NBN stays near 0.1\,s;
+\item with many parents, the dense table runs out of memory at 16 parents, while the new sparse table stays at 0.05\,s and 0.32\,GB up to 20 parents.
+\end{itemize}
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.82\linewidth]{discrete_fit.pdf}
+\includegraphics[width=0.95\linewidth]{discrete_fit_indeg.pdf}
+\caption{Discrete fit vs nodes and edges (top) and vs parents per node (bottom).}
+\end{figure}
+\textbf{Limit.} With many parents the problem is statistical, not computational. With 20
+parents almost every parent combination is seen only once, and the error of the fitted table
+grows 25$\times$ (K\&F Cor.~17.3). Fast fitting does not make the estimate good.
+
+\subsection{Discrete queries (vs pgmpy)}
+\textbf{Question.} Do exact and sampling queries scale?
+
+\textbf{Answer.} Yes for size, and only partly for density.
+\begin{itemize}
+\item NBN and pgmpy agree to $1.9\cdot10^{-7}$ on 450 exact queries.
+\item \textbf{Sparse graphs}: exact queries reach 5\,000 nodes. For 10 queries, \new{} takes 0.17\,s and pgmpy 1.36\,s. At 1\,000 and 2\,000 nodes, \new{} is 51$\times$ and 33$\times$ faster than \old. In \old, 95\% of the time went into choosing the elimination order.
+\item \textbf{Dense graphs}: every exact method stops early:
+  \begin{itemize}
+  \item pgmpy runs out of memory at 200 nodes;
+  \item \new{} answers 90\% of the queries at 200 nodes, 47\% at 500 and about 25\% at 2\,000--5\,000, and refuses the rest within the budget;
+  \item \old{} can answer about the same queries, only more slowly.
+  \end{itemize}
+\item \textbf{Sampling (LW)}: on dense graphs \new{} reaches 5\,000 nodes; \old{} stops at 200.
+\end{itemize}
+\begin{figure}[H]\centering
+\includegraphics[width=\linewidth]{discrete_infer.pdf}
+\caption{Discrete queries: time for 10 queries vs nodes and edges, and the share answered exactly on dense graphs.}
+\end{figure}
+
+\textbf{Why dense graphs stop.} The cost of exact inference grows exponentially in the
+tree-width (K\&F Thm~9.6), and finding the best elimination order is NP-hard (Thm~9.7). This is
+a limit of the problem, not of the implementation.
+\tabin{tables/q4er}
+
+\subsection{Certified sampling answers (new in dev)}
+\textbf{What it is.} \code{certified\_query} returns an interval $[\ell_y,u_y]$ for every value
+$y$. All intervals hold together with probability at least $1-\delta$. They are built from
+Hoeffding (KL form) and empirical-Bernstein bounds on unnormalised likelihood weighting
+(Appendix~\ref{app:cert}). Plain LW gives only a point estimate and an effective sample size,
+which is a heuristic.
+
+\textbf{Results.}
+\begin{itemize}
+\item 528/528 intervals covered the exact answer;
+\item the median width is 0.033;
+\item it reaches 5\,000 dense nodes at 1.5\,s per query.
+\end{itemize}
+\begin{figure}[H]\centering
+\includegraphics[width=0.66\linewidth]{05_certified_answers.pdf}
+\caption{Ten certified answers against the exact value.}
+\end{figure}
+\tabin{tables/q5}
+
+\subsection{S4 per-factor sets}
+Batched \code{interval\_sets} takes 1.04\,s for 5\,000 nodes, against 6.27\,s per node in \old,
+with bit-identical results. Closed-form L1 balls take 0.43\,s. pgmpy and Pyro have no equivalent.
+
+\subsection{Non-Gaussian fitting (vs Pyro)}
+\textbf{Question.} Does neural fitting scale?
+
+\textbf{Answer.} Yes, linearly, with a 3--5$\times$ smaller constant.
+\begin{itemize}
+\item \textbf{Same work for everyone}: all methods fit the same model with the same Adam steps and reach the same quality (log-likelihood gap to the truth $\approx0.03$ nats per node).
+\item \textbf{One CPU thread}: stacked fitting in \new{} costs about 30\,ms per node, against 95\,ms for \old{} and 130\,ms for Pyro.
+\item \textbf{Apple GPU}: \new{} fits 1\,000 nodes in 15\,s. \old{} manages only 20 nodes and Pyro 10, because each node launches its own small GPU kernels.
+\end{itemize}
+\begin{figure}[H]\centering
+\includegraphics[width=\linewidth]{cont_fit.pdf}
+\caption{Non-Gaussian (MDN) fit: time vs nodes and edges, and fit quality.}
+\end{figure}
+\tabin{tables/q6}
+
+The same stacking was then applied to the other neural mechanisms (round 2). Pyro has the same model only for the neural categorical:
+\begin{figure}[H]\centering
+\includegraphics[width=\linewidth]{r2_1_neural_fits.pdf}
+\caption{Neural categorical, FlexCode and flow fitting time vs nodes (10 epochs).}
+\end{figure}
+\tabin{tables_r2/r2fit}
+
+\subsection{Non-Gaussian queries (vs Pyro)}
+For 10 queries with 10k particles:
+
+\begin{center}\small
+\begin{tabular}{lll}\toprule
+method & 2\,000 nodes & 5\,000 nodes \\ \midrule
+\new{} LW & 0.64\,s & 1.8\,s \\
+\old{} LW & 20.5\,s & timeout \\
+Pyro, vectorised & 23\,s & out of memory \\
+Pyro, \code{pyro.infer.Importance} & \multicolumn{2}{l}{times out already at 10 nodes} \\ \bottomrule
+\end{tabular}
+\end{center}
+
+All use the same estimator and have the same accuracy against a reference with 4 million particles:
+\begin{itemize}
+\item median error 0.005 for NBN and 0.004 for Pyro;
+\item worst error 0.076, when the effective sample size drops to about 0.5\%.
+\end{itemize}
+Continuous evidence has unbounded densities, so no certified interval exists here.
+\begin{figure}[H]\centering
+\includegraphics[width=0.82\linewidth]{cont_infer.pdf}
+\caption{Non-Gaussian queries vs nodes and edges.}
+\end{figure}
+
+\subsection{Other mechanisms and engines (round 2, vs v0.25.0)}
+\begin{figure}[H]\centering
+\includegraphics[width=0.8\linewidth]{r2_0_summary.pdf}
+\caption{Speed-ups of \new{} over \old{} (``master'') and over the round-1 state (``first branch'').}
+\end{figure}
+\tabin{tables_r2/r2sum}
+Amortized IS draws different random numbers after pruning, so single runs differ by Monte Carlo noise. Over 6 seeds at 1\,000 nodes the errors agree:
+\begin{itemize}
+\item \new: $0.0099\pm0.0026$;
+\item \old: $0.0087\pm0.0012$.
+\end{itemize}
+The difference is below one standard error, and the effective sample size is the same.
+
+%=====================================================================
+\section{Part B --- Does a larger budget buy a better answer?}
+%=====================================================================
+\textbf{Question.} With more threads, a GPU, more memory or more time, does NBN do better?
+
+\textbf{Answer.} It depends on the method, as theory predicts:
+\begin{itemize}
+\item \textbf{Sampling, fitting and amortized methods}: yes. A 4$\times$ budget moves the largest graph by 2--10$\times$.
+\item \textbf{Exact VE}: no, without the new options. Its limit is the elimination width, and 4$\times$ the memory adds only $\log_3 4\approx1.26$ to it: measured, 16 $\to$ 17.
+\end{itemize}
+
+\subsection{Threads}
+\begin{figure}[H]\centering
+\includegraphics[width=\linewidth]{r3_1_threads_speedup.pdf}
+\caption{Speed-up from 1 to 8 CPU threads.}
+\end{figure}
+Threads help where the work is a few large tensor operations. \new{} gains from threads where \old{} got \emph{slower}:
+\begin{center}\small
+\begin{tabular}{lll}\toprule
+method & \new, 1 $\to$ 8 threads & \old, 1 $\to$ 8 threads \\ \midrule
+Amortized VI & 2.68$\times$ faster & 0.69$\times$ (slower) \\
+Neural categorical fit & 1.39$\times$ & 0.54$\times$ \\
+MDN fit & 1.47$\times$ & 0.81$\times$ \\ \bottomrule
+\end{tabular}
+\end{center}
+pgmpy and Pyro do not use extra threads (0.8--1.0$\times$).
+\tabin{tables_r3/r3threads}
+
+\subsection{GPU}
+\begin{figure}[H]\centering
+\includegraphics[width=\linewidth]{r3_3_gpu.pdf}
+\caption{GPU (Apple MPS) vs CPU.}
+\end{figure}
+\textbf{Where the GPU helps:} batched neural work. Amortized VI is 3.6$\times$ faster, certified queries 3.2$\times$, FlexCode LW 2.7$\times$.
+
+\textbf{Where it hurts:} small or loop-bound work. MLE counting runs at 0.13$\times$ and amortized IS at 0.32$\times$ the CPU speed. Keep these on the CPU.
+
+Pyro SVI timed out on MPS.
+\tabin{tables_r3/r3gpu}
+
+\subsection{Frontier and exact-VE width}
+\begin{figure}[H]\centering
+\includegraphics[width=\linewidth]{r3_4_frontier.pdf}
+\caption{Largest graph finished: reference budget vs large budget (8 threads, 16\,GB, 120\,s).}
+\end{figure}
+\tabin{tables_r3/r3frontier}
+\tabin{tables_r3/r3vewidth}
+
+%=====================================================================
+\section{Part C --- New opt-in capabilities in dev}
+%=====================================================================
+None of these exist in \old. Defaults are unchanged:
+\begin{itemize}
+\item plain VE still raises \code{OutOfMemoryError} when a query does not fit;
+\item the default \code{certified\_query} path gives bit-identical results to its first version.
+\end{itemize}
+
+\subsection{Conditioning: exact answers when memory is short}
+When VE does not fit in memory, NBN can fix a small set $C$ of variables (a cutset), run exact
+VE for each assignment of $C$, and add the results. All assignments run as rows of one batched
+computation, so workers divide the time. The answers are exact: all 40 conditioned answers with
+a VE reference match it to $1.7\cdot10^{-7}$.
+
+\begin{figure}[H]\centering
+\includegraphics[width=\linewidth]{r4_1_exact_answered.pdf}
+\caption{Exact answers within 20\,s by memory budget and graph density (100 nodes).}
+\end{figure}
+\textbf{Results.}
+\begin{itemize}
+\item \textbf{1\,GB, degree 3}: plain VE answers 6/10 queries (0/10 on MPS). Conditioning answers 8/10 on 1 thread, 9 on 20 threads, 10 on CUDA and 9 on MPS.
+\item \textbf{Workers}: for the same query, 20 threads are about 5$\times$ faster than 1, and CUDA 30--100$\times$.
+\item \textbf{Degree $\ge4.5$}: out of reach. The cutsets have 10--24 variables, which would need $10^3$--$10^7$\,s even on a GPU. This is the exponential cost of K\&F Thm~9.11.
+\end{itemize}
+\tabin{tables_r4/r4e1}
+
+\subsection{Anytime certified sampling}
+You can stop on a time budget or on a target width and still get a valid 95\% interval. This
+uses checkpoints at doubling sample sizes with $\delta_j=\delta/(j(j+1))$, a simple form of the
+``stitching'' of Howard et al.~(2021).
+
+\textbf{Results.}
+\begin{itemize}
+\item The width falls like $1/\sqrt{t}$.
+\item The GPU reaches a given width 4--16$\times$ sooner than the CPU.
+\item Coverage was 584/584 runs where the exact answer is known.
+\item \code{collapse="auto"} returns the exact answer when the whole query fits. It helps on the GPU, but on CPU it is 1--2.6$\times$ wider than plain sampling on dense graphs, so it stays off by default.
+\end{itemize}
+\begin{figure}[H]\centering
+\includegraphics[width=\linewidth]{r4_4_certified_anytime.pdf}
+\caption{Median certified width (95\%) by time budget.}
+\end{figure}
+\tabin{tables_r4/r4e2}
+
+\subsection{Bounded conditioning (an honest negative result)}
+These bounds hold with probability 1 and become exact when every assignment has been enumerated.
+On these networks, however, they stay near $[0,1]$: with 5 evidence variables the mass not yet
+enumerated is much larger than $P(e)$.
+
+A tighter bound on the unexplored mass, $\min(U_{\text{prior}},\,W(1-Q_S))$ (ours, checked
+with \code{koller\_claude}), is never wider than the old one. Its gain on these networks is
+small: the median width goes from 0.954 to 0.946 at best.
+\tabin{tables_r4/r4e3}
+
+\subsection{PAC answers from data: credal queries}
+\textbf{The gap in \old.} \old{} could build confidence sets for the learned tables (KL,
+Hoeffding, Clopper--Pearson intervals, L1 balls), but no inference engine used them. Every
+query ran on the single fitted model, so query answers carried no learning error.
+
+\textbf{What \new{} adds.}
+\begin{itemize}
+\item \code{credal\_query} bounds $P(y\mid e)$ and $P(y\mid e,\mathrm{do})$ over \emph{every} network whose rows lie in the sets. It uses credal variable elimination, children first, with exact inner problems.
+\item \code{pac\_sets} splits $\delta$ over all table entries, so all queries from the same sets hold together.
+\item \code{pac\_query} builds the sets for one query.
+\end{itemize}
+
+\textbf{Results.}
+\begin{itemize}
+\item exact for single-point sets;
+\item within 1.07--1.40$\times$ of a local-search inner range;
+\item covered the truth in 100/100 runs at level 0.9, including do-queries;
+\item width about $1/\sqrt N$: 0.81, 0.31 and 0.097 for $N=10^3$, $10^4$ and $10^5$.
+\end{itemize}
+
+\textbf{Review.} An adversarial review found no soundness failure on about 2\,300 random
+networks (worst violation $1.1\cdot10^{-16}$). It found two bugs, now fixed:
+\begin{itemize}
+\item underflow with about 120 evidence factors;
+\item impossible evidence returned crossed bounds; it now raises an error.
+\end{itemize}
+
+\subsection{Parallel queries and the mechanism portfolio}
+\paragraph{\code{query\_many}.} It runs independent queries on a thread pool and is 2.1--2.3$\times$ faster with 4--8 workers on CPU. On MPS it runs the queries one after another, because Metal crashes when several threads use it.
+
+A single batched sweep over different queries was also tried and dropped: it ran at 0.14--1.1$\times$ on CPU.
+
+\paragraph{\code{select\_mechanisms}.} It chooses a mechanism per node by successive halving (Hyperband schedule, Li et al.~2018), scored on held-out log-likelihood. With 11 candidates it takes 6.7\,s, against 25.2\,s to train all of them, and its picks are within 0.03 nats of the best. It now also reports the train/validation split indices, so a final test can use separate data.
+
+%=====================================================================
+\section{Part D --- Guarantees: review, bugs and fixes}\label{sec:guar}
+%=====================================================================
+Every bound that NBN states was reviewed: by book experts, by an independent adversarial
+reviewer, and by running every path on CPU, CUDA and MPS. The table says whether each problem
+was present in the released \old{} or only in new \new{} code.
+
+\begin{table}[H]\centering\small
+\caption{Problems found and fixed. ``In v0.25.0?'' = present in the released version.}
+\resizebox{\linewidth}{!}{%
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{>{\raggedright\arraybackslash}p{0.2\linewidth}>{\raggedright\arraybackslash}p{0.38\linewidth}>{\centering\arraybackslash}p{0.09\linewidth}>{\raggedright\arraybackslash}p{0.27\linewidth}}\toprule
+where & what was wrong & in v0.25.0? & fix (commit) \\ \midrule
+Counts on MPS & float32 sums stop at $2^{24}$; a PAC set could exclude the truth with certainty & yes & int64 counts; PAC builders refuse float32 counts $\ge2^{24}$ (\code{b435236}) \\
+\code{binomial\_interval} on MPS & float32 KL cancelled; undercoverage at $k=0$ & yes & float64 on CPU, cast outward \\
+PIT band & lower end wrong for a flat fitted CDF; missed the truth in 100\% of replicates & yes & strict empirical count \\
+Counterfactual bounds & float32 lower end 0.62 where the hull gives 0.083 & yes & float64 and outward margin \\
+IV program & a valid point box was refuted (solver ``infeasible'') & yes & confirm without presolve + elastic phase-1 LP \\
+Noise polytope, trajectory data & data-dependent union-bound count voids the proof & yes & count every non-empty expression \\
+LP end points (IV, sensitivity, tightened noise polytope) & fixed slack $10^{-6}$, not a proven bound & yes & rigorous weak-duality bound from the solver's duals (Neumaier \& Shcherbina 2004); kept only if wider (\code{843ee1d}) \\
+\code{joint\_row\_bounds} (export) & rows not tightened to the simplex; products not rounded outward & yes & tightened, outward rounding, off-simplex rows raise \\
+Export of a data-chosen structure & no way to charge the selection's failure probability & yes & \code{extra\_events=} in the union bound; schema updated \\
+Calibration rows & nothing checked that calibration rows differ from fitting rows & yes & opt-in \code{fit\_ids=}/\code{ids=} check \\
+\code{CDFBandSet} & not tied to its mechanism & yes & records a fingerprint; \code{check()} refuses a refitted one \\
+\code{bootstrap\_set} & no mask for rows without data & yes & \code{unseen=}; export derives it from counts \\
+Collapsed sampling ``exact'' & claimed $\pm10^{-6}$; rounding reached $1.8\cdot10^{-6}$ & no (new) & forward error bound (\code{c19735a}) \\
+Router certificate & could show the previous query's certificate & no (new) & cleared per query \\
+Certified weight bound & assumed \code{log\_prob} equals the table & no (new) & computed from \code{log\_prob} on every parent row and checked \\
+Router, batched query & crash with \code{fallback="certified"} & no (new) & batched queries go to plain LW \\
+Credal query & underflow; crossing bounds on impossible evidence; unseen rows & no (new) & rescaled messages; raises; unseen = whole simplex \\
+\code{credal\_query} on MPS & crashed (no float64 on MPS) & no (new) & \code{.cpu()} before \code{.double()} (\code{31732ab}) \\
+\code{query\_many} on MPS & Metal aborted the process & no (new) & sequential on MPS \\
+\code{select\_mechanisms} & neural categorical defaulted to 2 classes & no (new) & passes the node's class count \\ \bottomrule
+\end{tabular}}
+\end{table}
+
+\paragraph{How the fixes were checked.}
+\begin{itemize}
+\item \textbf{Book experts}: \code{koller\_claude} (Koller \& Friedman), \code{moss\_claude} (\emph{Algorithms for Validation}) and \code{badings\_claude} (interval MDPs) checked the soundness arguments.
+\item \textbf{\code{extra\_events}}: no reference adds a separate failure probability for a structure chosen from data. So the docstring states when it is valid: the chosen family must equal one fixed family. Otherwise, export the sets of every candidate (Badings 2025, §9.5; Ashok et al.~2019).
+\item \textbf{Adversarial review}: about 2\,300 random credal networks and 3\,000 adversarial LPs gave no soundness violation. The review's eight smaller findings are all fixed and tested.
+\item \textbf{Regression tests}: every fix has one (\code{tests/unit/scm/}\allowbreak\code{test\_guarantee\_regressions.py} and \code{tests/unit/}\allowbreak\code{test\_open\_risk\_fixes.py}).
+\end{itemize}
+
+\subsection{Tests and devices}
+\begin{table}[H]\centering\small
+\caption{Test status of \new{} at \code{31732ab}.}
+\begin{tabular}{lll}\toprule
+check & Mac (CPU + MPS, torch 2.14.1) & server (CUDA TITAN X, torch 2.7.1) \\ \midrule
+full unit suite ($\approx$1\,710 tests) & passes, 0 failures & passes, 0 failures \\
+guarantee smoke test (9 checks on the GPU) & 9/9 (re-run 18 Oct 2026) & 9/9 (17--18 Oct 2026) \\ \bottomrule
+\end{tabular}
+\end{table}
+The smoke test is \code{benchmarks/scaling/cuda\_smoke\_guarantees.py}. It covers the certified engine (three modes), a batched router query, credal and PAC queries (GPU equal to CPU, truth covered), \code{query\_many}, the portfolio, export with unseen rows and \code{extra\_events}, calibration checks, noise-polytope tightening and the LP bounds. The MPS output of 18 October:
+\begin{verbatim}
+ok certified       n_samples w=0.049; collapse w=0.000; target_width w=0.152
+ok router_batched  batched shape (3, 3) on mps:0
+ok credal_pac      interval w=0.161 (cpu same), l1 w=0.228, covers truth: True
+ok query_many      6 answers on mps:0
+ok portfolio       {'V1': 'table', 'V2': 'table'}
+ok export_unseen   level 0.890, joint row 0 width 0.474
+ok calibration     F(0) in [0.459, 0.545]
+ok noise_tightened dtype torch.float32 on mps:0, mean width 0.034
+ok safe_lp         IV rows ok, width 0.559
+ALL_OK
+\end{verbatim}
+
+%=====================================================================
+\section{What changes for a user upgrading from v0.25.0}\label{sec:changes}
+%=====================================================================
+\textbf{API compatibility.} Nothing is removed or renamed. All new features are opt-in, and
+existing calls keep working. A few outputs \emph{do} change by default. All of these changes
+are intended, and most of them make a bound sound:
+
+\begin{table}[H]\centering\small
+\caption{Default behaviour that differs from v0.25.0.}
+\resizebox{\linewidth}{!}{%
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{>{\raggedright\arraybackslash}p{0.3\linewidth}>{\raggedright\arraybackslash}p{0.66\linewidth}}\toprule
+where & what changes \\ \midrule
+kNN mechanism & ties now go to the lowest row index (\old{} had no rule). With continuous parents at most 0.5\% of query rows get a different neighbour set, $|\Delta\log p|\le0.025$ on those rows. \code{tie\_break="any"} restores the old behaviour. \\
+PAC set builders & refuse float32 counts $\ge2^{24}$; intervals are a few ulps wider (outward rounding) \\
+PIT band, noise polytope (trajectories), tightened polytope & wider where the old bound was not valid \\
+IV refutation & a ``refuted'' result is now a level-$\delta$ test, confirmed by a second LP \\
+\code{joint\_row\_bounds} & tighter (sum-to-one); rows that cannot sum to one raise \\
+Export & rows without data can be derived from counts, which can set \code{graph\_preserving} to False \\
+\code{certified\_query} & evidence with several rows raises (was a crash or a silent first row) \\
+\code{HybridRouter(}\allowbreak\code{fallback="certified")} & a batched query gets plain LW and no certificate \\
+\code{query\_many} on MPS & runs sequentially, with a warning \\ \bottomrule
+\end{tabular}}
+\end{table}
+
+%=====================================================================
+\section{What does not scale, and why}
+%=====================================================================
+\begin{enumerate}
+\item \textbf{Exact inference on dense graphs.} The cost is exponential in the tree-width, and
+random graphs have tree-width that grows with $n$. Faster ordering, evidence removal,
+conditioning and more workers move the wall; they cannot remove it (K\&F Thms~9.6, 9.7 and 9.11).
+\item \textbf{Rare evidence.} Any sampler needs about $1/P(e)$ samples. The certified interval
+shows this as a wide interval instead of hiding it.
+\item \textbf{Tables with many parents.} They are cheap to fit now, but statistically poor,
+because each parent combination gets few rows.
+\item \textbf{Neural fitting.} It is linear in the number of nodes and compute-bound. Stacking
+cut the constant; the slope stays.
+\item \textbf{Bounded conditioning} stays wide when there is evidence.
+\item \textbf{Known issue, not fixed.} The benchmark generator
+\code{nbn.bench.synthetic.\_build\_mdn\_mechanism} writes the mixture outputs in blocks, while
+\code{MDNMechanism} reads them interleaved. As a result, its documented ground truth has scales
+that grow exponentially with the parents. The bug is in both \old{} and \new. The study used a
+corrected generator, and the library was not changed.
+\end{enumerate}
+
+%=====================================================================
+\section{Recommendations for the next release}
+%=====================================================================
+\begin{enumerate}
+\item \textbf{Release the guarantee fixes first.} Several of them correct bounds in \old{}
+that could exclude the truth, especially on MPS.
+\item \textbf{Merge the speed and memory changes.} They give the same answers, and the full
+suites pass.
+\item \textbf{Review the new API as its own block}: certified, conditioning, credal/PAC,
+\code{query\_many}, \code{select\_mechanisms} and the sparse tables.
+\item \textbf{Owner decisions}:
+  \begin{itemize}
+  \item whether \code{HybridRouter} should use \code{query\_width\_check} or the certified fallback by default;
+  \item whether the kNN tie rule should average over ties instead.
+  \end{itemize}
+\item \textbf{Fix the benchmark generator's MDN output layout.}
+\item \textbf{Version number}: the default outputs in §\ref{sec:changes} change, so a minor version bump (0.26.0) with a changelog listing them seems appropriate. This is a proposal, not a decision.
+\end{enumerate}
+
+\appendix
+%=====================================================================
+\section{The certified query in one paragraph}\label{app:cert}
+%=====================================================================
+Run unnormalised likelihood weighting $M$ times, with $M$ fixed in advance (or use the anytime
+checkpoints). Particle $m$ has weight $w_m=\prod_{i\in E}P(e_i\mid\mathrm{pa}_i)\in[0,W]$, where
+$W=\prod_i\max_{\mathrm{pa}}P(e_i\mid\mathrm{pa})$. Since \code{843ee1d}, $W$ is computed from
+\code{log\_prob} on every parent row and checked against the table. Then
+$\mathbb E[w]=P(e)$ and $\mathbb E[w\,\mathbf 1\{Y=y\}]=P(y,e)$.
+
+For each of the $K+1$ means, NBN intersects two intervals:
+\begin{itemize}
+\item a Chernoff--Hoeffding interval in KL form (Hoeffding 1963; Garivier \& Cappé 2011);
+\item an empirical-Bernstein interval (Maurer \& Pontil 2009, Thm~4).
+\end{itemize}
+By a union bound, all of them hold together with probability $\ge1-\delta$. On that event
+\[ P(y\mid e)\in\Big[\tfrac{\ell_{ye}}{u_e},\ \min\big(1,\tfrac{u_{ye}}{\ell_e}\big)\Big], \]
+which is then tightened using $\sum_yP(y\mid e)=1$. The cost grows like $W/P(e)$ (Dagum \& Luby
+1997), not with the tree-width.
+
+\section{Commits since v0.25.0}
+\begin{center}\scriptsize
+\begin{longtable}{>{\ttfamily}lp{0.82\linewidth}}\toprule
+\multicolumn{2}{l}{\textbf{Round 1: speed and memory, certified queries}}\\
+cfbbf66 & incremental min-fill, LW pruning + inverse-CDF sampling, stacked MDN fit, certified LW queries\\
+9c1c174 & VE: evidence out of the ordering graph (best of two), width bounds; batched interval\_sets\\
+c900c9a & LW particles in passes, only target columns kept\\
+93300ec & SparseCategoricalTableMechanism\\
+666cb64, 01fcd9b, e571a0c & certified\_query: memory-aware passes; sum-to-one tightening; KL $\cap$ empirical Bernstein\\
+b7e84a4 & incremental DAG.induced\_width; opt-in query-width routing; plan\_width\\
+7dede1e, 752cec8 & closed-form MDN backward; interval\_sets passes\\
+\multicolumn{2}{l}{\textbf{Round 2: other mechanisms and engines}}\\
+960f7c7 & stacked fit for neural categorical, FlexCode, flows\\
+1a26896, db07a58, dac0b3e & kNN: tie-break, exact k-d tree, row dedup, bounded cache, threads\\
+9979cb9, 5286ab1, fa1c53d & amortized IS pruning; batched amortized VI; FlexCode matrix product\\
+bf002d3 & router: opt-in certified fallback\\
+\multicolumn{2}{l}{\textbf{Rounds 3--4: budget}}\\
+3b0fbe6 & certified on MPS\\
+f6d19fe, 3a5ff28, 870d2ab & conditioning, anytime certified, bounded conditioning; collapse="auto" fix\\
+\multicolumn{2}{l}{\textbf{Guarantees and new capabilities}}\\
+b435236 & guarantee review: every stated bound made to hold (v0.25.0 bugs)\\
+88212e2 & credal\_query, pac\_sets, pac\_query\\
+d4cca3f, abbb8c4 & bounded conditioning: tighter unexplored mass; relative float slack\\
+f8bd588 & query\_many\\
+23bce45 & select\_mechanisms\\
+c19735a, a0025f9 & certificate review; credal review fixes\\
+843ee1d & open risks closed (LP duality bound, export, calibration, credal unseen rows, ...)\\
+31732ab & device fixes (MPS/CUDA) + smoke test\\ \bottomrule
+\end{longtable}
+\end{center}
+Benchmark and report commits (\code{0c7e00a}, \code{1b412f2}, \code{2cea636}, \code{dd05bdf},
+\code{eb64ed0}, \code{fd4c3d1}, \code{f8c47da}, \code{65c29ce}, \code{710d056}) touch only
+\code{benchmarks/} and tests.
+
+\section{Reproduce}
+\begin{verbatim}
+cd NBN_scaling && export PYTHONPATH=$PWD        # branch feat/scaling-mechanisms
+python benchmarks/scaling/run.py <experiment> [--code <path to v0.25.0>]
+bash benchmarks/scaling/r2.sh ; bash benchmarks/scaling/r3_rerun.sh ; bash benchmarks/scaling/r4.sh
+python benchmarks/scaling/{analyze,r2_analyze,r3_analyze,r4_analyze}.py
+python benchmarks/scaling/cuda_smoke_guarantees.py [cpu|cuda|mps]
+\end{verbatim}
+Raw results: \code{benchmarks/scaling/results/}. Figures: \code{benchmarks/scaling/figures/}.
+The earlier per-round reports (\code{NBN\_scaling\_report*.pdf} on the Desktop) have every
+table in full.
+
+\begin{thebibliography}{99}\small
+\bibitem{kf} D.~Koller, N.~Friedman. \emph{Probabilistic Graphical Models}. MIT Press, 2009 (cited as K\&F, via \code{koller\_claude}).
+\bibitem{afv} M.~J.~Kochenderfer, S.~M.~Katz, A.~L.~Corso, R.~J.~Moss. \emph{Algorithms for Validation}. MIT Press, 2026 (via \code{moss\_claude}).
+\bibitem{hoeffding} W.~Hoeffding. Probability inequalities for sums of bounded random variables. \emph{JASA} 58(301):13--30, 1963. \url{https://doi.org/10.1080/01621459.1963.10500830}
+\bibitem{garivier} A.~Garivier, O.~Cappé. The KL-UCB algorithm for bounded stochastic bandits and beyond. COLT 2011. \url{https://arxiv.org/abs/1102.2490}
+\bibitem{maurer} A.~Maurer, M.~Pontil. Empirical Bernstein bounds and sample variance penalization. COLT 2009. \url{https://arxiv.org/abs/0907.3740}
+\bibitem{dagum} P.~Dagum, M.~Luby. An optimal approximation algorithm for Bayesian inference. \emph{Artificial Intelligence} 93(1--2):1--27, 1997. \url{https://doi.org/10.1016/S0004-3702(97)00013-1}
+\bibitem{howard} S.~R.~Howard, A.~Ramdas, J.~McAuliffe, J.~Sekhon. Time-uniform, nonparametric, nonasymptotic confidence sequences. \emph{Ann.\ Statist.} 49(2), 2021. \url{https://arxiv.org/abs/1810.08240}
+\bibitem{bidyuk} B.~Bidyuk, R.~Dechter. Cutset sampling for Bayesian networks. \emph{JAIR} 28, 2007. \url{https://arxiv.org/abs/1110.2740}
+\bibitem{horvitz} E.~Horvitz, H.~J.~Suermondt, G.~Cooper. Bounded conditioning: flexible inference for decisions under scarce resources. UAI 1989. \url{https://arxiv.org/abs/1304.1512}
+\bibitem{hyperband} L.~Li, K.~Jamieson, G.~DeSalvo, A.~Rostamizadeh, A.~Talwalkar. Hyperband. \emph{JMLR} 18, 2018. \url{https://arxiv.org/abs/1603.06560}
+\bibitem{ns} A.~Neumaier, O.~Shcherbina. Safe bounds in linear and mixed-integer linear programming. \emph{Math.\ Program.} 99(2):283--296, 2004. \url{https://doi.org/10.1007/s10107-003-0433-3}
+\bibitem{badings} T.~Badings. \emph{Robust Verification of Stochastic Systems}. PhD thesis, 2025, §9.5 (via \code{badings\_claude}).
+\bibitem{ashok} P.~Ashok, J.~Křetínský, M.~Weininger. PAC statistical model checking for Markov decision processes and stochastic games. CAV 2019, LNCS 11561. \url{https://arxiv.org/abs/1905.04403}
+\end{thebibliography}
+\end{document}

@@ -34,7 +34,7 @@ the benchmark suite.
 :link: examples/index
 :link-type: doc
 
-Thirteen executed notebooks with plots, each checked against a known ground
+Twenty-one executed notebooks with plots, each checked against a known ground
 truth.
 :::
 
@@ -62,6 +62,10 @@ Every public class and function, generated from the docstrings.
   per batch row ({doc}`interventions <user_guide/interventions>`); the
   {doc}`SCM layer <user_guide/scm>` adds explicit noise, abduction and
   counterfactuals.
+- **Answers with guarantees.** Certified sampling intervals, exact answers by
+  conditioning when memory is short, and PAC answers that also cover the
+  learning error ({doc}`inference <user_guide/inference>`,
+  {doc}`probability sets <user_guide/probability_sets>`).
 - **Incremental updates.** `update()` folds new data into a fitted network
   without the old data, atomically, with optional forgetting
   ({doc}`learning <user_guide/learning>`).
