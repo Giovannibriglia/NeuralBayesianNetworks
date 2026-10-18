@@ -32,7 +32,8 @@ Caveats
   rows; K&F Box 16.A, pp. 705–708): report performance on a separate test
   set.  Calibration or PAC tools that need held-out data must use rows that
   were *not* used here (see ``nbn.structure.continuous`` and
-  ``nbn.scm.calibration``).
+  ``nbn.scm.calibration``); ``PortfolioReport.train_index`` / ``val_index``
+  are the ids to pass as ``fit_ids`` to the calibration builders.
 * Scores compare densities (continuous) or probabilities (discrete) of one
   node, so all candidates of a node must model the same variable on the same
   scale: do not mix a discretised (binned) table with a density without the
@@ -65,6 +66,13 @@ class PortfolioReport:
     epochs_spent: Dict[str, int] = field(default_factory=dict)
     epochs_full: Dict[str, int] = field(default_factory=dict)
     seconds: Dict[str, float] = field(default_factory=dict)
+    # Row indices *into ``data``* used for training and for selection (None
+    # when ``val_data`` was given: then every row of ``data`` and ``val_data``
+    # is a fit row).  Both count as "fit" rows for calibration: map them to
+    # global row ids (the same space as the calibration rows' ids) and pass
+    # them as ``fit_ids``.
+    train_index: torch.Tensor | None = None
+    val_index: torch.Tensor | None = None
 
     def summary(self) -> str:
         lines = []
@@ -134,6 +142,8 @@ def select_mechanisms(
     full = {k: torch.cat([train[k], val[k]]) for k in train}
     nodes = list(nodes) if nodes is not None else list(model.dag.topological_order())
     report = PortfolioReport()
+    if val_data is None:
+        report.train_index, report.val_index = tr_idx.cpu(), val_idx.cpu()
 
     def node_kwargs(node):
         kw = dict(fit_kwargs)

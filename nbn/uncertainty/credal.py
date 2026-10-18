@@ -62,6 +62,7 @@ assumptions of the builders (``sampling="iid"`` or ``"trajectory"``).
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass, field
 from typing import Dict, Mapping, Sequence
 
@@ -200,6 +201,26 @@ class _Row:
         lo, up = pset.bounds()
         self.lo = lo.detach().double().cpu().reshape(shape)
         self.up = up.detach().double().cpu().reshape(shape)
+        # rows without data are the whole simplex, whatever the set stores
+        # (e.g. prior quantiles of a Dirichlet set, a refit bootstrap box)
+        unseen = getattr(pset, "unseen", None)
+        n_rows = math.prod(pcards)
+        if unseen is not None and unseen.numel() not in (0, n_rows):
+            raise ValueError(f"credal_query: a set's unseen mask has {unseen.numel()} rows, "
+                             f"not {n_rows}.")
+        if (unseen is None or unseen.numel() == 0) and getattr(pset, "guarantee", None) in (
+                "asymptotic", "bayesian"):
+            warnings.warn(
+                "credal_query: a sample-based set has no unseen mask, so rows without data "
+                "keep their (prior- or refit-driven) box; pass unseen= to bootstrap_set.",
+                stacklevel=3)
+        if unseen is not None and unseen.numel() == n_rows:
+            m = unseen.detach().cpu().bool().reshape(tuple(pcards))
+            if bool(m.any()):
+                self.lo[m] = 0.0
+                self.up[m] = 1.0
+                if self.kind == "l1":
+                    self.r[m] = 2.0
 
     def opt(self, g, maximise):
         """``g``: ``[*pa, *z, K]`` -> ``[*pa, *z]``."""

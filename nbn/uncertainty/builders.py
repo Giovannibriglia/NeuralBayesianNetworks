@@ -244,7 +244,11 @@ def dirichlet_set(
     """Posterior draws of the table under independent ``Dirichlet(prior)`` rows.
 
     Bayesian credibility, not a frequentist guarantee; useful as genuine
-    posterior weights and as a sanity check of the PAC sets.  Seed with
+    posterior weights and as a sanity check of the PAC sets.  Rows without
+    data (``unseen``) are draws from the prior alone: their ``bounds()`` are
+    prior quantiles, a statement about the prior and not about the data.
+    Frequentist consumers treat them as the whole simplex
+    (:func:`nbn.structure.joint_row_bounds`, :func:`nbn.uncertainty.credal_query`).  Seed with
     ``torch.manual_seed`` for reproducible draws.  Same as
     :func:`dirichlet_set_from_counts` on :func:`count_table`.
     """
@@ -283,6 +287,7 @@ def bootstrap_set(
     n_boot: int = 200,
     delta: float = 0.05,
     generator: torch.Generator | None = None,
+    unseen: torch.Tensor | None = None,
 ) -> SampleSet:
     """Episode (cluster) bootstrap of any statistic of a fitted model.
 
@@ -299,6 +304,14 @@ def bootstrap_set(
     groups:
         ``[N]`` integer group id of each data row (episode id).  Use
         ``torch.arange(N)`` for i.i.d. rows.
+    unseen:
+        Optional ``[R]`` mask of the statistic's rows that have no data (e.g.
+        ``count_table(model, data, node)[0].sum(-1) == 0`` for a node's
+        table).  The bootstrap cannot see them: every replicate refits the
+        same prior or smoothing there, so their box is narrow and says
+        nothing.  Without the mask the set carries none (``unseen`` is
+        empty) and :func:`nbn.structure.export_factored_sets` derives it from
+        the counts when it has them.
     """
     groups = groups.reshape(-1).long()
     group_ids, inverse = torch.unique(groups, return_inverse=True)
@@ -315,7 +328,9 @@ def bootstrap_set(
     samples = torch.stack(draws)
     return SampleSet(
         level=1.0 - delta, guarantee="asymptotic",
-        unseen=torch.zeros(0, dtype=torch.bool), samples=samples,
+        unseen=(torch.zeros(0, dtype=torch.bool) if unseen is None
+                else torch.as_tensor(unseen, dtype=torch.bool).reshape(-1)),
+        samples=samples,
     )
 
 

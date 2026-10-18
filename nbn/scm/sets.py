@@ -110,17 +110,24 @@ def noise_parameter_set(
 
 @torch.no_grad()
 def cdf_band_set(
-    model, data: Mapping[str, torch.Tensor], node: str, delta: float = 0.05
+    model, data: Mapping[str, torch.Tensor], node: str, delta: float = 0.05, *,
+    fit_ids: torch.Tensor | None = None, ids: torch.Tensor | None = None,
 ) -> CDFBandSet:
     """DKW band on the noise CDF of a 1-D continuous additive node.
 
     ``eps = sqrt(log(2 / delta) / (2 n))`` (Dvoretzky–Kiefer–Wolfowitz with
     Massart's constant).  Valid for i.i.d. residuals given the location ``g``:
     pass ``data`` that were *not* used to fit ``g`` (a held-out split), or the
-    guarantee is only approximate.
+    guarantee is only approximate.  ``fit_ids`` / ``ids``: optional row ids
+    of the fit rows and of ``data``; a shared id raises
+    (:func:`nbn.scm.calibration.check_held_out`).  The band records the
+    mechanism it was built from (``bound_to``); ``CDFBandSet.check`` or the
+    ``mechanism=`` argument of its bound methods refuse another one.
     """
     if not 0.0 < float(delta) < 1.0:
         raise ValueError(f"delta must lie in (0, 1); got {delta}.")
+    from nbn.scm.calibration import _fingerprint, check_held_out
+    check_held_out(fit_ids, ids, None, int(data[node].shape[0]))
     data = to_device(dict(data), model.device)
     mech = model.mechanisms[node]
     if not isinstance(mech, AdditiveNoiseMechanism) or not mech.is_fitted:
@@ -135,4 +142,5 @@ def cdf_band_set(
         sorted_residuals=residual[:, 0].sort().values,
         epsilon=math.sqrt(math.log(2.0 / delta) / (2.0 * n)),
         level=1.0 - delta,
+        bound_to=_fingerprint(mech),
     )

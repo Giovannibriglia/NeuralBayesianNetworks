@@ -14,6 +14,15 @@ from nbn.inference.tensor_ve import MPSTensorLimitError, TensorVariableEliminati
 logger = logging.getLogger(__name__)
 
 
+def _batched(*dicts) -> bool:
+    """True when some evidence / do value holds more than one row."""
+    for d in dicts:
+        for v in (d or {}).values():
+            if torch.as_tensor(v).numel() > 1:
+                return True
+    return False
+
+
 class HybridRouter(InferenceEngine):
     """Auto-selecting inference engine.
 
@@ -262,7 +271,7 @@ class HybridRouter(InferenceEngine):
             model, targets, evidence, kwargs.get("do"),
             kwargs.get("order", "min_fill"),
         )
-        if engine is self._lw and self._certify(model, targets, evidence, kwargs):
+        if engine is self._lw and self._certify(model, targets, evidence, kwargs, method):
             engine = self._cert
             self._last_engine = "certified"
         if engine is self._lw and self._conditionable(model, targets):
@@ -295,7 +304,7 @@ class HybridRouter(InferenceEngine):
             "HybridRouter: exact VE ran out of memory on %s (%s); answering "
             "with likelihood weighting (approximate).", device, oom,
         )
-        if self._certify(model, targets, evidence, kwargs):
+        if self._certify(model, targets, evidence, kwargs, method):
             self._last_engine = "certified"
             return getattr(self._cert, method)(model, targets, evidence, **kwargs)
         if self._conditionable(model, targets):
@@ -336,10 +345,15 @@ class HybridRouter(InferenceEngine):
                              else "tensor_ve")
         return out
 
-    def _certify(self, model, targets, evidence, kwargs) -> bool:
+    def _certify(self, model, targets, evidence, kwargs, method="query") -> bool:
         cert = getattr(self, "_cert", None)
-        return cert is not None and cert.applicable(model, targets, evidence,
-                                                     kwargs.get("do"))
+        if cert is None:
+            return False
+        if method == "query" and _batched(evidence, kwargs.get("do")):
+            # A certificate is per row; batched rows go through query_batch.
+            # Plain LW answers a batched ``query`` as before (no certificate).
+            return False
+        return cert.applicable(model, targets, evidence, kwargs.get("do"))
 
     @property
     def last_certificate(self):

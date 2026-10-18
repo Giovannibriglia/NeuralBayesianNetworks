@@ -321,6 +321,15 @@
           "items": {
             "type": "string"
           }
+        },
+        "extra_events": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "description": "Failure probabilities spent before the sets were built (e.g. selecting the family from data); included in events and delta_total."
         }
       }
     },

@@ -87,6 +87,7 @@ from nbn.core.variables import DiscreteVariable
 from nbn.uncertainty.binomial import IntervalMethod, binomial_interval
 from nbn.uncertainty.builders import Sampling, per_interval_delta
 from nbn.uncertainty.counts import count_table_for, parent_grid, parent_row_index
+from nbn.uncertainty._safe_lp import safe_min
 from nbn.uncertainty.sets import IntervalSet, tighten_box_to_simplex
 from nbn.utils.device import to_device
 
@@ -319,11 +320,19 @@ class IVProgram:
         return clone
 
     def bounds(self, c_mu: np.ndarray) -> Tuple[float, float]:
-        """Min and max of ``sum_t c_mu[t] mu_t`` over the feasible set (widened outward)."""
+        """Min and max of ``sum_t c_mu[t] mu_t`` over the feasible set (widened outward).
+
+        Each end is the solver's optimum widened by ``slack``, or further when
+        the weak-duality bound from the solver's own duals (:mod:`._safe_lp`)
+        says the slack is not enough: every variable is a probability mass in
+        ``[0, 1]`` (``sum mu = 1`` exactly and ``sum_a x[k, t, a] = mu_t``), so
+        that bound is rigorous whatever the solver's tolerances.
+        """
         _, linprog = _scipy()
         c = np.zeros(self.n_var)
         c[: self.nT] = c_mu
         out = []
+        safe = []
         for sign in (1.0, -1.0):
             res = linprog(sign * c, A_ub=self.A_ub, b_ub=self.b_ub, A_eq=self.A_eq, b_eq=self.b_eq,
                           bounds=(0, None), method="highs")
@@ -342,7 +351,13 @@ class IVProgram:
             if res.status != 0:
                 raise LPFailure(f"LP failed: {res.message}")
             out.append(sign * res.fun)
-        return out[0] - self.slack, out[1] + self.slack
+            safe.append(safe_min(res, sign * c, self.A_ub, self.b_ub, self.A_eq, self.b_eq, 0.0, 1.0))
+        lo, hi = out[0] - self.slack, out[1] + self.slack
+        if safe[0] is not None:
+            lo = min(lo, safe[0])
+        if safe[1] is not None:
+            hi = max(hi, -safe[1])
+        return lo, hi
 
     def _elastic_violation(self) -> float:
         """Smallest total violation of the box constraints (phase 1 with
@@ -451,14 +466,20 @@ def sensitivity_row_box(box: RegimeBox, k: int, a: int, lam: float) -> Tuple[np.
     for y in range(nY):
         c = np.zeros(2 * nY)
         c[y] = c[nY + y] = 1
-        vals = []
+        vals, safe = [], []
         for sign in (1.0, -1.0):
             res = linprog(sign * c, A_ub=A_ub_arr, b_ub=b, A_eq=A_eq_arr, b_eq=b_eq,
                           bounds=(0, None), method="highs")
             if res.status != 0:
                 return fallback
             vals.append(sign * res.fun)
+            # every variable is in [0, 1]: they are >= 0 and sum to one exactly
+            safe.append(safe_min(res, sign * c, A_ub_arr, b, A_eq_arr, b_eq, 0.0, 1.0))
         lo[y], hi[y] = vals[0] - SOLVER_SLACK, vals[1] + SOLVER_SLACK
+        if safe[0] is not None:
+            lo[y] = min(lo[y], safe[0])
+        if safe[1] is not None:
+            hi[y] = max(hi[y], -safe[1])
     return np.clip(lo, 0, 1), np.clip(hi, 0, 1)
 
 

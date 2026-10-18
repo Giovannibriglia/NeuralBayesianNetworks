@@ -94,23 +94,95 @@ class CertifiedAnswer:
         return float((self.upper - self.lower).max())
 
 
+def _scalar(name: str, val) -> int:
+    """The single value of an evidence / do entry (a certificate is per row)."""
+    t = torch.as_tensor(val)
+    if t.numel() != 1:
+        raise ValueError(
+            f"certified_query: '{name}' has {t.numel()} values; a certificate is for one "
+            f"query row.  Use CertifiedEngine.query_batch for several rows.")
+    return int(t.reshape(-1)[0])
+
+
 def evidence_weight_bound(model, evidence: Mapping[str, object]) -> float:
-    """``W = prod_i max_pa P(E_i = e_i | pa)``: an upper bound on every LW weight."""
+    """``W = prod_i max_pa P(E_i = e_i | pa)``: an upper bound on every LW weight.
+
+    ``P(e_i | pa)`` is taken from the mechanism's ``log_prob`` (the function
+    that weights the particles) on every parent configuration, and checked
+    against its tabulated CPT (what the exact and collapsed paths use): a
+    mechanism whose two disagree (e.g. a kNN or binning mechanism whose
+    ``log_prob`` transforms the parent values) is refused, since the
+    certificate would then mix two models.
+    """
     u = 1.0
     for node, val in evidence.items():
-        mech = model.mechanisms[node]
-        if not getattr(mech, "is_discrete", False):
-            raise NotImplementedError(
-                f"certified_query: evidence node '{node}' is continuous; its density "
-                f"is not bounded, so no weight bound exists.  Discretise it or use "
-                f"plain likelihood weighting (no guarantee)."
-            )
-        parents = model.dag.parents(node)
-        cards = [model.mechanisms[p].n_classes for p in parents]
-        probs = torch.softmax(mech.tabulate(cards).detach().cpu().double(), -1)  # MPS has no float64
-        v = int(torch.as_tensor(val).reshape(-1)[0])
-        u *= float(probs[..., v].max())
+        u *= float(_evidence_column(model, node, _scalar(node, val)).max())
     return u
+
+
+def _evidence_column(model, node: str, v: int, rtol: float = 1e-4,
+                     atol: float = 1e-6) -> torch.Tensor:
+    """``P(node = v | pa)`` for every parent row (float64, CPU), from
+    ``log_prob``; raises if the mechanism is not a discrete table whose
+    ``log_prob`` equals its ``tabulate``."""
+    mech = model.mechanisms[node]
+    if not getattr(mech, "is_discrete", False):
+        raise NotImplementedError(
+            f"certified_query: evidence node '{node}' is continuous; its density "
+            f"is not bounded, so no weight bound exists.  Discretise it or use "
+            f"plain likelihood weighting (no guarantee)."
+        )
+    parents = model.dag.parents(node)
+    cards = [_card(model, p) for p in parents]
+    try:
+        tab = torch.softmax(mech.tabulate(cards).detach().cpu().double(), -1)  # MPS: no float64
+    except NotImplementedError:
+        raise NotImplementedError(
+            f"certified_query: evidence mechanism of '{node}' has no table.") from None
+    if not 0 <= v < tab.shape[-1]:
+        raise ValueError(f"certified_query: evidence {node}={v} is outside 0..{tab.shape[-1] - 1}.")
+    col_tab = tab[..., v].reshape(-1)
+    col_lp = _log_prob_column(model, mech, node, parents, cards, v)
+    if col_lp is not None:
+        bad = (col_lp - col_tab).abs() > atol + rtol * col_tab
+        if bool(bad.any()):
+            i = int(bad.nonzero()[0, 0])
+            raise ValueError(
+                f"certified_query: the mechanism of evidence node '{node}' "
+                f"({type(mech).__name__}) gives P({node}={v} | parent row {i}) = "
+                f"{float(col_lp[i]):.6g} by log_prob but {float(col_tab[i]):.6g} by its "
+                f"table; the weight bound needs the two to agree.")
+        col_tab = torch.maximum(col_tab, col_lp)
+    return col_tab
+
+
+def _card(model, node: str) -> int:
+    """Cardinality of a discrete node (the mechanism's, else the variable's)."""
+    k = getattr(model.mechanisms[node], "n_classes", None)
+    if k is None:
+        var = model.variables.get(node) if hasattr(model, "variables") else None
+        k = getattr(var, "cardinality", None)
+    if k is None:
+        raise ValueError(f"certified_query: no cardinality for parent '{node}'.")
+    return int(k)
+
+
+@torch.no_grad()
+def _log_prob_column(model, mech, node, parents, cards, v):
+    """``exp(log_prob(v | pa))`` on every parent row, in the format likelihood
+    weighting uses (parent indices as the model's float tensors, C order)."""
+    import math as _m
+    n_rows = _m.prod(cards) if cards else 1
+    if n_rows > 1 << 16:
+        return None                     # too many rows to enumerate; the runtime check remains
+    dev = model.device
+    if cards:
+        grids = torch.meshgrid(*[torch.arange(c, device=dev) for c in cards], indexing="ij")
+        pa = torch.stack([g.reshape(-1) for g in grids], -1).to(torch.float32)
+    else:
+        pa = torch.zeros(n_rows, 0, device=dev)
+    x = torch.full((n_rows, 1), float(v), device=dev)
+    return torch.exp(mech.log_prob(x, pa if cards else None).detach().reshape(-1).cpu().double())
 
 
 def _bounds_from_sums(sum_w, sum_wy, sq_w, sq_wy, done: int, delta: float, k: int,
@@ -261,12 +333,13 @@ def certified_query(
         st = _gis(model, [target], tuple(sorted(evidence)), tuple(sorted(do)), eng._cache)
         chunk = eng._particle_chunk(1, st.total_dim)
 
-    def _t(v):
+    def _t(name, v):
+        _scalar(name, v)
         t = v if isinstance(v, torch.Tensor) else torch.as_tensor(v)
         return t.reshape(1).to(model.device)
 
-    ev = {kk: _t(v) for kk, v in evidence.items()}
-    dd = {kk: _t(v) for kk, v in do.items()}
+    ev = {kk: _t(kk, v) for kk, v in evidence.items()}
+    dd = {kk: _t(kk, v) for kk, v in do.items()}
     sum_w = torch.zeros((), dtype=torch.float64)
     sum_wy = torch.zeros(k, dtype=torch.float64)
     sq_w = torch.zeros((), dtype=torch.float64)
@@ -308,12 +381,13 @@ class _PlainDraw:
         self.model, self.target, self.k, self.W = model, target, k, W
         self.eng = LikelihoodWeightingEngine(n_samples=1, prune_barren=True)
 
-        def _t(v):
+        def _t(name, v):
+            _scalar(name, v)
             t = v if isinstance(v, torch.Tensor) else torch.as_tensor(v)
             return t.reshape(1).to(model.device)
 
-        self.ev = {kk: _t(v) for kk, v in evidence.items()}
-        self.dd = {kk: _t(v) for kk, v in do.items()}
+        self.ev = {kk: _t(kk, v) for kk, v in evidence.items()}
+        self.dd = {kk: _t(kk, v) for kk, v in do.items()}
         if chunk is None:
             st = get_inference_state(model, [target], tuple(sorted(evidence)),
                                      tuple(sorted(do)), self.eng._cache)
@@ -455,10 +529,8 @@ def _certified_general(model, target, evidence, *, delta, do, chunk, bound, n_sa
     if collapse is None:
         draw = _PlainDraw(model, target, evidence, do, k, W, chunk)
     else:
-        def _int(v):
-            return int(torch.as_tensor(v).reshape(-1)[0])
-        draw = _CollapsedDraw(model, target, {a: _int(b) for a, b in evidence.items()},
-                              {a: _int(b) for a, b in do.items()}, k, W, chunk, collapse,
+        draw = _CollapsedDraw(model, target, {a: _scalar(a, b) for a, b in evidence.items()},
+                              {a: _scalar(a, b) for a, b in do.items()}, k, W, chunk, collapse,
                               memory_budget, batch_rows=first_checkpoint)
         if not draw.Xp:
             # Nothing left to sample: the whole query fits the exact remainder
@@ -568,7 +640,8 @@ class CertifiedEngine(InferenceEngine):
 
     @staticmethod
     def applicable(model, targets, evidence, do=None) -> bool:
-        """One discrete target, discrete evidence, at most one row per value."""
+        """One discrete target; discrete evidence on table mechanisms whose
+        ``log_prob`` equals their ``tabulate`` (checked for each value)."""
         if targets is None or len(targets) != 1:
             return False
         if not getattr(model.mechanisms[targets[0]], "is_discrete", False):
@@ -580,6 +653,12 @@ class CertifiedEngine(InferenceEngine):
             for p in model.dag.parents(node):
                 if not getattr(model.mechanisms[p], "is_discrete", False):
                     return False
+            try:
+                for val in torch.as_tensor(v).reshape(-1).unique().tolist():
+                    _evidence_column(model, node, int(val))
+            except (ValueError, NotImplementedError, AttributeError, RuntimeError,
+                    IndexError):
+                return False                 # no checkable table: plain LW answers
         return True
 
     def _one(self, model, target, evidence, do):

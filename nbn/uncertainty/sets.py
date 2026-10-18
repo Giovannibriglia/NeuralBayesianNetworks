@@ -220,6 +220,8 @@ class NoiseParameterSet:
             raise ImportError("tightened() needs SciPy (pip install scipy; it is part of the 'bench' extra).") from exc
         import numpy as np
 
+        from nbn.uncertainty._safe_lp import safe_min
+
         e_mat = self.expressions.detach().cpu().double().numpy()
         lo = self.lower.detach().cpu().double().numpy()
         hi = self.upper.detach().cpu().double().numpy()
@@ -241,12 +243,21 @@ class NoiseParameterSet:
                 if res.status != 0:
                     raise RuntimeError(f"tightened(): the LP solver failed ({res.message}).")
                 # widen by the solver's feasibility tolerance (HiGHS ~1e-7) so a
-                # tightened end never cuts into the exact range
-                store[e] = sign * res.fun - sign * 1e-6
-        as_tensor = lambda a: torch.as_tensor(a, dtype=self.lower.dtype, device=self.lower.device)  # noqa: E731
+                # tightened end never cuts into the exact range, and further if
+                # the weak-duality bound from the solver's duals says so
+                # (rigorous: q is in [0, 1]^m; see nbn.uncertainty._safe_lp)
+                end = sign * res.fun - sign * 1e-6
+                safe = safe_min(res, sign * e_mat[e], a_ub, b_ub, a_eq, b_eq, 0.0, 1.0)
+                if safe is not None:
+                    end = min(end, safe) if sign > 0 else max(end, -safe)
+                store[e] = end
+        from nbn.uncertainty.binomial import _outward_cast
+        lo_t, hi_t = _outward_cast(torch.as_tensor(new_lo, dtype=torch.float64),
+                                   torch.as_tensor(new_hi, dtype=torch.float64),
+                                   self.lower.dtype, self.lower.device)   # round outward
         return NoiseParameterSet(
-            expressions=self.expressions, lower=torch.maximum(self.lower, as_tensor(new_lo)),
-            upper=torch.minimum(self.upper, as_tensor(new_hi)), index=self.index,
+            expressions=self.expressions, lower=torch.maximum(self.lower, lo_t),
+            upper=torch.minimum(self.upper, hi_t), index=self.index,
             level=self.level, guarantee=self.guarantee, unseen=self.unseen,
         )
 
@@ -268,22 +279,39 @@ class CDFBandSet:
     epsilon: float
     level: float
     guarantee: Guarantee = "pac_under_model"
+    # Digest of the mechanism whose residuals these are (set by
+    # nbn.scm.cdf_band_set); the band holds for that location g only.
+    bound_to: str | None = field(default=None, repr=False)
 
-    def noise_cdf_bounds(self, t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Bounds on ``P(U <= t)`` for every entry of ``t`` (any shape)."""
+    def check(self, mechanism) -> None:
+        """Raise if ``mechanism`` is not the one the band was built from (a
+        refit or edited mechanism has another location ``g``, so the band says
+        nothing about its noise).  No-op for a band built without a digest."""
+        if self.bound_to is None:
+            return
+        from nbn.scm.calibration import _check_bound
+        _check_bound(self.bound_to, mechanism)
+
+    def noise_cdf_bounds(self, t: torch.Tensor, mechanism=None) -> tuple[torch.Tensor, torch.Tensor]:
+        """Bounds on ``P(U <= t)`` for every entry of ``t`` (any shape).
+        With ``mechanism``, first :meth:`check` that it is the band's own."""
+        if mechanism is not None:
+            self.check(mechanism)
         n = self.sorted_residuals.numel()
         r = self.sorted_residuals.to(t)
         f_hat = torch.searchsorted(r, t.contiguous(), right=True).to(t.dtype) / n
         return (f_hat - self.epsilon).clamp(0.0, 1.0), (f_hat + self.epsilon).clamp(0.0, 1.0)
 
     def interval_probability_bounds(
-        self, a: torch.Tensor, b: torch.Tensor, location: torch.Tensor
+        self, a: torch.Tensor, b: torch.Tensor, location: torch.Tensor, mechanism=None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Bounds on ``P(a < X <= b | pa)`` given ``location = g(pa)``, batched.
 
         ``P(a < X <= b) = F(b - g) - F(a - g)``.  Inside the band each CDF value
         is known up to ``eps``, so the difference is known up to ``2 eps``.
         """
+        if mechanism is not None:
+            self.check(mechanism)
         lo_b, hi_b = self.noise_cdf_bounds(b - location)
         lo_a, hi_a = self.noise_cdf_bounds(a - location)
         return (lo_b - hi_a).clamp(0.0, 1.0), (hi_b - lo_a).clamp(0.0, 1.0)
