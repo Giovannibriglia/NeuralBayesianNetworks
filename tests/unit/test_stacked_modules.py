@@ -5,6 +5,13 @@ Full-batch steps make the minibatch order irrelevant, and the network
 initialisers are patched to a deterministic, shape-dependent fill so both
 paths start from the same point; the fitted mechanisms must then agree up to
 floating-point summation order.
+
+The networks are pinned to the CPU: these tests compare two training
+algorithms, and must not depend on a device's kernels.  On a GitHub-hosted
+macOS runner (macOS 26.6.2, torch 2.14.1) a plain ``nn.Linear`` forward on
+MPS disagreed with the CPU by up to 0.5 while ``torch.func.vmap`` agreed, so a
+device-level discrepancy would be reported as a stacking error.  MPS itself is
+covered by the ``mps`` lane.
 """
 from __future__ import annotations
 
@@ -60,11 +67,11 @@ def _disc_data(n=400, seed=0, k=3):
 
 def _net(kind, **mk):
     if kind == "ncat":
-        m = NeuralBayesianNetwork(EDGES, variables=dict.fromkeys("ABCD", ("discrete", 3)))
+        m = NeuralBayesianNetwork(EDGES, variables=dict.fromkeys("ABCD", ("discrete", 3)), device="cpu")
         for v in "ABCD":
             m.set_mechanism(v, NeuralCategoricalMechanism(n_classes=3, hidden=(6,), **mk))
     elif kind == "flexcode":
-        m = NeuralBayesianNetwork(EDGES, variables=dict.fromkeys("ABCD", ("continuous", 1)))
+        m = NeuralBayesianNetwork(EDGES, variables=dict.fromkeys("ABCD", ("continuous", 1)), device="cpu")
         m.set_mechanism("A", LinearGaussianMechanism())
         for v in "BCD":
             m.set_mechanism(v, FlexCodeMechanism(n_basis=7, hidden=(8,), **mk))
@@ -112,7 +119,7 @@ def test_flexcode_stacked_equals_local(monkeypatch, sharpen):
 def _flow_net():
     pytest.importorskip("zuko")
     from nbn.mechanisms.parametric.normalizing_flow import NormalizingFlowMechanism
-    m = NeuralBayesianNetwork(EDGES, variables=dict.fromkeys("ABCD", ("continuous", 1)))
+    m = NeuralBayesianNetwork(EDGES, variables=dict.fromkeys("ABCD", ("continuous", 1)), device="cpu")
     m.set_mechanism("A", LinearGaussianMechanism())
     for v in "BCD":
         m.set_mechanism(v, NormalizingFlowMechanism(num_transforms=2, hidden=(8,), bins=4))
