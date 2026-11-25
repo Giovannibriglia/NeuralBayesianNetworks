@@ -24,6 +24,21 @@ The rule here
    and ``c`` is discarded; a superset candidate is never discarded on that
    event.  This is the batch form of the structure test of Strehl, Diuk &
    Littman (AAAI 2007), "does adding a variable change the prediction?".
+
+   **Extension sets** (``extension_size = e > 1``).  A candidate that misses
+   several parents whose effect only shows jointly (XOR-like, AND-gated) agrees
+   with every one-variable extension and is never refuted by them.  With
+   ``e > 1`` each candidate is compared with ``c ∪ Z`` for every non-empty
+   ``Z`` of at most ``e`` other inputs; ``e = max_parents`` is the pairwise
+   superset test in the form of Rosenberg & Mansour (NeurIPS 2021, "consistent
+   scopes").  The guarantee is the same (all families hold jointly, a superset
+   candidate is never discarded).  Refutation is stronger: if two rows of
+   ``c ∪ Pa`` that agree on ``c`` have true conditionals further apart than
+   the sum of twice the radius of ``c ∪ Pa`` on each row, plus twice ``c``'s
+   own radius, ``c`` is discarded.  The cost is ``sum_{i<=e} C(D, d+i)``
+   families with up to ``d + e`` parents.  ``common_parents`` (the variables
+   in every survivor) is the true parent set once every candidate that does
+   not contain it has been refuted.
 3. **One set per row** of the union ``U`` of the survivors' parents.  Where
    every survivor has data the set is a ball centred at the survivors' mean
    ``c̄`` with radius ``max_s (||c_s - c̄||_1 + r_s)``: it contains every
@@ -133,6 +148,12 @@ class AgreementSet:
     flat_rows: int | None = None
     flat_visited: int | None = None
     flat_with_set: int | None = None
+    # Largest number of variables added to a candidate in the refutation test
+    # (0 with refute=False: no test).
+    extension_size: int = 1
+    # Variables in every survivor (in the order of `inputs`); empty without survivors.
+    # Equal to Pa(node) once every candidate that does not contain it is refuted.
+    common_parents: Family = ()
 
     @property
     def n_rows_with_set(self) -> int:
@@ -167,6 +188,7 @@ def agreement_set(
     max_families: int = 1 << 14,
     coverage_rows: torch.Tensor | None = None,
     refute: bool = True,
+    extension_size: int = 1,
 ) -> AgreementSet:
     """One probability set per row of ``node``, valid without knowing its parents.
 
@@ -219,6 +241,12 @@ def agreement_set(
         ``Pa(node)`` itself is in a family that holds w.p. ``1 - delta_G``.
         Requires ``candidates`` (or a :class:`HypothesisSet` with candidates
         for ``node``).
+    extension_size:
+        Largest number of other inputs added to a candidate in the refutation
+        test (default 1: one-variable extensions).  Larger values also refute
+        candidates that miss parents acting only jointly, at the cost of more
+        and larger families (see the module notes).  Not used with
+        ``refute=False``.
 
     Returns
     -------
@@ -244,10 +272,13 @@ def agreement_set(
         raise ValueError("max_parents is required when candidates is not given.")
     if max_parents is not None and max_parents < 0:
         raise ValueError(f"max_parents must be >= 0; got {max_parents}.")
+    if isinstance(extension_size, bool) or not isinstance(extension_size, int) or extension_size < 1:
+        raise ValueError(f"extension_size must be an integer >= 1; got {extension_size!r}.")
     d = len(inputs) if max_parents is None else min(int(max_parents), len(inputs))
     if candidates is None:
-        # candidates plus their distinct one-variable extensions (deduplicated as sets)
-        n_default = math.comb(len(inputs), d) + (math.comb(len(inputs), d + 1) if d < len(inputs) else 0)
+        # candidates plus their distinct extensions (deduplicated as sets)
+        n_default = sum(math.comb(len(inputs), d + i)
+                        for i in range(extension_size + 1) if d + i <= len(inputs))
         if n_default > max_families:
             raise ValueError(
                 f"{len(inputs)} inputs with max_parents={d} give about {n_default} families "
@@ -269,18 +300,28 @@ def agreement_set(
         if not cands:
             raise ValueError("candidates is empty.")
 
-    # Families: candidates and their one-variable extensions, deduplicated as sets.
+    # Families: candidates and their extensions by at most `extension_size` other
+    # inputs, deduplicated as sets.
     families: Dict[frozenset, Family] = {frozenset(c): c for c in cands}
-    extensions: Dict[Family, List[Tuple[str, Family]]] = {}
+    extensions: Dict[Family, List[Tuple[Family, Family]]] = {}
+    n_extended = len(families)
     for c in cands:
         extensions[c] = []
         if not refute:
             continue                                      # union over the given family: no extensions
-        for v in inputs:
-            if v in c:
-                continue
-            e = families.setdefault(frozenset((*c, v)), (*c, v))
-            extensions[c].append((v, e))
+        others = [v for v in inputs if v not in c]
+        for size in range(1, min(extension_size, len(others)) + 1):
+            for vs in itertools.combinations(others, size):
+                key = frozenset((*c, *vs))
+                if key not in families:
+                    n_extended += 1
+                    if n_extended > max_families:         # stop before building them all
+                        raise ValueError(
+                            f"more than max_families={max_families} families with "
+                            f"extension_size={extension_size}; lower it, restrict inputs or pass candidates."
+                        )
+                    families[key] = (*c, *vs)
+                extensions[c].append((vs, families[key]))
     fam_list = list(families.values())
     if len(fam_list) > max_families:
         raise ValueError(f"{len(fam_list)} families (> max_families={max_families}).")
@@ -306,7 +347,7 @@ def agreement_set(
         for f in fam_list
     }
 
-    # 2. Refutation against the one-variable extensions (one host sync in total).
+    # 2. Refutation against the extensions (one host sync in total).
     # Tolerance: float32 rounding (MPS) must not refute a ball that just touches.
     tol = 1e-6
     pairs: List[Tuple[Family, Family]] = []
@@ -314,12 +355,13 @@ def agreement_set(
     for c in cands:
         bc = balls[c]
         r_c = bc.unseen.numel()
-        for v, e in extensions[c]:
+        for vs, e in extensions[c]:
             be = balls[e]
-            order = (*c, v)
+            order = (*c, *vs)
             e_cards = [cards[p] for p in e]
-            center = _reorder_parents(be.center, e_cards, e, order).reshape(r_c, cards[v], k)
-            radius = _reorder_parents(be.radius.unsqueeze(-1), e_cards, e, order).reshape(r_c, cards[v])
+            n_ext = math.prod(cards[v] for v in vs)
+            center = _reorder_parents(be.center, e_cards, e, order).reshape(r_c, n_ext, k)
+            radius = _reorder_parents(be.radius.unsqueeze(-1), e_cards, e, order).reshape(r_c, n_ext)
             gap = (center - bc.center.unsqueeze(1)).abs().sum(-1) - (radius + bc.radius.unsqueeze(1))
             stats.append(torch.stack([(gap > tol).sum().to(gap.dtype), gap.max()]))
             pairs.append((c, e))
@@ -330,6 +372,7 @@ def agreement_set(
             worst[c] = {"against": e, "rows": int(n_conflicts), "gap": float(g)}
     survivors = [c for c in cands if c not in worst]
     discarded = {c: worst[c] for c in cands if c in worst}
+    common_parents: Family = tuple(p for p in inputs if survivors and all(p in s for s in survivors))
 
     device = data[node].device
     input_cards = [cards[p] for p in inputs]
@@ -402,7 +445,7 @@ def agreement_set(
         max_parents=d if candidates is None else None, epsilon=epsilon,
         level=1.0 - delta, n_families=len(fam_list), delta_per_family=per_family,
         sampling=sampling, flat_rows=n_coverage, flat_visited=flat_visited, assumptions=assumptions,
-        refute=refute,
+        refute=refute, extension_size=extension_size if refute else 0, common_parents=common_parents,
     )
 
     if not survivors:
