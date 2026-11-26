@@ -173,8 +173,10 @@ def test_mixture_noise_is_replication_equivalent():
     a.fit(data, weights=weights)
     b.fit(replicated)
     na, nb = a.mechanisms["y"].noise, b.mechanisms["y"].noise
-    assert torch.allclose(na.means, nb.means, atol=1e-4)
-    assert torch.allclose(na.mix_logits.softmax(-1), nb.mix_logits.softmax(-1), atol=1e-4)
+    # Weighted and replicated fits sum the same terms in a different order, and the mixture fit iterates:
+    # the results agree to float32 accumulation, about 2e-4 on the macOS CI runner (1e-4 was too tight).
+    assert torch.allclose(na.means, nb.means, atol=1e-3)
+    assert torch.allclose(na.mix_logits.softmax(-1), nb.mix_logits.softmax(-1), atol=1e-3)
 
 
 def test_mlp_standardisation_is_weighted():
