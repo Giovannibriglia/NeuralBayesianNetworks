@@ -245,6 +245,23 @@ inputs as parents). With explicit `candidates`, the first assumption becomes
 every logger (no hidden confounding). Several nodes: split `delta` between
 them. Worked example: {doc}`../examples/15_agreement_rule`.
 
+**Parents that act only jointly.** A candidate is compared with its
+one-variable extensions by default. A candidate that misses several parents
+whose effect shows only together (XOR, an AND gate) agrees with each of them,
+so it is never refuted and it widens the result. Pass `extension_size=e` to
+compare each candidate with every extension by up to `e` other inputs;
+`e = max_parents` refutes every candidate that does not contain the true
+parents, wherever the data cover two rows that differ enough. The guarantee
+is the same. The cost is more and larger families (`res.n_families`, guarded
+by `max_families`), so each ball is wider. `res.common_parents` lists the
+variables in every survivor: once the wrong candidates are refuted, these are
+the true parents.
+
+```python
+res = agreement_set(variables, data, "y", inputs, max_parents=2, extension_size=2)
+res.survivors, res.common_parents
+```
+
 **Union over a given family.** When the candidates come from another procedure
 (the parent sets accepted by an invariance test, a declared list), pass them
 with `refute=False`. No candidate is refuted and no extension family is built.
